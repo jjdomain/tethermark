@@ -1,0 +1,26 @@
+{
+  "name": "tethermark",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build --silent && node dist/packages/core-engine/src/test-runner.js",
+    "scan": "npm run build --silent && node dist/apps/cli/src/index.js",
+    "scan:self": "npm run build --silent && node dist/apps/cli/src/index.js scan path . --output ./.artifacts/runs/self-scan-ts --mode static",
+    "api": "npm run build --silent && node dist/apps/api-server/src/index.js",
+    "mcp": "npm run build --silent && node dist/apps/mcp-server/src/index.js",
+    "web": "npm run build --silent && node dist/apps/web-ui/src/index.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.17",
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "sql.js": "^1.13.0"
+  }
+}

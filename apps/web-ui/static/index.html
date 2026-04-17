@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Security Harness</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              background: "#f5efe5",
+              foreground: "#203036",
+              card: "#fffdfa",
+              border: "#d8cabc",
+              primary: "#0f6b5d",
+              accent: "#b55a1f",
+              muted: "#6d6a66",
+              secondary: "#f0e6d8"
+            },
+            fontFamily: {
+              serif: ["Georgia", "serif"],
+              sans: ["Segoe UI", "sans-serif"],
+              mono: ["Consolas", "monospace"]
+            },
+            boxShadow: {
+              soft: "0 22px 40px rgba(24, 33, 38, 0.08)"
+            }
+          }
+        }
+      };
+    </script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  </head>
+  <body class="min-h-screen bg-background text-foreground font-sans">
+    <div id="root"></div>
+    <script src="/config.js"></script>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

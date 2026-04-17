@@ -1,0 +1,11 @@
+{
+  "id": "baseline-static",
+  "title": "Static Baseline",
+  "run_mode": "static",
+  "enabled_lanes": ["repo_posture", "supply_chain"],
+  "max_agent_calls": 8,
+  "max_total_tokens": 80000,
+  "max_rerun_rounds": 1,
+  "allow_runtime_execution": false,
+  "publishability_threshold": "medium"
+}

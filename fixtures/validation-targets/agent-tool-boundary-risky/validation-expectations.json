@@ -1,0 +1,19 @@
+{
+  "id": "agent-tool-boundary-risky",
+  "expected_target_class": "tool_using_multi_turn_agent",
+  "expected_findings": [
+    "secret_exposure",
+    "workflow_permissions"
+  ],
+  "expected_likely_controls": [
+    "owasp_llm.sensitive_information_disclosure",
+    "owasp_agentic.tool_misuse_boundary",
+    "mitre_atlas.tool_misuse_mitigation",
+    "openssf.token_permissions"
+  ],
+  "expected_human_review_required": true,
+  "notes": [
+    "This fixture intentionally contains risky tool-execution patterns, broad workflow permissions, and credential-like literals.",
+    "It should be useful for validating detection of agent/tool boundary issues and non-public-safe findings."
+  ]
+}

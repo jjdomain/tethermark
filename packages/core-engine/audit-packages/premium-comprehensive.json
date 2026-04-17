@@ -1,0 +1,11 @@
+{
+  "id": "premium-comprehensive",
+  "title": "Premium Comprehensive",
+  "run_mode": "validate",
+  "enabled_lanes": ["repo_posture", "supply_chain", "agentic_controls", "data_exposure", "runtime_validation"],
+  "max_agent_calls": 28,
+  "max_total_tokens": 400000,
+  "max_rerun_rounds": 3,
+  "allow_runtime_execution": true,
+  "publishability_threshold": "high"
+}

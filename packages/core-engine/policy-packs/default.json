@@ -1,0 +1,32 @@
+{
+  "id": "default",
+  "name": "Default Audit Supervision",
+  "version": "2026-04-13.audit-policy.v1",
+  "source": "builtin",
+  "policy": {
+    "version": "2026-04-13.audit-policy.v1",
+    "profile": "default_audit_supervision",
+    "objectives": [
+      "Produce evidence-grounded audit conclusions.",
+      "Prefer selective corrections over broad reruns when scope is unchanged.",
+      "Keep public-safe conclusions narrower than private reviewer notes when evidence is partial."
+    ],
+    "control_decision_rules": [
+      "Do not convert missing evidence into a passing control.",
+      "Use not_assessed or partial when provider coverage is insufficient.",
+      "Escalate to rerun when upstream classification, threat framing, or evidence selection is materially wrong."
+    ],
+    "evidence_requirements": [
+      "Repository-visible claims should cite deterministic source evidence when available.",
+      "Public-facing findings should avoid overclaiming beyond the audited snapshot.",
+      "Tool execution failures reduce assessability; they do not strengthen failure conclusions by themselves."
+    ],
+    "publication_rules": [
+      "Differentiate repository-visible posture from organizational or runtime posture.",
+      "Treat policy-sensitive or company-specific conclusions as review-scoped unless direct evidence supports publication."
+    ],
+    "custom_context": [],
+    "finding_suppressions": [],
+    "control_waivers": []
+  }
+}

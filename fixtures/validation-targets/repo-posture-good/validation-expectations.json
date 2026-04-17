@@ -1,0 +1,17 @@
+{
+  "id": "repo-posture-good",
+  "expected_target_class": "runnable_local_app",
+  "expected_findings": [],
+  "expected_likely_controls": [
+    "openssf.security_policy",
+    "openssf.dependency_update_tool",
+    "openssf.pinned_dependencies",
+    "nist_ssdf.automated_security_checks",
+    "harness_internal.architecture_evidence"
+  ],
+  "expected_human_review_required": true,
+  "notes": [
+    "This fixture is intended to score as a relatively healthy static repository target.",
+    "It includes visible security policy, dependency maintenance markers, architecture context, and CI security workflow markers."
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "id": "noisy-fixtures",
+  "expected_target_class": "tool_using_multi_turn_agent",
+  "expected_findings": [
+    "secret_exposure"
+  ],
+  "expected_likely_controls": [
+    "owasp_llm.sensitive_information_disclosure",
+    "harness_internal.eval_harness_presence",
+    "harness_internal.architecture_evidence"
+  ],
+  "expected_human_review_required": true,
+  "notes": [
+    "This fixture intentionally contains fake secrets in test data.",
+    "It is useful for validating that the harness flags noisy evidence for human review rather than assuming those literals are definitely real credentials."
+  ]
+}

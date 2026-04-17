@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.artifacts/
+.npm-cache/
+.tmp/
+.git-home/
+
+.env
+.env.local
+.env.*.local
+
+*.log
+*.tsbuildinfo
+Thumbs.db

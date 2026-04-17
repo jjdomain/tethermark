@@ -1,0 +1,34 @@
+{
+  "id": "conservative-review",
+  "name": "Conservative Review",
+  "version": "2026-04-13.audit-policy.v1",
+  "source": "builtin",
+  "policy": {
+    "version": "2026-04-13.audit-policy.v1",
+    "profile": "conservative_review",
+    "objectives": [
+      "Maximize reviewer visibility into potential AI security concerns.",
+      "Retain review-scoped findings unless explicitly suppressed by policy.",
+      "Favor human review when publication or confidence is uncertain."
+    ],
+    "control_decision_rules": [
+      "Do not suppress findings solely because they are noisy if they may still matter for review.",
+      "Escalate uncertain publication decisions to review_required.",
+      "Preserve reviewer notes and supervisory downgrades for audit traceability."
+    ],
+    "evidence_requirements": [
+      "Conservative review can retain inferential findings when clearly labeled as review-scoped.",
+      "Potential secret-like material should be retained for reviewer inspection unless explicitly waived.",
+      "Supervisor notes should remain attached to the final audit state."
+    ],
+    "publication_rules": [
+      "Prefer internal visibility when evidence is partial or findings are not public-safe.",
+      "Human review is expected for policy-sensitive conclusions."
+    ],
+    "custom_context": [
+      "This pack is intended for conservative reviewer-oriented use rather than public leaderboard publication."
+    ],
+    "finding_suppressions": [],
+    "control_waivers": []
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "id": "deep-static",
+  "title": "Deep Static",
+  "run_mode": "static",
+  "enabled_lanes": ["repo_posture", "supply_chain", "agentic_controls", "data_exposure"],
+  "max_agent_calls": 18,
+  "max_total_tokens": 240000,
+  "max_rerun_rounds": 2,
+  "allow_runtime_execution": false,
+  "publishability_threshold": "high"
+}
