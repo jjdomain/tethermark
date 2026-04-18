@@ -1,0 +1,182 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "tethermark",
+          "informationUri": "https://github.com/",
+          "semanticVersion": "1.0.0",
+          "taxa": [
+            {
+              "id": "tethermark.runtime_validation",
+              "name": "Runtime Validation",
+              "shortDescription": {
+                "text": "Tethermark runtime-validation and rerun-aware audit taxonomy."
+              }
+            }
+          ],
+          "rules": [
+            {
+              "id": "tethermark/tool_boundary/unsafe_tool_access",
+              "name": "Unsafe tool access",
+              "shortDescription": {
+                "text": "Unsafe tool access"
+              },
+              "fullDescription": {
+                "text": "Agent can invoke privileged tool without confirmation."
+              },
+              "properties": {
+                "category": "tool_boundary",
+                "defaultSeverity": "high",
+                "tethermarkCategory": "tool_boundary",
+                "tags": [
+                  "tool_boundary",
+                  "high"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "automationDetails": {
+        "id": "run_golden"
+      },
+      "results": [
+        {
+          "ruleId": "tethermark/tool_boundary/unsafe_tool_access",
+          "level": "error",
+          "fingerprints": {
+            "tethermark/finding-id": "finding_golden",
+            "tethermark/signature": "tool_boundary:unsafe_tool_access:high",
+            "tethermark/location": "src_agent_js:17:3",
+            "tethermark/symbol": "unsafe_tool_access"
+          },
+          "partialFingerprints": {
+            "tethermark/runtime-validation-status": "blocked",
+            "tethermark/runtime-followup-policy": "rerun_in_capable_env",
+            "tethermark/evidence-identity": "unsafe_tool_access"
+          },
+          "message": {
+            "text": "Agent can invoke privileged tool without confirmation.",
+            "markdown": "Evidence sufficiency: high\nFalse positive risk: low\nRuntime validation status: blocked\nRuntime follow-up policy: rerun_in_capable_env\nRuntime follow-up resolution: rerun_requested\nRuntime follow-up outcome: pending\nValidation recommendation: yes\nValidation reasons:\n- bounded sandbox execution did not complete cleanly for this run"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/agent.js"
+                },
+                "region": {
+                  "startLine": 17,
+                  "startColumn": 3
+                }
+              },
+              "message": {
+                "text": "tool_boundary_entrypoint"
+              }
+            }
+          ],
+          "codeFlows": [
+            {
+              "threadFlows": [
+                {
+                  "locations": [
+                    {
+                      "location": {
+                        "physicalLocation": {
+                          "artifactLocation": {
+                            "uri": "src/agent.js"
+                          },
+                          "region": {
+                            "startLine": 17,
+                            "startColumn": 3
+                          }
+                        },
+                        "message": {
+                          "text": "tool_boundary_entrypoint"
+                        }
+                      }
+                    },
+                    {
+                      "location": {
+                        "logicalLocations": [
+                          {
+                            "name": "unsafe_tool_access",
+                            "kind": "function"
+                          }
+                        ],
+                        "message": {
+                          "text": "finding_symbol"
+                        }
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "properties": {
+            "sandboxExecution": {
+              "readiness_status": "blocked",
+              "execution_runtime": "host",
+              "total_steps": 2,
+              "completed_step_count": 0,
+              "failed_step_count": 0,
+              "blocked_step_count": 2,
+              "attention_required": true,
+              "attention_reasons": [
+                "Host blocked bounded runtime execution."
+              ]
+            },
+            "findingId": "finding_golden",
+            "category": "tool_boundary",
+            "originalSeverity": "high",
+            "currentSeverity": "high",
+            "visibility": "internal_only",
+            "reviewDisposition": "needs_validation",
+            "activeDispositionType": null,
+            "activeDispositionScope": null,
+            "activeDispositionReason": null,
+            "activeDispositionExpiresAt": null,
+            "confidence": 0.91,
+            "evidenceSufficiency": "high",
+            "falsePositiveRisk": "low",
+            "runtimeValidationStatus": "blocked",
+            "runtimeFollowupPolicy": "rerun_in_capable_env",
+            "runtimeFollowupResolution": "rerun_requested",
+            "runtimeFollowupOutcome": "pending",
+            "runtimeFollowupLinkedRunId": null,
+            "validationRecommendation": "yes",
+            "nextAction": "rerun_in_capable_env",
+            "duplicateWithFindingIds": [],
+            "conflictWithFindingIds": [],
+            "evidence": [
+              "src/agent.js:17 privileged tool path",
+              "docs/ARCHITECTURE.md"
+            ],
+            "evidenceSymbols": [
+              "unsafe_tool_access"
+            ],
+            "evidenceLocations": [
+              {
+                "source_kind": "file",
+                "path": "src/agent.js",
+                "line": 17,
+                "column": 3,
+                "label": "tool_boundary_entrypoint"
+              },
+              {
+                "source_kind": "symbol",
+                "symbol": "unsafe_tool_access",
+                "label": "finding_symbol"
+              }
+            ],
+            "tethermarkRuleId": "tethermark/tool_boundary/unsafe_tool_access"
+          }
+        }
+      ]
+    }
+  ]
+}

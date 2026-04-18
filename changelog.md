@@ -1,5 +1,24 @@
 ﻿# Changelog
 
+## 2026-04-18
+
+### Added
+
+- Added `npm run release:check` as the maintainer verification path for OSS release readiness.
+- Added `docs/release-checklist.md` covering build, test, export, API/web, and end-to-end OSS smoke checks.
+- Added explicit runtime, auth, persistence, and release-boundary guidance to the public README.
+- Expanded `.env.example` so the documented OSS API, web, auth, persistence, and runtime toggles match the actual code paths.
+
+### Changed
+
+- Updated contributing guidance so release-sensitive changes run the full release verification path and keep the release checklist in sync.
+- Updated the security policy to clarify the trusted-self-hosting boundary and the difference between `auth=none` and `auth=api_key`.
+
+### Verified
+
+- `npm run build --silent`
+- `npm test --silent`
+
 ## 2026-04-15
 
 ### Added

@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 
 import type {
   AuditRequest,
+  EvidenceLocation,
   EvidenceExecutionRecord,
   EvidenceProviderDescriptor,
   NormalizedEvidenceSummary
@@ -40,6 +41,57 @@ function pushSeverity(summary: NormalizedEvidenceSummary, severity: string | nul
   if (normalized === "medium") summary.severity_counts.medium += 1;
   if (normalized === "high") summary.severity_counts.high += 1;
   if (normalized === "critical") summary.severity_counts.critical += 1;
+}
+
+function normalizeEvidencePath(value: string | null | undefined): string | null {
+  const text = String(value ?? "").trim();
+  if (!text) return null;
+  return text.replace(/\\/g, "/");
+}
+
+function toEvidenceLocation(input: Partial<EvidenceLocation>): EvidenceLocation | null {
+  const path = normalizeEvidencePath(input.path);
+  const uri = typeof input.uri === "string" && /^https?:/i.test(input.uri) ? input.uri : null;
+  const sourceKind = input.source_kind ?? (uri ? "uri" : path ? "file" : input.symbol ? "symbol" : null);
+  if (!sourceKind) return null;
+  if (!path && !uri && !input.symbol) return null;
+  return {
+    source_kind: sourceKind,
+    path,
+    uri,
+    line: typeof input.line === "number" ? Number(input.line) : null,
+    column: typeof input.column === "number" ? Number(input.column) : null,
+    end_line: typeof input.end_line === "number" ? Number(input.end_line) : null,
+    end_column: typeof input.end_column === "number" ? Number(input.end_column) : null,
+    symbol: input.symbol ? String(input.symbol) : null,
+    label: input.label ? String(input.label) : null
+  };
+}
+
+function dedupeEvidenceLocations(locations: Array<EvidenceLocation | null | undefined>): EvidenceLocation[] {
+  const deduped = new Map<string, EvidenceLocation>();
+  for (const candidate of locations) {
+    if (!candidate) continue;
+    const normalized = toEvidenceLocation(candidate);
+    if (!normalized) continue;
+    const key = [
+      normalized.source_kind,
+      normalized.path ?? "",
+      normalized.uri ?? "",
+      normalized.symbol ?? "",
+      normalized.line ?? "",
+      normalized.column ?? "",
+      normalized.end_line ?? "",
+      normalized.end_column ?? "",
+      normalized.label ?? ""
+    ].join("|");
+    if (!deduped.has(key)) deduped.set(key, normalized);
+  }
+  return [...deduped.values()];
+}
+
+function arrayOfStrings(value: unknown): string[] {
+  return Array.isArray(value) ? value.map((item) => String(item)) : [];
 }
 
 async function runCommand(command: string, args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
@@ -166,11 +218,30 @@ function summarizeTrivy(parsed: any): string {
 
 function normalizeScorecard(parsed: any): NormalizedEvidenceSummary {
   const checks = Array.isArray(parsed?.checks) ? parsed.checks : [];
+  const locations = dedupeEvidenceLocations(checks.flatMap((item: any) => ([
+    {
+      source_kind: "symbol" as const,
+      symbol: typeof item?.name === "string" && item.name.trim() ? item.name : null,
+      label: "scorecard_check"
+    },
+    {
+      source_kind: "uri" as const,
+      uri: typeof item?.documentation?.url === "string" && item.documentation.url.trim()
+        ? item.documentation.url
+        : typeof item?.details?.documentation_url === "string" && item.details.documentation_url.trim()
+          ? item.details.documentation_url
+          : typeof item?.reason === "string" && /^https?:/i.test(item.reason.trim())
+            ? item.reason.trim()
+            : null,
+      label: "scorecard_documentation"
+    }
+  ])));
   const summary = emptyNormalized("scorecard", {
     signal_count: checks.length,
     issue_count: checks.filter((item: any) => typeof item?.score === "number" && item.score < 5).length,
     warning_count: checks.filter((item: any) => typeof item?.score === "number" && item.score < 7).length,
-    notes: checks.length ? [] : ["No scorecard checks parsed."]
+    notes: checks.length ? [] : ["No scorecard checks parsed."],
+    locations: locations.slice(0, 100)
   });
   if (checks.some((item: any) => typeof item?.score === "number" && item.score < 3)) {
     summary.notes.push("At least one scorecard check scored below 3.");
@@ -182,6 +253,7 @@ function normalizeSemgrep(parsed: any): NormalizedEvidenceSummary {
   const results = Array.isArray(parsed?.results) ? parsed.results : [];
   const errors = Array.isArray(parsed?.errors) ? parsed.errors : [];
   const coverage = new Set<string>();
+  const locations: EvidenceLocation[] = [];
   const summary = emptyNormalized("semgrep", {
     signal_count: results.length,
     issue_count: results.length,
@@ -190,8 +262,27 @@ function normalizeSemgrep(parsed: any): NormalizedEvidenceSummary {
   for (const result of results) {
     pushSeverity(summary, result?.extra?.severity);
     if (typeof result?.path === "string" && result.path) coverage.add(result.path);
+    const start = result?.start ?? {};
+    const end = result?.end ?? {};
+    locations.push({
+      source_kind: "file",
+      path: result?.path,
+      line: typeof start?.line === "number" ? start.line : null,
+      column: typeof start?.col === "number" ? start.col : null,
+      end_line: typeof end?.line === "number" ? end.line : null,
+      end_column: typeof end?.col === "number" ? end.col : null,
+      label: result?.check_id ? String(result.check_id) : "semgrep_finding"
+    });
+    if (typeof result?.check_id === "string" && result.check_id.trim()) {
+      locations.push({
+        source_kind: "symbol",
+        symbol: result.check_id,
+        label: "semgrep_rule"
+      });
+    }
   }
   summary.coverage_paths = [...coverage].sort().slice(0, 50);
+  summary.locations = dedupeEvidenceLocations(locations).slice(0, 100);
   if (errors.length) {
     summary.notes.push(`Semgrep reported ${errors.length} parser/runtime errors.`);
   }
@@ -201,6 +292,7 @@ function normalizeSemgrep(parsed: any): NormalizedEvidenceSummary {
 function normalizeTrivy(parsed: any): NormalizedEvidenceSummary {
   const results = Array.isArray(parsed?.Results) ? parsed.Results : [];
   const coverage = new Set<string>();
+  const locations: EvidenceLocation[] = [];
   const summary = emptyNormalized("trivy");
   for (const result of results) {
     const vulnerabilities = Array.isArray(result?.Vulnerabilities) ? result.Vulnerabilities : [];
@@ -215,8 +307,46 @@ function normalizeTrivy(parsed: any): NormalizedEvidenceSummary {
     }
     if (typeof result?.Target === "string" && result.Target) coverage.add(result.Target);
     if (typeof result?.Type === "string" && result.Type) summary.notes.push(`coverage_type:${result.Type}`);
+    for (const item of [...vulnerabilities, ...misconfigurations]) {
+      locations.push({
+        source_kind: "file",
+        path: typeof item?.Target === "string" && item.Target ? item.Target : result?.Target,
+        line: typeof item?.PrimaryURL === "string" ? null : null,
+        label: item?.VulnerabilityID ?? item?.ID ?? item?.AVDID ?? "trivy_finding"
+      });
+      const symbolId = typeof item?.VulnerabilityID === "string" && item.VulnerabilityID
+        ? item.VulnerabilityID
+        : typeof item?.AVDID === "string" && item.AVDID
+          ? item.AVDID
+          : typeof item?.ID === "string" && item.ID
+            ? item.ID
+            : null;
+      if (symbolId) {
+        locations.push({
+          source_kind: "symbol",
+          symbol: symbolId,
+          label: "trivy_rule"
+        });
+      }
+      if (typeof item?.PrimaryURL === "string" && /^https?:/i.test(item.PrimaryURL)) {
+        locations.push({
+          source_kind: "uri",
+          uri: item.PrimaryURL,
+          label: symbolId ?? "trivy_reference"
+        });
+      }
+      const classPath = normalizeEvidencePath(item?.Class ?? null);
+      if (classPath) {
+        locations.push({
+          source_kind: "file",
+          path: classPath,
+          label: item?.VulnerabilityID ?? item?.ID ?? item?.AVDID ?? "trivy_class"
+        });
+      }
+    }
   }
   summary.coverage_paths = [...coverage].sort().slice(0, 50);
+  summary.locations = dedupeEvidenceLocations(locations).slice(0, 100);
   summary.notes = [...new Set(summary.notes)];
   return summary;
 }
@@ -232,12 +362,86 @@ function normalizeRepoAnalysis(analysisSummary: any): NormalizedEvidenceSummary 
   ])];
   const entryPoints = Array.isArray(analysis?.entry_points) ? analysis.entry_points.slice(0, 25) : [];
   const ecosystems = Array.isArray(analysis?.package_ecosystems) ? analysis.package_ecosystems : [];
+  const locations = dedupeEvidenceLocations([
+    ...arrayOfStrings(analysis?.dependency_manifests).map((item: string) => ({
+      source_kind: "file" as const,
+      path: item,
+      label: "manifest"
+    })),
+    ...arrayOfStrings(analysis?.lockfiles).map((item: string) => ({
+      source_kind: "file" as const,
+      path: item,
+      label: "lockfile"
+    })),
+    ...arrayOfStrings(analysis?.ci_workflows).map((item: string) => ({
+      source_kind: "file" as const,
+      path: item,
+      label: "ci_workflow"
+    })),
+    ...arrayOfStrings(analysis?.security_docs).map((item: string) => ({
+      source_kind: "file" as const,
+      path: item,
+      label: "security_doc"
+    })),
+    ...arrayOfStrings(analysis?.release_files).map((item: string) => ({
+      source_kind: "file" as const,
+      path: item,
+      label: "release_artifact"
+    })),
+    ...arrayOfStrings(analysis?.container_files).map((item: string) => ({
+      source_kind: "file" as const,
+      path: item,
+      label: "container_file"
+    })),
+    ...entryPoints.map((item: string) => ({
+      source_kind: "file" as const,
+      path: item,
+      label: "entry_point"
+    })),
+    ...ecosystems.map((item: string) => ({
+      source_kind: "symbol" as const,
+      symbol: item,
+      label: "package_ecosystem"
+    })),
+    ...arrayOfStrings(analysis?.package_managers).map((item: string) => ({
+      source_kind: "symbol" as const,
+      symbol: item,
+      label: "package_manager"
+    }))
+  ]).slice(0, 100);
   return emptyNormalized("repo_analysis", {
     signal_count: categorySignals.length + ecosystems.length + Math.min(entryPoints.length, 10),
     ecosystems,
     coverage_paths: entryPoints,
+    locations: dedupeEvidenceLocations([
+      ...locations,
+      ...categorySignals.map((item: string) => ({
+        source_kind: "symbol" as const,
+        symbol: item,
+        label: "repo_capability"
+      }))
+    ]).slice(0, 100),
     notes: categorySignals.slice(0, 10)
   });
+}
+
+export function normalizeEvidenceSummaryForTests(args: {
+  providerId: "scorecard" | "semgrep" | "trivy" | "repo_analysis";
+  parsed?: any;
+  analysisSummary?: any;
+}): NormalizedEvidenceSummary {
+  switch (args.providerId) {
+    case "scorecard":
+      return normalizeScorecard(args.parsed);
+    case "semgrep":
+      return normalizeSemgrep(args.parsed);
+    case "trivy":
+      return normalizeTrivy(args.parsed);
+    case "repo_analysis":
+      return normalizeRepoAnalysis(args.analysisSummary);
+    default:
+      return emptyNormalized("unknown");
+  }
 }
 
 function normalizePythonWorker(output: any, status: string): NormalizedEvidenceSummary {

@@ -20,16 +20,36 @@ type RuntimeProbeAttempt = {
   status_code: number | null;
   response_excerpt: string | null;
   error: string | null;
+  duration_ms: number;
 };
 
 type RuntimeProbeResult = {
   ok: boolean;
+  classification: "healthy" | "http_error" | "connection_refused" | "timeout" | "exited_early" | "startup_failed" | "unknown";
   successful_target: string | null;
+  successful_port: number | null;
+  successful_path: string | null;
   status_code: number | null;
   response_excerpt: string | null;
   error: string | null;
   attempts: RuntimeProbeAttempt[];
 };
+
+type StartupSignal = {
+  signaled_ready: boolean;
+  indicator: string | null;
+  failure_reason: string | null;
+};
+
+function discoverHttpPathsFromText(text: string | null | undefined): string[] {
+  const combined = String(text ?? "");
+  const matches = combined.match(/\/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*/g) ?? [];
+  const interesting = matches
+    .map((item) => item.trim())
+    .filter((item) => item.startsWith("/") && item.length > 1 && !item.startsWith("//"))
+    .filter((item) => !/\.(js|css|png|jpg|svg|ico|map)$/i.test(item));
+  return [...new Set(interesting)].slice(0, 12);
+}
 
 function truncateOutput(value: string | Buffer | null | undefined): string | null {
   if (value == null) return null;
@@ -106,6 +126,14 @@ async function readJsonFile(filePath: string): Promise<any | null> {
   }
 }
 
+async function readTextFile(filePath: string): Promise<string | null> {
+  try {
+    return await fs.readFile(filePath, "utf8");
+  } catch {
+    return null;
+  }
+}
+
 function appendOutput(current: string, chunk: string | Buffer | null | undefined): string | null {
   return truncateOutput(`${current}\n${String(chunk ?? "")}`);
 }
@@ -115,8 +143,12 @@ async function detectPythonEntrypoint(targetDir: string): Promise<string | null>
     "app.py",
     "main.py",
     "server.py",
+    "manage.py",
+    "wsgi.py",
+    "asgi.py",
     "src/app.py",
     "src/main.py",
+    "src/server.py",
     "service.py"
   ];
   for (const candidate of candidates) {
@@ -125,6 +157,128 @@ async function detectPythonEntrypoint(targetDir: string): Promise<string | null>
     }
   }
   return null;
+}
+
+async function detectNodeEntrypoint(targetDir: string): Promise<string | null> {
+  const candidates = [
+    "server.js",
+    "app.js",
+    "index.js",
+    "main.js",
+    "dist/server.js",
+    "dist/index.js",
+    "src/server.js",
+    "src/index.js"
+  ];
+  for (const candidate of candidates) {
+    if (await fileExists(path.join(targetDir, candidate))) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function resolveNodeScriptCommand(packageManager: string, scriptName: string): string[] {
+  if (packageManager === "pnpm") return ["pnpm", "run", scriptName];
+  if (packageManager === "yarn") return ["yarn", scriptName];
+  return ["npm", "run", scriptName];
+}
+
+function firstScriptName(scripts: Record<string, unknown>, candidates: string[]): string | null {
+  for (const candidate of candidates) {
+    if (typeof scripts[candidate] === "string" && scripts[candidate].trim()) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function detectNodeFramework(packageJson: any): string | null {
+  const deps = {
+    ...(packageJson?.dependencies && typeof packageJson.dependencies === "object" ? packageJson.dependencies : {}),
+    ...(packageJson?.devDependencies && typeof packageJson.devDependencies === "object" ? packageJson.devDependencies : {})
+  };
+  if (typeof deps.next === "string") return "next";
+  if (typeof deps.vite === "string") return "vite";
+  if (typeof deps.express === "string") return "express";
+  if (typeof deps["@nestjs/core"] === "string") return "nestjs";
+  return null;
+}
+
+async function detectPythonFramework(targetDir: string): Promise<string | null> {
+  const requirements = await readTextFile(path.join(targetDir, "requirements.txt"));
+  const pyproject = await readTextFile(path.join(targetDir, "pyproject.toml"));
+  const combined = `${requirements ?? ""}\n${pyproject ?? ""}`;
+  if (/\bfastapi\b/i.test(combined)) return "fastapi";
+  if (/\bflask\b/i.test(combined)) return "flask";
+  if (/\bdjango\b/i.test(combined)) return "django";
+  return null;
+}
+
+function pythonEntrypointToModule(entrypoint: string): string {
+  return entrypoint
+    .replace(/\\/g, "/")
+    .replace(/\.py$/i, "")
+    .replace(/^\.?\//, "")
+    .replace(/\/__init__$/i, "")
+    .split("/")
+    .filter(Boolean)
+    .join(".") || "app";
+}
+
+function buildPythonRuntimeCommand(args: { entrypoint: string; framework: string | null; probePort: number }): { command: string[]; strategy: string } {
+  switch (args.framework) {
+    case "django":
+      if (path.basename(args.entrypoint).toLowerCase() === "manage.py") {
+        return {
+          command: ["python", args.entrypoint, "runserver", `127.0.0.1:${args.probePort}`, "--noreload"],
+          strategy: "django_manage_py"
+        };
+      }
+      break;
+    case "fastapi":
+      return {
+        command: ["python", "-m", "uvicorn", `${pythonEntrypointToModule(args.entrypoint)}:app`, "--host", "127.0.0.1", "--port", String(args.probePort)],
+        strategy: "uvicorn_module"
+      };
+    case "flask":
+      return {
+        command: ["python", "-m", "flask", "--app", args.entrypoint, "run", "--host", "127.0.0.1", "--port", String(args.probePort)],
+        strategy: "flask_cli"
+      };
+    default:
+      break;
+  }
+  return {
+    command: ["python", args.entrypoint],
+    strategy: "direct_python"
+  };
+}
+
+function frameworkProbeDefaults(args: { stack: "node" | "python"; framework: string | null }): { ports: number[]; paths: string[] } {
+  if (args.stack === "node") {
+    switch (args.framework) {
+      case "next":
+        return { ports: [3000], paths: ["/", "/api/health", "/_next/static/"] };
+      case "vite":
+        return { ports: [4173, 5173, 3000], paths: ["/"] };
+      case "express":
+      case "nestjs":
+        return { ports: [3000, 8080], paths: ["/", "/health", "/healthz"] };
+      default:
+        return { ports: [3000, 4173, 8080], paths: DEFAULT_RUNTIME_PROBE_PATHS };
+    }
+  }
+  switch (args.framework) {
+    case "fastapi":
+      return { ports: [8000], paths: ["/docs", "/openapi.json", "/health", "/"] };
+    case "flask":
+      return { ports: [5000, 8000], paths: ["/", "/health"] };
+    case "django":
+      return { ports: [8000], paths: ["/", "/admin/login/"] };
+    default:
+      return { ports: [8000, 5000, 3000], paths: DEFAULT_RUNTIME_PROBE_PATHS };
+  }
 }
 
 function detectRuntimeProbePort(command: string[]): number | null {
@@ -163,6 +317,7 @@ async function probeHttpService(ports: number[], paths: string[], timeoutMs: num
     for (const probePath of paths) {
       const url = new URL(`http://127.0.0.1:${port}${probePath}`);
       const attempt = await new Promise<RuntimeProbeAttempt>((resolve) => {
+        const requestStarted = Date.now();
         const requester = url.protocol === "https:" ? httpsRequest : httpRequest;
         const req = requester(url, { method: "GET", timeout: timeoutMs }, (res) => {
           let body = "";
@@ -176,7 +331,8 @@ async function probeHttpService(ports: number[], paths: string[], timeoutMs: num
               path: probePath,
               status_code: res.statusCode ?? null,
               response_excerpt: truncateOutput(body),
-              error: null
+              error: null,
+              duration_ms: Date.now() - requestStarted
             });
           });
         });
@@ -189,7 +345,8 @@ async function probeHttpService(ports: number[], paths: string[], timeoutMs: num
             path: probePath,
             status_code: null,
             response_excerpt: null,
-            error: String(error?.message ?? error)
+            error: String(error?.message ?? error),
+            duration_ms: Date.now() - requestStarted
           });
         });
         req.end();
@@ -198,7 +355,10 @@ async function probeHttpService(ports: number[], paths: string[], timeoutMs: num
       if ((attempt.status_code ?? 500) < 500) {
         return {
           ok: true,
+          classification: "healthy",
           successful_target: `http://127.0.0.1:${attempt.port}${attempt.path}`,
+          successful_port: attempt.port,
+          successful_path: attempt.path,
           status_code: attempt.status_code,
           response_excerpt: attempt.response_excerpt,
           error: null,
@@ -208,14 +368,84 @@ async function probeHttpService(ports: number[], paths: string[], timeoutMs: num
     }
   }
   const lastAttempt = attempts.at(-1) ?? null;
+  const lastError = String(lastAttempt?.error ?? "").toLowerCase();
+  const classification = lastAttempt?.status_code != null
+    ? "http_error"
+    : /refused|econnrefused/.test(lastError)
+      ? "connection_refused"
+      : /timeout/.test(lastError)
+        ? "timeout"
+        : "unknown";
   return {
     ok: false,
+    classification,
     successful_target: null,
+    successful_port: null,
+    successful_path: null,
     status_code: lastAttempt?.status_code ?? null,
     response_excerpt: lastAttempt?.response_excerpt ?? null,
     error: lastAttempt?.error ?? "no successful runtime probe response",
     attempts
   };
+}
+
+function deriveStartupSignal(stdout: string | null, stderr: string | null): StartupSignal {
+  const combined = `${stdout ?? ""}\n${stderr ?? ""}`;
+  const patterns: Array<{ pattern: RegExp; indicator: string }> = [
+    { pattern: /\blistening on\b/i, indicator: "listening_on" },
+    { pattern: /\bserver started\b/i, indicator: "server_started" },
+    { pattern: /\bready\b/i, indicator: "ready" },
+    { pattern: /\bserving\b/i, indicator: "serving" },
+    { pattern: /\bhttpserver\b/i, indicator: "http_server_started" }
+  ];
+  for (const entry of patterns) {
+    if (entry.pattern.test(combined)) {
+      return { signaled_ready: true, indicator: entry.indicator, failure_reason: null };
+    }
+  }
+  const failurePatterns: Array<{ pattern: RegExp; reason: string }> = [
+    { pattern: /eaddrinuse|address already in use/i, reason: "address_in_use" },
+    { pattern: /cannot find module|module not found/i, reason: "module_not_found" },
+    { pattern: /importerror|modulenotfounderror/i, reason: "import_error" },
+    { pattern: /syntaxerror/i, reason: "syntax_error" },
+    { pattern: /permission denied/i, reason: "permission_denied" }
+  ];
+  for (const entry of failurePatterns) {
+    if (entry.pattern.test(combined)) {
+      return { signaled_ready: false, indicator: null, failure_reason: entry.reason };
+    }
+  }
+  return { signaled_ready: false, indicator: null, failure_reason: null };
+}
+
+function classifyRuntimeProbeFailure(args: {
+  spawnError: any;
+  exitCode: number | null;
+  runtimeProbe: RuntimeProbeResult | null;
+  startupSignal: StartupSignal;
+}): RuntimeProbeResult["classification"] {
+  if (args.spawnError) return "startup_failed";
+  if (args.runtimeProbe?.classification) return args.runtimeProbe.classification;
+  if (args.exitCode === 0) return "exited_early";
+  if (args.startupSignal.signaled_ready) return "http_error";
+  return "startup_failed";
+}
+
+function describeRuntimeProbeFailure(classification: RuntimeProbeResult["classification"], command: string[]): string {
+  switch (classification) {
+    case "connection_refused":
+      return `Bounded runtime probe could not connect to a healthy endpoint for '${command.join(" ")}'.`;
+    case "timeout":
+      return `Bounded runtime probe timed out before a healthy endpoint responded for '${command.join(" ")}'.`;
+    case "http_error":
+      return `Bounded runtime probe reached the service but only received unhealthy HTTP responses for '${command.join(" ")}'.`;
+    case "exited_early":
+      return `Runtime command exited before exposing a healthy HTTP endpoint for '${command.join(" ")}'.`;
+    case "startup_failed":
+      return `Bounded runtime probe failed to start '${command.join(" ")}'.`;
+    default:
+      return `Bounded runtime probe failed for '${command.join(" ")}'.`;
+  }
 }
 
 function buildNormalizedArtifact(step: SandboxExecutionStep, result: {
@@ -225,6 +455,7 @@ function buildNormalizedArtifact(step: SandboxExecutionStep, result: {
   stdout?: string | null;
   stderr?: string | null;
   runtimeProbe?: RuntimeProbeResult | null;
+  startupSignal?: StartupSignal | null;
 }): NonNullable<SandboxExecutionResult["normalized_artifact"]> {
   const detailsJson: Record<string, unknown> = {
     adapter: step.adapter,
@@ -234,15 +465,35 @@ function buildNormalizedArtifact(step: SandboxExecutionStep, result: {
   };
   if (result.stdout) detailsJson.stdout_excerpt = result.stdout;
   if (result.stderr) detailsJson.stderr_excerpt = result.stderr;
+  if (result.startupSignal) {
+    detailsJson.startup = result.startupSignal;
+  }
   if (result.runtimeProbe) {
+    const artifactProbePorts = Array.isArray(step.artifact_context?.probe_ports)
+      ? step.artifact_context.probe_ports.map((value) => Number(value)).filter((value) => Number.isFinite(value))
+      : [];
+    const discoveredPaths = [
+      ...(result.runtimeProbe.successful_path ? [String(result.runtimeProbe.successful_path)] : []),
+      ...discoverHttpPathsFromText(result.stdout),
+      ...discoverHttpPathsFromText(result.stderr),
+      ...result.runtimeProbe.attempts.map((attempt) => attempt.path).filter(Boolean)
+    ];
+    const discoveredEndpoints = [...new Set(discoveredPaths.map((probePath) => {
+      const port = result.runtimeProbe?.successful_port ?? artifactProbePorts[0] ?? Number(step.artifact_context?.probe_port ?? 3000);
+      return `http://127.0.0.1:${port}${String(probePath)}`;
+    }))].slice(0, 12);
     detailsJson.probe = {
       ok: result.runtimeProbe.ok,
+      classification: result.runtimeProbe.classification,
       attempted_targets: result.runtimeProbe.attempts.map((attempt) => `http://127.0.0.1:${attempt.port}${attempt.path}`),
       successful_target: result.runtimeProbe.successful_target,
+      successful_port: result.runtimeProbe.successful_port,
+      successful_path: result.runtimeProbe.successful_path,
       status_code: result.runtimeProbe.status_code,
       response_excerpt: result.runtimeProbe.response_excerpt,
       error: result.runtimeProbe.error,
-      attempts: result.runtimeProbe.attempts
+      attempts: result.runtimeProbe.attempts,
+      discovered_endpoints: discoveredEndpoints
     };
   }
   return {
@@ -268,9 +519,12 @@ async function buildExecutionPlan(targetDir: string, runMode: NonNullable<AuditR
   const entrySignals: string[] = [];
   const warnings: string[] = [];
   const nodePackageManager = hasPnpmLock ? "pnpm" : hasYarnLock ? "yarn" : "npm";
+  const nodeFramework = packageJson ? detectNodeFramework(packageJson) : null;
+  const pythonFramework = hasPyproject || hasRequirements ? await detectPythonFramework(targetDir) : null;
 
   if (packageJson) {
     detectedStack.add("node");
+    if (nodeFramework) detectedStack.add(nodeFramework);
     if (hasPnpmLock) detectedStack.add("pnpm");
     else if (hasYarnLock) detectedStack.add("yarn");
     else if (hasPackageLock) detectedStack.add("npm");
@@ -331,74 +585,104 @@ async function buildExecutionPlan(targetDir: string, runMode: NonNullable<AuditR
       if (!hasPackageLock) warnings.push("Node project has no package-lock.json; runtime install reproducibility is reduced.");
     }
 
-    if (typeof scripts.build === "string" && scripts.build.trim()) {
+    const buildScript = firstScriptName(scripts, ["build", "compile"]);
+    if (buildScript) {
       steps.push({
         step_id: "build-node",
         phase: "build",
         adapter: "node_npm",
-        command: hasPnpmLock ? ["pnpm", "run", "build"] : hasYarnLock ? ["yarn", "build"] : ["npm", "run", "build"],
-        rationale: "package.json defines a build script.",
+        command: resolveNodeScriptCommand(nodePackageManager, buildScript),
+        rationale: `package.json defines a ${buildScript} script.`,
         requires_network: false,
         enabled: true,
         expected_artifact: "node-build",
         artifact_context: {
           stack: "node",
           package_manager: nodePackageManager,
-          script_name: "build",
+          script_name: buildScript,
           artifact_role: "build_output"
         }
       });
-      entrySignals.push("package.json:scripts.build");
+      entrySignals.push(`package.json:scripts.${buildScript}`);
     }
-    if (typeof scripts.test === "string" && scripts.test.trim()) {
+    const testScript = firstScriptName(scripts, ["test", "test:ci", "test:unit"]);
+    if (testScript) {
+      const command = resolveNodeScriptCommand(nodePackageManager, testScript);
       steps.push({
         step_id: "test-node",
         phase: "test",
         adapter: "node_npm",
-        command: hasPnpmLock ? ["pnpm", "run", "test", "--", "--runInBand"] : hasYarnLock ? ["yarn", "test", "--runInBand"] : ["npm", "run", "test", "--", "--runInBand"],
-        rationale: "package.json defines a test script suitable for bounded execution.",
+        command: testScript === "test"
+          ? (hasPnpmLock ? ["pnpm", "run", "test", "--", "--runInBand"] : hasYarnLock ? ["yarn", "test", "--runInBand"] : ["npm", "run", "test", "--", "--runInBand"])
+          : command,
+        rationale: `package.json defines a ${testScript} script suitable for bounded execution.`,
         requires_network: false,
         enabled: true,
         expected_artifact: "node-test",
         artifact_context: {
           stack: "node",
           package_manager: nodePackageManager,
-          script_name: "test",
+          script_name: testScript,
           artifact_role: "test_report"
         }
       });
-      entrySignals.push("package.json:scripts.test");
+      entrySignals.push(`package.json:scripts.${testScript}`);
     }
-    const runtimeScript = typeof scripts.start === "string" && scripts.start.trim()
-      ? "start"
-      : typeof scripts.dev === "string" && scripts.dev.trim()
-        ? "dev"
-        : null;
+    const runtimeScript = firstScriptName(scripts, ["start", "start:prod", "serve", "preview", "dev"]);
     if (runtimeScript) {
+      const runtimeCommand = resolveNodeScriptCommand(nodePackageManager, runtimeScript);
+      const probeDefaults = frameworkProbeDefaults({ stack: "node", framework: nodeFramework });
       steps.push({
         step_id: "runtime-node",
         phase: "runtime_probe",
         adapter: "http_service",
-        command: hasPnpmLock ? ["pnpm", "run", runtimeScript] : hasYarnLock ? ["yarn", runtimeScript] : ["npm", "run", runtimeScript],
+        command: runtimeCommand,
         rationale: `package.json defines a ${runtimeScript} script for bounded runtime probing.`,
         requires_network: runMode === "runtime",
         enabled: runMode !== "build",
         expected_artifact: "http-runtime-probe",
         artifact_context: {
           stack: "node",
+          framework: nodeFramework,
           package_manager: nodePackageManager,
           script_name: runtimeScript,
           artifact_role: "service_probe",
-          probe_paths: DEFAULT_RUNTIME_PROBE_PATHS,
-          probe_ports: [detectRuntimeProbePort(hasPnpmLock ? ["pnpm", "run", runtimeScript] : hasYarnLock ? ["yarn", runtimeScript] : ["npm", "run", runtimeScript]) ?? 3000]
+          probe_paths: probeDefaults.paths,
+          probe_ports: [detectRuntimeProbePort(runtimeCommand) ?? probeDefaults.ports[0], ...probeDefaults.ports.slice(1)]
         }
       });
       entrySignals.push(`package.json:scripts.${runtimeScript}`);
+    } else {
+      const nodeEntrypoint = await detectNodeEntrypoint(targetDir);
+      if (nodeEntrypoint && runMode !== "build") {
+        const probeDefaults = frameworkProbeDefaults({ stack: "node", framework: nodeFramework });
+        steps.push({
+          step_id: "runtime-node-entrypoint",
+          phase: "runtime_probe",
+          adapter: "http_service",
+          command: ["node", nodeEntrypoint],
+          rationale: `Node entrypoint '${nodeEntrypoint}' is available for bounded runtime probing.`,
+          requires_network: runMode === "runtime",
+          enabled: true,
+          expected_artifact: "http-runtime-probe",
+          artifact_context: {
+            stack: "node",
+            framework: nodeFramework,
+            package_manager: nodePackageManager,
+            entrypoint: nodeEntrypoint,
+            artifact_role: "service_probe",
+            probe_paths: probeDefaults.paths,
+            probe_ports: probeDefaults.ports
+          }
+        });
+        entrySignals.push(`node:${nodeEntrypoint}`);
+      }
     }
   }
 
   if (hasPyproject || hasRequirements) {
     detectedStack.add("python");
+    if (pythonFramework) detectedStack.add(pythonFramework);
     steps.push({
       step_id: "install-python",
       phase: "install",
@@ -414,41 +698,54 @@ async function buildExecutionPlan(targetDir: string, runMode: NonNullable<AuditR
         artifact_role: "dependency_install"
       }
     });
-    if (await fileExists(path.join(targetDir, "pytest.ini")) || await fileExists(path.join(targetDir, "tests"))) {
+    const hasPytestConfig = await fileExists(path.join(targetDir, "pytest.ini"))
+      || await fileExists(path.join(targetDir, "tox.ini"))
+      || await fileExists(path.join(targetDir, ".pytest.ini"));
+    const hasTestsDir = await fileExists(path.join(targetDir, "tests"));
+    if (hasPytestConfig || hasTestsDir) {
+      const testRunner = hasPytestConfig ? "pytest" : "unittest";
       steps.push({
         step_id: "test-python",
         phase: "test",
         adapter: "python_pytest",
-        command: ["python", "-m", "pytest", "-q"],
-        rationale: "Pytest configuration or tests directory detected.",
+        command: testRunner === "pytest" ? ["python", "-m", "pytest", "-q"] : ["python", "-m", "unittest", "discover", "-s", "tests", "-q"],
+        rationale: hasPytestConfig ? "Pytest configuration detected." : "Python tests directory detected; falling back to unittest discovery.",
         requires_network: false,
         enabled: true,
         expected_artifact: "python-test",
         artifact_context: {
           stack: "python",
-          test_runner: "pytest",
+          test_runner: testRunner,
           artifact_role: "test_report"
         }
       });
-      entrySignals.push("pytest");
+      entrySignals.push(testRunner);
     }
     const pythonEntrypoint = await detectPythonEntrypoint(targetDir);
     if (pythonEntrypoint && runMode !== "build") {
+      const probeDefaults = frameworkProbeDefaults({ stack: "python", framework: pythonFramework });
+      const runtimeCommand = buildPythonRuntimeCommand({
+        entrypoint: pythonEntrypoint,
+        framework: pythonFramework,
+        probePort: probeDefaults.ports[0] ?? 8000
+      });
       steps.push({
         step_id: "runtime-python",
         phase: "runtime_probe",
         adapter: "http_service",
-        command: ["python", pythonEntrypoint],
+        command: runtimeCommand.command,
         rationale: `Python entrypoint '${pythonEntrypoint}' is available for bounded runtime probing.`,
         requires_network: runMode === "runtime",
         enabled: true,
         expected_artifact: "python-runtime-probe",
         artifact_context: {
           stack: "python",
+          framework: pythonFramework,
           entrypoint: pythonEntrypoint,
+          command_strategy: runtimeCommand.strategy,
           artifact_role: "service_probe",
-          probe_paths: DEFAULT_RUNTIME_PROBE_PATHS,
-          probe_ports: [8000, 5000, 3000]
+          probe_paths: probeDefaults.paths,
+          probe_ports: probeDefaults.ports
         }
       });
       entrySignals.push(`python:${pythonEntrypoint}`);
@@ -709,6 +1006,7 @@ async function executeRuntimeProbeStep(
   const completedAt = new Date().toISOString();
   const trimmedStdout = truncateOutput(stdoutExcerpt);
   const trimmedStderr = truncateOutput(stderrExcerpt || spawnError?.message);
+  const startupSignal = deriveStartupSignal(trimmedStdout, trimmedStderr);
 
   if (blockedByHost) {
     const summary = `Bounded host execution is blocked by the current host for '${step.command.join(" ")}'.`;
@@ -730,7 +1028,8 @@ async function executeRuntimeProbeStep(
         summary,
         exitCode: null,
         stdout: trimmedStdout,
-        stderr: trimmedStderr
+        stderr: trimmedStderr,
+        startupSignal
       })
     };
   }
@@ -756,16 +1055,22 @@ async function executeRuntimeProbeStep(
         exitCode,
         stdout: trimmedStdout,
         stderr: trimmedStderr,
-        runtimeProbe
+        startupSignal,
+        runtimeProbe: {
+          ...runtimeProbe,
+          classification: startupSignal.signaled_ready ? "healthy" : runtimeProbe.classification
+        }
       })
     };
   }
 
-  const summary = spawnError
-    ? `Bounded runtime probe failed to start '${step.command.join(" ")}'.`
-    : exited && exitCode === 0
-      ? `Runtime command exited before exposing a healthy HTTP endpoint for '${step.command.join(" ")}'.`
-      : `Bounded runtime probe failed for '${step.command.join(" ")}'.`;
+  const classification = classifyRuntimeProbeFailure({
+    spawnError,
+    exitCode,
+    runtimeProbe,
+    startupSignal
+  });
+  const summary = describeRuntimeProbeFailure(classification, step.command);
   return {
     step_id: step.step_id,
     status: "failed",
@@ -779,16 +1084,29 @@ async function executeRuntimeProbeStep(
     stdout_excerpt: trimmedStdout,
     stderr_excerpt: trimmedStderr,
     adapter: step.adapter,
-    normalized_artifact: buildNormalizedArtifact(step, {
-      status: "failed",
-      summary,
-      exitCode,
-      stdout: trimmedStdout,
-      stderr: trimmedStderr,
-      runtimeProbe
-    })
-  };
-}
+      normalized_artifact: buildNormalizedArtifact(step, {
+        status: "failed",
+        summary,
+        exitCode,
+        stdout: trimmedStdout,
+        stderr: trimmedStderr,
+        startupSignal,
+        runtimeProbe: runtimeProbe
+          ? { ...runtimeProbe, classification }
+          : {
+              ok: false,
+              classification,
+              successful_target: null,
+              successful_port: null,
+              successful_path: null,
+              status_code: null,
+              response_excerpt: null,
+              error: spawnError?.message ? String(spawnError.message) : null,
+              attempts: []
+            }
+      })
+    };
+  }
 
 export class LinuxContainerSandboxBackend {
   constructor(private readonly rootDir: string) {}

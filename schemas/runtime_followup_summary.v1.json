@@ -1,0 +1,24 @@
+{
+  "type": "object",
+  "required": ["schema_name", "schema_version", "generated_at", "tethermark_version", "payload"],
+  "properties": {
+    "schema_name": { "const": "runtime_followup_summary.v1" },
+    "schema_version": { "const": "1.0.0" },
+    "generated_at": { "type": "string" },
+    "tethermark_version": { "type": "string" },
+    "payload": {
+      "type": "object",
+      "required": ["total_count", "pending_count", "launched_count", "adoption_ready_count", "confirmed_count", "not_reproduced_count", "inconclusive_count", "resolved_count"],
+      "properties": {
+        "total_count": { "type": "number" },
+        "pending_count": { "type": "number" },
+        "launched_count": { "type": "number" },
+        "adoption_ready_count": { "type": "number" },
+        "confirmed_count": { "type": "number" },
+        "not_reproduced_count": { "type": "number" },
+        "inconclusive_count": { "type": "number" },
+        "resolved_count": { "type": "number" }
+      }
+    }
+  }
+}

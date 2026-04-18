@@ -39,7 +39,7 @@ export interface FindingEvaluationRecord {
   false_positive_risk: "low" | "medium" | "high";
   runtime_validation_status: "validated" | "blocked" | "failed" | "recommended" | "not_applicable";
   runtime_followup_policy: "none" | "rerun_in_capable_env" | "manual_runtime_review" | "runtime_validation_recommended" | "not_applicable";
-  runtime_followup_resolution: "none" | "rerun_requested" | "manual_review_completed" | "accepted_without_runtime_validation";
+  runtime_followup_resolution: "none" | "rerun_requested" | "rerun_outcome_adopted" | "manual_review_completed" | "accepted_without_runtime_validation";
   runtime_followup_resolution_at: string | null;
   runtime_followup_resolution_by: string | null;
   runtime_followup_resolution_notes: string | null;
@@ -52,6 +52,8 @@ export interface FindingEvaluationRecord {
   runtime_impact_reasons: string[];
   runtime_evidence_ids: string[];
   runtime_evidence_summaries: string[];
+  runtime_evidence_locations: Array<Record<string, unknown>>;
+  evidence_symbols: string[];
   evidence_quality_summary: string;
   validation_recommendation: "yes" | "no";
   validation_reasons: string[];
@@ -183,6 +185,11 @@ function resolveRuntimeFollowupResolution(actions: PersistedReviewActionRecord[]
       resolvedAt = action.created_at;
       resolvedBy = action.reviewer_id;
       resolvedNotes = action.notes ?? null;
+    } else if (action.action_type === "adopt_rerun_outcome") {
+      resolution = "rerun_outcome_adopted";
+      resolvedAt = action.created_at;
+      resolvedBy = action.reviewer_id;
+      resolvedNotes = action.notes ?? null;
     } else if (action.action_type === "mark_manual_runtime_review_complete") {
       resolution = "manual_review_completed";
       resolvedAt = action.created_at;
@@ -228,6 +235,60 @@ function collectRelatedRuntimeEvidence(args: {
     }
     return false;
   });
+}
+
+function collectRuntimeEvidenceLocations(records: Array<Record<string, any>>): Array<Record<string, unknown>> {
+  const seen = new Set<string>();
+  const locations: Array<Record<string, unknown>> = [];
+  for (const record of records) {
+    const recordLocations = Array.isArray(record?.locations_json)
+      ? record.locations_json
+      : Array.isArray(record?.locations)
+        ? record.locations
+        : [];
+    for (const location of recordLocations) {
+      if (!location || typeof location !== "object") continue;
+      const key = JSON.stringify(location);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      locations.push(location as Record<string, unknown>);
+    }
+  }
+  return locations.slice(0, 25);
+}
+
+function collectEvidenceSymbols(records: Array<Record<string, any>>): string[] {
+  const seen = new Set<string>();
+  const symbols: string[] = [];
+  for (const record of records) {
+    const recordLocations = Array.isArray(record?.locations_json)
+      ? record.locations_json
+      : Array.isArray(record?.locations)
+        ? record.locations
+        : [];
+    for (const location of recordLocations) {
+      if (typeof location?.symbol !== "string" || !location.symbol.trim()) continue;
+      const symbol = location.symbol.trim();
+      if (seen.has(symbol)) continue;
+      seen.add(symbol);
+      symbols.push(symbol);
+    }
+  }
+  return symbols.slice(0, 25);
+}
+
+function collectFindingEvidenceSymbols(args: {
+  finding: PersistedFindingRecord;
+  evidenceRecords: Array<Record<string, any>>;
+}): string[] {
+  const findingControls = new Set(asStringArray(args.finding.control_ids_json));
+  const matched = args.evidenceRecords.filter((record) => {
+    const recordControls = new Set(asStringArray(record.control_ids_json ?? record.control_ids));
+    if ([...findingControls].some((item) => recordControls.has(item))) return true;
+    const summary = String(record.summary ?? "");
+    return tokenOverlap(summary, args.finding.title) || tokenOverlap(summary, args.finding.category);
+  });
+  return collectEvidenceSymbols(matched);
 }
 
 export function summarizeSandboxExecution(artifact: SandboxExecutionArtifact | null | undefined): SandboxExecutionSummary | null {
@@ -296,6 +357,15 @@ export function buildFindingEvaluationSummary(args: {
     (Array.isArray(args.runtimeFollowups) ? args.runtimeFollowups : [])
       .map((item) => [item.finding_id, item] as const)
   );
+  const evidenceSymbolsByFinding = new Map(
+    args.findings.map((finding) => [
+      finding.id,
+      collectFindingEvidenceSymbols({
+        finding,
+        evidenceRecords: runtimeEvidenceRecords
+      })
+    ] as const)
+  );
 
   const duplicates = new Map<string, Set<string>>();
   const conflicts = new Map<string, Array<{ other: string; reason: string }>>();
@@ -308,13 +378,18 @@ export function buildFindingEvaluationSummary(args: {
       const overlappingControls = [...leftControls].filter((item) => rightControls.has(item));
       const similarTitle = tokenOverlap(left.title, right.title);
       const sameCategory = left.category === right.category;
-      if ((sameCategory && similarTitle) || (overlappingControls.length > 0 && similarTitle)) {
+      const leftSymbols = new Set(evidenceSymbolsByFinding.get(left.id) ?? []);
+      const rightSymbols = new Set(evidenceSymbolsByFinding.get(right.id) ?? []);
+      const overlappingSymbols = [...leftSymbols].filter((item) => rightSymbols.has(item));
+      if ((sameCategory && similarTitle) || (overlappingControls.length > 0 && similarTitle) || overlappingSymbols.length > 0) {
         duplicates.set(left.id, new Set([...(duplicates.get(left.id) ?? []), right.id]));
         duplicates.set(right.id, new Set([...(duplicates.get(right.id) ?? []), left.id]));
       }
-      if (overlappingControls.length > 0 && (compareSeverity(left.severity, right.severity) >= 2 || left.publication_state !== right.publication_state)) {
+      if ((overlappingControls.length > 0 || overlappingSymbols.length > 0) && (compareSeverity(left.severity, right.severity) >= 2 || left.publication_state !== right.publication_state)) {
         const reason = left.publication_state !== right.publication_state
           ? "linked controls have conflicting visibility/publication posture"
+          : overlappingSymbols.length > 0
+            ? "shared evidence symbols produced materially different severity outcomes"
           : "linked controls have materially different severity outcomes";
         conflicts.set(left.id, [...(conflicts.get(left.id) ?? []), { other: right.id, reason }]);
         conflicts.set(right.id, [...(conflicts.get(right.id) ?? []), { other: left.id, reason }]);
@@ -338,6 +413,7 @@ export function buildFindingEvaluationSummary(args: {
       conflicts,
       duplicates
     });
+    const relatedRuntimeLocations = collectRuntimeEvidenceLocations(relatedRuntimeEvidence);
     const relatedRuntimeCompleted = relatedRuntimeEvidence.filter((item) => runtimeMetadata(item).status === "completed");
     const relatedRuntimeBlocked = relatedRuntimeEvidence.filter((item) => runtimeMetadata(item).status === "blocked");
     const relatedRuntimeFailed = relatedRuntimeEvidence.filter((item) => runtimeMetadata(item).status === "failed");
@@ -400,13 +476,28 @@ export function buildFindingEvaluationSummary(args: {
       if (runtimeFollowupOutcome === "confirmed" || runtimeFollowupOutcome === "not_reproduced") {
         runtimeValidationStatus = "validated";
       }
+      if (runtimeFollowupOutcome === "confirmed") {
+        if (runtimeImpact === "none") runtimeImpact = "strengthened";
+        falsePositiveRisk = decreaseTriageLevel(falsePositiveRisk);
+        evidenceSufficiency = increaseTriageLevel(evidenceSufficiency);
+        runtimeImpactReasons.push("linked rerun reproduced the finding and increased confidence in the original issue identity");
+      } else if (runtimeFollowupOutcome === "not_reproduced") {
+        if (runtimeImpact === "none") runtimeImpact = "weakened";
+        falsePositiveRisk = increaseTriageLevel(falsePositiveRisk);
+        runtimeImpactReasons.push("linked rerun did not reproduce the finding and weakened confidence in the original issue");
+        validationReasons.push("linked rerun did not reproduce the finding and should be reviewed before final approval");
+      } else if (runtimeFollowupOutcome === "still_inconclusive") {
+        validationReasons.push("linked rerun remained inconclusive and still requires reviewer judgment");
+      }
     }
     let nextAction: FindingEvaluationRecord["next_action"] = "ready_for_review";
     if (reviewFinding?.disposition === "suppressed") nextAction = "suppressed";
     else if (reviewFinding?.disposition === "waived") nextAction = "waived";
     else if (reviewFinding?.needs_disposition_review) nextAction = "review_expired_disposition";
     else if (runtimeFollowupPolicy === "rerun_in_capable_env") {
-      nextAction = runtimeFollowupOutcome !== "none" && runtimeFollowupOutcome !== "pending"
+      nextAction = runtimeResolution.resolution === "rerun_outcome_adopted"
+        ? "ready_for_review"
+        : runtimeFollowupOutcome !== "none" && runtimeFollowupOutcome !== "pending"
         ? "manual_review"
         : "rerun_in_capable_env";
     } else if (runtimeFollowupPolicy === "manual_runtime_review") {
@@ -465,6 +556,8 @@ export function buildFindingEvaluationSummary(args: {
       runtime_impact_reasons: runtimeImpactReasons,
       runtime_evidence_ids: runtimeEvidenceIds,
       runtime_evidence_summaries: runtimeEvidenceSummaries,
+      runtime_evidence_locations: relatedRuntimeLocations,
+      evidence_symbols: evidenceSymbolsByFinding.get(finding.id) ?? [],
       evidence_quality_summary: evidenceQualitySummary,
       validation_recommendation: validationRecommendation,
       validation_reasons: validationReasons,

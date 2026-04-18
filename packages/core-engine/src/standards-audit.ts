@@ -120,17 +120,28 @@ function summarizeRuntimeEvidence(record: EvidenceRecord): string {
   const phase = String(record.metadata?.phase || "step");
   const summaryParts = [record.summary];
   if (details.stack) summaryParts.push(`stack ${details.stack}`);
+  if (details.framework) summaryParts.push(`framework ${details.framework}`);
   if (details.package_manager) summaryParts.push(`pkg ${details.package_manager}`);
   if (details.script_name) summaryParts.push(`script ${details.script_name}`);
   if (details.entrypoint) summaryParts.push(`entry ${details.entrypoint}`);
   if (adapter === "http_service") {
     const probe = (details.probe || {}) as any;
+    const startup = (details.startup || {}) as any;
     if (probe.successful_target) {
       summaryParts.push(`healthy ${probe.successful_target}`);
     } else if (probe.attempted_targets?.length) {
       summaryParts.push(`checked ${probe.attempted_targets.join(", ")}`);
     }
+    if (probe.classification) {
+      summaryParts.push(`probe ${probe.classification}`);
+    }
     if (probe.status_code) summaryParts.push(`status ${probe.status_code}`);
+    if (startup.signaled_ready && startup.indicator) {
+      summaryParts.push(`startup ${startup.indicator}`);
+    }
+    if (startup.failure_reason) {
+      summaryParts.push(`startup-failure ${startup.failure_reason}`);
+    }
   }
   if (adapter === "python_pytest" && details.test_runner) {
     summaryParts.push(`runner ${details.test_runner}`);

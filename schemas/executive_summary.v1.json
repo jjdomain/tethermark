@@ -1,0 +1,80 @@
+{
+  "type": "object",
+  "required": ["schema_name", "schema_version", "generated_at", "tethermark_version", "payload"],
+  "properties": {
+    "schema_name": { "const": "executive_summary.v1" },
+    "schema_version": { "const": "1.0.0" },
+    "generated_at": { "type": "string" },
+    "tethermark_version": { "type": "string" },
+    "payload": {
+      "type": "object",
+      "required": ["run_id", "status", "audit_package", "run_mode", "finding_count", "top_findings", "runtime_validation", "dispositions", "runtime_followups", "outstanding_actions"],
+      "properties": {
+        "run_id": { "type": "string" },
+        "status": { "type": "string" },
+        "audit_package": { "type": "string" },
+        "run_mode": { "type": "string" },
+        "rating": { "type": ["string", "null"] },
+        "overall_score": { "type": ["number", "null"] },
+        "target_class": { "type": ["string", "null"] },
+        "publishability_status": { "type": ["string", "null"] },
+        "human_review_required": { "type": "boolean" },
+        "finding_count": { "type": "number" },
+        "top_findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["finding_id", "title", "category", "severity", "confidence", "runtime_validation_status", "next_action", "disposition"],
+            "properties": {
+              "finding_id": { "type": "string" },
+              "title": { "type": "string" },
+              "category": { "type": "string" },
+              "severity": { "enum": ["critical", "high", "medium", "low", "info"] },
+              "confidence": { "type": "number" },
+              "evidence_sufficiency": { "type": "string" },
+              "runtime_validation_status": { "enum": ["validated", "blocked", "failed", "recommended", "not_applicable"] },
+              "next_action": { "type": "string" },
+              "disposition": { "enum": ["open", "confirmed", "suppressed", "downgraded", "needs_validation", "waived"] }
+            }
+          }
+        },
+        "runtime_validation": {
+          "type": "object",
+          "required": ["validated_count", "blocked_count", "failed_count", "recommended_count"],
+          "properties": {
+            "validated_count": { "type": "number" },
+            "blocked_count": { "type": "number" },
+            "failed_count": { "type": "number" },
+            "recommended_count": { "type": "number" }
+          }
+        },
+        "dispositions": {
+          "type": "object",
+          "required": ["suppressed_count", "waived_count", "expired_count", "reopened_count", "needs_review_count", "active"],
+          "properties": {
+            "suppressed_count": { "type": "number" },
+            "waived_count": { "type": "number" },
+            "expired_count": { "type": "number" },
+            "reopened_count": { "type": "number" },
+            "needs_review_count": { "type": "number" },
+            "active": { "type": "array" }
+          }
+        },
+        "runtime_followups": {
+          "type": "object",
+          "required": ["required_count", "resolved_count", "rerun_requested_count", "completed_count", "outstanding"],
+          "properties": {
+            "required_count": { "type": "number" },
+            "resolved_count": { "type": "number" },
+            "rerun_requested_count": { "type": "number" },
+            "completed_count": { "type": "number" },
+            "outstanding": { "type": "array" }
+          }
+        },
+        "remediation_summary": { "type": ["string", "null"] },
+        "remediation_checklist": { "type": "array", "items": { "type": "string" } },
+        "outstanding_actions": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

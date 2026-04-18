@@ -11,16 +11,21 @@ const initSqlJs: any = require("sql.js/dist/sql-wasm.js");
 let sqlJsPromise: Promise<any> | null = null;
 
 export interface PersistenceMetadata {
+  persistence_schema_version: string;
   database_mode: DatabaseMode;
   backend_kind: "sqlite_file";
   sqlite_path: string;
   bundle_exports_dir: string;
   bundle_export_policy: BundleExportPolicy;
   json_table_mirrors: boolean;
+  compatibility_status: "current" | "legacy" | "unknown";
+  warnings: string[];
   updated_at: string;
 }
 
 export type EmbeddedPersistenceMetadata = PersistenceMetadata;
+
+export const PERSISTENCE_SCHEMA_VERSION = "1.1.0";
 
 function wasmPath(): string {
   return path.resolve(process.cwd(), "node_modules", "sql.js", "dist", "sql-wasm.wasm");
@@ -61,12 +66,15 @@ export async function openSqliteDatabase(rootDir: string): Promise<any> {
 
 export async function writePersistenceMetadata(rootDir: string, databaseMode: DatabaseMode, bundleExportPolicy: BundleExportPolicy): Promise<PersistenceMetadata> {
   const metadata: PersistenceMetadata = {
+    persistence_schema_version: PERSISTENCE_SCHEMA_VERSION,
     database_mode: databaseMode,
     backend_kind: "sqlite_file",
     sqlite_path: sqliteDbPath(rootDir),
     bundle_exports_dir: path.join(rootDir, "runs"),
     bundle_export_policy: bundleExportPolicy,
     json_table_mirrors: false,
+    compatibility_status: "current",
+    warnings: [],
     updated_at: new Date().toISOString()
   };
   await fs.mkdir(rootDir, { recursive: true });
@@ -82,7 +90,39 @@ export async function writeEmbeddedPersistenceMetadata(rootDir: string): Promise
 export async function readPersistenceMetadata(rootDir: string): Promise<PersistenceMetadata | null> {
   try {
     const raw = await fs.readFile(embeddedPersistenceMetadataPath(rootDir), "utf8");
-    return JSON.parse(raw) as PersistenceMetadata;
+    const parsed = JSON.parse(raw) as Partial<PersistenceMetadata> & Record<string, unknown>;
+    const warnings: string[] = Array.isArray(parsed.warnings) ? parsed.warnings.map((item) => String(item)) : [];
+    const schemaVersion = typeof parsed.persistence_schema_version === "string" && parsed.persistence_schema_version
+      ? parsed.persistence_schema_version
+      : "1.0.0";
+    const compatibilityStatus: PersistenceMetadata["compatibility_status"] = schemaVersion === PERSISTENCE_SCHEMA_VERSION
+      ? "current"
+      : typeof parsed.persistence_schema_version === "string"
+        ? "legacy"
+        : "unknown";
+    if (compatibilityStatus !== "current") {
+      warnings.push(`Persistence metadata schema ${schemaVersion} differs from expected ${PERSISTENCE_SCHEMA_VERSION}.`);
+    }
+    return {
+      persistence_schema_version: schemaVersion,
+      database_mode: (parsed.database_mode as DatabaseMode | undefined) ?? "embedded",
+      backend_kind: "sqlite_file",
+      sqlite_path: typeof parsed.sqlite_path === "string" && parsed.sqlite_path ? parsed.sqlite_path : sqliteDbPath(rootDir),
+      bundle_exports_dir: typeof parsed.bundle_exports_dir === "string" && parsed.bundle_exports_dir ? parsed.bundle_exports_dir : path.join(rootDir, "runs"),
+      bundle_export_policy: (parsed.bundle_export_policy && typeof parsed.bundle_export_policy === "object"
+        ? parsed.bundle_export_policy as BundleExportPolicy
+        : {
+            database_mode: (parsed.database_mode as DatabaseMode | undefined) ?? "embedded",
+            policy: "debug_optional",
+            enabled: true,
+            retention_days: 30,
+            notes: ["Recovered default bundle export policy for legacy persistence metadata."]
+          }),
+      json_table_mirrors: Boolean(parsed.json_table_mirrors),
+      compatibility_status: compatibilityStatus,
+      warnings,
+      updated_at: typeof parsed.updated_at === "string" && parsed.updated_at ? parsed.updated_at : new Date().toISOString()
+    };
   } catch {
     return null;
   }

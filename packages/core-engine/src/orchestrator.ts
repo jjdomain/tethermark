@@ -327,6 +327,7 @@ function toEvidenceRecord(record: any): any {
     summary: record.summary,
     confidence: record.confidence,
     raw_artifact_path: record.raw_artifact_path ?? undefined,
+    locations: Array.isArray(record.locations_json) ? record.locations_json : [],
     metadata: (record.metadata_json ?? {}) as Record<string, unknown>
   };
 }

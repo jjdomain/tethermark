@@ -1,0 +1,21 @@
+{
+  "type": "object",
+  "required": ["schema_name", "schema_version", "generated_at", "tethermark_version", "payload"],
+  "properties": {
+    "schema_name": { "const": "review_audit.v1" },
+    "schema_version": { "const": "1.0.0" },
+    "generated_at": { "type": "string" },
+    "tethermark_version": { "type": "string" },
+    "payload": {
+      "type": "object",
+      "required": ["workflow", "actions", "comments", "summary", "finding_dispositions"],
+      "properties": {
+        "workflow": { "type": ["object", "null"] },
+        "actions": { "type": "array" },
+        "comments": { "type": "array" },
+        "summary": { "type": "object" },
+        "finding_dispositions": { "type": "array" }
+      }
+    }
+  }
+}

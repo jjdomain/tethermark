@@ -1,0 +1,45 @@
+{
+  "type": "object",
+  "required": ["schema_name", "schema_version", "generated_at", "tethermark_version", "payload"],
+  "properties": {
+    "schema_name": { "const": "finding_evaluations.v1" },
+    "schema_version": { "const": "1.0.0" },
+    "generated_at": { "type": "string" },
+    "tethermark_version": { "type": "string" },
+    "payload": {
+      "type": "object",
+      "required": ["overall_evidence_sufficiency", "overall_false_positive_risk", "evaluations"],
+      "properties": {
+        "overall_evidence_sufficiency": { "type": "string" },
+        "overall_false_positive_risk": { "type": "string" },
+        "findings_needing_validation_count": { "type": "number" },
+        "runtime_validation_validated_count": { "type": "number" },
+        "runtime_validation_blocked_count": { "type": "number" },
+        "runtime_validation_failed_count": { "type": "number" },
+        "runtime_validation_recommended_count": { "type": "number" },
+        "runtime_followup_required_count": { "type": "number" },
+        "runtime_followup_resolved_count": { "type": "number" },
+        "runtime_followup_rerun_requested_count": { "type": "number" },
+        "runtime_followup_completed_count": { "type": "number" },
+        "evaluations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["finding_id", "title", "review_disposition", "runtime_validation_status", "runtime_followup_policy", "runtime_followup_resolution", "runtime_followup_outcome", "next_action"],
+            "properties": {
+              "finding_id": { "type": "string" },
+              "title": { "type": "string" },
+              "review_disposition": { "enum": ["open", "confirmed", "suppressed", "downgraded", "needs_validation", "waived"] },
+              "runtime_validation_status": { "enum": ["validated", "blocked", "failed", "recommended", "not_applicable"] },
+              "runtime_followup_policy": { "enum": ["none", "not_applicable", "rerun_in_capable_env", "manual_runtime_review", "runtime_validation_recommended"] },
+              "runtime_followup_resolution": { "enum": ["none", "rerun_requested", "rerun_outcome_adopted", "manual_review_completed", "accepted_without_runtime_validation"] },
+              "runtime_followup_outcome": { "enum": ["none", "pending", "confirmed", "not_reproduced", "still_inconclusive"] },
+              "runtime_evidence_locations": { "type": "array" },
+              "next_action": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

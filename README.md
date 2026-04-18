@@ -16,12 +16,14 @@ The harness combines deterministic evidence collection, LLM-guided planning and 
 
 ## Current Status
 
-The TypeScript/Node rewrite is active and the refactor to persistence-backed querying is complete.
+Tethermark is in public OSS release-candidate shape for local and trusted-team self-hosting.
 
 - `embedded` is the default OSS mode.
 - `local` and `hosted` are implemented as separate mode-aware stores, but they currently share the same SQLite-file backend contract rather than a PostgreSQL implementation.
 - The default `.env.example` configuration uses the mock LLM runtime, so the repo can build and run without live model credentials.
 - OSS auth defaults to `none`, which is appropriate for solo operators and trusted internal teams. In that mode, review roles and assignments are advisory governance rather than hard identity enforcement.
+- The supported OSS path is end-to-end: preflight, run execution, findings, review workflow, runtime follow-up, exports, and guarded manual outbound GitHub actions.
+- The main remaining non-goals for OSS are enterprise identity, hosted notification infrastructure, and non-SQLite persistence backends.
 
 ## Architecture
 
@@ -101,6 +103,12 @@ npm test --silent
 npm run scan -- validate-fixtures
 ```
 
+For a release-candidate verification pass, run:
+
+```bash
+npm run release:check
+```
+
 ### 3. Run a Local Static Audit
 
 ```bash
@@ -130,8 +138,13 @@ By default the web UI serves on `http://127.0.0.1:8788` and proxies its backend 
 
 Useful environment variables:
 
+- `PORT`
 - `WEB_UI_PORT`
 - `WEB_UI_API_BASE_URL`
+- `HARNESS_API_AUTH_MODE`
+- `HARNESS_API_KEY`
+- `HARNESS_DB_MODE`
+- `HARNESS_EMBEDDED_DB_ROOT`
 
 The web UI is also deployable as a plain static app. It reads its backend origin from `apps/web-ui/static/config.js`, which defaults to `/api`. For Vercel or other static hosting, point `apiBaseUrl` at the hosted API origin or add a platform rewrite so `/api/*` reaches the API server.
 
@@ -161,6 +174,7 @@ Useful routes:
 - `GET /runs/:runId/outbound-delivery`
 - `POST /runs/:runId/outbound-delivery`
 - `GET /runs/:runId/observability-summary`
+- `GET /runs/:runId/exports`
 - `GET /targets`
 - `GET /stats/runs`
 - `GET /stats/observability`
@@ -193,6 +207,40 @@ npm run scan -- review action <run-id> --reviewer alice --action approve_run --n
 Review workflow state is persisted per run and exposed over both CLI and API. Reviewer actions are append-only records rather than ad hoc artifact edits.
 
 Async runs use the same orchestrator and persistence path as synchronous runs, but they are now tracked as durable async jobs with per-attempt run history. `POST /runs/async` returns a persisted job plus its attempts immediately, `GET /runs/async/:jobId` is the polling surface for that job, queued jobs survive API restarts, cancellation can be requested before start or during execution and is honored cooperatively at stage boundaries, canceled or failed jobs can be retried on the same job as a new attempt, and `completion_webhook_url` receives the terminal job plus its latest attempt context.
+
+JSON-native exports expose a versioned Tethermark schema envelope and a per-run export catalog at `GET /runs/:runId/exports`. The current export contract and stable enum values are documented in `docs/export-schemas.md`.
+
+Example consumers for executive summaries, run comparisons, runtime follow-up queues, and SARIF upload live under `examples/`.
+
+Export maintenance is explicit too: run `npm run exports:check` to validate the current golden fixtures and `npm run exports:refresh` when intentionally updating the checked-in export snapshots.
+
+## OSS Support Boundary
+
+Tethermark OSS is intended for:
+
+- solo developers
+- trusted internal security engineers or small teams
+- self-hosted API and web UI deployments
+- manual or guarded outbound GitHub sharing
+
+Tethermark OSS is not claiming:
+
+- enterprise SSO or user lifecycle management
+- internet-grade multi-user security when `auth=none`
+- hosted notification routing or managed ops workflows
+- non-SQLite production persistence backends
+
+If you need enforced auth in OSS, use `HARNESS_API_AUTH_MODE=api_key` and put the service behind your own trusted network or reverse proxy controls.
+
+## Release Checklist
+
+The maintainer release checklist lives at [`docs/release-checklist.md`](docs/release-checklist.md). The short version is:
+
+1. `npm run release:check`
+2. `npm run api`
+3. `npm run web`
+4. complete one local scan plus one web-UI review/export smoke path
+5. confirm the documented OSS limitations still match reality
 
 ## OSS Auth Model
 
@@ -251,6 +299,16 @@ The harness now has an explicit boundary between queryable state and archival de
 - Artifact APIs under `/artifacts/runs/...` are best-effort archival/debug access.
 - Reusable orchestration inputs such as planner output, threat model, eval selection, run plan, findings-pre-skeptic, score summary, and observations are persisted as normalized stage artifacts.
 - Per-run bundle exports are optional debug exports rather than canonical persistence.
+
+## Runtime Limitations
+
+The OSS build has meaningful runtime validation support, but it still has practical limits:
+
+- bounded host execution is opt-in via `HARNESS_ENABLE_HOST_SANDBOX_EXECUTION=1`
+- local tool execution depends on installed binaries and host child-process permission
+- Python worker-backed evidence depends on a working local Python runtime
+- runtime probing is framework-aware for common Node and Python patterns, but not every stack is covered
+- `local` and `hosted` database modes still use the SQLite backend contract today
 
 ## LLM Configuration
 

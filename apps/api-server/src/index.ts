@@ -65,6 +65,8 @@ import {
   findingDispositionSignature,
   buildFindingEvidenceFingerprint,
   buildMarkdownRunReport,
+  buildExecutiveMarkdownReport,
+  buildExecutiveSummaryPayload,
   buildSarifRunReport,
   emitGenericWebhookEvent,
   normalizeGenericWebhookConfig,
@@ -137,6 +139,8 @@ import {
 loadEnvironment();
 
 const engine = createEngine();
+const TETHERMARK_VERSION = process.env.TETHERMARK_VERSION ?? "0.2.0";
+const EXPORT_SCHEMA_VERSION = "1.0.0";
 const asyncJobs = new PersistedAsyncJobManager(engine, {
   onTerminalJob: async ({ job, attempt, rootDirOrOptions }) => {
     await markRuntimeFollowupJobTerminal({
@@ -183,11 +187,14 @@ type RunSubresource =
   | "review-comments"
   | "review-summary"
   | "runtime-followups"
+  | "exports"
   | "finding-dispositions"
   | "finding-evaluations"
   | "webhook-deliveries"
   | "report-markdown"
   | "report-sarif"
+  | "report-executive"
+  | "report-compare"
   | "sandbox-execution"
   | "review-audit"
   | "outbound-preview"
@@ -208,6 +215,283 @@ type RunSubresource =
   | "resolved-config"
   | "correction-plan"
   | "correction-result";
+
+function sendText(res: http.ServerResponse, status: number, contentType: string, body: string): void {
+  res.writeHead(status, { "content-type": contentType });
+  res.end(body);
+}
+
+function buildRuntimeFollowupSummary(followups: Array<Record<string, any>>) {
+  return {
+    total_count: followups.length,
+    pending_count: followups.filter((item) => item.status === "pending").length,
+    launched_count: followups.filter((item) => item.status === "launched").length,
+    adoption_ready_count: followups.filter((item) => item.status !== "resolved" && item.rerun_outcome && item.rerun_outcome !== "pending").length,
+    confirmed_count: followups.filter((item) => item.rerun_outcome === "confirmed").length,
+    not_reproduced_count: followups.filter((item) => item.rerun_outcome === "not_reproduced").length,
+    inconclusive_count: followups.filter((item) => item.rerun_outcome === "still_inconclusive").length,
+    resolved_count: followups.filter((item) => item.status === "resolved").length
+  };
+}
+
+function csvValue(value: unknown): string {
+  const text = value == null ? "" : String(value);
+  return `"${text.replace(/"/g, "\"\"")}"`;
+}
+
+function buildRuntimeFollowupCsv(followups: Array<Record<string, any>>): string {
+  const headers = [
+    "id",
+    "run_id",
+    "finding_id",
+    "finding_title",
+    "status",
+    "followup_policy",
+    "requested_by",
+    "requested_at",
+    "linked_job_id",
+    "linked_run_id",
+    "rerun_outcome",
+    "rerun_outcome_summary",
+    "resolved_at",
+    "resolved_by",
+    "resolution_action_type"
+  ];
+  const rows = followups.map((item) => headers.map((key) => csvValue(item[key])).join(","));
+  return [headers.join(","), ...rows].join("\n");
+}
+
+function buildExportEnvelope<T>(schemaName: string, payload: T) {
+  return {
+    schema_name: schemaName,
+    schema_version: EXPORT_SCHEMA_VERSION,
+    generated_at: new Date().toISOString(),
+    tethermark_version: TETHERMARK_VERSION,
+    payload
+  };
+}
+
+function buildRunExportIndex(runId: string, compareToRunId: string | null) {
+  return {
+    run_id: runId,
+    exports: [
+      { export_type: "executive_summary", format: "json", filename: `${runId}-executive-summary.json`, route: `/runs/${encodeURIComponent(runId)}/report-executive?format=json`, schema_name: "executive_summary.v1" },
+      { export_type: "executive_summary", format: "markdown", filename: `${runId}-executive-summary.md`, route: `/runs/${encodeURIComponent(runId)}/report-executive?format=markdown`, schema_name: null },
+      { export_type: "run_report", format: "markdown", filename: `${runId}-report.md`, route: `/runs/${encodeURIComponent(runId)}/report-markdown`, schema_name: null },
+      { export_type: "run_report", format: "sarif", filename: `${runId}-report.sarif.json`, route: `/runs/${encodeURIComponent(runId)}/report-sarif`, schema_name: null },
+      { export_type: "finding_evaluations", format: "json", filename: `${runId}-finding-evaluations.json`, route: `/runs/${encodeURIComponent(runId)}/finding-evaluations`, schema_name: "finding_evaluations.v1" },
+      { export_type: "review_audit", format: "json", filename: `${runId}-review-audit.json`, route: `/runs/${encodeURIComponent(runId)}/review-audit`, schema_name: "review_audit.v1" },
+      ...(compareToRunId ? [
+        { export_type: "run_comparison", format: "json", filename: `${runId}-vs-${compareToRunId}-comparison.json`, route: `/runs/${encodeURIComponent(runId)}/report-compare?compare_to=${encodeURIComponent(compareToRunId)}&format=json`, schema_name: "run_comparison.v1" },
+        { export_type: "run_comparison", format: "markdown", filename: `${runId}-vs-${compareToRunId}-comparison.md`, route: `/runs/${encodeURIComponent(runId)}/report-compare?compare_to=${encodeURIComponent(compareToRunId)}&format=markdown`, schema_name: null }
+      ] : [])
+    ]
+  };
+}
+
+function normalizeFindingSignature(finding: { title?: string | null; category?: string | null }): string {
+  return `${String(finding.category ?? "unknown").trim().toLowerCase()}::${String(finding.title ?? "").trim().toLowerCase()}`;
+}
+
+function normalizeEvidenceSymbols(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map((item) => String(item).trim()).filter(Boolean))].sort();
+}
+
+function overlappingEvidenceSymbols(left: unknown, right: unknown): string[] {
+  const leftSet = new Set(normalizeEvidenceSymbols(left));
+  if (!leftSet.size) return [];
+  return normalizeEvidenceSymbols(right).filter((item) => leftSet.has(item));
+}
+
+export function buildRunComparisonReport(args: {
+  currentRunId: string;
+  compareToRunId: string;
+  currentFindings: Array<Record<string, any>>;
+  previousFindings: Array<Record<string, any>>;
+  currentEvaluations: Record<string, any>;
+  previousEvaluations: Record<string, any>;
+  currentSummary: Record<string, any>;
+  previousSummary: Record<string, any>;
+}) {
+  const currentBySignature = new Map<string, Record<string, any>>();
+  const previousBySignature = new Map<string, Record<string, any>>();
+  const currentEvalByFindingId = new Map<string, Record<string, any>>(
+    Array.isArray(args.currentEvaluations?.evaluations)
+      ? args.currentEvaluations.evaluations.map((item: Record<string, any>) => [String(item.finding_id), item])
+      : []
+  );
+  const previousEvalByFindingId = new Map<string, Record<string, any>>(
+    Array.isArray(args.previousEvaluations?.evaluations)
+      ? args.previousEvaluations.evaluations.map((item: Record<string, any>) => [String(item.finding_id), item])
+      : []
+  );
+  for (const finding of args.currentFindings) currentBySignature.set(normalizeFindingSignature(finding), finding);
+  for (const finding of args.previousFindings) previousBySignature.set(normalizeFindingSignature(finding), finding);
+  const newFindings: Array<Record<string, any>> = [];
+  const resolvedFindings: Array<Record<string, any>> = [];
+  const changedFindings: Array<Record<string, any>> = [];
+  const matchedPreviousIds = new Set<string>();
+  let symbolMatchedCount = 0;
+  let unchangedCount = 0;
+
+  for (const [signature, currentFinding] of currentBySignature.entries()) {
+    const currentEvaluation = currentEvalByFindingId.get(String(currentFinding.id)) ?? null;
+    let previousFinding = previousBySignature.get(signature);
+    let matchStrategy: "finding_signature" | "evidence_symbols" | "none" = previousFinding ? "finding_signature" : "none";
+    let sharedEvidenceSymbols: string[] = [];
+    if (!previousFinding) {
+      const currentSymbols = normalizeEvidenceSymbols(currentEvaluation?.evidence_symbols);
+      if (currentSymbols.length) {
+        for (const candidate of args.previousFindings) {
+          if (matchedPreviousIds.has(String(candidate.id))) continue;
+          const candidateEvaluation = previousEvalByFindingId.get(String(candidate.id)) ?? null;
+          const overlappingSymbols = overlappingEvidenceSymbols(currentSymbols, candidateEvaluation?.evidence_symbols);
+          if (!overlappingSymbols.length) continue;
+          previousFinding = candidate;
+          matchStrategy = "evidence_symbols";
+          sharedEvidenceSymbols = overlappingSymbols;
+          symbolMatchedCount += 1;
+          break;
+        }
+      }
+    }
+    if (!previousFinding) {
+      newFindings.push({
+        signature,
+        finding_id: currentFinding.id,
+        title: currentFinding.title,
+        category: currentFinding.category,
+        current_severity: currentEvaluation?.current_severity ?? currentFinding.severity,
+        current_confidence: currentFinding.confidence,
+        runtime_validation_status: currentEvaluation?.runtime_validation_status ?? "not_applicable",
+        runtime_followup_policy: currentEvaluation?.runtime_followup_policy ?? "not_applicable",
+        evidence_symbols: normalizeEvidenceSymbols(currentEvaluation?.evidence_symbols)
+      });
+      continue;
+    }
+    matchedPreviousIds.add(String(previousFinding.id));
+    const previousEvaluation = previousEvalByFindingId.get(String(previousFinding.id)) ?? null;
+    if (!sharedEvidenceSymbols.length && matchStrategy === "evidence_symbols") {
+      sharedEvidenceSymbols = overlappingEvidenceSymbols(currentEvaluation?.evidence_symbols, previousEvaluation?.evidence_symbols);
+    }
+    const fieldPairs = [
+      ["severity", previousEvaluation?.current_severity ?? previousFinding.severity, currentEvaluation?.current_severity ?? currentFinding.severity],
+      ["confidence", previousFinding.confidence, currentFinding.confidence],
+      ["evidence_sufficiency", previousEvaluation?.evidence_sufficiency ?? "unknown", currentEvaluation?.evidence_sufficiency ?? "unknown"],
+      ["runtime_validation_status", previousEvaluation?.runtime_validation_status ?? "not_applicable", currentEvaluation?.runtime_validation_status ?? "not_applicable"],
+      ["runtime_followup_policy", previousEvaluation?.runtime_followup_policy ?? "not_applicable", currentEvaluation?.runtime_followup_policy ?? "not_applicable"],
+      ["runtime_followup_resolution", previousEvaluation?.runtime_followup_resolution ?? "none", currentEvaluation?.runtime_followup_resolution ?? "none"],
+      ["next_action", previousEvaluation?.next_action ?? "ready_for_review", currentEvaluation?.next_action ?? "ready_for_review"]
+    ];
+    const changes = fieldPairs
+      .filter(([, previousValue, currentValue]) => String(previousValue) !== String(currentValue))
+      .map(([field, previousValue, currentValue]) => ({ field, previous: previousValue, current: currentValue }));
+    if (!changes.length) {
+      unchangedCount += 1;
+      continue;
+    }
+    changedFindings.push({
+      signature,
+      match_strategy: matchStrategy,
+      shared_evidence_symbols: sharedEvidenceSymbols,
+      title: currentFinding.title,
+      category: currentFinding.category,
+      previous_finding_id: previousFinding.id,
+      current_finding_id: currentFinding.id,
+      changes
+    });
+  }
+
+  for (const [signature, previousFinding] of previousBySignature.entries()) {
+    if (matchedPreviousIds.has(String(previousFinding.id))) continue;
+    const previousEvaluation = previousEvalByFindingId.get(String(previousFinding.id)) ?? null;
+    resolvedFindings.push({
+      signature,
+      finding_id: previousFinding.id,
+      title: previousFinding.title,
+      category: previousFinding.category,
+      previous_severity: previousEvaluation?.current_severity ?? previousFinding.severity,
+      previous_confidence: previousFinding.confidence,
+      runtime_validation_status: previousEvaluation?.runtime_validation_status ?? "not_applicable",
+      runtime_followup_policy: previousEvaluation?.runtime_followup_policy ?? "not_applicable",
+      evidence_symbols: normalizeEvidenceSymbols(previousEvaluation?.evidence_symbols)
+    });
+  }
+
+  return {
+    current_run_id: args.currentRunId,
+    compare_to_run_id: args.compareToRunId,
+    summary: {
+      current_finding_count: args.currentFindings.length,
+      compare_to_finding_count: args.previousFindings.length,
+      new_finding_count: newFindings.length,
+      resolved_finding_count: resolvedFindings.length,
+      changed_finding_count: changedFindings.length,
+      unchanged_finding_count: unchangedCount,
+      evidence_symbol_matched_count: symbolMatchedCount,
+      current_runtime_followup_required_count: Number(args.currentEvaluations?.runtime_followup_required_count ?? 0),
+      compare_to_runtime_followup_required_count: Number(args.previousEvaluations?.runtime_followup_required_count ?? 0),
+      current_runtime_validation_blocked_count: Number(args.currentEvaluations?.runtime_validation_blocked_count ?? 0),
+      compare_to_runtime_validation_blocked_count: Number(args.previousEvaluations?.runtime_validation_blocked_count ?? 0),
+      current_overall_score: args.currentSummary?.overall_score ?? null,
+      compare_to_overall_score: args.previousSummary?.overall_score ?? null
+    },
+    new_findings: newFindings,
+    resolved_findings: resolvedFindings,
+    changed_findings: changedFindings
+  };
+}
+
+function buildMarkdownComparisonReport(comparison: Record<string, any>): string {
+  const lines: string[] = [];
+  lines.push(`# Run Comparison Report`);
+  lines.push("");
+  lines.push(`- Current Run: ${comparison.current_run_id}`);
+  lines.push(`- Compared To: ${comparison.compare_to_run_id}`);
+  lines.push(`- New Findings: ${comparison.summary?.new_finding_count ?? 0}`);
+  lines.push(`- Resolved Findings: ${comparison.summary?.resolved_finding_count ?? 0}`);
+  lines.push(`- Changed Findings: ${comparison.summary?.changed_finding_count ?? 0}`);
+  lines.push(`- Unchanged Findings: ${comparison.summary?.unchanged_finding_count ?? 0}`);
+  lines.push(`- Current Overall Score: ${comparison.summary?.current_overall_score ?? "n/a"}`);
+  lines.push(`- Compared Overall Score: ${comparison.summary?.compare_to_overall_score ?? "n/a"}`);
+  lines.push("");
+  lines.push(`## New Findings`);
+  lines.push("");
+  if (!comparison.new_findings?.length) {
+    lines.push(`No new findings.`);
+  } else {
+    for (const item of comparison.new_findings) {
+      lines.push(`- ${item.title} (${item.category}) - severity ${item.current_severity}, runtime ${item.runtime_validation_status}`);
+    }
+  }
+  lines.push("");
+  lines.push(`## Resolved Findings`);
+  lines.push("");
+  if (!comparison.resolved_findings?.length) {
+    lines.push(`No resolved findings.`);
+  } else {
+    for (const item of comparison.resolved_findings) {
+      lines.push(`- ${item.title} (${item.category}) - previous severity ${item.previous_severity}, runtime ${item.runtime_validation_status}`);
+    }
+  }
+  lines.push("");
+  lines.push(`## Changed Findings`);
+  lines.push("");
+  if (!comparison.changed_findings?.length) {
+    lines.push(`No changed findings.`);
+  } else {
+    for (const item of comparison.changed_findings) {
+      const matchDetail = item.match_strategy === "evidence_symbols" && Array.isArray(item.shared_evidence_symbols) && item.shared_evidence_symbols.length
+        ? ` matched by evidence identity (${item.shared_evidence_symbols.join(", ")})`
+        : "";
+      lines.push(`### ${item.title} (${item.category})${matchDetail}`);
+      for (const change of item.changes || []) lines.push(`- ${change.field}: ${change.previous} -> ${change.current}`);
+      lines.push("");
+    }
+  }
+  return lines.join("\n");
+}
 
 type ArtifactFormat = "json" | "jsonl" | "text";
 type AsyncRunRequestBody = {
@@ -448,7 +732,7 @@ function buildScopedTargetStats(targets: PersistedTargetListItem[]) {
 }
 
 function matchRunSubresource(url: URL): { runId: string; resource: RunSubresource } | null {
-  const match = url.pathname.match(/^\/runs\/([^/]+)\/(observability|observations|events|metrics|observability-summary|maintenance|lane-plans|lane-results|lane-specialists|lane-reuse-decisions|evidence-records|findings|control-results|tool-executions|tool-adapters|agent-invocations|artifact-index|score-summary|dimension-scores|usage-summary|review-decision|review-workflow|review-actions|review-comments|review-summary|runtime-followups|finding-dispositions|finding-evaluations|webhook-deliveries|report-markdown|report-sarif|sandbox-execution|review-audit|outbound-preview|outbound-approval|outbound-send|outbound-verification|outbound-delivery|supervisor-review|remediation|summary|preflight|launch-intent|commit-diff|persistence|stage-executions|publishability|policy-application|resolved-config|correction-plan|correction-result)$/);
+  const match = url.pathname.match(/^\/runs\/([^/]+)\/(observability|observations|events|metrics|observability-summary|maintenance|lane-plans|lane-results|lane-specialists|lane-reuse-decisions|evidence-records|findings|control-results|tool-executions|tool-adapters|agent-invocations|artifact-index|score-summary|dimension-scores|usage-summary|review-decision|review-workflow|review-actions|review-comments|review-summary|runtime-followups|exports|finding-dispositions|finding-evaluations|webhook-deliveries|report-markdown|report-sarif|report-executive|report-compare|sandbox-execution|review-audit|outbound-preview|outbound-approval|outbound-send|outbound-verification|outbound-delivery|supervisor-review|remediation|summary|preflight|launch-intent|commit-diff|persistence|stage-executions|publishability|policy-application|resolved-config|correction-plan|correction-result)$/);
   if (!match) return null;
   return { runId: match[1] ?? "", resource: match[2] as RunSubresource };
 }
@@ -515,6 +799,12 @@ function matchRuntimeFollowupAction(url: URL): { followupId: string; action: "la
     followupId: decodeURIComponent(match[1] ?? ""),
     action: "launch"
   };
+}
+
+function matchRuntimeFollowupReport(url: URL): { followupId: string } | null {
+  const match = url.pathname.match(/^\/runtime-followups\/([^/]+)\/report$/);
+  if (!match) return null;
+  return { followupId: decodeURIComponent(match[1] ?? "") };
 }
 
 function matchRunArtifact(url: URL): { runId: string; artifactType: string } | null {
@@ -1134,6 +1424,47 @@ export function createApiServer(): http.Server {
     return;
   }
 
+  if (req.method === "GET" && url.pathname === "/runtime-followups/summary") {
+    const followups = await listPersistedRuntimeFollowups({
+      workspaceId: context.workspaceId,
+      projectId: context.projectId
+    });
+    sendJson(res, 200, {
+      runtime_followup_summary: buildRuntimeFollowupSummary(followups),
+      export_schema: buildExportEnvelope("runtime_followup_summary.v1", buildRuntimeFollowupSummary(followups))
+    });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/runtime-followups/export") {
+    const format = (url.searchParams.get("format") || "json").toLowerCase();
+    const followups = await listPersistedRuntimeFollowups({
+      workspaceId: context.workspaceId,
+      projectId: context.projectId
+    });
+    const filename = `runtime-followups.${format === "csv" ? "csv" : "json"}`;
+    if (format === "csv") {
+      sendJson(res, 200, {
+        format: "csv",
+        filename,
+        csv: buildRuntimeFollowupCsv(followups),
+        runtime_followup_summary: buildRuntimeFollowupSummary(followups)
+      });
+      return;
+    }
+    sendJson(res, 200, {
+      format: "json",
+      filename,
+      export_schema: buildExportEnvelope("runtime_followup_queue.v1", {
+        runtime_followup_summary: buildRuntimeFollowupSummary(followups),
+        runtime_followups: followups
+      }),
+      runtime_followup_summary: buildRuntimeFollowupSummary(followups),
+      runtime_followups: followups
+    });
+    return;
+  }
+
   const asyncRun = req.method === "GET" ? matchAsyncRun(url) : null;
   if (asyncRun) {
     const job = await asyncJobs.getJob(asyncRun.runId);
@@ -1179,6 +1510,83 @@ export function createApiServer(): http.Server {
   }
 
   const runtimeFollowupAction = req.method === "POST" ? matchRuntimeFollowupAction(url) : null;
+  const runtimeFollowupReport = req.method === "GET" ? matchRuntimeFollowupReport(url) : null;
+  if (runtimeFollowupReport) {
+    try {
+      const followup = await readPersistedRuntimeFollowup(runtimeFollowupReport.followupId);
+      if (!followup || normalizeWorkspaceId(followup.workspace_id) !== context.workspaceId || normalizeProjectId(followup.project_id) !== context.projectId) {
+        sendJson(res, 404, { error: "runtime_followup_not_found", followup_id: runtimeFollowupReport.followupId });
+        return;
+      }
+      const [sourceRun, sourceFindings, sourceActions, sourceComments, sourceDispositions, sourceSupervisorReview, sourceEvidenceRecords, sourceWorkflow, linkedSummary, linkedFindings, linkedEvaluations] = await Promise.all([
+        getPersistedRun(followup.run_id),
+        readPersistedFindings(followup.run_id),
+        readPersistedReviewActions(followup.run_id),
+        readPersistedReviewComments(followup.run_id),
+        readPersistedFindingDispositions(followup.run_id),
+        readPersistedSupervisorReview(followup.run_id),
+        readPersistedEvidenceRecords(followup.run_id),
+        readPersistedReviewWorkflow(followup.run_id),
+        followup.linked_run_id ? buildRunSummary(followup.linked_run_id) : Promise.resolve(null),
+        followup.linked_run_id ? readPersistedFindings(followup.linked_run_id) : Promise.resolve([]),
+        followup.linked_run_id ? (async () => {
+          const [workflow, findings, actions, comments, dispositions, supervisorReview, sandboxExecution, evidenceRecords, runtimeFollowups] = await Promise.all([
+            readPersistedReviewWorkflow(followup.linked_run_id!),
+            readPersistedFindings(followup.linked_run_id!),
+            readPersistedReviewActions(followup.linked_run_id!),
+            readPersistedReviewComments(followup.linked_run_id!),
+            readPersistedFindingDispositions(followup.linked_run_id!),
+            readPersistedSupervisorReview(followup.linked_run_id!),
+            readPersistedStageArtifact(followup.linked_run_id!, "sandbox-execution"),
+            readPersistedEvidenceRecords(followup.linked_run_id!),
+            listPersistedRuntimeFollowups({ runId: followup.linked_run_id! })
+          ]);
+          return buildFindingEvaluationSummary({ workflow, findings, actions, comments, dispositions, supervisorReview, sandboxExecution: sandboxExecution as any, evidenceRecords, runtimeFollowups });
+        })() : Promise.resolve(null)
+      ]);
+      const sourceFinding = sourceFindings.find((item: any) => item.id === followup.finding_id) ?? null;
+      const sourceEvaluation = buildFindingEvaluationSummary({
+        workflow: sourceWorkflow,
+        findings: sourceFindings,
+        actions: sourceActions,
+        comments: sourceComments,
+        dispositions: sourceDispositions,
+        supervisorReview: sourceSupervisorReview,
+        sandboxExecution: null as any,
+        evidenceRecords: sourceEvidenceRecords,
+        runtimeFollowups: [followup]
+      }).evaluations.find((item: any) => item.finding_id === followup.finding_id) ?? null;
+      sendJson(res, 200, {
+        followup_id: followup.id,
+        filename: `${followup.id}-runtime-followup-report.json`,
+        export_schema: buildExportEnvelope("runtime_followup_report.v1", {
+          followup,
+          summary: buildRuntimeFollowupSummary([followup]),
+          source_run: sourceRun,
+          source_finding: sourceFinding,
+          source_evaluation: sourceEvaluation,
+          source_review_actions: sourceActions.filter((item: any) => item.finding_id === followup.finding_id),
+          linked_rerun_summary: linkedSummary,
+          linked_rerun_findings: linkedFindings,
+          linked_rerun_evaluations: linkedEvaluations?.evaluations ?? []
+        }),
+        runtime_followup_report: {
+          followup,
+          summary: buildRuntimeFollowupSummary([followup]),
+          source_run: sourceRun,
+          source_finding: sourceFinding,
+          source_evaluation: sourceEvaluation,
+          source_review_actions: sourceActions.filter((item: any) => item.finding_id === followup.finding_id),
+          linked_rerun_summary: linkedSummary,
+          linked_rerun_findings: linkedFindings,
+          linked_rerun_evaluations: linkedEvaluations?.evaluations ?? []
+        }
+      });
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error), followup_id: runtimeFollowupReport.followupId });
+    }
+    return;
+  }
   if (runtimeFollowupAction) {
     try {
       const followup = await readPersistedRuntimeFollowup(runtimeFollowupAction.followupId);
@@ -2227,7 +2635,7 @@ export function createApiServer(): http.Server {
           });
           return;
         }
-        if (runSubresource.resource === "runtime-followups") {
+      if (runSubresource.resource === "runtime-followups") {
           sendJson(res, 200, {
             run_id: runSubresource.runId,
             runtime_followups: await listPersistedRuntimeFollowups({
@@ -2235,6 +2643,15 @@ export function createApiServer(): http.Server {
               workspaceId: context.workspaceId,
               projectId: context.projectId
             })
+          });
+          return;
+        }
+        if (runSubresource.resource === "exports") {
+          const compareToRunId = url.searchParams.get("compare_to") || (await readPersistedCommitDiff(runSubresource.runId))?.previous_run_id || null;
+          sendJson(res, 200, {
+            run_id: runSubresource.runId,
+            export_schema: buildExportEnvelope("export_index.v1", buildRunExportIndex(runSubresource.runId, compareToRunId)),
+            export_index: buildRunExportIndex(runSubresource.runId, compareToRunId)
           });
           return;
         }
@@ -2273,13 +2690,15 @@ export function createApiServer(): http.Server {
           readPersistedEvidenceRecords(runSubresource.runId),
           listPersistedRuntimeFollowups({ runId: runSubresource.runId })
         ]);
+        const findingEvaluations = buildFindingEvaluationSummary({ workflow, findings, actions, comments, dispositions, supervisorReview, sandboxExecution: sandboxExecution as any, evidenceRecords, runtimeFollowups });
         sendJson(res, 200, {
           run_id: runSubresource.runId,
-          finding_evaluations: buildFindingEvaluationSummary({ workflow, findings, actions, comments, dispositions, supervisorReview, sandboxExecution: sandboxExecution as any, evidenceRecords, runtimeFollowups })
+          export_schema: buildExportEnvelope("finding_evaluations.v1", findingEvaluations),
+          finding_evaluations: findingEvaluations
         });
         return;
       }
-      if (runSubresource.resource === "report-markdown" || runSubresource.resource === "report-sarif") {
+      if (runSubresource.resource === "report-markdown" || runSubresource.resource === "report-sarif" || runSubresource.resource === "report-executive") {
         const [summary, findings, workflow, actions, comments, dispositions, supervisorReview, reviewDecision, remediation, resolvedConfiguration, sandboxExecution, evidenceRecords, runtimeFollowups] = await Promise.all([
           buildRunSummary(runSubresource.runId),
           readPersistedFindings(runSubresource.runId),
@@ -2296,6 +2715,50 @@ export function createApiServer(): http.Server {
           listPersistedRuntimeFollowups({ runId: runSubresource.runId })
         ]);
         const evaluations = buildFindingEvaluationSummary({ workflow, findings, actions, comments, dispositions, supervisorReview, sandboxExecution: sandboxExecution as any, evidenceRecords, runtimeFollowups });
+        if (runSubresource.resource === "report-executive") {
+          const format = String(url.searchParams.get("format") || "json").toLowerCase() === "markdown" ? "markdown" : "json";
+          if (format === "markdown") {
+            sendJson(res, 200, {
+              run_id: runSubresource.runId,
+              format: "markdown",
+              filename: `${runSubresource.runId}-executive-summary.md`,
+              report_executive_markdown: buildExecutiveMarkdownReport({
+                run,
+                summary,
+                findings,
+                evaluations,
+                reviewDecision,
+                remediation,
+                resolvedConfiguration
+              })
+            });
+            return;
+          }
+          sendJson(res, 200, {
+            run_id: runSubresource.runId,
+            format: "json",
+            filename: `${runSubresource.runId}-executive-summary.json`,
+            export_schema: buildExportEnvelope("executive_summary.v1", buildExecutiveSummaryPayload({
+              run,
+              summary,
+              findings,
+              evaluations,
+              reviewDecision,
+              remediation,
+              resolvedConfiguration
+            })),
+            report_executive: buildExecutiveSummaryPayload({
+              run,
+              summary,
+              findings,
+              evaluations,
+              reviewDecision,
+              remediation,
+              resolvedConfiguration
+            })
+          });
+          return;
+        }
         if (runSubresource.resource === "report-markdown") {
           sendJson(res, 200, {
             run_id: runSubresource.runId,
@@ -2320,8 +2783,120 @@ export function createApiServer(): http.Server {
           report_sarif: buildSarifRunReport({
             run,
             findings,
-            evaluations
+            evaluations,
+            evidenceRecords
           })
+        });
+        return;
+      }
+      if (runSubresource.resource === "report-compare") {
+        const compareToRunId = url.searchParams.get("compare_to") || (await readPersistedCommitDiff(runSubresource.runId))?.previous_run_id || "";
+        if (!compareToRunId) {
+          sendJson(res, 400, { error: "compare_to_run_required", run_id: runSubresource.runId });
+          return;
+        }
+        const compareRun = await getPersistedRun(compareToRunId);
+        if (!runMatchesScope(compareRun, context)) {
+          sendJson(res, 404, { error: "compare_to_run_not_found", compare_to_run_id: compareToRunId });
+          return;
+        }
+        if (!compareRun) {
+          sendJson(res, 404, { error: "compare_to_run_not_found", compare_to_run_id: compareToRunId });
+          return;
+        }
+        const [
+          currentSummary,
+          currentFindings,
+          currentWorkflow,
+          currentActions,
+          currentComments,
+          currentDispositions,
+          currentSupervisorReview,
+          currentSandboxExecution,
+          currentEvidenceRecords,
+          currentRuntimeFollowups,
+          previousSummary,
+          previousFindings,
+          previousWorkflow,
+          previousActions,
+          previousComments,
+          previousDispositions,
+          previousSupervisorReview,
+          previousSandboxExecution,
+          previousEvidenceRecords,
+          previousRuntimeFollowups
+        ] = await Promise.all([
+          buildRunSummary(runSubresource.runId),
+          readPersistedFindings(runSubresource.runId),
+          readPersistedReviewWorkflow(runSubresource.runId),
+          readPersistedReviewActions(runSubresource.runId),
+          readPersistedReviewComments(runSubresource.runId),
+          readPersistedFindingDispositions(runSubresource.runId),
+          readPersistedSupervisorReview(runSubresource.runId),
+          readPersistedStageArtifact(runSubresource.runId, "sandbox-execution"),
+          readPersistedEvidenceRecords(runSubresource.runId),
+          listPersistedRuntimeFollowups({ runId: runSubresource.runId }),
+          buildRunSummary(compareToRunId),
+          readPersistedFindings(compareToRunId),
+          readPersistedReviewWorkflow(compareToRunId),
+          readPersistedReviewActions(compareToRunId),
+          readPersistedReviewComments(compareToRunId),
+          readPersistedFindingDispositions(compareToRunId),
+          readPersistedSupervisorReview(compareToRunId),
+          readPersistedStageArtifact(compareToRunId, "sandbox-execution"),
+          readPersistedEvidenceRecords(compareToRunId),
+          listPersistedRuntimeFollowups({ runId: compareToRunId })
+        ]);
+        const currentEvaluations = buildFindingEvaluationSummary({
+          workflow: currentWorkflow,
+          findings: currentFindings,
+          actions: currentActions,
+          comments: currentComments,
+          dispositions: currentDispositions,
+          supervisorReview: currentSupervisorReview,
+          sandboxExecution: currentSandboxExecution as any,
+          evidenceRecords: currentEvidenceRecords,
+          runtimeFollowups: currentRuntimeFollowups
+        });
+        const previousEvaluations = buildFindingEvaluationSummary({
+          workflow: previousWorkflow,
+          findings: previousFindings,
+          actions: previousActions,
+          comments: previousComments,
+          dispositions: previousDispositions,
+          supervisorReview: previousSupervisorReview,
+          sandboxExecution: previousSandboxExecution as any,
+          evidenceRecords: previousEvidenceRecords,
+          runtimeFollowups: previousRuntimeFollowups
+        });
+        const comparison = buildRunComparisonReport({
+          currentRunId: runSubresource.runId,
+          compareToRunId,
+          currentFindings,
+          previousFindings,
+          currentEvaluations,
+          previousEvaluations,
+          currentSummary,
+          previousSummary
+        });
+        const format = String(url.searchParams.get("format") || "json").toLowerCase() === "markdown" ? "markdown" : "json";
+        if (format === "markdown") {
+          sendJson(res, 200, {
+            run_id: runSubresource.runId,
+            compare_to_run_id: compareToRunId,
+            format: "markdown",
+            filename: `${runSubresource.runId}-vs-${compareToRunId}-comparison.md`,
+            report_compare_markdown: buildMarkdownComparisonReport(comparison)
+          });
+          return;
+        }
+        sendJson(res, 200, {
+          run_id: runSubresource.runId,
+          compare_to_run_id: compareToRunId,
+          format: "json",
+          filename: `${runSubresource.runId}-vs-${compareToRunId}-comparison.json`,
+          export_schema: buildExportEnvelope("run_comparison.v1", comparison),
+          report_compare: comparison
         });
         return;
       }
@@ -2339,6 +2914,13 @@ export function createApiServer(): http.Server {
         ]);
         sendJson(res, 200, {
           run_id: runSubresource.runId,
+          export_schema: buildExportEnvelope("review_audit.v1", {
+            workflow,
+            actions,
+            comments,
+            summary: buildReviewSummary({ workflow, findings, actions, comments, dispositions }),
+            finding_dispositions: dispositions
+          }),
           review_audit: {
             workflow,
             actions,

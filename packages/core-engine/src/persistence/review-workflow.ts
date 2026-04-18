@@ -200,6 +200,13 @@ function applyReviewAction(workflow: PersistedReviewWorkflowRecord, action: Pers
     return next;
   }
 
+  if (action.action_type === "adopt_rerun_outcome") {
+    next.status = "in_review";
+    next.started_at = next.started_at ?? action.created_at;
+    next.completed_at = null;
+    return next;
+  }
+
   if (next.status === "review_required" || next.status === "not_required") {
     next.status = "in_review";
   }

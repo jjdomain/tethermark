@@ -376,6 +376,7 @@ export async function persistAuditResult(args: {
       summary: item.summary,
       confidence: item.confidence,
       raw_artifact_path: item.raw_artifact_path ?? null,
+      locations_json: item.locations ?? [],
       metadata_json: item.metadata
     })),
     lane_results: args.result.lane_results.map((item) => ({

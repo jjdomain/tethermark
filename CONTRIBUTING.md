@@ -40,6 +40,12 @@ npm test
 npm run scan -- validate-fixtures
 ```
 
+For release-sensitive or public-surface changes, also run:
+
+```bash
+npm run release:check
+```
+
 The GitHub Actions CI workflow runs the same verification steps for pushes and pull requests.
 
 `validate-fixtures` uses an isolated temporary persistence root by default, so it should not contend with the normal local embedded database unless you explicitly pass `--persistence-root`.
@@ -59,6 +65,7 @@ and sanity-check the affected routes.
 - Add or update regression tests for behavior changes.
 - Keep fixture targets intentionally small, deterministic, and documented.
 - Document user-facing behavior changes in [`README.md`](README.md) and [`changelog.md`](changelog.md).
+- If a change affects OSS support boundaries, also update [`docs/release-checklist.md`](docs/release-checklist.md).
 
 ## Pull Request Guidance
 

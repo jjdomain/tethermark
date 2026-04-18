@@ -6,6 +6,7 @@ const navItems = [
   ["dashboard", "Dashboard"],
   ["runs", "Runs"],
   ["jobs", "Async Jobs"],
+  ["followups", "Runtime Follow-ups"],
   ["reviews", "Reviews"],
   ["settings", "Settings"]
 ];
@@ -369,6 +370,125 @@ function runtimeFollowupCount(run) {
   return Number(run.review_summary_counts?.runtime_followup_required_count || 0);
 }
 
+function isRuntimeFollowupAdoptionReady(followup) {
+  return Boolean(
+    followup
+    && followup.status === "completed"
+    && followup.rerun_outcome
+    && followup.rerun_outcome !== "pending"
+    && followup.rerun_outcome !== "none"
+    && followup.resolution_action_type !== "adopt_rerun_outcome"
+  );
+}
+
+function runtimeFollowupPriority(followup) {
+  if (isRuntimeFollowupAdoptionReady(followup)) return 0;
+  if (followup.status === "pending") return 1;
+  if (followup.status === "launched") return 2;
+  if (followup.status === "completed") return 3;
+  if (followup.status === "resolved") return 4;
+  return 5;
+}
+
+function runtimeFollowupComparisonRows(sourceFinding, sourceEvaluation, rerunFinding, rerunEvaluation, followup) {
+  const rows = [
+    {
+      label: "Finding Title",
+      source: sourceFinding?.title || "none",
+      rerun: rerunFinding?.title || "none"
+    },
+    {
+      label: "Category",
+      source: sourceFinding?.category || "none",
+      rerun: rerunFinding?.category || "none"
+    },
+    {
+      label: "Severity",
+      source: sourceFinding?.severity || "none",
+      rerun: rerunFinding?.severity || "none"
+    },
+    {
+      label: "Confidence",
+      source: sourceFinding?.confidence != null ? String(sourceFinding.confidence) : "n/a",
+      rerun: rerunFinding?.confidence != null ? String(rerunFinding.confidence) : "n/a"
+    },
+    {
+      label: "Runtime Validation",
+      source: sourceEvaluation?.runtime_validation_status || "none",
+      rerun: rerunEvaluation?.runtime_validation_status || "none"
+    },
+    {
+      label: "Runtime Follow-up Policy",
+      source: sourceEvaluation?.runtime_followup_policy || "none",
+      rerun: rerunEvaluation?.runtime_followup_policy || "none"
+    },
+    {
+      label: "Runtime Impact",
+      source: sourceEvaluation?.runtime_impact || "none",
+      rerun: rerunEvaluation?.runtime_impact || "none"
+    },
+    {
+      label: "Next Action",
+      source: sourceEvaluation?.next_action || "none",
+      rerun: rerunEvaluation?.next_action || "none"
+    },
+    {
+      label: "Runtime Evidence Count",
+      source: String(sourceEvaluation?.runtime_evidence_ids?.length || 0),
+      rerun: String(rerunEvaluation?.runtime_evidence_ids?.length || 0)
+    },
+    {
+      label: "Linked Rerun Outcome",
+      source: followup?.rerun_outcome || "pending",
+      rerun: rerunEvaluation?.runtime_followup_outcome || followup?.rerun_outcome || "pending"
+    }
+  ];
+  return rows.map((row) => ({
+    ...row,
+    changed: row.source !== row.rerun
+  }));
+}
+
+function runtimeFollowupRecommendation(followup) {
+  if (!followup) return null;
+  if (isRuntimeFollowupAdoptionReady(followup) && followup.rerun_outcome === "confirmed") {
+    return {
+      tone: "emerald",
+      title: "Confirmed In Linked Rerun",
+      body: "The linked rerun reproduced the runtime-sensitive issue. The next step is usually to adopt the rerun outcome and continue final review."
+    };
+  }
+  if (isRuntimeFollowupAdoptionReady(followup) && followup.rerun_outcome === "not_reproduced") {
+    return {
+      tone: "amber",
+      title: "Not Reproduced In Linked Rerun",
+      body: "The linked rerun did not reproduce the original runtime-sensitive issue. Review the diff carefully before adopting the outcome or downgrading confidence."
+    };
+  }
+  if (isRuntimeFollowupAdoptionReady(followup) && followup.rerun_outcome === "still_inconclusive") {
+    return {
+      tone: "indigo",
+      title: "Still Inconclusive",
+      body: "The linked rerun completed but did not close the runtime question. Manual runtime review or another rerun path is likely still needed."
+    };
+  }
+  if (followup.status === "launched") {
+    return {
+      tone: "sky",
+      title: "Linked Rerun In Progress",
+      body: "A linked rerun job is active. Wait for it to complete before adopting or closing this follow-up."
+    };
+  }
+  if (followup.status === "pending") {
+    return {
+      tone: "amber",
+      title: "Pending Launch",
+      body: "This follow-up has not launched its linked rerun yet. Launch it from here when the target environment is ready."
+    };
+  }
+  return null;
+}
+
 function reviewPriority(run, actorId) {
   const status = run.review_workflow?.status || "";
   const mine = (run.review_workflow?.current_reviewer_id || "") === (actorId || "");
@@ -388,6 +508,7 @@ function describeRuntimeProbe(probe) {
   if (!probe) return [];
   const items = [];
   if (probe.successful_target) items.push(`healthy endpoint ${probe.successful_target}`);
+  if (probe.classification) items.push(`classification ${probe.classification}`);
   if (probe.status_code != null) items.push(`status ${probe.status_code}`);
   if (Array.isArray(probe.attempted_targets) && probe.attempted_targets.length) {
     items.push(`checked ${probe.attempted_targets.join(", ")}`);
@@ -400,10 +521,24 @@ function getEvidenceMetadata(item) {
   return item?.metadata || item?.metadata_json || {};
 }
 
+function getEvidenceLocations(item) {
+  return Array.isArray(item?.locations) ? item.locations : Array.isArray(item?.locations_json) ? item.locations_json : [];
+}
+
+function formatEvidenceLocation(location) {
+  if (!location) return "unknown";
+  const base = location.path || location.uri || location.symbol || "unknown";
+  const line = Number.isFinite(location.line) ? `:${location.line}` : "";
+  const column = Number.isFinite(location.column) ? `:${location.column}` : "";
+  const label = location.label ? ` (${location.label})` : "";
+  return `${base}${line}${column}${label}`;
+}
+
 function runtimeArtifactDetailItems(artifact) {
   const details = artifact?.details_json || {};
   const items = [];
   if (details.stack) items.push({ label: "Stack", value: details.stack });
+  if (details.framework) items.push({ label: "Framework", value: details.framework });
   if (details.package_manager) items.push({ label: "Package Manager", value: details.package_manager });
   if (details.lockfile) items.push({ label: "Lockfile", value: details.lockfile });
   if (details.script_name) items.push({ label: "Script", value: details.script_name });
@@ -411,6 +546,8 @@ function runtimeArtifactDetailItems(artifact) {
   if (details.test_runner) items.push({ label: "Test Runner", value: details.test_runner });
   if (details.entrypoint) items.push({ label: "Entrypoint", value: details.entrypoint });
   if (details.artifact_role) items.push({ label: "Artifact Role", value: details.artifact_role });
+  if (details.startup?.signaled_ready) items.push({ label: "Startup Signal", value: details.startup.indicator || "ready" });
+  if (details.startup?.failure_reason) items.push({ label: "Startup Failure", value: details.startup.failure_reason });
   const probeSummary = describeRuntimeProbe(details.probe).join(" | ");
   if (probeSummary) items.push({ label: "Probe", value: probeSummary });
   return items;
@@ -575,6 +712,343 @@ function ReviewActionTimeline({ actions }) {
     : h("div", { className: "text-sm text-muted" }, "No persisted review actions yet.");
 }
 
+function RuntimeFollowupWorkspace({
+  followups,
+  filter,
+  onFilterChange,
+  selectedFollowupId,
+  onSelectFollowup,
+  selectedFollowupIds,
+  onToggleFollowupSelection,
+  onSelectAllFiltered,
+  onClearFollowupSelection,
+  sourceRunDetail,
+  rerunRunDetail,
+  rerunLoading,
+  onOpenSourceRun,
+  onLaunchRuntimeFollowup,
+  onAdoptRerunOutcome,
+  onExportQueue,
+  onExportFollowupReport,
+  onBulkAdoptConfirmed,
+  onBulkManualReview,
+  onBulkAcceptWithoutRuntimeValidation
+}) {
+  const sortedFollowups = [...(followups || [])].sort((left, right) => {
+    const priorityDiff = runtimeFollowupPriority(left) - runtimeFollowupPriority(right);
+    if (priorityDiff !== 0) return priorityDiff;
+    return String(right.requested_at || "").localeCompare(String(left.requested_at || ""));
+  });
+  const filteredFollowups = sortedFollowups.filter((followup) => {
+    if (filter === "all") return true;
+    if (filter === "pending") return followup.status === "pending";
+    if (filter === "launched") return followup.status === "launched";
+    if (filter === "adoption_ready") return isRuntimeFollowupAdoptionReady(followup);
+    if (filter === "confirmed") return followup.rerun_outcome === "confirmed";
+    if (filter === "not_reproduced") return followup.rerun_outcome === "not_reproduced";
+    if (filter === "still_inconclusive") return followup.rerun_outcome === "still_inconclusive";
+    if (filter === "resolved") return followup.status === "resolved";
+    return followup.status !== "resolved";
+  });
+  const selectedFollowup = filteredFollowups.find((item) => item.id === selectedFollowupId)
+    || sortedFollowups.find((item) => item.id === selectedFollowupId)
+    || filteredFollowups[0]
+    || sortedFollowups[0]
+    || null;
+  const sourceFindings = sourceRunDetail?.findings?.findings || [];
+  const sourceEvaluations = sourceRunDetail?.findingEvaluations?.finding_evaluations?.evaluations || [];
+  const rerunFindings = rerunRunDetail?.findings?.findings || [];
+  const rerunEvaluations = rerunRunDetail?.findingEvaluations?.finding_evaluations?.evaluations || [];
+  const sourceFinding = selectedFollowup ? sourceFindings.find((item) => item.id === selectedFollowup.finding_id) || null : null;
+  const sourceEvaluation = selectedFollowup ? sourceEvaluations.find((item) => item.finding_id === selectedFollowup.finding_id) || null : null;
+  const rerunFinding = selectedFollowup
+    ? rerunFindings.find((item) => (selectedFollowup.rerun_finding_ids_json || []).includes(item.id))
+      || rerunFindings.find((item) => item.category === sourceFinding?.category)
+      || null
+    : null;
+  const rerunEvaluation = rerunFinding ? rerunEvaluations.find((item) => item.finding_id === rerunFinding.id) || null : null;
+  const comparisonRows = runtimeFollowupComparisonRows(sourceFinding, sourceEvaluation, rerunFinding, rerunEvaluation, selectedFollowup);
+  const changedComparisonRows = comparisonRows.filter((item) => item.changed);
+  const recommendation = runtimeFollowupRecommendation(selectedFollowup);
+  const queueStats = {
+    active: sortedFollowups.filter((item) => item.status !== "resolved").length,
+    pending: sortedFollowups.filter((item) => item.status === "pending").length,
+    launched: sortedFollowups.filter((item) => item.status === "launched").length,
+    adoptionReady: sortedFollowups.filter((item) => isRuntimeFollowupAdoptionReady(item)).length,
+    confirmed: sortedFollowups.filter((item) => item.rerun_outcome === "confirmed").length,
+    notReproduced: sortedFollowups.filter((item) => item.rerun_outcome === "not_reproduced").length,
+    inconclusive: sortedFollowups.filter((item) => item.rerun_outcome === "still_inconclusive").length,
+    resolved: sortedFollowups.filter((item) => item.status === "resolved").length
+  };
+  const selectedBulkFollowups = filteredFollowups.filter((item) => (selectedFollowupIds || []).includes(item.id));
+  const bulkConfirmedCount = selectedBulkFollowups.filter((item) => isRuntimeFollowupAdoptionReady(item) && item.rerun_outcome === "confirmed").length;
+  const bulkManualReviewCount = selectedBulkFollowups.filter((item) => item.rerun_outcome === "still_inconclusive").length;
+  const bulkAcceptCount = selectedBulkFollowups.filter((item) => item.rerun_outcome === "not_reproduced").length;
+  const followupHistoryActions = (sourceRunDetail?.reviewActions?.review_actions || []).filter((action) => action.finding_id === selectedFollowup?.finding_id);
+
+  return h("div", { className: "grid gap-6 xl:grid-cols-[0.88fr_1.12fr]" }, [
+    h("div", { key: "queue", className: "space-y-6" }, [
+      h(Card, { key: "controls", title: "Runtime Follow-up Queue", description: "Linked rerun work items for runtime-sensitive findings, separated from the generic review queue." }, [
+        h(Field, { key: "filter", label: "Queue Filter" }, h(Select, {
+          value: filter,
+          onChange: (event) => onFilterChange?.(event.target.value)
+        }, [
+          h("option", { key: "open", value: "open" }, "open follow-ups"),
+          h("option", { key: "pending", value: "pending launch" }, "pending launch"),
+          h("option", { key: "launched", value: "launched reruns" }, "launched reruns"),
+          h("option", { key: "adoption-ready", value: "adoption_ready" }, "completed reruns awaiting adoption"),
+          h("option", { key: "confirmed", value: "confirmed" }, "confirmed by rerun"),
+          h("option", { key: "not-reproduced", value: "not_reproduced" }, "not reproduced"),
+          h("option", { key: "inconclusive", value: "still_inconclusive" }, "still inconclusive"),
+          h("option", { key: "resolved", value: "resolved" }, "resolved"),
+          h("option", { key: "all", value: "all" }, "all")
+        ])),
+        h("div", { key: "stats", className: "mt-4 grid gap-3 md:grid-cols-4 xl:grid-cols-7" }, [
+          h("div", { key: "active", className: "rounded-2xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-950" }, `Active ${queueStats.active}`),
+          h("div", { key: "pending", className: "rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900" }, `Pending ${queueStats.pending}`),
+          h("div", { key: "launched", className: "rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-900" }, `Launched ${queueStats.launched}`),
+          h("div", { key: "ready", className: "rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900" }, `Adopt ${queueStats.adoptionReady}`),
+          h("div", { key: "confirmed", className: "rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900" }, `Confirmed ${queueStats.confirmed}`),
+          h("div", { key: "not-reproduced", className: "rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900" }, `Not reproduced ${queueStats.notReproduced}`),
+          h("div", { key: "inconclusive", className: "rounded-2xl border border-violet-200 bg-violet-50 px-4 py-3 text-sm text-violet-900" }, `Inconclusive ${queueStats.inconclusive}`),
+          h("div", { key: "resolved", className: "rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm" }, `Resolved ${queueStats.resolved}`)
+        ]),
+        h("div", { key: "bulk-controls", className: "mt-4 rounded-2xl border border-border bg-white/70 px-4 py-4" }, [
+          h("div", { key: "bulk-head", className: "flex flex-wrap items-center justify-between gap-3" }, [
+            h("div", { key: "copy", className: "text-sm text-muted" }, `${selectedBulkFollowups.length} selected in current filter`),
+            h("div", { key: "selection-actions", className: "flex flex-wrap gap-3" }, [
+              h(Button, { key: "export-json", variant: "outline", onClick: () => onExportQueue?.("json") }, "Export JSON"),
+              h(Button, { key: "export-csv", variant: "outline", onClick: () => onExportQueue?.("csv") }, "Export CSV"),
+              h(Button, { key: "select-all", variant: "outline", onClick: () => onSelectAllFiltered?.(filteredFollowups) }, "Select Filtered"),
+              h(Button, { key: "clear", variant: "outline", onClick: () => onClearFollowupSelection?.() }, "Clear Selection")
+            ])
+          ]),
+          h("div", { key: "bulk-buttons", className: "mt-4 flex flex-wrap gap-3" }, [
+            h(Button, {
+              key: "bulk-adopt",
+              variant: "secondary",
+              disabled: bulkConfirmedCount === 0,
+              onClick: () => onBulkAdoptConfirmed?.(selectedBulkFollowups)
+            }, `Bulk Adopt Confirmed (${bulkConfirmedCount})`),
+            h(Button, {
+              key: "bulk-manual",
+              variant: "outline",
+              disabled: bulkManualReviewCount === 0,
+              onClick: () => onBulkManualReview?.(selectedBulkFollowups)
+            }, `Bulk Manual Review (${bulkManualReviewCount})`),
+            h(Button, {
+              key: "bulk-accept",
+              variant: "outline",
+              disabled: bulkAcceptCount === 0,
+              onClick: () => onBulkAcceptWithoutRuntimeValidation?.(selectedBulkFollowups)
+            }, `Bulk Accept Without Runtime Validation (${bulkAcceptCount})`)
+          ])
+        ]),
+        filteredFollowups.length
+          ? h("div", { key: "list", className: "mt-5 space-y-3" }, filteredFollowups.map((followup) => h("div", {
+            key: followup.id,
+            onClick: () => onSelectFollowup?.(followup.id),
+            className: cn(
+              "cursor-pointer rounded-2xl border px-4 py-4 text-left transition-colors",
+              selectedFollowup?.id === followup.id ? "border-primary bg-primary/10" : "border-border bg-white/70 hover:bg-stone-50"
+            )
+          }, [
+            h("div", { key: "head", className: "flex items-start justify-between gap-3" }, [
+              h("div", { key: "copy-wrap", className: "flex items-start gap-3" }, [
+                h("input", {
+                  key: "select",
+                  type: "checkbox",
+                  checked: (selectedFollowupIds || []).includes(followup.id),
+                  onClick: (event) => event.stopPropagation(),
+                  onChange: () => onToggleFollowupSelection?.(followup.id)
+                }),
+                h("div", { key: "copy" }, [
+                  h("div", { key: "title", className: "font-medium" }, followup.finding_title || followup.finding_id),
+                h("div", { key: "meta", className: "mt-1 text-sm text-muted" }, `${followup.run_id} • ${followup.followup_policy} • ${formatDate(followup.requested_at)}`)
+              ]),
+                ])
+              ]),
+              h("div", { key: "badges", className: "flex flex-wrap gap-2 justify-end" }, [
+                h(Badge, { key: "status" }, followup.status),
+                isRuntimeFollowupAdoptionReady(followup) ? h(Badge, { key: "adopt" }, "adopt") : null
+              ].filter(Boolean))
+            ]),
+            h("div", { key: "details", className: "mt-3 grid gap-2 md:grid-cols-2 text-sm text-muted" }, [
+              h("div", { key: "run" }, `linked rerun ${followup.linked_run_id || "none"}`),
+              h("div", { key: "outcome" }, `outcome ${followup.rerun_outcome || "pending"}`),
+              h("div", { key: "resolution" }, `resolution ${followup.resolution_action_type || "none"}`),
+              h("div", { key: "job" }, `job ${followup.linked_job_id || "none"}`)
+            ])
+          ])))
+          : h("div", { key: "empty", className: "mt-5 text-sm text-muted" }, "No runtime follow-ups match the current filter.")
+      ])
+    ]),
+    h("div", { key: "detail", className: "space-y-6" }, selectedFollowup
+      ? [
+        h(Card, { key: "followup-detail", title: "Runtime Follow-up Detail", description: "Compare the original finding with its linked rerun and resolve the next decision from one place." }, [
+          h(DetailList, {
+            key: "followup-summary",
+            items: [
+              { label: "Follow-up Id", value: selectedFollowup.id },
+              { label: "Source Run", value: selectedFollowup.run_id },
+              { label: "Source Finding", value: selectedFollowup.finding_id },
+              { label: "Status", value: selectedFollowup.status },
+              { label: "Policy", value: selectedFollowup.followup_policy },
+              { label: "Requested By", value: selectedFollowup.requested_by },
+              { label: "Linked Job", value: selectedFollowup.linked_job_id || "none" },
+              { label: "Linked Rerun", value: selectedFollowup.linked_run_id || "none" },
+              { label: "Rerun Outcome", value: selectedFollowup.rerun_outcome || "pending" },
+              { label: "Resolution", value: selectedFollowup.resolution_action_type || "none" }
+            ]
+          }),
+          selectedFollowup.rerun_outcome_summary
+            ? h("div", { key: "outcome-summary", className: "mt-4 rounded-2xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-950" }, selectedFollowup.rerun_outcome_summary)
+            : null,
+          recommendation
+            ? h("div", {
+              key: "recommendation",
+              className: cn(
+                "mt-4 rounded-2xl border px-4 py-3 text-sm",
+                recommendation.tone === "emerald" && "border-emerald-200 bg-emerald-50 text-emerald-950",
+                recommendation.tone === "amber" && "border-amber-200 bg-amber-50 text-amber-950",
+                recommendation.tone === "sky" && "border-sky-200 bg-sky-50 text-sky-950",
+                recommendation.tone === "indigo" && "border-indigo-200 bg-indigo-50 text-indigo-950"
+              )
+            }, [
+              h("div", { key: "title", className: "font-medium" }, recommendation.title),
+              h("div", { key: "body", className: "mt-1" }, recommendation.body)
+            ])
+            : null,
+          h("div", { key: "actions", className: "mt-4 flex flex-wrap gap-3" }, [
+            h(Button, { key: "open-source", variant: "outline", onClick: () => onOpenSourceRun?.(selectedFollowup) }, "Open Source Run"),
+            h(Button, { key: "export-followup", variant: "outline", onClick: () => onExportFollowupReport?.(selectedFollowup.id) }, "Export Follow-up Bundle"),
+            selectedFollowup.rerun_request_json && (selectedFollowup.status === "pending" || selectedFollowup.status === "completed")
+              ? h(Button, { key: "launch", onClick: () => onLaunchRuntimeFollowup?.(selectedFollowup.id) }, "Launch Linked Rerun")
+              : null,
+            isRuntimeFollowupAdoptionReady(selectedFollowup) && sourceFinding
+              ? h(Button, { key: "adopt", variant: "secondary", onClick: () => onAdoptRerunOutcome?.(sourceFinding) }, "Adopt Rerun Outcome")
+              : null
+          ].filter(Boolean))
+        ]),
+        h(Card, { key: "comparison", title: "Source Vs Linked Rerun", description: "Side-by-side comparison of the original runtime-sensitive finding and the linked rerun evidence." }, [
+          h("div", { key: "delta-summary", className: "mb-4 grid gap-3 md:grid-cols-3" }, [
+            h("div", { key: "changed", className: "rounded-2xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-950" }, `Changed fields ${changedComparisonRows.length}`),
+            h("div", { key: "matched", className: "rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm" }, `Matched fields ${comparisonRows.length - changedComparisonRows.length}`),
+            h("div", { key: "outcome", className: "rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900" }, `Rerun outcome ${selectedFollowup.rerun_outcome || "pending"}`)
+          ]),
+          h("div", { key: "grid", className: "grid gap-4 xl:grid-cols-2" }, [
+            h("div", { key: "source", className: "rounded-2xl border border-border bg-white/70 px-4 py-4" }, [
+              h("div", { key: "title", className: "text-xs font-mono uppercase tracking-[0.18em] text-muted" }, "Source Finding"),
+              sourceFinding
+                ? [
+                  h("div", { key: "name", className: "mt-3 font-medium" }, sourceFinding.title),
+                  h("div", { key: "meta", className: "mt-1 text-sm text-muted" }, `${sourceFinding.id} • ${sourceFinding.category} • ${sourceFinding.severity}`),
+                  sourceEvaluation
+                    ? h(DetailList, {
+                      key: "source-eval",
+                      items: [
+                        { label: "Runtime Validation", value: sourceEvaluation.runtime_validation_status },
+                        { label: "Follow-up Policy", value: sourceEvaluation.runtime_followup_policy },
+                        { label: "Follow-up Resolution", value: sourceEvaluation.runtime_followup_resolution },
+                        { label: "Next Action", value: sourceEvaluation.next_action }
+                      ]
+                    })
+                    : null
+                ]
+                : h("div", { key: "empty", className: "mt-3 text-sm text-muted" }, "The source run is not currently loaded. Open the source run to inspect the original finding.")
+            ]),
+            h("div", { key: "rerun", className: "rounded-2xl border border-border bg-white/70 px-4 py-4" }, [
+              h("div", { key: "title", className: "text-xs font-mono uppercase tracking-[0.18em] text-muted" }, "Linked Rerun"),
+              rerunLoading
+                ? h("div", { key: "loading", className: "mt-3 text-sm text-muted" }, "Loading linked rerun detail...")
+                : rerunRunDetail?.summary?.summary
+                  ? [
+                    h("div", { key: "status", className: "mt-3 flex flex-wrap gap-2" }, [
+                      h(Badge, { key: "run-status" }, rerunRunDetail.summary.summary.status || "unknown"),
+                      h(Badge, { key: "review-status" }, rerunRunDetail.summary.summary.review_workflow_status || "none")
+                    ]),
+                    h("div", { key: "meta", className: "mt-2 text-sm text-muted" }, `${selectedFollowup.linked_run_id} • ${formatDate(rerunRunDetail.summary.summary.created_at)}`),
+                    rerunFinding
+                      ? [
+                        h("div", { key: "finding-title", className: "mt-3 font-medium" }, rerunFinding.title),
+                        h("div", { key: "finding-meta", className: "mt-1 text-sm text-muted" }, `${rerunFinding.id} • ${rerunFinding.category} • ${rerunFinding.severity}`),
+                        rerunEvaluation
+                          ? h(DetailList, {
+                            key: "rerun-eval",
+                            items: [
+                              { label: "Runtime Impact", value: rerunEvaluation.runtime_impact || "none" },
+                              { label: "Runtime Validation", value: rerunEvaluation.runtime_validation_status },
+                              { label: "Follow-up Policy", value: rerunEvaluation.runtime_followup_policy },
+                              { label: "Next Action", value: rerunEvaluation.next_action }
+                            ]
+                          })
+                          : null
+                      ]
+                      : h("div", { key: "no-finding", className: "mt-3 text-sm text-muted" }, "No matching rerun finding was derived from the linked rerun yet.")
+                  ]
+                  : h("div", { key: "empty", className: "mt-3 text-sm text-muted" }, selectedFollowup.linked_run_id ? "No linked rerun detail is available yet." : "No rerun has been linked yet.")
+            ])
+          ]),
+          h("div", { key: "diff-table", className: "mt-4 overflow-x-auto rounded-2xl border border-border" }, h("table", { className: "w-full text-sm" }, [
+            h("thead", { key: "head" }, h("tr", { className: "border-b border-border bg-stone-100/70 text-left text-xs uppercase tracking-[0.18em] text-muted" }, [
+              h("th", { key: "field", className: "px-4 py-3" }, "Field"),
+              h("th", { key: "source", className: "px-4 py-3" }, "Source"),
+              h("th", { key: "rerun", className: "px-4 py-3" }, "Linked Rerun"),
+              h("th", { key: "delta", className: "px-4 py-3" }, "Delta")
+            ])),
+            h("tbody", { key: "body" }, comparisonRows.map((row) => h("tr", {
+              key: row.label,
+              className: cn("border-b border-border/80", row.changed ? "bg-indigo-50/60" : "bg-white/70")
+            }, [
+              h("td", { key: "label", className: "px-4 py-3 font-medium" }, row.label),
+              h("td", { key: "source", className: "px-4 py-3 text-muted" }, row.source),
+              h("td", { key: "rerun", className: "px-4 py-3 text-muted" }, row.rerun),
+              h("td", { key: "delta", className: "px-4 py-3" }, row.changed ? h(Badge, null, "changed") : h(Badge, null, "same"))
+            ])))
+          ])),
+          changedComparisonRows.length
+            ? h("div", { key: "changed-list", className: "mt-4 rounded-2xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-950" }, [
+              h("div", { key: "title", className: "font-medium" }, "Changed In The Linked Rerun"),
+              h("ul", { key: "list", className: "mt-2 space-y-1" }, changedComparisonRows.map((row) => h("li", { key: row.label }, `${row.label}: ${row.source} -> ${row.rerun}`)))
+            ])
+            : h("div", { key: "no-diff", className: "mt-4 rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm text-muted" }, "No material source-vs-rerun differences were derived from the current follow-up linkage.")
+        ]),
+        h(Card, { key: "history", title: "Follow-up Audit Trail", description: "Runtime follow-up lifecycle plus related review actions for the source finding." }, [
+          h("div", { key: "status-list", className: "space-y-3" }, [
+            h("div", { key: "requested", className: "rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm" }, `Requested ${formatDate(selectedFollowup.requested_at)} by ${selectedFollowup.requested_by || "unknown"}`),
+            selectedFollowup.linked_job_id
+              ? h("div", { key: "launched", className: "rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-950" }, `Linked rerun job ${selectedFollowup.linked_job_id} ${selectedFollowup.launched_at ? `launched ${formatDate(selectedFollowup.launched_at)}` : "created"}`)
+              : null,
+            selectedFollowup.linked_run_id
+              ? h("div", { key: "linked-run", className: "rounded-2xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-950" }, `Linked rerun run ${selectedFollowup.linked_run_id}`)
+              : null,
+            selectedFollowup.completed_at
+              ? h("div", { key: "completed", className: "rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-950" }, `Rerun reconciliation completed ${formatDate(selectedFollowup.completed_at)} with outcome ${selectedFollowup.rerun_outcome || "unknown"}`)
+              : null,
+            selectedFollowup.resolved_at
+              ? h("div", { key: "resolved", className: "rounded-2xl border border-violet-200 bg-violet-50 px-4 py-3 text-sm text-violet-950" }, `Reviewer resolved follow-up ${formatDate(selectedFollowup.resolved_at)} via ${selectedFollowup.resolution_action_type || "unknown"}`)
+              : null
+          ].filter(Boolean)),
+          followupHistoryActions.length
+            ? h("div", { key: "actions", className: "mt-4 space-y-3" }, followupHistoryActions.map((action) => h("div", {
+              key: action.id,
+              className: "rounded-2xl border border-border bg-white/70 px-4 py-3"
+            }, [
+              h("div", { key: "head", className: "flex items-center justify-between gap-3" }, [
+                h("div", { key: "type", className: "font-medium" }, action.action_type.replace(/_/g, " ")),
+                h("div", { key: "when", className: "text-sm text-muted" }, formatDate(action.created_at))
+              ]),
+              h("div", { key: "reviewer", className: "mt-1 text-sm text-muted" }, `reviewer ${action.reviewer_id || "unknown"}`),
+              action.notes ? h("div", { key: "notes", className: "mt-2 text-sm" }, action.notes) : null
+            ])))
+            : h("div", { key: "no-actions", className: "mt-4 text-sm text-muted" }, "No related review actions were recorded for this finding yet.")
+        ])
+      ]
+      : h(Card, { key: "empty-detail", title: "Runtime Follow-up Detail", description: "Select a follow-up to compare the source finding and linked rerun." }, h("div", { className: "text-sm text-muted" }, "No runtime follow-up is selected."))
+    )
+  ]);
+}
+
 function ReviewNotesTimeline({ actions }) {
   const noted = (actions || []).filter((action) => action.notes);
   return noted.length
@@ -629,9 +1103,32 @@ function ReviewCommentsPanel({ comments, commentBody, commentFindingId, findings
   ]);
 }
 
+function ComparisonSummaryText(comparison) {
+  const summary = comparison?.summary || {};
+  return `Changed ${summary.changed_finding_count || 0} · New ${summary.new_finding_count || 0} · Resolved ${summary.resolved_finding_count || 0} · Symbol matches ${summary.evidence_symbol_matched_count || 0}`;
+}
+
+function deriveComparisonDetailDiffs(currentFinding, currentEvaluation, previousFinding, previousEvaluation) {
+  if (!currentFinding || !previousFinding) return [];
+  const rows = [
+    ["Title", previousFinding.title || "n/a", currentFinding.title || "n/a"],
+    ["Category", previousFinding.category || "n/a", currentFinding.category || "n/a"],
+    ["Severity", previousEvaluation?.current_severity || previousFinding.severity || "n/a", currentEvaluation?.current_severity || currentFinding.severity || "n/a"],
+    ["Confidence", String(previousFinding.confidence ?? "n/a"), String(currentFinding.confidence ?? "n/a")],
+    ["Runtime Validation", previousEvaluation?.runtime_validation_status || "not_applicable", currentEvaluation?.runtime_validation_status || "not_applicable"],
+    ["Next Action", previousEvaluation?.next_action || "ready_for_review", currentEvaluation?.next_action || "ready_for_review"],
+    ["Evidence Symbols", previousEvaluation?.evidence_symbols?.join(", ") || "none", currentEvaluation?.evidence_symbols?.join(", ") || "none"]
+  ];
+  return rows
+    .filter(([, previousValue, currentValue]) => String(previousValue) !== String(currentValue))
+    .map(([label, previousValue, currentValue]) => ({ label, previous: previousValue, current: currentValue }));
+}
+
 function RunDetailPanel({
   detail,
   loading,
+  comparison,
+  comparisonLoading,
   selectedFindingId,
   reviewAssignee,
   findingReviewState,
@@ -652,13 +1149,23 @@ function RunDetailPanel({
   onCommentFindingChange,
   onSubmitComment,
   onExportReviewAudit,
+  onExportExecutiveReport,
   onExportMarkdownReport,
   onExportSarifReport,
+  onDownloadIndexedRunExport,
+  compareRunId,
+  onCompareRunIdChange,
+  onExportComparisonReport,
   onApproveOutbound,
   onPrepareOutboundSend,
   onVerifyOutbound,
   onExecuteOutboundDelivery,
   onLaunchRuntimeFollowup,
+  comparisonDetail,
+  comparisonDetailLoading,
+  selectedComparisonFindingId,
+  onSelectComparisonFinding,
+  onSelectComparisonPair,
   outboundActionType,
   outboundTargetNumber,
   onOutboundActionTypeChange,
@@ -685,6 +1192,7 @@ function RunDetailPanel({
   const reviewActions = detail.reviewActions?.review_actions || [];
   const reviewSummary = detail.reviewSummary?.review_summary || null;
   const runtimeFollowups = detail.runtimeFollowups?.runtime_followups || [];
+  const indexedExports = detail.exportsIndex?.export_index?.exports || [];
   const findingDispositions = detail.findingDispositions?.finding_dispositions || [];
   const resolvedFindingDispositions = detail.findingDispositions?.resolved_finding_dispositions || [];
   const findingEvaluations = detail.findingEvaluations?.finding_evaluations || null;
@@ -695,6 +1203,14 @@ function RunDetailPanel({
   const outboundSend = detail.outboundSend?.outbound_send || null;
   const outboundVerification = detail.outboundVerification?.outbound_verification || null;
   const outboundDelivery = detail.outboundDelivery?.outbound_delivery || null;
+  const comparisonPayload = comparison?.report_compare || null;
+  const changedComparisonItems = comparisonPayload?.changed_findings || [];
+  const comparisonFindings = comparisonDetail?.findings?.findings || [];
+  const comparisonEvaluations = comparisonDetail?.findingEvaluations?.finding_evaluations?.evaluations || [];
+  const selectedComparisonFinding = comparisonFindings.find((finding) => finding.id === selectedComparisonFindingId) || null;
+  const selectedComparisonEvaluation = selectedComparisonFinding
+    ? comparisonEvaluations.find((item) => item.finding_id === selectedComparisonFinding.id) || null
+    : null;
   const findingSummaries = reviewSummary?.finding_summaries || [];
   const evaluationRecords = findingEvaluations?.evaluations || [];
   const suppressedFindingSummaries = findingSummaries.filter((item) => item.disposition === "suppressed");
@@ -712,6 +1228,36 @@ function RunDetailPanel({
     ? findingDispositions.filter((item) => item.finding_id === selectedFinding.id || (item.scope_level === "project" && item.finding_signature === selectedFindingDisposition?.finding_signature))
     : [];
   const selectedFindingState = selectedFinding ? (findingReviewState?.[selectedFinding.id] || {}) : {};
+  const selectedChangedComparisonIndex = changedComparisonItems.findIndex((item) => (
+    (selectedFindingId && item.current_finding_id === selectedFindingId)
+    || (selectedComparisonFindingId && item.previous_finding_id === selectedComparisonFindingId)
+  ));
+  const comparisonDetailDiffs = deriveComparisonDetailDiffs(
+    selectedFinding,
+    selectedFindingEvaluation,
+    selectedComparisonFinding,
+    selectedComparisonEvaluation
+  );
+  function selectChangedComparisonItem(item) {
+    if (!item) return;
+    if (item.current_finding_id && item.previous_finding_id) {
+      onSelectComparisonPair?.(item.current_finding_id, item.previous_finding_id);
+      return;
+    }
+    if (item.current_finding_id) {
+      onSelectFinding?.(item.current_finding_id);
+      return;
+    }
+    if (item.previous_finding_id) {
+      onSelectComparisonFinding?.(item.previous_finding_id);
+    }
+  }
+  function selectChangedComparisonByOffset(offset) {
+    if (!changedComparisonItems.length) return;
+    const baseIndex = selectedChangedComparisonIndex >= 0 ? selectedChangedComparisonIndex : 0;
+    const nextIndex = (baseIndex + offset + changedComparisonItems.length) % changedComparisonItems.length;
+    selectChangedComparisonItem(changedComparisonItems[nextIndex]);
+  }
   const relatedControls = selectedFinding
     ? controlResults.filter((control) => (control.finding_ids_json || []).includes(selectedFinding.id) || (selectedFinding.control_ids_json || []).includes(control.control_id))
     : [];
@@ -1131,6 +1677,9 @@ function RunDetailPanel({
               ]),
               h("div", { key: "description", className: "mt-4 text-sm leading-6 text-foreground" }, selectedFinding.description)
             ]),
+            selectedComparisonFinding
+              ? h("div", { key: "comparison-context", className: "rounded-2xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-950" }, `Compared against prior finding ${selectedComparisonFinding.id} from run ${compareRunId || "n/a"}.`)
+              : null,
             h(Card, { key: "evidence", title: "Evidence And Impact", description: "Persisted evidence, linked standards, and direct control impact." }, [
               h(DetailList, {
                 key: "evidence-summary",
@@ -1146,7 +1695,13 @@ function RunDetailPanel({
                 h("div", { key: "title", className: "text-xs font-mono uppercase tracking-[0.18em] text-muted" }, "Evidence"),
                 Array.isArray(selectedFinding.evidence_json) && selectedFinding.evidence_json.length
                   ? h("ul", { key: "list", className: "mt-3 space-y-2 text-sm" }, selectedFinding.evidence_json.map((item, index) => h("li", { key: `${index}:${item}` }, item)))
-                  : h("div", { key: "empty", className: "mt-3 text-sm text-muted" }, "No persisted evidence strings are available for this finding.")
+                  : h("div", { key: "empty", className: "mt-3 text-sm text-muted" }, "No persisted evidence strings are available for this finding."),
+                selectedFindingEvaluation?.runtime_evidence_locations?.length
+                  ? h("div", { key: "locations", className: "mt-4" }, [
+                      h("div", { key: "title", className: "text-xs font-mono uppercase tracking-[0.18em] text-muted" }, "Normalized Evidence Locations"),
+                      h("ul", { key: "list", className: "mt-3 space-y-2 text-sm" }, selectedFindingEvaluation.runtime_evidence_locations.map((location, index) => h("li", { key: `${index}:${formatEvidenceLocation(location)}` }, formatEvidenceLocation(location))))
+                    ])
+                  : null
               ])
             ]),
             h(Card, { key: "controls", title: "Affected Controls", description: "Normalized control results linked to the selected finding." }, relatedControls.length
@@ -1179,6 +1734,9 @@ function RunDetailPanel({
                   h(Badge, { key: "status" }, getEvidenceMetadata(item)?.status || "unknown")
                 ]),
                 h("div", { key: "summary", className: "mt-2 text-sm" }, item.summary),
+                getEvidenceLocations(item).length
+                  ? h("ul", { key: "locations", className: "mt-2 space-y-1 text-sm text-muted" }, getEvidenceLocations(item).map((location, index) => h("li", { key: `${index}:${formatEvidenceLocation(location)}` }, formatEvidenceLocation(location))))
+                  : null,
                 runtimeArtifactDetailItems(getEvidenceMetadata(item)?.normalized_artifact).length
                   ? h(DetailList, { key: "runtime-artifact-details", items: runtimeArtifactDetailItems(getEvidenceMetadata(item)?.normalized_artifact) })
                   : null
@@ -1214,6 +1772,7 @@ function RunDetailPanel({
                     { label: "Current Visibility", value: selectedFindingEvaluation.current_visibility },
                     { label: "Review Disposition", value: selectedFindingEvaluation.review_disposition },
                     { label: "Disposition Status", value: selectedFindingEvaluation.disposition_status },
+                    { label: "Evidence Symbols", value: selectedFindingEvaluation.evidence_symbols?.join(", ") || "none" },
                     { label: "Waiver Owner", value: selectedFindingEvaluation.active_disposition_owner_id || "n/a" },
                     { label: "Waiver Reviewed", value: selectedFindingEvaluation.active_disposition_reviewed_at ? formatDate(selectedFindingEvaluation.active_disposition_reviewed_at) : "n/a" },
                     { label: "Review Due By", value: selectedFindingEvaluation.active_disposition_review_due_by ? formatDate(selectedFindingEvaluation.active_disposition_review_due_by) : "n/a" }
@@ -1246,6 +1805,11 @@ function RunDetailPanel({
                       ? h("div", { key: "resolution-notes", className: "mt-2 text-sm text-indigo-900" }, selectedFindingEvaluation.runtime_followup_resolution_notes)
                       : null,
                     h("div", { key: "actions", className: "mt-3 flex flex-wrap gap-3" }, [
+                      selectedFindingEvaluation.runtime_followup_outcome !== "none"
+                        && selectedFindingEvaluation.runtime_followup_outcome !== "pending"
+                        && selectedFindingEvaluation.runtime_followup_resolution !== "rerun_outcome_adopted"
+                        ? h(Button, { key: "adopt-rerun", variant: "outline", onClick: () => onFindingReviewAction?.(selectedFinding, "adopt_rerun_outcome") }, "Adopt Rerun Outcome")
+                        : null,
                       selectedFindingEvaluation.runtime_followup_policy === "rerun_in_capable_env"
                         ? h(Button, { key: "rerun-capable", variant: "outline", onClick: () => onFindingReviewAction?.(selectedFinding, "rerun_in_capable_env") }, "Rerun In Capable Env")
                         : null,
@@ -1268,18 +1832,30 @@ function RunDetailPanel({
                     h("ul", { key: "list", className: "mt-2 space-y-1 text-sm text-foreground" }, selectedFindingEvaluation.runtime_evidence_summaries.map((item, index) => h("li", { key: `${index}:${item}` }, item)))
                   ])
                   : null,
+                selectedFindingEvaluation.evidence_symbols?.length
+                  ? h("div", { key: "evidence-identity", className: "rounded-2xl border border-cyan-200 bg-cyan-50 px-4 py-3" }, [
+                    h("div", { key: "title", className: "text-xs font-mono uppercase tracking-[0.18em] text-cyan-700" }, "Evidence Identity"),
+                    h("div", { key: "body", className: "mt-2 text-sm text-cyan-950" }, selectedFindingEvaluation.evidence_symbols.join(", "))
+                  ])
+                  : null,
                 selectedFindingEvaluation.duplicate_with_finding_ids?.length || selectedFindingEvaluation.conflict_with_finding_ids?.length
                   ? h("div", { key: "relationships", className: "grid gap-3 md:grid-cols-2" }, [
                     selectedFindingEvaluation.duplicate_with_finding_ids?.length
                       ? h("div", { key: "duplicates", className: "rounded-2xl border border-border bg-stone-50 px-4 py-3 text-sm" }, [
                         h("div", { key: "title", className: "font-semibold" }, "Possible Duplicates"),
-                        h("div", { key: "body", className: "mt-2 text-muted" }, selectedFindingEvaluation.duplicate_with_finding_ids.join(", "))
+                        h("div", { key: "body", className: "mt-2 text-muted" }, selectedFindingEvaluation.duplicate_with_finding_ids.join(", ")),
+                        selectedFindingEvaluation.evidence_symbols?.length
+                          ? h("div", { key: "reason", className: "mt-2 text-xs text-cyan-900" }, `Shared evidence identity: ${selectedFindingEvaluation.evidence_symbols.join(", ")}`)
+                          : null
                       ])
                       : null,
                     selectedFindingEvaluation.conflict_with_finding_ids?.length
                       ? h("div", { key: "conflicts", className: "rounded-2xl border border-border bg-stone-50 px-4 py-3 text-sm" }, [
                         h("div", { key: "title", className: "font-semibold" }, "Conflicting Outcomes"),
-                        h("div", { key: "body", className: "mt-2 text-muted" }, selectedFindingEvaluation.conflict_with_finding_ids.join(", "))
+                        h("div", { key: "body", className: "mt-2 text-muted" }, selectedFindingEvaluation.conflict_with_finding_ids.join(", ")),
+                        selectedFindingEvaluation.evidence_symbols?.length
+                          ? h("div", { key: "reason", className: "mt-2 text-xs text-amber-900" }, `Conflict linked by evidence identity: ${selectedFindingEvaluation.evidence_symbols.join(", ")}`)
+                          : null
                       ])
                       : null
                   ].filter(Boolean))
@@ -1539,6 +2115,12 @@ function RunDetailPanel({
     }, "Download Review Audit")),
     h(Card, { key: "report-exports", title: "Report Exports", description: "Generate portable report formats from persisted findings and evaluation state." }, h("div", { className: "flex flex-wrap gap-3" }, [
       h(Button, {
+        key: "executive",
+        variant: "outline",
+        onClick: () => onExportExecutiveReport?.("markdown"),
+        disabled: !detail
+      }, "Download Executive Summary"),
+      h(Button, {
         key: "markdown",
         variant: "outline",
         onClick: onExportMarkdownReport,
@@ -1551,6 +2133,180 @@ function RunDetailPanel({
         disabled: !detail
       }, "Download SARIF Report")
     ])),
+    h(Card, { key: "comparison-preview", title: "Run Comparison Preview", description: compareRunId ? "Live diff against the selected comparison run, including evidence-identity matches." : "Set a comparison run ID to preview changed, new, and resolved findings inline." }, comparisonLoading
+      ? h("div", { className: "text-sm text-muted" }, "Loading comparison preview...")
+      : !compareRunId
+        ? h("div", { className: "text-sm text-muted" }, "No comparison run selected.")
+        : !comparisonPayload
+          ? h("div", { className: "text-sm text-muted" }, "Comparison preview unavailable for the selected run pair.")
+          : h("div", { className: "space-y-4" }, [
+            h("div", { key: "summary", className: "grid gap-3 md:grid-cols-4" }, [
+              h("div", { key: "overview", className: "rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm" }, ComparisonSummaryText(comparisonPayload)),
+              h("div", { key: "score", className: "rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm" }, `Score ${comparisonPayload.summary?.compare_to_overall_score ?? "n/a"} -> ${comparisonPayload.summary?.current_overall_score ?? "n/a"}`),
+              h("div", { key: "runtime-followup", className: "rounded-2xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-950" }, `Runtime follow-up ${comparisonPayload.summary?.compare_to_runtime_followup_required_count ?? 0} -> ${comparisonPayload.summary?.current_runtime_followup_required_count ?? 0}`),
+              h("div", { key: "runtime-blocked", className: "rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900" }, `Runtime blocked ${comparisonPayload.summary?.compare_to_runtime_validation_blocked_count ?? 0} -> ${comparisonPayload.summary?.current_runtime_validation_blocked_count ?? 0}`)
+            ]),
+            changedComparisonItems.length ? h("div", { key: "changed", className: "space-y-3" }, [
+              h("div", { key: "label", className: "text-xs font-mono uppercase tracking-[0.18em] text-muted" }, "Changed Findings"),
+              h("div", { key: "navigation", className: "flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm" }, [
+                h("div", { key: "position", className: "text-muted" }, selectedChangedComparisonIndex >= 0
+                  ? `Viewing changed finding ${selectedChangedComparisonIndex + 1} of ${changedComparisonItems.length}.`
+                  : `Select a changed finding to inspect both sides. ${changedComparisonItems.length} changed findings are available.`),
+                h("div", { key: "actions", className: "flex flex-wrap gap-2" }, [
+                  h(Button, {
+                    key: "previous",
+                    variant: "outline",
+                    onClick: () => selectChangedComparisonByOffset(-1),
+                    disabled: !changedComparisonItems.length
+                  }, "Previous Changed"),
+                  h(Button, {
+                    key: "next",
+                    variant: "outline",
+                    onClick: () => selectChangedComparisonByOffset(1),
+                    disabled: !changedComparisonItems.length
+                  }, "Next Changed")
+                ])
+              ]),
+              ...changedComparisonItems.slice(0, 6).map((item) => h("div", {
+                key: `changed:${item.current_finding_id || item.signature}`,
+                className: `rounded-2xl border px-4 py-3 ${selectedFindingId === item.current_finding_id || selectedComparisonFindingId === item.previous_finding_id ? "border-indigo-300 bg-indigo-50/70" : "border-border bg-white/70"}`
+              }, [
+                h("div", { key: "head", className: "flex flex-wrap items-center justify-between gap-3" }, [
+                  h("div", { key: "title", className: "font-medium" }, `${item.title} (${item.category})`),
+                  h("div", { key: "badge-wrap", className: "flex flex-wrap gap-2" }, [
+                    h(Badge, { key: "match" }, item.match_strategy === "evidence_symbols" ? "matched by evidence identity" : "matched by finding signature"),
+                    item.shared_evidence_symbols?.length ? h(Badge, { key: "symbols", tone: "success" }, item.shared_evidence_symbols.join(", ")) : null
+                  ].filter(Boolean))
+                ]),
+                h("div", { key: "meta", className: "mt-1 text-xs text-muted" }, `${item.previous_finding_id} -> ${item.current_finding_id}`),
+                item.changes?.length ? h("ul", { key: "changes", className: "mt-3 space-y-1 text-sm" }, item.changes.map((change) => h("li", { key: change.field }, `${change.field}: ${change.previous} -> ${change.current}`))) : null
+              ].concat(item.current_finding_id ? [
+                h("div", { key: "actions", className: "mt-3 flex flex-wrap gap-3" }, [
+                  h(Button, {
+                    key: "current",
+                    variant: "outline",
+                    onClick: () => onSelectFinding?.(item.current_finding_id)
+                  }, "Inspect Current Finding"),
+                  item.previous_finding_id ? h(Button, {
+                    key: "both",
+                    variant: "outline",
+                    onClick: () => onSelectComparisonPair?.(item.current_finding_id, item.previous_finding_id)
+                  }, "Inspect Both Sides") : null,
+                  item.previous_finding_id ? h(Button, {
+                    key: "previous",
+                    variant: "outline",
+                    onClick: () => onSelectComparisonFinding?.(item.previous_finding_id)
+                  }, "Inspect Prior Finding") : null
+                ].filter(Boolean))
+              ] : [])))
+            ]) : h("div", { key: "no-changes", className: "rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm text-muted" }, "No changed findings in this comparison."),
+            h("div", { key: "other-groups", className: "grid gap-4 md:grid-cols-2" }, [
+              h("div", { key: "new", className: "rounded-2xl border border-border bg-white/70 px-4 py-3" }, [
+                h("div", { key: "label", className: "text-xs font-mono uppercase tracking-[0.18em] text-muted" }, "New Findings"),
+                comparisonPayload.new_findings?.length
+                  ? h("div", { key: "list", className: "mt-2 space-y-2 text-sm" }, comparisonPayload.new_findings.slice(0, 6).map((item) => h("div", {
+                    key: item.finding_id || item.signature,
+                    className: "rounded-xl border border-border/70 bg-background/60 px-3 py-2"
+                  }, [
+                    h("div", { key: "text" }, `${item.title} (${item.category})${item.evidence_symbols?.length ? ` [${item.evidence_symbols.join(", ")}]` : ""}`),
+                    item.finding_id ? h("div", { key: "actions", className: "mt-2" }, h(Button, {
+                      variant: "outline",
+                      onClick: () => onSelectFinding?.(item.finding_id)
+                    }, "Inspect Finding")) : null
+                  ])))
+                  : h("div", { key: "empty", className: "mt-2 text-sm text-muted" }, "No new findings.")
+              ]),
+              h("div", { key: "resolved", className: "rounded-2xl border border-border bg-white/70 px-4 py-3" }, [
+                h("div", { key: "label", className: "text-xs font-mono uppercase tracking-[0.18em] text-muted" }, "Resolved Findings"),
+                comparisonPayload.resolved_findings?.length
+                  ? h("div", { key: "list", className: "mt-2 space-y-2 text-sm" }, comparisonPayload.resolved_findings.slice(0, 6).map((item) => h("div", {
+                    key: item.finding_id || item.signature,
+                    className: "rounded-xl border border-border/70 bg-background/60 px-3 py-2"
+                  }, [
+                    h("div", { key: "text" }, `${item.title} (${item.category})${item.evidence_symbols?.length ? ` [${item.evidence_symbols.join(", ")}]` : ""}`),
+                    item.finding_id ? h("div", { key: "actions", className: "mt-2" }, h(Button, {
+                      variant: "outline",
+                      onClick: () => onSelectComparisonFinding?.(item.finding_id)
+                    }, "Inspect Prior Finding")) : null
+                  ])))
+                  : h("div", { key: "empty", className: "mt-2 text-sm text-muted" }, "No resolved findings.")
+              ])
+            ]),
+            compareRunId ? h(Card, {
+              key: "comparison-detail",
+              title: "Prior Run Finding Detail",
+              description: selectedComparisonFindingId ? "Inspect the matched finding from the comparison run." : "Choose a resolved finding to inspect prior-run context."
+            }, comparisonDetailLoading
+              ? h("div", { className: "text-sm text-muted" }, "Loading prior-run detail...")
+              : !selectedComparisonFinding
+                ? h("div", { className: "text-sm text-muted" }, "No prior-run finding selected.")
+                : h("div", { className: "space-y-3" }, [
+                  h(DetailList, {
+                    key: "comparison-finding",
+                    items: [
+                      { label: "Finding", value: selectedComparisonFinding.title || selectedComparisonFinding.id },
+                      { label: "Category", value: selectedComparisonFinding.category || "n/a" },
+                      { label: "Severity", value: selectedComparisonEvaluation?.current_severity || selectedComparisonFinding.severity || "n/a" },
+                      { label: "Confidence", value: selectedComparisonFinding.confidence ?? "n/a" },
+                      { label: "Runtime Validation", value: selectedComparisonEvaluation?.runtime_validation_status || "not_applicable" },
+                      { label: "Next Action", value: selectedComparisonEvaluation?.next_action || "ready_for_review" },
+                      { label: "Evidence Symbols", value: selectedComparisonEvaluation?.evidence_symbols?.length ? selectedComparisonEvaluation.evidence_symbols.join(", ") : "none" }
+                    ]
+                  }),
+                  comparisonDetailDiffs.length
+                    ? h("div", { key: "diffs", className: "rounded-2xl border border-indigo-200 bg-indigo-50 px-4 py-3" }, [
+                        h("div", { key: "title", className: "text-xs font-mono uppercase tracking-[0.18em] text-indigo-700" }, "Changed Fields"),
+                        h("ul", { key: "list", className: "mt-2 space-y-1 text-sm text-indigo-950" }, comparisonDetailDiffs.map((item) => h("li", { key: item.label }, `${item.label}: ${item.previous} -> ${item.current}`)))
+                      ])
+                    : h("div", { key: "no-diffs", className: "rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm text-muted" }, "No field-level differences between the selected current and prior findings."),
+                  selectedComparisonFinding.description ? h("div", { key: "description", className: "rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm" }, selectedComparisonFinding.description) : null
+                ]))
+              : null
+          ])),
+    h(Card, { key: "indexed-exports", title: "Machine-readable Exports", description: "Per-run export catalog for versioned JSON contracts and portable report artifacts." }, indexedExports.length
+      ? h("div", { className: "space-y-3" }, indexedExports.map((item) => h("div", {
+        key: `${item.export_type}:${item.format}:${item.route}`,
+        className: "rounded-2xl border border-border bg-white/70 px-4 py-3"
+      }, [
+        h("div", { key: "head", className: "flex flex-col gap-3 md:flex-row md:items-start md:justify-between" }, [
+          h("div", { key: "meta", className: "space-y-1" }, [
+            h("div", { key: "title", className: "font-medium text-foreground" }, `${item.export_type.replace(/_/g, " ")} (${item.format})`),
+            h("div", { key: "filename", className: "text-sm text-muted" }, item.filename),
+            h("div", { key: "route", className: "break-all text-xs font-mono text-muted" }, item.route),
+            item.schema_name ? h("div", { key: "schema", className: "text-xs font-mono uppercase tracking-[0.18em] text-emerald-700" }, `Schema ${item.schema_name}`) : null
+          ]),
+          h("div", { key: "actions", className: "flex items-center gap-2" }, [
+            item.schema_name ? h(Badge, { key: "kind", tone: "success" }, "Versioned JSON") : h(Badge, { key: "kind" }, "Portable"),
+            h(Button, {
+              key: "download",
+              variant: "outline",
+              onClick: () => onDownloadIndexedRunExport?.(item),
+              disabled: !detail
+            }, "Download")
+          ])
+        ])
+      ])))
+      : h("div", { className: "text-sm text-muted" }, "No export catalog is available for this run.")),
+    h(Card, { key: "comparison-export", title: "Run Comparison", description: "Compare this run against a prior run or linked rerun and export the diff." }, [
+      h("div", { key: "compare-controls", className: "grid gap-4 md:grid-cols-[1fr_auto_auto]" }, [
+        h(Field, { key: "compare-to", label: "Compare To Run ID" }, h(Input, {
+          value: compareRunId || "",
+          onChange: (event) => onCompareRunIdChange?.(event.target.value),
+          placeholder: "run id"
+        })),
+        h("div", { key: "json-wrap", className: "flex items-end" }, h(Button, {
+          variant: "outline",
+          onClick: () => onExportComparisonReport?.("json"),
+          disabled: !detail || !compareRunId
+        }, "Download Comparison JSON")),
+        h("div", { key: "markdown-wrap", className: "flex items-end" }, h(Button, {
+          variant: "outline",
+          onClick: () => onExportComparisonReport?.("markdown"),
+          disabled: !detail || !compareRunId
+        }, "Download Comparison Markdown"))
+      ]),
+      h("div", { key: "hint", className: "mt-3 text-sm text-muted" }, "Use a previous run id or a linked rerun run id to export a direct run-to-run diff.")
+    ]),
     h(Card, { key: "timeline", title: "Review Timeline", description: "Persisted reviewer actions, assignment history, and adjudication trail." }, h(ReviewActionTimeline, { actions: reviewActions })),
     h(Card, { key: "providers", title: "Provider Readiness", description: "Persisted preflight provider readiness at launch time." }, preflight?.provider_readiness?.length
       ? h("div", { className: "space-y-3" }, preflight.provider_readiness.map((item) => h("div", {
@@ -1627,15 +2383,26 @@ function App() {
   const [selectedRunId, setSelectedRunId] = useState("");
   const [selectedRunDetail, setSelectedRunDetail] = useState(null);
   const [selectedRunLoading, setSelectedRunLoading] = useState(false);
+  const [compareRunId, setCompareRunId] = useState("");
+  const [selectedRunComparison, setSelectedRunComparison] = useState(null);
+  const [selectedRunComparisonLoading, setSelectedRunComparisonLoading] = useState(false);
+  const [comparisonRunDetail, setComparisonRunDetail] = useState(null);
+  const [comparisonRunLoading, setComparisonRunLoading] = useState(false);
+  const [selectedComparisonFindingId, setSelectedComparisonFindingId] = useState("");
   const [reviewNotifications, setReviewNotifications] = useState([]);
   const [reviewAssignee, setReviewAssignee] = useState("");
   const [findingReviewState, setFindingReviewState] = useState({});
   const [reviewFilter, setReviewFilter] = useState("my_assigned");
+  const [runtimeFollowupFilter, setRuntimeFollowupFilter] = useState("open");
   const [reviewCommentBody, setReviewCommentBody] = useState("");
   const [reviewCommentFindingId, setReviewCommentFindingId] = useState("");
   const [outboundActionType, setOutboundActionType] = useState("pr_comment");
   const [outboundTargetNumber, setOutboundTargetNumber] = useState("");
   const [selectedFindingId, setSelectedFindingId] = useState("");
+  const [selectedRuntimeFollowupId, setSelectedRuntimeFollowupId] = useState("");
+  const [selectedRuntimeFollowupIds, setSelectedRuntimeFollowupIds] = useState([]);
+  const [linkedRuntimeRerunDetail, setLinkedRuntimeRerunDetail] = useState(null);
+  const [linkedRuntimeRerunLoading, setLinkedRuntimeRerunLoading] = useState(false);
 
   const pendingReviews = useMemo(
     () => runs
@@ -1704,6 +2471,24 @@ function App() {
     () => getIntegrationDefinition(integrationRegistry, "generic_webhook"),
     [integrationRegistry]
   );
+  const selectedRuntimeFollowup = useMemo(
+    () => runtimeFollowups.find((item) => item.id === selectedRuntimeFollowupId) || runtimeFollowups[0] || null,
+    [runtimeFollowups, selectedRuntimeFollowupId]
+  );
+
+  function toggleRuntimeFollowupSelection(followupId) {
+    setSelectedRuntimeFollowupIds((current) => current.includes(followupId)
+      ? current.filter((id) => id !== followupId)
+      : [...current, followupId]);
+  }
+
+  function selectAllRuntimeFollowups(items) {
+    setSelectedRuntimeFollowupIds((items || []).map((item) => item.id));
+  }
+
+  function clearRuntimeFollowupSelection() {
+    setSelectedRuntimeFollowupIds([]);
+  }
 
   function updateRunForm(key, value) {
     setPreflightStale(true);
@@ -1791,6 +2576,7 @@ function App() {
     return Promise.all([
       api("/runs/" + encodeURIComponent(runId), undefined, requestContext),
       api("/runs/" + encodeURIComponent(runId) + "/summary", undefined, requestContext),
+      api(`/runs/${encodeURIComponent(runId)}/exports${compareRunId ? `?compare_to=${encodeURIComponent(compareRunId)}` : ""}`, undefined, requestContext),
       api("/runs/" + encodeURIComponent(runId) + "/resolved-config", undefined, requestContext),
       api("/runs/" + encodeURIComponent(runId) + "/preflight", undefined, requestContext),
       api("/runs/" + encodeURIComponent(runId) + "/launch-intent", undefined, requestContext),
@@ -1813,10 +2599,11 @@ function App() {
       api("/runs/" + encodeURIComponent(runId) + "/outbound-send", undefined, requestContext),
       api("/runs/" + encodeURIComponent(runId) + "/outbound-verification", undefined, requestContext),
       api("/runs/" + encodeURIComponent(runId) + "/outbound-delivery", undefined, requestContext)
-    ]).then(([runPayload, summaryPayload, resolvedPayload, preflightPayload, launchIntentPayload, sandboxExecutionPayload, findingsPayload, evidenceRecordsPayload, controlResultsPayload, observationsPayload, supervisorReviewPayload, remediationPayload, findingEvaluationsPayload, webhookDeliveriesPayload, reviewActionsPayload, reviewSummaryPayload, reviewCommentsPayload, runtimeFollowupsPayload, findingDispositionsPayload, outboundPreviewPayload, outboundApprovalPayload, outboundSendPayload, outboundVerificationPayload, outboundDeliveryPayload]) => {
+    ]).then(([runPayload, summaryPayload, exportsIndexPayload, resolvedPayload, preflightPayload, launchIntentPayload, sandboxExecutionPayload, findingsPayload, evidenceRecordsPayload, controlResultsPayload, observationsPayload, supervisorReviewPayload, remediationPayload, findingEvaluationsPayload, webhookDeliveriesPayload, reviewActionsPayload, reviewSummaryPayload, reviewCommentsPayload, runtimeFollowupsPayload, findingDispositionsPayload, outboundPreviewPayload, outboundApprovalPayload, outboundSendPayload, outboundVerificationPayload, outboundDeliveryPayload]) => {
       setSelectedRunDetail({
         run: runPayload,
         summary: summaryPayload,
+        exportsIndex: exportsIndexPayload,
         resolvedConfig: resolvedPayload,
         preflight: preflightPayload,
         launchIntent: launchIntentPayload,
@@ -1866,12 +2653,82 @@ function App() {
       setReviewCommentBody("");
       setReviewCommentFindingId("");
       setSelectedFindingId((current) => current && (findingsPayload.findings || []).some((finding) => finding.id === current) ? current : (findingsPayload.findings || [])[0]?.id || "");
+      setCompareRunId((current) => current || "");
       setOutboundActionType((outboundPreviewPayload.outbound_preview?.proposed_actions || [])[0]?.action_type || "pr_comment");
       setOutboundTargetNumber("");
     }).catch((loadError) => {
       setSelectedRunDetail(null);
       setError(loadError.message || String(loadError));
     }).finally(() => setSelectedRunLoading(false));
+  }
+
+  function loadRunComparison(runId, compareToRunId) {
+    if (!runId || !compareToRunId) {
+      setSelectedRunComparison(null);
+      setSelectedRunComparisonLoading(false);
+      return Promise.resolve();
+    }
+    setSelectedRunComparisonLoading(true);
+    return api(`/runs/${encodeURIComponent(runId)}/report-compare?compare_to=${encodeURIComponent(compareToRunId)}&format=json`, undefined, requestContext)
+      .then((payload) => setSelectedRunComparison(payload))
+      .catch((loadError) => {
+        setSelectedRunComparison(null);
+        setError(loadError.message || String(loadError));
+      })
+      .finally(() => setSelectedRunComparisonLoading(false));
+  }
+
+  function loadComparisonRunDetail(runId) {
+    if (!runId) {
+      setComparisonRunDetail(null);
+      setComparisonRunLoading(false);
+      return Promise.resolve();
+    }
+    setComparisonRunLoading(true);
+    return Promise.all([
+      api("/runs/" + encodeURIComponent(runId) + "/summary", undefined, requestContext),
+      api("/runs/" + encodeURIComponent(runId) + "/findings", undefined, requestContext),
+      api("/runs/" + encodeURIComponent(runId) + "/finding-evaluations", undefined, requestContext)
+    ]).then(([summaryPayload, findingsPayload, evaluationsPayload]) => {
+      setComparisonRunDetail({
+        summary: summaryPayload,
+        findings: findingsPayload,
+        findingEvaluations: evaluationsPayload
+      });
+      setSelectedComparisonFindingId((current) => current && (findingsPayload.findings || []).some((finding) => finding.id === current)
+        ? current
+        : "");
+    }).catch((loadError) => {
+      setComparisonRunDetail(null);
+      setError(loadError.message || String(loadError));
+    }).finally(() => setComparisonRunLoading(false));
+  }
+
+  function selectComparisonPair(currentFindingId, previousFindingId) {
+    if (currentFindingId) setSelectedFindingId(currentFindingId);
+    if (previousFindingId) setSelectedComparisonFindingId(previousFindingId);
+  }
+
+  function loadLinkedRuntimeRerunDetail(runId) {
+    if (!runId) {
+      setLinkedRuntimeRerunDetail(null);
+      return Promise.resolve();
+    }
+    setLinkedRuntimeRerunLoading(true);
+    return Promise.all([
+      api("/runs/" + encodeURIComponent(runId) + "/summary", undefined, requestContext),
+      api("/runs/" + encodeURIComponent(runId) + "/findings", undefined, requestContext),
+      api("/runs/" + encodeURIComponent(runId) + "/finding-evaluations", undefined, requestContext)
+    ]).then(([summaryPayload, findingsPayload, evaluationsPayload]) => {
+      setLinkedRuntimeRerunDetail({
+        summary: summaryPayload,
+        findings: findingsPayload,
+        findingEvaluations: evaluationsPayload
+      });
+    }).catch((loadError) => {
+      setLinkedRuntimeRerunDetail(null);
+      setError(loadError.message || String(loadError));
+    }).finally(() => setLinkedRuntimeRerunLoading(false));
   }
 
   useEffect(() => {
@@ -1892,6 +2749,47 @@ function App() {
   useEffect(() => {
     loadRunDetail(selectedRunId);
   }, [selectedRunId, requestContext.workspaceId, requestContext.projectId, requestContext.actorId, requestContext.apiKey]);
+
+  useEffect(() => {
+    loadRunComparison(selectedRunId, compareRunId);
+  }, [selectedRunId, compareRunId, requestContext.workspaceId, requestContext.projectId, requestContext.actorId, requestContext.apiKey]);
+
+  useEffect(() => {
+    loadComparisonRunDetail(compareRunId);
+  }, [compareRunId, requestContext.workspaceId, requestContext.projectId, requestContext.actorId, requestContext.apiKey]);
+
+  useEffect(() => {
+    if (!selectedRunId) return;
+    api(`/runs/${encodeURIComponent(selectedRunId)}/exports${compareRunId ? `?compare_to=${encodeURIComponent(compareRunId)}` : ""}`, undefined, requestContext)
+      .then((payload) => {
+        setSelectedRunDetail((current) => current ? { ...current, exportsIndex: payload } : current);
+      })
+      .catch((loadError) => setError(loadError.message || String(loadError)));
+  }, [selectedRunId, compareRunId, requestContext.workspaceId, requestContext.projectId, requestContext.actorId, requestContext.apiKey]);
+
+  useEffect(() => {
+    if (!runtimeFollowups.length) {
+      setSelectedRuntimeFollowupId("");
+      setSelectedRuntimeFollowupIds([]);
+      setLinkedRuntimeRerunDetail(null);
+      return;
+    }
+    if (!runtimeFollowups.some((item) => item.id === selectedRuntimeFollowupId)) {
+      setSelectedRuntimeFollowupId(runtimeFollowups[0].id);
+    }
+    setSelectedRuntimeFollowupIds((current) => current.filter((id) => runtimeFollowups.some((item) => item.id === id)));
+  }, [runtimeFollowups, selectedRuntimeFollowupId]);
+
+  useEffect(() => {
+    if (!selectedRuntimeFollowup) {
+      setLinkedRuntimeRerunDetail(null);
+      return;
+    }
+    if (selectedRunId !== selectedRuntimeFollowup.run_id) {
+      setSelectedRunId(selectedRuntimeFollowup.run_id);
+    }
+    loadLinkedRuntimeRerunDetail(selectedRuntimeFollowup.linked_run_id || "");
+  }, [selectedRuntimeFollowup?.id, selectedRuntimeFollowup?.run_id, selectedRuntimeFollowup?.linked_run_id, requestContext.workspaceId, requestContext.projectId, requestContext.actorId, requestContext.apiKey]);
 
   useEffect(() => {
     if (!projects.length) return;
@@ -2070,6 +2968,13 @@ function App() {
     );
   }
 
+  function submitReviewActionForRun(runId, payload) {
+    return api("/runs/" + encodeURIComponent(runId) + "/review-actions", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }, requestContext);
+  }
+
   function runReviewAction(actionType) {
     submitReviewAction({
       action_type: actionType,
@@ -2079,12 +2984,19 @@ function App() {
 
   function findingReviewAction(finding, actionType) {
     const state = findingReviewState[finding.id] || {};
+    const evaluation = (findingEvaluations?.evaluations || []).find((item) => item.finding_id === finding.id) || null;
     submitReviewAction({
       action_type: actionType,
       finding_id: finding.id,
       updated_severity: actionType === "downgrade_severity" ? (state.updated_severity || null) : null,
       visibility_override: state.visibility_override || null,
-      notes: state.notes || `submitted from web ui by ${requestContext.actorId || "anonymous"}`
+      notes: state.notes || `submitted from web ui by ${requestContext.actorId || "anonymous"}`,
+      metadata: actionType === "adopt_rerun_outcome"
+        ? {
+            adopted_outcome: evaluation?.runtime_followup_outcome || "none",
+            linked_run_id: evaluation?.runtime_followup_linked_run_id || null
+          }
+        : null
     }, `Finding action recorded: ${actionType}.`);
   }
 
@@ -2252,6 +3164,28 @@ function App() {
       .catch((taskError) => setError(taskError.message || String(taskError)));
   }
 
+  function exportExecutiveReport(format) {
+    if (!selectedRunId) return;
+    setError("");
+    setNotice("");
+    api(`/runs/${encodeURIComponent(selectedRunId)}/report-executive?format=${encodeURIComponent(format || "json")}`, undefined, requestContext)
+      .then((payload) => {
+        const isMarkdown = payload.format === "markdown";
+        const content = isMarkdown
+          ? (payload.report_executive_markdown || "")
+          : JSON.stringify(payload.report_executive || payload, null, 2);
+        const blob = new Blob([content], { type: isMarkdown ? "text/markdown;charset=utf-8" : "application/json;charset=utf-8" });
+        const url = window.URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = payload.filename || `${selectedRunId}-executive-summary.${isMarkdown ? "md" : "json"}`;
+        anchor.click();
+        window.URL.revokeObjectURL(url);
+        setNotice(`Executive summary exported as ${isMarkdown ? "Markdown" : "JSON"}.`);
+      })
+      .catch((taskError) => setError(taskError.message || String(taskError)));
+  }
+
   function exportMarkdownReport() {
     if (!selectedRunId) return;
     setError("");
@@ -2284,6 +3218,99 @@ function App() {
         anchor.click();
         window.URL.revokeObjectURL(url);
         setNotice("SARIF report exported.");
+      })
+      .catch((taskError) => setError(taskError.message || String(taskError)));
+  }
+
+  function exportComparisonReport(format) {
+    if (!selectedRunId || !compareRunId) return;
+    setError("");
+    setNotice("");
+    api(`/runs/${encodeURIComponent(selectedRunId)}/report-compare?compare_to=${encodeURIComponent(compareRunId)}&format=${encodeURIComponent(format || "json")}`, undefined, requestContext)
+      .then((payload) => {
+        const isMarkdown = payload.format === "markdown";
+        const content = isMarkdown
+          ? (payload.report_compare_markdown || "")
+          : JSON.stringify(payload.report_compare || payload, null, 2);
+        const blob = new Blob([content], { type: isMarkdown ? "text/markdown;charset=utf-8" : "application/json;charset=utf-8" });
+        const url = window.URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = payload.filename || `${selectedRunId}-vs-${compareRunId}-comparison.${isMarkdown ? "md" : "json"}`;
+        anchor.click();
+        window.URL.revokeObjectURL(url);
+        setNotice(`Run comparison exported as ${isMarkdown ? "Markdown" : "JSON"}.`);
+      })
+      .catch((taskError) => setError(taskError.message || String(taskError)));
+  }
+
+  function downloadIndexedRunExport(exportItem) {
+    if (!selectedRunId || !exportItem?.route) return;
+    setError("");
+    setNotice("");
+    api(exportItem.route, undefined, requestContext)
+      .then((payload) => {
+        let content = "";
+        let contentType = "application/json;charset=utf-8";
+        if (exportItem.format === "markdown") {
+          content = payload.report_executive_markdown || payload.report_markdown || payload.report_compare_markdown || "";
+          contentType = "text/markdown;charset=utf-8";
+        } else if (exportItem.format === "sarif") {
+          content = JSON.stringify(payload.report_sarif || {}, null, 2);
+          contentType = "application/sarif+json;charset=utf-8";
+        } else {
+          content = JSON.stringify(payload, null, 2);
+        }
+        const blob = new Blob([content], { type: contentType });
+        const url = window.URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = exportItem.filename || `${selectedRunId}-${exportItem.export_type}.${exportItem.format === "markdown" ? "md" : "json"}`;
+        anchor.click();
+        window.URL.revokeObjectURL(url);
+        setNotice(`${exportItem.export_type.replace(/_/g, " ")} exported as ${exportItem.format.toUpperCase()}.`);
+      })
+      .catch((taskError) => setError(taskError.message || String(taskError)));
+  }
+
+  function exportRuntimeFollowupQueue(format) {
+    setError("");
+    setNotice("");
+    api(`/runtime-followups/export?format=${encodeURIComponent(format || "json")}`, undefined, requestContext)
+      .then((payload) => {
+        const isCsv = payload.format === "csv";
+        const content = isCsv
+          ? (payload.csv || "")
+          : JSON.stringify({
+              runtime_followup_summary: payload.runtime_followup_summary || {},
+              runtime_followups: payload.runtime_followups || []
+            }, null, 2);
+        const blob = new Blob([content], { type: isCsv ? "text/csv;charset=utf-8" : "application/json;charset=utf-8" });
+        const url = window.URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = payload.filename || `runtime-followups.${isCsv ? "csv" : "json"}`;
+        anchor.click();
+        window.URL.revokeObjectURL(url);
+        setNotice(`Runtime follow-up queue exported as ${isCsv ? "CSV" : "JSON"}.`);
+      })
+      .catch((taskError) => setError(taskError.message || String(taskError)));
+  }
+
+  function exportRuntimeFollowupBundle(followupId) {
+    if (!followupId) return;
+    setError("");
+    setNotice("");
+    api("/runtime-followups/" + encodeURIComponent(followupId) + "/report", undefined, requestContext)
+      .then((payload) => {
+        const blob = new Blob([JSON.stringify(payload.runtime_followup_report || payload, null, 2)], { type: "application/json;charset=utf-8" });
+        const url = window.URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = payload.filename || `${followupId}-runtime-followup-report.json`;
+        anchor.click();
+        window.URL.revokeObjectURL(url);
+        setNotice("Runtime follow-up bundle exported.");
       })
       .catch((taskError) => setError(taskError.message || String(taskError)));
   }
@@ -2346,6 +3373,60 @@ function App() {
       }, requestContext).then(() => loadRunDetail(selectedRunId)),
       "Runtime follow-up rerun launched."
     );
+  }
+
+  function selectRuntimeFollowup(followupId) {
+    setSelectedRuntimeFollowupId(followupId);
+    const followup = runtimeFollowups.find((item) => item.id === followupId);
+    setCompareRunId(followup?.linked_run_id || "");
+    if (followup?.run_id) {
+      setSelectedRunId(followup.run_id);
+    }
+  }
+
+  function openRuntimeFollowupSource(followup) {
+    if (!followup?.run_id) return;
+    setView("runs");
+    setSelectedRunId(followup.run_id);
+    setSelectedRuntimeFollowupId(followup.id);
+    if (followup.finding_id) {
+      setSelectedFindingId(followup.finding_id);
+    }
+  }
+
+  function adoptRuntimeFollowupOutcome(finding) {
+    if (!finding) return;
+    findingReviewAction(finding, "adopt_rerun_outcome");
+  }
+
+  function bulkRuntimeFollowupAction(followups, actionType) {
+    const applicable = (followups || []).filter((item) => {
+      if (!item?.run_id || !item?.finding_id) return false;
+      if (actionType === "adopt_rerun_outcome") return isRuntimeFollowupAdoptionReady(item) && item.rerun_outcome === "confirmed";
+      if (actionType === "mark_manual_runtime_review_complete") return item.rerun_outcome === "still_inconclusive";
+      if (actionType === "accept_without_runtime_validation") return item.rerun_outcome === "not_reproduced";
+      return false;
+    });
+    if (!applicable.length) return;
+    act(
+      () => Promise.all(applicable.map((followup) => submitReviewActionForRun(followup.run_id, {
+        action_type: actionType,
+        finding_id: followup.finding_id,
+        notes: `bulk ${actionType} from web ui by ${requestContext.actorId || "anonymous"}`,
+        metadata: actionType === "adopt_rerun_outcome"
+          ? {
+              adopted_outcome: followup.rerun_outcome || "none",
+              linked_run_id: followup.linked_run_id || null
+            }
+          : null
+      }))).then(() => Promise.all([load(), selectedRunId ? loadRunDetail(selectedRunId) : Promise.resolve()])),
+      actionType === "adopt_rerun_outcome"
+        ? "Confirmed rerun outcomes adopted."
+        : actionType === "mark_manual_runtime_review_complete"
+          ? "Manual runtime review recorded."
+          : "Accepted without runtime validation."
+    );
+    setSelectedRuntimeFollowupIds([]);
   }
 
   const dashboard = h("div", { className: "space-y-6" }, [
@@ -2650,10 +3731,17 @@ function App() {
       key: "detail",
       detail: selectedRunDetail,
       loading: selectedRunLoading,
+      comparison: selectedRunComparison,
+      comparisonLoading: selectedRunComparisonLoading,
+      comparisonDetail: comparisonRunDetail,
+      comparisonDetailLoading: comparisonRunLoading,
       selectedFindingId,
+      selectedComparisonFindingId,
       reviewAssignee,
       findingReviewState,
       onSelectFinding: setSelectedFindingId,
+      onSelectComparisonFinding: setSelectedComparisonFindingId,
+      onSelectComparisonPair: selectComparisonPair,
       onReviewAssigneeChange: setReviewAssignee,
       onAssignReviewer: assignReviewer,
       onRunReviewAction: runReviewAction,
@@ -2670,8 +3758,13 @@ function App() {
       onCommentFindingChange: setReviewCommentFindingId,
       onSubmitComment: submitReviewComment,
       onExportReviewAudit: exportReviewAudit,
+      onExportExecutiveReport: exportExecutiveReport,
       onExportMarkdownReport: exportMarkdownReport,
       onExportSarifReport: exportSarifReport,
+      onDownloadIndexedRunExport: downloadIndexedRunExport,
+      compareRunId,
+      onCompareRunIdChange: setCompareRunId,
+      onExportComparisonReport: exportComparisonReport,
       onApproveOutbound: approveOutboundSharing,
         onPrepareOutboundSend: prepareOutboundSend,
         onVerifyOutbound: verifyOutboundAccess,
@@ -2761,10 +3854,17 @@ function App() {
       key: "detail",
       detail: selectedRunDetail,
       loading: selectedRunLoading,
+      comparison: selectedRunComparison,
+      comparisonLoading: selectedRunComparisonLoading,
+      comparisonDetail: comparisonRunDetail,
+      comparisonDetailLoading: comparisonRunLoading,
       selectedFindingId,
+      selectedComparisonFindingId,
       reviewAssignee,
       findingReviewState,
       onSelectFinding: setSelectedFindingId,
+      onSelectComparisonFinding: setSelectedComparisonFindingId,
+      onSelectComparisonPair: selectComparisonPair,
       onReviewAssigneeChange: setReviewAssignee,
       onAssignReviewer: assignReviewer,
       onRunReviewAction: runReviewAction,
@@ -2781,8 +3881,13 @@ function App() {
       onCommentFindingChange: setReviewCommentFindingId,
       onSubmitComment: submitReviewComment,
       onExportReviewAudit: exportReviewAudit,
+      onExportExecutiveReport: exportExecutiveReport,
       onExportMarkdownReport: exportMarkdownReport,
       onExportSarifReport: exportSarifReport,
+      onDownloadIndexedRunExport: downloadIndexedRunExport,
+      compareRunId,
+      onCompareRunIdChange: setCompareRunId,
+      onExportComparisonReport: exportComparisonReport,
       onApproveOutbound: approveOutboundSharing,
         onPrepareOutboundSend: prepareOutboundSend,
         onVerifyOutbound: verifyOutboundAccess,
@@ -2794,6 +3899,29 @@ function App() {
       onOutboundTargetNumberChange: setOutboundTargetNumber
     })
   ]);
+
+  const runtimeFollowupsView = h(RuntimeFollowupWorkspace, {
+    followups: runtimeFollowups,
+    filter: runtimeFollowupFilter,
+    onFilterChange: setRuntimeFollowupFilter,
+    selectedFollowupId: selectedRuntimeFollowupId,
+    onSelectFollowup: selectRuntimeFollowup,
+    selectedFollowupIds: selectedRuntimeFollowupIds,
+    onToggleFollowupSelection: toggleRuntimeFollowupSelection,
+    onSelectAllFiltered: selectAllRuntimeFollowups,
+    onClearFollowupSelection: clearRuntimeFollowupSelection,
+    sourceRunDetail: selectedRunDetail,
+    rerunRunDetail: linkedRuntimeRerunDetail,
+    rerunLoading: linkedRuntimeRerunLoading,
+    onOpenSourceRun: openRuntimeFollowupSource,
+    onLaunchRuntimeFollowup: launchRuntimeFollowup,
+    onAdoptRerunOutcome: adoptRuntimeFollowupOutcome,
+    onExportQueue: exportRuntimeFollowupQueue,
+    onExportFollowupReport: exportRuntimeFollowupBundle,
+    onBulkAdoptConfirmed: (items) => bulkRuntimeFollowupAction(items, "adopt_rerun_outcome"),
+    onBulkManualReview: (items) => bulkRuntimeFollowupAction(items, "mark_manual_runtime_review_complete"),
+    onBulkAcceptWithoutRuntimeValidation: (items) => bulkRuntimeFollowupAction(items, "accept_without_runtime_validation")
+  });
 
   const settingsView = h("div", { className: "grid gap-6 xl:grid-cols-[1.05fr_0.95fr]" }, [
     h(Card, { key: "settings", title: "Engine Settings", description: "Persisted provider, audit, preflight, review, and integration defaults." }, [
@@ -3261,7 +4389,17 @@ function App() {
       ]),
       error ? h("div", { key: "error", className: "mt-6 rounded-2xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700" }, error) : null,
       notice ? h("div", { key: "notice", className: "mt-6 rounded-2xl border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm text-emerald-700" }, notice) : null,
-      h("div", { key: "view", className: "mt-6" }, view === "dashboard" ? dashboard : view === "runs" ? runsView : view === "jobs" ? jobsView : view === "reviews" ? reviewsView : settingsView)
+      h("div", { key: "view", className: "mt-6" }, view === "dashboard"
+        ? dashboard
+        : view === "runs"
+          ? runsView
+          : view === "jobs"
+            ? jobsView
+            : view === "followups"
+              ? runtimeFollowupsView
+              : view === "reviews"
+                ? reviewsView
+                : settingsView)
     ])
   ]);
 }

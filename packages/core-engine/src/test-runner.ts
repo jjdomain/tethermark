@@ -3,13 +3,14 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-import { createApiServer } from "../../../apps/api-server/src/index.js";
+import { buildRunComparisonReport, createApiServer } from "../../../apps/api-server/src/index.js";
 import { createWebUiServer } from "../../../apps/web-ui/src/index.js";
 import { buildScanRequest } from "../../../apps/cli/src/args.js";
 import { validateFixtures } from "../../../apps/cli/src/fixture-validation.js";
 import { describeArtifactType } from "./artifact-policy.js";
-import { executeEvidenceProvider, resetEvidenceProviderCapabilityCacheForTests } from "./evidence-providers.js";
+import { executeEvidenceProvider, normalizeEvidenceSummaryForTests, resetEvidenceProviderCapabilityCacheForTests } from "./evidence-providers.js";
 import { buildFindingEvaluationSummary } from "./finding-evaluation.js";
 import { createEngine } from "./orchestrator.js";
 import { buildPreflightSummary } from "./preflight.js";
@@ -29,6 +30,7 @@ import { listPersistedApiKeys, listPersistedUiDocuments, readPersistedUiSettings
 import { markRuntimeFollowupJobTerminal, markRuntimeFollowupLaunched, readPersistedRuntimeFollowup, upsertRuntimeFollowupFromReviewAction } from "./persistence/runtime-followups.js";
 import { LinuxContainerSandboxBackend } from "./sandbox/backends/linux-container.js";
 import { buildReviewSummary } from "./review-summary.js";
+import { buildGoldenExports, readGoldenExports } from "./export-golden.js";
 import { evaluateStandardsAudit } from "./standards-audit.js";
 import { getControlCatalog } from "./standards.js";
 import { deriveCanonicalTargetId } from "./target-identity.js";
@@ -59,6 +61,69 @@ async function pathExists(filePath: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+type MinimalJsonSchema = {
+  type?: string | string[];
+  required?: string[];
+  properties?: Record<string, MinimalJsonSchema>;
+  items?: MinimalJsonSchema;
+  enum?: unknown[];
+  const?: unknown;
+};
+
+async function loadExportSchema(schemaFilename: string): Promise<MinimalJsonSchema> {
+  const currentDir = path.dirname(fileURLToPath(import.meta.url));
+  const schemaPath = path.resolve(currentDir, "../../../../schemas", schemaFilename);
+  return JSON.parse(await fs.readFile(schemaPath, "utf8")) as MinimalJsonSchema;
+}
+
+function validateAgainstMinimalJsonSchema(schema: MinimalJsonSchema, value: unknown, jsonPath = "$"): string[] {
+  const errors: string[] = [];
+  const allowedTypes = Array.isArray(schema.type) ? schema.type : schema.type ? [schema.type] : [];
+  if (allowedTypes.length) {
+    const actualType =
+      value === null
+        ? "null"
+        : Array.isArray(value)
+          ? "array"
+          : typeof value;
+    if (!allowedTypes.includes(actualType)) {
+      errors.push(`${jsonPath}: expected type ${allowedTypes.join("|")} but received ${actualType}`);
+      return errors;
+    }
+  }
+  if (schema.const !== undefined && value !== schema.const) {
+    errors.push(`${jsonPath}: expected const ${JSON.stringify(schema.const)} but received ${JSON.stringify(value)}`);
+  }
+  if (schema.enum && !schema.enum.some((candidate) => candidate === value)) {
+    errors.push(`${jsonPath}: expected one of ${schema.enum.map((item) => JSON.stringify(item)).join(", ")} but received ${JSON.stringify(value)}`);
+  }
+  if (schema.required?.length && value && typeof value === "object" && !Array.isArray(value)) {
+    for (const key of schema.required) {
+      if (!(key in (value as Record<string, unknown>))) {
+        errors.push(`${jsonPath}: missing required property ${key}`);
+      }
+    }
+  }
+  if (schema.properties && value && typeof value === "object" && !Array.isArray(value)) {
+    for (const [key, propertySchema] of Object.entries(schema.properties)) {
+      if (!(key in (value as Record<string, unknown>))) continue;
+      errors.push(...validateAgainstMinimalJsonSchema(propertySchema, (value as Record<string, unknown>)[key], `${jsonPath}.${key}`));
+    }
+  }
+  if (schema.items && Array.isArray(value)) {
+    value.forEach((item, index) => {
+      errors.push(...validateAgainstMinimalJsonSchema(schema.items as MinimalJsonSchema, item, `${jsonPath}[${index}]`));
+    });
+  }
+  return errors;
+}
+
+async function assertExportSchemaMatches(schemaFilename: string, payload: unknown): Promise<void> {
+  const schema = await loadExportSchema(schemaFilename);
+  const errors = validateAgainstMinimalJsonSchema(schema, payload);
+  assert.deepEqual(errors, [], `Schema validation failed for ${schemaFilename}: ${errors.join("; ")}`);
 }
 
 async function waitForServer(url: string, timeoutMs = 15000): Promise<void> {
@@ -194,6 +259,8 @@ async function testModeAwarePersistenceStoresSeparateEmbeddedLocalAndHostedRoots
     assert.equal(embeddedMeta?.database_mode, "embedded");
     assert.equal(localMeta?.database_mode, "local");
     assert.equal(hostedMeta?.database_mode, "hosted");
+    assert.equal(embeddedMeta?.persistence_schema_version, "1.1.0");
+    assert.equal(embeddedMeta?.compatibility_status, "current");
     assert.equal(localRun?.resolved_configuration?.db_mode, "local");
     assert.equal(hostedRun?.resolved_configuration?.db_mode, "hosted");
     assert.equal(await fs.stat(path.join(embeddedRoot, "runs", "run_embedded.json")).then(() => true).catch(() => false), true);
@@ -259,6 +326,21 @@ async function testReadPersistedLaneSpecialistOutputsFromSqlite(): Promise<void>
     assert.equal(outputs[0]?.lane_name, "repo_posture");
     assert.deepEqual(outputs[0]?.tool_provider_ids_json, ["scorecard"]);
   });
+}
+
+async function testGoldenExportSnapshots(): Promise<void> {
+  const { executiveJson, executiveMarkdown, sarif } = buildGoldenExports();
+  const expected = await readGoldenExports();
+
+  assert.equal(JSON.stringify(executiveJson, null, 2), expected.executiveJson);
+  assert.equal(executiveMarkdown, expected.executiveMarkdown);
+  assert.equal(JSON.stringify(sarif, null, 2), expected.sarif);
+  assert.equal((sarif as any).runs[0]?.results[0]?.ruleId, "tethermark/tool_boundary/unsafe_tool_access");
+  assert.equal((sarif as any).runs[0]?.results[0]?.locations?.[0]?.physicalLocation?.artifactLocation?.uri, "src/agent.js");
+  assert.equal((sarif as any).runs[0]?.results[0]?.locations?.[0]?.physicalLocation?.region?.startLine, 17);
+  assert.equal((sarif as any).runs[0]?.results[0]?.fingerprints?.["tethermark/symbol"], "unsafe_tool_access");
+  assert.equal((sarif as any).runs[0]?.results[0]?.partialFingerprints?.["tethermark/evidence-identity"], "unsafe_tool_access");
+  assert.equal((sarif as any).runs[0]?.results[0]?.properties?.evidenceSymbols?.[0], "unsafe_tool_access");
 }
 
 
@@ -1118,6 +1200,9 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
           summary: "Bounded host execution completed successfully for 'npm run test'.",
           confidence: 0.9,
           raw_artifact_path: null,
+          locations_json: [
+            { source_kind: "file", path: "src/agent.js", line: 17, column: 3, end_line: 17, end_column: 24, label: "test_report" }
+          ],
           metadata_json: {
             category: "sandbox_execution",
             phase: "test",
@@ -1146,6 +1231,9 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
           summary: "Bounded host execution failed for 'npm run start'.",
           confidence: 0.78,
           raw_artifact_path: null,
+          locations_json: [
+            { source_kind: "file", path: "src/server.js", line: 41, column: 1, end_line: 41, end_column: 18, label: "service_probe" }
+          ],
           metadata_json: {
             category: "sandbox_execution",
             phase: "runtime_probe",
@@ -1160,7 +1248,12 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
                 package_manager: "npm",
                 script_name: "start",
                 artifact_role: "service_probe",
+                startup: {
+                  signaled_ready: false,
+                  indicator: null
+                },
                 probe: {
+                  classification: "connection_refused",
                   attempted_targets: ["http://127.0.0.1:3000/", "http://127.0.0.1:3000/health"],
                   successful_target: null,
                   error: "connection refused"
@@ -1203,6 +1296,34 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
       remediation_memo: { run_id: "run_api", summary: "Persisted remediation", checklist_json: ["rotate credentials"], human_review_required: false },
       review_workflow: { run_id: "run_api", status: "review_required", human_review_required: true, publishability_status: "publishable", recommended_visibility: "public", opened_at: "2026-04-14T00:00:00.000Z", started_at: null, completed_at: null, current_reviewer_id: null, last_action_at: null, last_action_type: null, notes_json: [] },
       review_actions: [],
+      runtime_followups: [{
+        id: "runtime-followup-1",
+        run_id: "run_api",
+        workspace_id: "default",
+        project_id: "default",
+        finding_id: "finding_api",
+        finding_title: "Persisted finding",
+        status: "completed",
+        followup_policy: "rerun_in_capable_env",
+        requested_by: "triage_api",
+        requested_at: "2026-04-14T00:02:00.000Z",
+        source_review_action_id: "review_action_runtime_followup_seed",
+        rerun_request_json: null,
+        linked_job_id: null,
+        linked_run_id: null,
+        launch_attempted_at: "2026-04-14T00:03:00.000Z",
+        completed_at: "2026-04-14T00:04:00.000Z",
+        completed_status: "succeeded",
+        rerun_outcome: "confirmed",
+        rerun_outcome_summary: "Linked rerun confirmed the original runtime-sensitive issue.",
+        rerun_outcome_finding_ids_json: ["finding_api_rerun"],
+        rerun_reconciled_at: "2026-04-14T00:04:30.000Z",
+        resolved_at: null,
+        resolved_by: null,
+        resolution_action_type: null,
+        resolution_notes: null,
+        metadata_json: {}
+      }],
       policy_application: { run_id: "run_api", applied_suppressions_json: [], applied_waivers_json: [], effective_finding_ids_json: ["finding_api", "finding_api_expired", "finding_api_reopened"], effective_control_ids_json: [], notes_json: [] },
       dimension_scores: [],
       metrics: [{ run_id: "run_api", name: "llm_total_tokens_total", kind: "gauge", value: 60, count: null, min: null, max: null, avg: null, tags_json: {} }],
@@ -1212,6 +1333,19 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
       ],
       artifact_index: []
     } as any);
+
+    await upsertRuntimeFollowupFromReviewAction({
+      runId: "run_api",
+      actionId: "review_action_runtime_followup_seed",
+      rootDirOrOptions: path.join(rootDir, ".artifacts", "state", "embedded-db"),
+      input: {
+        reviewer_id: "triage_api",
+        action_type: "rerun_in_capable_env",
+        finding_id: "finding_api",
+        notes: "seeded runtime follow-up for export coverage",
+        metadata: null
+      }
+    });
 
     await updatePersistedUiSettings({
       credentials: {
@@ -1439,8 +1573,13 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
         const remediationResponse = await fetch(`http://127.0.0.1:${port}/runs/run_api/remediation`);
         const observationsResponse = await fetch(`http://127.0.0.1:${port}/runs/run_api/observations`);
         const findingEvaluationsResponse = await fetch(`http://127.0.0.1:${port}/runs/run_api/finding-evaluations`);
+        const executiveReportJsonResponse = await fetch(`http://127.0.0.1:${port}/runs/run_api/report-executive?format=json`);
+        const executiveReportMarkdownResponse = await fetch(`http://127.0.0.1:${port}/runs/run_api/report-executive?format=markdown`);
         const markdownReportResponse = await fetch(`http://127.0.0.1:${port}/runs/run_api/report-markdown`);
         const sarifReportResponse = await fetch(`http://127.0.0.1:${port}/runs/run_api/report-sarif`);
+        const comparisonReportJsonResponse = await fetch(`http://127.0.0.1:${port}/runs/run_api/report-compare?compare_to=run_api&format=json`);
+        const comparisonReportMarkdownResponse = await fetch(`http://127.0.0.1:${port}/runs/run_api/report-compare?compare_to=run_api&format=markdown`);
+        const exportsIndexResponse = await fetch(`http://127.0.0.1:${port}/runs/run_api/exports?compare_to=run_api`);
         const preflightResponse = await fetch(`http://127.0.0.1:${port}/runs/run_api/preflight`);
         const launchIntentResponse = await fetch(`http://127.0.0.1:${port}/runs/run_api/launch-intent`);
         const outboundPreviewResponse = await fetch(`http://127.0.0.1:${port}/runs/run_api/outbound-preview`);
@@ -1482,6 +1621,10 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
         const outboundDeliveryStoredResponse = await fetch(`http://127.0.0.1:${port}/runs/run_api/outbound-delivery`);
         const reviewSummaryResponse = await fetch(`http://127.0.0.1:${port}/runs/run_api/review-summary`);
         const reviewAuditResponse = await fetch(`http://127.0.0.1:${port}/runs/run_api/review-audit`);
+        const runtimeFollowupsResponse = await fetch(`http://127.0.0.1:${port}/runtime-followups`);
+        const runtimeFollowupSummaryResponse = await fetch(`http://127.0.0.1:${port}/runtime-followups/summary`);
+        const runtimeFollowupExportJsonResponse = await fetch(`http://127.0.0.1:${port}/runtime-followups/export?format=json`);
+        const runtimeFollowupExportCsvResponse = await fetch(`http://127.0.0.1:${port}/runtime-followups/export?format=csv`);
         const observabilitySummaryResponse = await fetch(`http://127.0.0.1:${port}/runs/run_api/observability-summary`);
         const observabilityStatsResponse = await fetch(`http://127.0.0.1:${port}/stats/observability`);
         const summaryPayload = await summaryResponse.json() as any;
@@ -1503,8 +1646,13 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
         const remediationPayload = await remediationResponse.json() as any;
         const observationsPayload = await observationsResponse.json() as any;
         const findingEvaluationsPayload = await findingEvaluationsResponse.json() as any;
+        const executiveReportJsonPayload = await executiveReportJsonResponse.json() as any;
+        const executiveReportMarkdownPayload = await executiveReportMarkdownResponse.json() as any;
         const markdownReportPayload = await markdownReportResponse.json() as any;
         const sarifReportPayload = await sarifReportResponse.json() as any;
+        const comparisonReportJsonPayload = await comparisonReportJsonResponse.json() as any;
+        const comparisonReportMarkdownPayload = await comparisonReportMarkdownResponse.json() as any;
+        const exportsIndexPayload = await exportsIndexResponse.json() as any;
         const preflightPayload = await preflightResponse.json() as any;
         const launchIntentPayload = await launchIntentResponse.json() as any;
         const outboundPreviewPayload = await outboundPreviewResponse.json() as any;
@@ -1522,6 +1670,10 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
         const outboundDeliveryStoredPayload = await outboundDeliveryStoredResponse.json() as any;
         const reviewSummaryPayload = await reviewSummaryResponse.json() as any;
         const reviewAuditPayload = await reviewAuditResponse.json() as any;
+        const runtimeFollowupsPayload = await runtimeFollowupsResponse.json() as any;
+        const runtimeFollowupSummaryPayload = await runtimeFollowupSummaryResponse.json() as any;
+        const runtimeFollowupExportJsonPayload = await runtimeFollowupExportJsonResponse.json() as any;
+        const runtimeFollowupExportCsvPayload = await runtimeFollowupExportCsvResponse.json() as any;
         const observabilitySummaryPayload = await observabilitySummaryResponse.json() as any;
         const observabilityStatsPayload = await observabilityStatsResponse.json() as any;
         const authInfoPayload = await authInfoResponse.json() as any;
@@ -1551,8 +1703,13 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
         assert.equal(remediationResponse.status, 200);
         assert.equal(observationsResponse.status, 200);
         assert.equal(findingEvaluationsResponse.status, 200);
+        assert.equal(executiveReportJsonResponse.status, 200);
+        assert.equal(executiveReportMarkdownResponse.status, 200);
         assert.equal(markdownReportResponse.status, 200);
         assert.equal(sarifReportResponse.status, 200);
+        assert.equal(comparisonReportJsonResponse.status, 200);
+        assert.equal(comparisonReportMarkdownResponse.status, 200);
+        assert.equal(exportsIndexResponse.status, 200);
         assert.equal(preflightResponse.status, 200);
         assert.equal(launchIntentResponse.status, 200);
         assert.equal(outboundPreviewResponse.status, 200);
@@ -1570,6 +1727,10 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
         assert.equal(outboundDeliveryStoredResponse.status, 200);
         assert.equal(reviewSummaryResponse.status, 200);
         assert.equal(reviewAuditResponse.status, 200);
+        assert.equal(runtimeFollowupsResponse.status, 200);
+        assert.equal(runtimeFollowupSummaryResponse.status, 200);
+        assert.equal(runtimeFollowupExportJsonResponse.status, 200);
+        assert.equal(runtimeFollowupExportCsvResponse.status, 200);
         assert.equal(observabilitySummaryResponse.status, 200);
         assert.equal(observabilityStatsResponse.status, 200);
         assert.equal(summaryPayload.summary.overall_score, 82);
@@ -1590,6 +1751,10 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
         assert.equal(findingsPayload.findings[3]?.id, "finding_api_reopened");
         assert.equal(evidenceRecordsPayload.evidence_records.length, 2);
         assert.equal(evidenceRecordsPayload.evidence_records[0]?.metadata_json?.category, "sandbox_execution");
+        assert.equal(evidenceRecordsPayload.evidence_records[0]?.locations_json?.[0]?.path, "src/agent.js");
+        assert.equal(evidenceRecordsPayload.evidence_records[0]?.locations_json?.[0]?.line, 17);
+        assert.equal(evidenceRecordsPayload.evidence_records[1]?.metadata_json?.normalized_artifact?.details_json?.probe?.classification, "connection_refused");
+        assert.equal(evidenceRecordsPayload.evidence_records[1]?.metadata_json?.normalized_artifact?.details_json?.startup?.signaled_ready, false);
         assert.equal(reviewWorkflowPayload.review_workflow.status, "review_required");
         assert.equal(reviewActionPostPayload.workflow.status, "approved");
         assert.equal(reviewActionsPayload.review_actions.length, 1);
@@ -1634,6 +1799,11 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
         assert.equal(remediationPayload.remediation_memo.summary, "Persisted remediation");
         assert.equal(observationsPayload.observations[0].observation_id, "obs_api_1");
         assert.equal(findingEvaluationsPayload.finding_evaluations.overall_evidence_sufficiency, "medium");
+        assert.equal(findingEvaluationsPayload.export_schema.schema_name, "finding_evaluations.v1");
+        assert.equal(findingEvaluationsPayload.export_schema.schema_version, "1.0.0");
+        assert.equal(findingEvaluationsPayload.export_schema.tethermark_version, "0.2.0");
+        assert.equal(findingEvaluationsPayload.export_schema.payload.overall_evidence_sufficiency, "medium");
+        await assertExportSchemaMatches("finding_evaluations.v1.json", findingEvaluationsPayload.export_schema);
         assert.equal(findingEvaluationsPayload.finding_evaluations.overall_false_positive_risk, "medium");
         assert.equal(findingEvaluationsPayload.finding_evaluations.findings_needing_validation_count, 4);
         assert.equal(findingEvaluationsPayload.finding_evaluations.sandbox_execution.blocked_step_count, 2);
@@ -1668,6 +1838,8 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
         assert.equal(typeof findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api")?.runtime_followup_outcome, "string");
         assert.equal(typeof findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api")?.runtime_impact, "string");
         assert.equal(Array.isArray(findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api")?.runtime_evidence_ids), true);
+        assert.equal(Array.isArray(findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api")?.runtime_evidence_locations), true);
+        assert.equal(findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api")?.runtime_evidence_locations?.[0]?.path, "src/agent.js");
         assert.equal(findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api_expired")?.disposition_status, "expired");
         assert.equal(findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api_expired")?.needs_disposition_review, true);
         assert.equal(findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api_expired")?.next_action, "review_expired_disposition");
@@ -1679,6 +1851,22 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
         assert.equal(typeof findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api_reopened")?.runtime_impact, "string");
         assert.equal(Array.isArray(findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api_reopened")?.runtime_evidence_ids), true);
         assert.equal(findingEvaluationsPayload.finding_evaluations.evaluations.every((item: any) => item.validation_reasons.includes("bounded sandbox execution did not complete cleanly for this run")), true);
+        assert.equal(executiveReportJsonPayload.format, "json");
+        assert.equal(executiveReportJsonPayload.filename, "run_api-executive-summary.json");
+        assert.equal(executiveReportJsonPayload.export_schema.schema_name, "executive_summary.v1");
+        assert.equal(executiveReportJsonPayload.export_schema.schema_version, "1.0.0");
+        assert.equal(executiveReportJsonPayload.export_schema.tethermark_version, "0.2.0");
+        await assertExportSchemaMatches("executive_summary.v1.json", executiveReportJsonPayload.export_schema);
+        assert.equal(executiveReportJsonPayload.report_executive.run_id, "run_api");
+        assert.equal(executiveReportJsonPayload.report_executive.finding_count, 4);
+        assert.equal(Array.isArray(executiveReportJsonPayload.report_executive.top_findings), true);
+        assert.equal(typeof executiveReportJsonPayload.report_executive.runtime_validation.blocked_count, "number");
+        assert.equal(typeof executiveReportJsonPayload.report_executive.runtime_followups.required_count, "number");
+        assert.ok(Array.isArray(executiveReportJsonPayload.report_executive.outstanding_actions));
+        assert.equal(executiveReportMarkdownPayload.format, "markdown");
+        assert.equal(executiveReportMarkdownPayload.filename, "run_api-executive-summary.md");
+        assert.match(String(executiveReportMarkdownPayload.report_executive_markdown || ""), /Executive Security Summary/);
+        assert.match(String(executiveReportMarkdownPayload.report_executive_markdown || ""), /Top Findings/);
         assert.equal(markdownReportPayload.format, "markdown");
         assert.equal(markdownReportPayload.filename, "run_api-report.md");
         assert.ok(String(markdownReportPayload.report_markdown).includes("# AI Security Audit Report"));
@@ -1689,15 +1877,43 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
         assert.ok(String(markdownReportPayload.report_markdown).includes("Runtime Validation Blocked:"));
         assert.ok(String(markdownReportPayload.report_markdown).includes("Runtime Follow-up Policy:"));
         assert.ok(String(markdownReportPayload.report_markdown).includes("Runtime Follow-up Resolution:"));
+        assert.ok(String(markdownReportPayload.report_markdown).includes("Runtime Evidence Locations:"));
+        assert.ok(String(markdownReportPayload.report_markdown).includes("src/agent.js:17:3"));
         assert.equal(sarifReportPayload.format, "sarif");
         assert.equal(sarifReportPayload.filename, "run_api-report.sarif.json");
         assert.equal(sarifReportPayload.report_sarif.version, "2.1.0");
         assert.equal(sarifReportPayload.report_sarif.runs[0]?.results.length, 4);
         assert.equal(sarifReportPayload.report_sarif.runs[0]?.results[0]?.properties?.sandboxExecution?.blocked_step_count, 2);
+        assert.equal(sarifReportPayload.report_sarif.runs[0]?.results[0]?.locations?.[0]?.physicalLocation?.artifactLocation?.uri, "src/agent.js");
+        assert.equal(sarifReportPayload.report_sarif.runs[0]?.results[0]?.locations?.[0]?.physicalLocation?.region?.startLine, 17);
+        assert.equal(sarifReportPayload.report_sarif.runs[0]?.tool?.driver?.semanticVersion, "1.0.0");
+        assert.ok(Array.isArray(sarifReportPayload.report_sarif.runs[0]?.tool?.driver?.taxa));
         assert.equal(typeof sarifReportPayload.report_sarif.runs[0]?.results[0]?.properties?.runtimeValidationStatus, "string");
         assert.equal(typeof sarifReportPayload.report_sarif.runs[0]?.results[0]?.properties?.runtimeFollowupPolicy, "string");
         assert.equal(typeof sarifReportPayload.report_sarif.runs[0]?.results[0]?.properties?.runtimeFollowupResolution, "string");
+        assert.equal(typeof sarifReportPayload.report_sarif.runs[0]?.results[0]?.properties?.evidenceLocations?.[0]?.label, "string");
         assert.ok(sarifReportPayload.report_sarif.runs[0]?.results.some((item: any) => item.properties?.activeDispositionType === "waiver"));
+        assert.equal(comparisonReportJsonPayload.format, "json");
+        assert.equal(comparisonReportJsonPayload.filename, "run_api-vs-run_api-comparison.json");
+        assert.equal(comparisonReportJsonPayload.export_schema.schema_name, "run_comparison.v1");
+        assert.equal(comparisonReportJsonPayload.export_schema.schema_version, "1.0.0");
+        await assertExportSchemaMatches("run_comparison.v1.json", comparisonReportJsonPayload.export_schema);
+        assert.equal(comparisonReportJsonPayload.report_compare.current_run_id, "run_api");
+        assert.equal(comparisonReportJsonPayload.report_compare.compare_to_run_id, "run_api");
+        assert.equal(comparisonReportJsonPayload.report_compare.summary.changed_finding_count, 0);
+        assert.equal(comparisonReportJsonPayload.report_compare.summary.new_finding_count, 0);
+        assert.equal(comparisonReportJsonPayload.report_compare.summary.resolved_finding_count, 0);
+        assert.equal(comparisonReportJsonPayload.report_compare.summary.unchanged_finding_count, 4);
+        assert.equal(comparisonReportMarkdownPayload.format, "markdown");
+        assert.equal(comparisonReportMarkdownPayload.filename, "run_api-vs-run_api-comparison.md");
+        assert.match(String(comparisonReportMarkdownPayload.report_compare_markdown || ""), /Run Comparison Report/);
+        assert.match(String(comparisonReportMarkdownPayload.report_compare_markdown || ""), /No new findings\./);
+        assert.equal(exportsIndexPayload.export_schema.schema_name, "export_index.v1");
+        assert.equal(exportsIndexPayload.export_index.run_id, "run_api");
+        assert.equal(exportsIndexPayload.export_index.exports.some((item: any) => item.export_type === "executive_summary" && item.format === "json"), true);
+        assert.equal(exportsIndexPayload.export_index.exports.some((item: any) => item.export_type === "finding_evaluations" && item.schema_name === "finding_evaluations.v1"), true);
+        assert.equal(exportsIndexPayload.export_index.exports.some((item: any) => item.export_type === "review_audit" && item.schema_name === "review_audit.v1"), true);
+        await assertExportSchemaMatches("export_index.v1.json", exportsIndexPayload.export_schema);
         assert.equal(preflightPayload.preflight.launch_profile.audit_package, "deep-static");
         assert.equal(preflightPayload.preflight.readiness.status, "ready_with_warnings");
         assert.equal(launchIntentPayload.launch_intent.source_surface, "web_ui");
@@ -1749,7 +1965,37 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
         assert.equal(reviewSummaryPayload.review_summary.handoff.reopened_disposition_count, 0);
         assert.equal(reviewSummaryPayload.review_summary.handoff.findings_needing_disposition_review_count, 1);
         assert.equal(reviewAuditPayload.review_audit.comments.length, 1);
+        assert.equal(reviewAuditPayload.export_schema.schema_name, "review_audit.v1");
+        assert.equal(reviewAuditPayload.export_schema.schema_version, "1.0.0");
+        await assertExportSchemaMatches("review_audit.v1.json", reviewAuditPayload.export_schema);
         assert.equal(reviewAuditPayload.review_audit.summary.handoff.latest_comments[0], "manual triage comment");
+        assert.equal(runtimeFollowupsPayload.runtime_followups.length, 1);
+        assert.equal(runtimeFollowupSummaryPayload.runtime_followup_summary.total_count, 1);
+        assert.equal(runtimeFollowupSummaryPayload.export_schema.schema_name, "runtime_followup_summary.v1");
+        assert.equal(runtimeFollowupSummaryPayload.export_schema.schema_version, "1.0.0");
+        await assertExportSchemaMatches("runtime_followup_summary.v1.json", runtimeFollowupSummaryPayload.export_schema);
+        assert.equal(typeof runtimeFollowupSummaryPayload.runtime_followup_summary.confirmed_count, "number");
+        assert.equal(runtimeFollowupExportJsonPayload.format, "json");
+        assert.equal(runtimeFollowupExportJsonPayload.filename, "runtime-followups.json");
+        assert.equal(runtimeFollowupExportJsonPayload.export_schema.schema_name, "runtime_followup_queue.v1");
+        assert.equal(runtimeFollowupExportJsonPayload.export_schema.schema_version, "1.0.0");
+        await assertExportSchemaMatches("runtime_followup_queue.v1.json", runtimeFollowupExportJsonPayload.export_schema);
+        assert.equal(runtimeFollowupExportJsonPayload.runtime_followups.length, 1);
+        assert.equal(runtimeFollowupExportCsvPayload.format, "csv");
+        assert.equal(runtimeFollowupExportCsvPayload.filename, "runtime-followups.csv");
+        const runtimeFollowupId = runtimeFollowupsPayload.runtime_followups[0]?.id;
+        assert.ok(runtimeFollowupId);
+        assert.match(String(runtimeFollowupExportCsvPayload.csv || ""), new RegExp(String(runtimeFollowupId)));
+        const runtimeFollowupReportResponse = await fetch(`http://127.0.0.1:${port}/runtime-followups/${encodeURIComponent(runtimeFollowupId)}/report`);
+        const runtimeFollowupReportPayload = await runtimeFollowupReportResponse.json() as any;
+        assert.equal(runtimeFollowupReportResponse.status, 200);
+        assert.equal(runtimeFollowupReportPayload.followup_id, runtimeFollowupId);
+        assert.equal(runtimeFollowupReportPayload.filename, `${runtimeFollowupId}-runtime-followup-report.json`);
+        assert.equal(runtimeFollowupReportPayload.export_schema.schema_name, "runtime_followup_report.v1");
+        assert.equal(runtimeFollowupReportPayload.export_schema.schema_version, "1.0.0");
+        await assertExportSchemaMatches("runtime_followup_report.v1.json", runtimeFollowupReportPayload.export_schema);
+        assert.equal(runtimeFollowupReportPayload.runtime_followup_report.followup.id, runtimeFollowupId);
+        assert.equal(runtimeFollowupReportPayload.runtime_followup_report.source_finding.id, "finding_api");
         assert.equal(observabilitySummaryPayload.totals.total_tokens, 60);
         assert.equal(observabilitySummaryPayload.provider_rollups[0]?.provider_id, "openai:gpt-5.4");
         assert.equal(observabilityStatsPayload.totals.run_count, 1);
@@ -2000,12 +2246,24 @@ async function testRuntimeFollowupOutcomeReconciliation(): Promise<void> {
       }],
       stage_executions: [],
       lane_plans: [],
-      evidence_records: [],
+      evidence_records: [{
+        id: "evidence_runtime_source",
+        run_id: sourceRunId,
+        lane_name: null,
+        source_type: "tool",
+        source_id: "sandbox:runtime-node",
+        control_ids_json: ["harness_internal.eval_harness_presence"],
+        summary: "runtime validation pointed at the shared service route",
+        confidence: 0.92,
+        raw_artifact_path: null,
+        locations_json: [{ source_kind: "symbol", symbol: "service.route:/api/runtime-shared", label: "runtime_endpoint" }],
+        metadata_json: { category: "sandbox_execution" }
+      }],
       lane_results: [],
       lane_specialists: [],
       agent_invocations: [],
       tool_executions: [],
-      findings: [{ id: "finding_runtime_source", run_id: sourceRunId, lane_name: null, title: "Runtime follow-up target", severity: "high", category: "runtime_validation", description: "needs capable rerun", confidence: 0.8, source: "supervisor", publication_state: "internal_only", needs_human_review: true, score_impact: 8, control_ids_json: ["harness_internal.eval_harness_presence"], standards_refs_json: [], evidence_json: [], created_at: "2026-04-17T00:00:00.000Z" }],
+      findings: [{ id: "finding_runtime_source", run_id: sourceRunId, lane_name: null, title: "Source runtime validation issue", severity: "high", category: "runtime_validation", description: "needs capable rerun", confidence: 0.8, source: "supervisor", publication_state: "internal_only", needs_human_review: true, score_impact: 8, control_ids_json: ["harness_internal.eval_harness_presence"], standards_refs_json: [], evidence_json: [], created_at: "2026-04-17T00:00:00.000Z" }],
       control_results: [],
       score_summary: { run_id: sourceRunId, methodology_version: "1", overall_score: 58, rating: "fair", leaderboard_summary: "", limitations_json: [] },
       review_decision: { run_id: sourceRunId, publishability_status: "review_required", human_review_required: true, public_summary_safe: false, threshold: "high", rationale_json: [], gating_findings_json: ["finding_runtime_source"], recommended_visibility: "internal" },
@@ -2037,12 +2295,24 @@ async function testRuntimeFollowupOutcomeReconciliation(): Promise<void> {
       stage_artifacts: [],
       stage_executions: [],
       lane_plans: [],
-      evidence_records: [],
+      evidence_records: [{
+        id: "evidence_runtime_rerun",
+        run_id: rerunRunId,
+        lane_name: null,
+        source_type: "tool",
+        source_id: "sandbox:runtime-node",
+        control_ids_json: ["owasp_llm.agent_runtime_security"],
+        summary: "rerun reproduced the same shared service route",
+        confidence: 0.94,
+        raw_artifact_path: null,
+        locations_json: [{ source_kind: "symbol", symbol: "service.route:/api/runtime-shared", label: "runtime_endpoint" }],
+        metadata_json: { category: "sandbox_execution" }
+      }],
       lane_results: [],
       lane_specialists: [],
       agent_invocations: [],
       tool_executions: [],
-      findings: [{ id: "finding_runtime_rerun", run_id: rerunRunId, lane_name: null, title: "Runtime follow-up target reproduced", severity: "high", category: "runtime_validation", description: "reproduced during linked rerun", confidence: 0.85, source: "supervisor", publication_state: "internal_only", needs_human_review: true, score_impact: 8, control_ids_json: ["harness_internal.eval_harness_presence"], standards_refs_json: [], evidence_json: [], created_at: "2026-04-17T00:02:30.000Z" }],
+      findings: [{ id: "finding_runtime_rerun", run_id: rerunRunId, lane_name: null, title: "Different rerun title with shared evidence identity", severity: "high", category: "runtime_service_unhealthy", description: "reproduced during linked rerun", confidence: 0.85, source: "supervisor", publication_state: "internal_only", needs_human_review: true, score_impact: 8, control_ids_json: ["owasp_llm.agent_runtime_security"], standards_refs_json: [], evidence_json: [], created_at: "2026-04-17T00:02:30.000Z" }],
       control_results: [],
       score_summary: { run_id: rerunRunId, methodology_version: "1", overall_score: 61, rating: "fair", leaderboard_summary: "", limitations_json: [] },
       review_decision: { run_id: rerunRunId, publishability_status: "review_required", human_review_required: true, public_summary_safe: false, threshold: "high", rationale_json: [], gating_findings_json: ["finding_runtime_rerun"], recommended_visibility: "internal" },
@@ -2087,7 +2357,7 @@ async function testRuntimeFollowupOutcomeReconciliation(): Promise<void> {
 
     const persistedFollowup = await readPersistedRuntimeFollowup(followup!.id, location);
     const sourceFindings = await readPersistedFindings(sourceRunId, location);
-    const evaluationSummary = buildFindingEvaluationSummary({
+    let evaluationSummary = buildFindingEvaluationSummary({
       workflow: await readPersistedReviewWorkflow(sourceRunId, location),
       findings: sourceFindings,
       actions: [],
@@ -2101,6 +2371,54 @@ async function testRuntimeFollowupOutcomeReconciliation(): Promise<void> {
     assert.equal(evaluationSummary.evaluations[0]?.runtime_followup_outcome, "confirmed");
     assert.equal(evaluationSummary.evaluations[0]?.runtime_followup_linked_run_id, rerunRunId);
     assert.equal(evaluationSummary.evaluations[0]?.next_action, "manual_review");
+    assert.equal(evaluationSummary.evaluations[0]?.runtime_impact, "strengthened");
+
+    const adoptAction = await submitPersistedReviewAction({
+      runId: sourceRunId,
+      rootDirOrOptions: location,
+      input: {
+        reviewer_id: "runtime-reviewer",
+        action_type: "adopt_rerun_outcome",
+        finding_id: "finding_runtime_source",
+        notes: "adopted linked rerun outcome back into source review state",
+        metadata: {
+          adopted_outcome: "confirmed",
+          linked_run_id: rerunRunId
+        }
+      }
+    });
+    await upsertRuntimeFollowupFromReviewAction({
+      runId: sourceRunId,
+      actionId: adoptAction.action.id,
+      rootDirOrOptions: location,
+      input: {
+        reviewer_id: "runtime-reviewer",
+        action_type: "adopt_rerun_outcome",
+        finding_id: "finding_runtime_source",
+        notes: "adopted linked rerun outcome back into source review state",
+        metadata: {
+          adopted_outcome: "confirmed",
+          linked_run_id: rerunRunId
+        }
+      }
+    });
+    const resolvedFollowup = await readPersistedRuntimeFollowup(followup!.id, location);
+    const resolvedActions = await readPersistedReviewActions(sourceRunId, location);
+    evaluationSummary = buildFindingEvaluationSummary({
+      workflow: await readPersistedReviewWorkflow(sourceRunId, location),
+      findings: sourceFindings,
+      actions: resolvedActions,
+      comments: [],
+      dispositions: [],
+      supervisorReview: null,
+      evidenceRecords: [],
+      runtimeFollowups: resolvedFollowup ? [resolvedFollowup] : []
+    });
+    assert.equal(resolvedFollowup?.status, "resolved");
+    assert.equal(resolvedFollowup?.resolution_action_type, "adopt_rerun_outcome");
+    assert.equal(evaluationSummary.runtime_followup_resolved_count, 1);
+    assert.equal(evaluationSummary.evaluations[0]?.runtime_followup_resolution, "rerun_outcome_adopted");
+    assert.equal(evaluationSummary.evaluations[0]?.next_action, "ready_for_review");
   });
 }
 
@@ -3151,6 +3469,109 @@ async function testPythonWorkerProvidersReportBlockedWhenDisabled(): Promise<voi
   });
 }
 
+async function testRepoAnalysisProviderEmitsNormalizedLocations(): Promise<void> {
+  await withTempDir("harness-repo-analysis-provider-", async (rootDir) => {
+    const repoAnalysis = await executeEvidenceProvider({
+      providerId: "repo_analysis",
+      request: {
+        local_path: rootDir,
+        run_mode: "static",
+        audit_package: "deep-static",
+        llm_provider: "mock"
+      },
+      rootPath: rootDir,
+      repoUrl: null,
+      analysisSummary: {
+        analysis: {
+          project_name: "repo-analysis-target",
+          file_count: 12,
+          languages: ["typescript"],
+          frameworks: [],
+          package_ecosystems: ["npm"],
+          package_managers: ["npm"],
+          dependency_manifests: ["package.json"],
+          lockfiles: ["package-lock.json"],
+          ci_workflows: [".github/workflows/ci.yml"],
+          security_docs: ["SECURITY.md"],
+          release_files: ["CHANGELOG.md"],
+          container_files: ["Dockerfile"],
+          entry_points: ["src/server.ts"],
+          mcp_indicators: [],
+          agent_indicators: [],
+          tool_execution_indicators: []
+        },
+        repoContext: {
+          summary: [],
+          capability_signals: ["repo_posture_only"],
+          documents: []
+        }
+      }
+    });
+    assert.equal(repoAnalysis.status, "completed");
+    assert.equal(repoAnalysis.normalized?.result_type, "repo_analysis");
+    assert.equal(Array.isArray(repoAnalysis.normalized?.locations), true);
+    assert.equal(repoAnalysis.normalized?.locations?.some((item: any) => item.path === "package.json" && item.label === "manifest"), true);
+    assert.equal(repoAnalysis.normalized?.locations?.some((item: any) => item.path === ".github/workflows/ci.yml" && item.label === "ci_workflow"), true);
+    assert.equal(repoAnalysis.normalized?.locations?.some((item: any) => item.path === "SECURITY.md" && item.label === "security_doc"), true);
+    assert.equal(repoAnalysis.normalized?.locations?.some((item: any) => item.path === "CHANGELOG.md" && item.label === "release_artifact"), true);
+    assert.equal(repoAnalysis.normalized?.locations?.some((item: any) => item.path === "src/server.ts" && item.label === "entry_point"), true);
+    assert.equal(repoAnalysis.normalized?.locations?.some((item: any) => item.symbol === "repo_posture_only" && item.label === "repo_capability"), true);
+  });
+}
+
+async function testScorecardAndTrivyNormalizationEmitSymbolLocations(): Promise<void> {
+  const scorecard = normalizeEvidenceSummaryForTests({
+    providerId: "scorecard",
+    parsed: {
+      checks: [
+        { name: "Code-Review", score: 8 },
+        { name: "Pinned-Dependencies", score: 2 }
+      ]
+    }
+  });
+  assert.equal(scorecard.locations?.some((item: any) => item.symbol === "Code-Review" && item.label === "scorecard_check"), true);
+  assert.equal(scorecard.locations?.some((item: any) => item.symbol === "Pinned-Dependencies" && item.label === "scorecard_check"), true);
+  const scorecardWithDocs = normalizeEvidenceSummaryForTests({
+    providerId: "scorecard",
+    parsed: {
+      checks: [
+        { name: "Maintained", score: 10, documentation: { url: "https://example.test/scorecard/maintained" } }
+      ]
+    }
+  });
+  assert.equal(scorecardWithDocs.locations?.some((item: any) => item.uri === "https://example.test/scorecard/maintained" && item.label === "scorecard_documentation"), true);
+
+  const trivy = normalizeEvidenceSummaryForTests({
+    providerId: "trivy",
+    parsed: {
+      Results: [
+        {
+          Target: "package-lock.json",
+          Type: "npm",
+          Vulnerabilities: [
+            {
+              VulnerabilityID: "CVE-2026-0001",
+              Severity: "HIGH",
+              Class: "src/server.ts",
+              PrimaryURL: "https://avd.aquasec.com/nvd/cve-2026-0001"
+            }
+          ],
+          Misconfigurations: [
+            {
+              ID: "AVD-AWS-0001",
+              Severity: "MEDIUM"
+            }
+          ]
+        }
+      ]
+    }
+  });
+  assert.equal(trivy.locations?.some((item: any) => item.symbol === "CVE-2026-0001" && item.label === "trivy_rule"), true);
+  assert.equal(trivy.locations?.some((item: any) => item.symbol === "AVD-AWS-0001" && item.label === "trivy_rule"), true);
+  assert.equal(trivy.locations?.some((item: any) => item.path === "src/server.ts" && item.label === "CVE-2026-0001"), true);
+  assert.equal(trivy.locations?.some((item: any) => item.uri === "https://avd.aquasec.com/nvd/cve-2026-0001" && item.label === "CVE-2026-0001"), true);
+}
+
 async function testLinuxContainerSandboxBuildsExecutionPlan(): Promise<void> {
   await withTempDir("harness-container-plan-", async (rootDir) => {
     const sourceDir = path.join(rootDir, "source");
@@ -3213,6 +3634,8 @@ async function testLinuxContainerSandboxBuildsExecutionPlan(): Promise<void> {
       assert.equal(typeof buildResult?.duration_ms, "number");
       if (runtimeResult?.normalized_artifact?.details_json?.probe) {
         assert.equal(Array.isArray((runtimeResult.normalized_artifact.details_json.probe as any).attempted_targets), true);
+        assert.equal(typeof (runtimeResult.normalized_artifact.details_json.probe as any).classification, "string");
+        assert.equal(Array.isArray((runtimeResult.normalized_artifact.details_json.probe as any).discovered_endpoints), true);
       }
       if (buildResult?.status === "completed") {
         assert.equal(await pathExists(path.join(sandbox.target_dir, "build.ok")), true);
@@ -3274,9 +3697,102 @@ async function testLinuxContainerSandboxBuildsPythonRuntimeProbePlan(): Promise<
     const runtimeStep = executionPlan?.steps.find((step) => step.step_id === "runtime-python") ?? null;
     assert.ok(runtimeStep);
     assert.equal(executionPlan?.detected_stack.includes("python"), true);
+    assert.equal(executionPlan?.detected_stack.includes("fastapi"), false);
     assert.equal(runtimeStep?.adapter, "http_service");
     assert.equal(runtimeStep?.artifact_context?.entrypoint, "app.py");
     assert.deepEqual(runtimeStep?.artifact_context?.probe_ports, [8000, 5000, 3000]);
+    assert.equal(executionPlan?.steps.find((step) => step.step_id === "test-python")?.artifact_context?.test_runner, "unittest");
+  });
+}
+
+async function testLinuxContainerSandboxDetectsPythonFrameworkProbeDefaults(): Promise<void> {
+  await withTempDir("harness-container-python-framework-", async (rootDir) => {
+    const sourceDir = path.join(rootDir, "source");
+    const sandboxRoot = path.join(rootDir, "sandboxes");
+    await fs.mkdir(sourceDir, { recursive: true });
+    await fs.writeFile(path.join(sourceDir, "requirements.txt"), "fastapi\nuvicorn\n");
+    await fs.writeFile(path.join(sourceDir, "app.py"), "print('ready')\n");
+
+    const backend = new LinuxContainerSandboxBackend(sandboxRoot);
+    const sandbox = await backend.create("run_container_python_framework", {
+      local_path: sourceDir,
+      run_mode: "runtime",
+      audit_package: "runtime-validated",
+      llm_provider: "mock"
+    });
+
+    const executionPlan = sandbox.execution_plan;
+    const runtimeStep = executionPlan?.steps.find((step) => step.step_id === "runtime-python") ?? null;
+    assert.ok(runtimeStep);
+    assert.equal(executionPlan?.detected_stack.includes("fastapi"), true);
+    assert.deepEqual(runtimeStep?.command, ["python", "-m", "uvicorn", "app:app", "--host", "127.0.0.1", "--port", "8000"]);
+    assert.equal(runtimeStep?.artifact_context?.framework, "fastapi");
+    assert.equal(runtimeStep?.artifact_context?.command_strategy, "uvicorn_module");
+    assert.deepEqual(runtimeStep?.artifact_context?.probe_ports, [8000]);
+    assert.deepEqual(runtimeStep?.artifact_context?.probe_paths, ["/docs", "/openapi.json", "/health", "/"]);
+  });
+}
+
+async function testLinuxContainerSandboxBuildsDjangoRuntimeCommand(): Promise<void> {
+  await withTempDir("harness-container-django-framework-", async (rootDir) => {
+    const sourceDir = path.join(rootDir, "source");
+    const sandboxRoot = path.join(rootDir, "sandboxes");
+    await fs.mkdir(sourceDir, { recursive: true });
+    await fs.writeFile(path.join(sourceDir, "requirements.txt"), "django\n");
+    await fs.writeFile(path.join(sourceDir, "manage.py"), "print('ready')\n");
+
+    const backend = new LinuxContainerSandboxBackend(sandboxRoot);
+    const sandbox = await backend.create("run_container_django_framework", {
+      local_path: sourceDir,
+      run_mode: "runtime",
+      audit_package: "runtime-validated",
+      llm_provider: "mock"
+    });
+
+    const executionPlan = sandbox.execution_plan;
+    const runtimeStep = executionPlan?.steps.find((step) => step.step_id === "runtime-python") ?? null;
+    assert.ok(runtimeStep);
+    assert.equal(executionPlan?.detected_stack.includes("django"), true);
+    assert.deepEqual(runtimeStep?.command, ["python", "manage.py", "runserver", "127.0.0.1:8000", "--noreload"]);
+    assert.equal(runtimeStep?.artifact_context?.framework, "django");
+    assert.equal(runtimeStep?.artifact_context?.command_strategy, "django_manage_py");
+    assert.deepEqual(runtimeStep?.artifact_context?.probe_ports, [8000]);
+    assert.deepEqual(runtimeStep?.artifact_context?.probe_paths, ["/", "/admin/login/"]);
+  });
+}
+
+async function testLinuxContainerSandboxDetectsNodeEntrypointWithoutScripts(): Promise<void> {
+  await withTempDir("harness-container-node-entrypoint-", async (rootDir) => {
+    const sourceDir = path.join(rootDir, "source");
+    const sandboxRoot = path.join(rootDir, "sandboxes");
+    await fs.mkdir(path.join(sourceDir, "src"), { recursive: true });
+    await fs.writeFile(path.join(sourceDir, "package.json"), JSON.stringify({
+      name: "entrypoint-target",
+      private: true,
+      devDependencies: {
+        vite: "^5.0.0"
+      }
+    }, null, 2));
+    await fs.writeFile(path.join(sourceDir, "src", "server.js"), "console.log('ready');\n");
+
+    const backend = new LinuxContainerSandboxBackend(sandboxRoot);
+    const sandbox = await backend.create("run_container_node_entrypoint", {
+      local_path: sourceDir,
+      run_mode: "runtime",
+      audit_package: "runtime-validated",
+      llm_provider: "mock"
+    });
+
+    const executionPlan = sandbox.execution_plan;
+    const runtimeStep = executionPlan?.steps.find((step) => step.step_id === "runtime-node-entrypoint") ?? null;
+    assert.ok(runtimeStep);
+    assert.equal(executionPlan?.detected_stack.includes("vite"), true);
+    assert.equal(runtimeStep?.adapter, "http_service");
+    assert.deepEqual(runtimeStep?.command, ["node", "src/server.js"]);
+    assert.equal(runtimeStep?.artifact_context?.framework, "vite");
+    assert.equal(runtimeStep?.artifact_context?.entrypoint, "src/server.js");
+    assert.deepEqual(runtimeStep?.artifact_context?.probe_ports, [4173, 5173, 3000]);
+    assert.deepEqual(runtimeStep?.artifact_context?.probe_paths, ["/"]);
   });
 }
 
@@ -3362,7 +3878,12 @@ async function testRuntimeEvidenceInfluencesStandardsAudit(): Promise<void> {
                 package_manager: "npm",
                 script_name: "start",
                 artifact_role: "service_probe",
+                startup: {
+                  signaled_ready: false,
+                  indicator: null
+                },
                 probe: {
+                  classification: "connection_refused",
                   attempted_targets: ["http://127.0.0.1:3000/", "http://127.0.0.1:3000/health"],
                   successful_target: null,
                   status_code: null,
@@ -3461,6 +3982,158 @@ async function testRuntimeEvidenceInfluencesStandardsAudit(): Promise<void> {
   });
 }
 
+async function testFindingEvaluationUsesEvidenceSymbolsForGrouping(): Promise<void> {
+  const summary = buildFindingEvaluationSummary({
+    findings: [
+      {
+        id: "finding_symbol_left",
+        run_id: "run_symbol_grouping",
+        lane_name: null,
+        title: "Unsafe tool access path",
+        severity: "high",
+        category: "tool_boundary",
+        description: "Privileged tool access is exposed through one path.",
+        confidence: 0.82,
+        source: "tool",
+        publication_state: "internal_only",
+        needs_human_review: true,
+        score_impact: 8,
+        control_ids_json: ["CTRL-SYMBOL"],
+        standards_refs_json: [],
+        evidence_json: ["path A"],
+        created_at: "2026-04-18T00:00:00.000Z"
+      } as any,
+      {
+        id: "finding_symbol_right",
+        run_id: "run_symbol_grouping",
+        lane_name: null,
+        title: "Privileged execution route",
+        severity: "low",
+        category: "access_control",
+        description: "A second tool surfaced the same underlying issue.",
+        confidence: 0.66,
+        source: "tool",
+        publication_state: "public_safe",
+        needs_human_review: true,
+        score_impact: 3,
+        control_ids_json: ["CTRL-OTHER"],
+        standards_refs_json: [],
+        evidence_json: ["path B"],
+        created_at: "2026-04-18T00:01:00.000Z"
+      } as any
+    ],
+    supervisorReview: null,
+    workflow: null,
+    actions: [],
+    comments: [],
+    dispositions: [],
+    sandboxExecution: null,
+    runtimeFollowups: [],
+    evidenceRecords: [
+      {
+        evidence_id: "e_symbol_left",
+        control_ids_json: ["CTRL-SYMBOL"],
+        summary: "shared analyzer evidence",
+        locations_json: [
+          {
+            source_kind: "symbol",
+            symbol: "unsafe_tool_access",
+            label: "semgrep_rule"
+          }
+        ]
+      },
+      {
+        evidence_id: "e_symbol_right",
+        control_ids_json: ["CTRL-OTHER"],
+        summary: "shared analyzer evidence",
+        locations_json: [
+          {
+            source_kind: "symbol",
+            symbol: "unsafe_tool_access",
+            label: "trivy_rule"
+          }
+        ]
+      }
+    ]
+  });
+
+  assert.equal(summary.duplicate_groups.length, 1);
+  assert.deepEqual(summary.duplicate_groups[0], ["finding_symbol_left", "finding_symbol_right"]);
+  assert.equal(summary.conflict_pairs.length, 1);
+  assert.equal(summary.conflict_pairs[0]?.reason, "linked controls have conflicting visibility/publication posture");
+  assert.deepEqual(summary.evaluations.find((item) => item.finding_id === "finding_symbol_left")?.evidence_symbols, ["unsafe_tool_access"]);
+  assert.deepEqual(summary.evaluations.find((item) => item.finding_id === "finding_symbol_left")?.duplicate_with_finding_ids, ["finding_symbol_right"]);
+  assert.deepEqual(summary.evaluations.find((item) => item.finding_id === "finding_symbol_right")?.duplicate_with_finding_ids, ["finding_symbol_left"]);
+}
+
+async function testRunComparisonUsesEvidenceSymbolsForMatching(): Promise<void> {
+  const comparison = buildRunComparisonReport({
+    currentRunId: "run_current",
+    compareToRunId: "run_previous",
+    currentFindings: [
+      {
+        id: "finding_current",
+        title: "Privileged execution route",
+        category: "access_control",
+        severity: "medium",
+        confidence: 0.72
+      }
+    ],
+    previousFindings: [
+      {
+        id: "finding_previous",
+        title: "Unsafe tool access path",
+        category: "tool_boundary",
+        severity: "high",
+        confidence: 0.81
+      }
+    ],
+    currentEvaluations: {
+      evaluations: [
+        {
+          finding_id: "finding_current",
+          current_severity: "medium",
+          evidence_sufficiency: "medium",
+          runtime_validation_status: "recommended",
+          runtime_followup_policy: "runtime_validation_recommended",
+          runtime_followup_resolution: "none",
+          next_action: "request_validation",
+          evidence_symbols: ["unsafe_tool_access"]
+        }
+      ],
+      runtime_followup_required_count: 1,
+      runtime_validation_blocked_count: 0
+    },
+    previousEvaluations: {
+      evaluations: [
+        {
+          finding_id: "finding_previous",
+          current_severity: "high",
+          evidence_sufficiency: "high",
+          runtime_validation_status: "failed",
+          runtime_followup_policy: "rerun_in_capable_env",
+          runtime_followup_resolution: "rerun_requested",
+          next_action: "rerun_in_capable_env",
+          evidence_symbols: ["unsafe_tool_access"]
+        }
+      ],
+      runtime_followup_required_count: 1,
+      runtime_validation_blocked_count: 1
+    },
+    currentSummary: { overall_score: 72 },
+    previousSummary: { overall_score: 61 }
+  });
+
+  assert.equal(comparison.summary.new_finding_count, 0);
+  assert.equal(comparison.summary.resolved_finding_count, 0);
+  assert.equal(comparison.summary.changed_finding_count, 1);
+  assert.equal(comparison.summary.evidence_symbol_matched_count, 1);
+  assert.equal(comparison.changed_findings[0]?.match_strategy, "evidence_symbols");
+  assert.deepEqual(comparison.changed_findings[0]?.shared_evidence_symbols, ["unsafe_tool_access"]);
+  assert.equal(comparison.changed_findings[0]?.previous_finding_id, "finding_previous");
+  assert.equal(comparison.changed_findings[0]?.current_finding_id, "finding_current");
+}
+
 async function main(): Promise<void> {
   const tests: Array<[string, () => Promise<void>]> = [
     ["buildScanRequest parses llm flags", testBuildScanRequestParsesLlmFlags],
@@ -3476,6 +4149,7 @@ async function main(): Promise<void> {
     ["cleanupEmbeddedJsonMirrors live", testCleanupEmbeddedJsonMirrorsLive],
     ["validateEmbeddedPersistence detects missing records", testValidateEmbeddedPersistenceDetectsMissingRecords],
     ["validateEmbeddedPersistence passes for persisted run", testValidateEmbeddedPersistencePassesForPersistedRun],
+    ["golden export snapshots", testGoldenExportSnapshots],
     ["fresh run persists expected records", testFreshRunPersistsExpectedRecords],
     ["persisted review workflow and actions", testPersistedReviewWorkflowAndActions],
     ["api responses use persisted state", testApiResponsesUsePersistedState],
@@ -3493,9 +4167,17 @@ async function main(): Promise<void> {
       ["validateFixtures passes for bundled targets", testValidateFixturesPassesForBundledTargets],
       ["local binary providers short-circuit when spawn is blocked", testLocalBinaryProvidersShortCircuitWhenSpawnBlocked],
       ["python worker providers report blocked runtime capability when disabled", testPythonWorkerProvidersReportBlockedWhenDisabled],
+      ["repo analysis provider emits normalized locations", testRepoAnalysisProviderEmitsNormalizedLocations],
+      ["scorecard and trivy normalization emit symbol locations", testScorecardAndTrivyNormalizationEmitSymbolLocations],
       ["linux container sandbox builds bounded execution plan", testLinuxContainerSandboxBuildsExecutionPlan],
       ["linux container sandbox builds python runtime probe plan", testLinuxContainerSandboxBuildsPythonRuntimeProbePlan],
+      ["linux container sandbox detects python framework probe defaults", testLinuxContainerSandboxDetectsPythonFrameworkProbeDefaults],
+      ["linux container sandbox builds django runtime command", testLinuxContainerSandboxBuildsDjangoRuntimeCommand],
+      ["linux container sandbox detects node entrypoint without scripts", testLinuxContainerSandboxDetectsNodeEntrypointWithoutScripts],
       ["runtime evidence influences standards audit", testRuntimeEvidenceInfluencesStandardsAudit]
+      ,
+      ["finding evaluation uses evidence symbols for grouping", testFindingEvaluationUsesEvidenceSymbolsForGrouping],
+      ["run comparison uses evidence symbols for matching", testRunComparisonUsesEvidenceSymbolsForMatching]
     ];
 
   for (const [name, fn] of tests) {

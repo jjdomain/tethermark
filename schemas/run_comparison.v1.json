@@ -1,0 +1,33 @@
+{
+  "type": "object",
+  "required": ["schema_name", "schema_version", "generated_at", "tethermark_version", "payload"],
+  "properties": {
+    "schema_name": { "const": "run_comparison.v1" },
+    "schema_version": { "const": "1.0.0" },
+    "generated_at": { "type": "string" },
+    "tethermark_version": { "type": "string" },
+    "payload": {
+      "type": "object",
+      "required": ["current_run_id", "compare_to_run_id", "summary", "new_findings", "resolved_findings", "changed_findings"],
+      "properties": {
+        "current_run_id": { "type": "string" },
+        "compare_to_run_id": { "type": "string" },
+        "summary": {
+          "type": "object",
+          "required": ["current_finding_count", "compare_to_finding_count", "new_finding_count", "resolved_finding_count", "changed_finding_count", "unchanged_finding_count"],
+          "properties": {
+            "current_finding_count": { "type": "number" },
+            "compare_to_finding_count": { "type": "number" },
+            "new_finding_count": { "type": "number" },
+            "resolved_finding_count": { "type": "number" },
+            "changed_finding_count": { "type": "number" },
+            "unchanged_finding_count": { "type": "number" }
+          }
+        },
+        "new_findings": { "type": "array" },
+        "resolved_findings": { "type": "array" },
+        "changed_findings": { "type": "array" }
+      }
+    }
+  }
+}

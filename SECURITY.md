@@ -26,6 +26,16 @@ This repository is security-sensitive in several areas:
 
 Reports involving those areas should be treated as high priority.
 
+## OSS Deployment Boundary
+
+Tethermark OSS is designed for local or trusted self-hosted environments.
+
+- `auth=none` is not a hardened multi-user security model
+- `auth=api_key` is the stronger OSS mode for service or API enforcement
+- public internet exposure should be fronted by your own network, proxy, and secret-management controls
+
+Misconfigurations that ignore that deployment boundary may still be important operational risks, even if they are not code vulnerabilities by themselves.
+
 ## Please Avoid Public Disclosure Until Fixed
 
 Public issues, PRs, or discussions should not contain:

@@ -10,6 +10,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "npm run build --silent && node dist/packages/core-engine/src/test-runner.js",
+    "exports:check": "npm run build --silent && node dist/packages/core-engine/src/export-maintenance.js check",
+    "exports:refresh": "npm run build --silent && node dist/packages/core-engine/src/export-maintenance.js refresh",
+    "release:check": "npm run build --silent && npm test --silent && npm run exports:check && npm run scan -- validate-fixtures",
     "scan": "npm run build --silent && node dist/apps/cli/src/index.js",
     "scan:self": "npm run build --silent && node dist/apps/cli/src/index.js scan path . --output ./.artifacts/runs/self-scan-ts --mode static",
     "api": "npm run build --silent && node dist/apps/api-server/src/index.js",

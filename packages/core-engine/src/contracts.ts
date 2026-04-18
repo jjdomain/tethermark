@@ -52,6 +52,7 @@ export type HumanReviewActionType =
     | "reject_run"
     | "require_rerun"
     | "rerun_in_capable_env"
+    | "adopt_rerun_outcome"
     | "confirm_finding"
     | "suppress_finding"
     | "downgrade_severity"
@@ -420,7 +421,20 @@ export interface EvidenceRecord {
   summary: string;
   confidence: number;
   raw_artifact_path?: string;
+  locations?: EvidenceLocation[];
   metadata: Record<string, unknown>;
+}
+
+export interface EvidenceLocation {
+  source_kind: "file" | "uri" | "symbol";
+  path?: string | null;
+  uri?: string | null;
+  line?: number | null;
+  column?: number | null;
+  end_line?: number | null;
+  end_column?: number | null;
+  symbol?: string | null;
+  label?: string | null;
 }
 
 export interface LaneResult {
@@ -803,6 +817,7 @@ export interface NormalizedEvidenceSummary {
   };
   ecosystems: string[];
   coverage_paths: string[];
+  locations?: EvidenceLocation[];
   notes: string[];
 }
 

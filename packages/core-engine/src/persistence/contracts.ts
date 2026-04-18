@@ -213,6 +213,7 @@ export interface PersistedEvidenceRecord {
   summary: string;
   confidence: number;
   raw_artifact_path: string | null;
+  locations_json: unknown;
   metadata_json: unknown;
 }
 

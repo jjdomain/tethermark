@@ -2,7 +2,7 @@ import type { AsyncJobStatus, AuditRequest, HumanReviewActionInput, LaunchIntent
 import { normalizeProjectId, normalizeWorkspaceId } from "../request-scope.js";
 import type { PersistedAsyncJobRecord, PersistedRuntimeFollowupRecord } from "./contracts.js";
 import { getPersistedRun } from "./query.js";
-import { readPersistedFindings, readPersistedStageArtifact } from "./run-details.js";
+import { readPersistedEvidenceRecords, readPersistedFindings, readPersistedStageArtifact } from "./run-details.js";
 import { resolvePersistenceLocation, type PersistenceReadOptions } from "./backend.js";
 import { ensureSqliteSchema, hasSqliteDatabase, openSqliteDatabase, readSqliteTable, saveSqliteDatabase, upsertSqliteRecord } from "./sqlite.js";
 
@@ -54,6 +54,45 @@ function findingsMatch(sourceFinding: Awaited<ReturnType<typeof readPersistedFin
   const overlappingControls = [...sourceControls].some((item) => candidateControls.has(item));
   if (overlappingControls) return true;
   return tokenOverlap(sourceFinding.title, candidate.title);
+}
+
+function collectEvidenceIdentity(args: {
+  finding: Awaited<ReturnType<typeof readPersistedFindings>>[number] | null;
+  evidenceRecords: Awaited<ReturnType<typeof readPersistedEvidenceRecords>>;
+}): { symbols: Set<string>; paths: Set<string> } {
+  const symbols = new Set<string>();
+  const paths = new Set<string>();
+  const controlIds = new Set(asStringArray(args.finding?.control_ids_json));
+  for (const record of args.evidenceRecords) {
+    const metadata = (record.metadata_json ?? {}) as Record<string, any>;
+    const runtimeEvidenceIds = Array.isArray(metadata?.runtime_evidence_ids) ? metadata.runtime_evidence_ids.map((item: any) => String(item)) : [];
+    const linkedFindingIds = Array.isArray(metadata?.finding_ids) ? metadata.finding_ids.map((item: any) => String(item)) : [];
+    const recordControlIds = new Set(asStringArray(record.control_ids_json));
+    const belongsToFinding = linkedFindingIds.includes(String(args.finding?.id ?? ""))
+      || runtimeEvidenceIds.includes(record.id)
+      || [...controlIds].some((item) => recordControlIds.has(item))
+      || tokenOverlap(String(record.summary ?? ""), String(args.finding?.title ?? ""));
+    if (!belongsToFinding) continue;
+    const locations = Array.isArray(record.locations_json) ? record.locations_json : [];
+    for (const location of locations) {
+      if (typeof location?.symbol === "string" && location.symbol.trim()) symbols.add(location.symbol.trim());
+      if (typeof location?.path === "string" && location.path.trim()) paths.add(String(location.path).replace(/\\/g, "/"));
+    }
+  }
+  return { symbols, paths };
+}
+
+function evidenceIdentityMatches(args: {
+  source: { symbols: Set<string>; paths: Set<string> };
+  candidate: { symbols: Set<string>; paths: Set<string> };
+}): boolean {
+  for (const symbol of args.source.symbols) {
+    if (args.candidate.symbols.has(symbol)) return true;
+  }
+  for (const filePath of args.source.paths) {
+    if (args.candidate.paths.has(filePath)) return true;
+  }
+  return false;
 }
 
 function deriveRerunRequest(args: {
@@ -143,13 +182,26 @@ async function reconcileRuntimeFollowupOutcome(args: {
       rerun_reconciled_at: reconciledAt
     };
   }
-  const [sourceFindings, linkedRun, linkedFindings] = await Promise.all([
+  const [sourceFindings, linkedRun, linkedFindings, sourceEvidenceRecords, linkedEvidenceRecords] = await Promise.all([
     readPersistedFindings(args.followup.run_id, args.rootDirOrOptions),
     getPersistedRun(args.linkedRunId, args.rootDirOrOptions),
-    readPersistedFindings(args.linkedRunId, args.rootDirOrOptions)
+    readPersistedFindings(args.linkedRunId, args.rootDirOrOptions),
+    readPersistedEvidenceRecords(args.followup.run_id, args.rootDirOrOptions),
+    readPersistedEvidenceRecords(args.linkedRunId, args.rootDirOrOptions)
   ]);
   const sourceFinding = sourceFindings.find((item) => item.id === args.followup.finding_id) ?? null;
-  const matchingFindings = linkedFindings.filter((item) => findingsMatch(sourceFinding, item));
+  const sourceIdentity = collectEvidenceIdentity({
+    finding: sourceFinding,
+    evidenceRecords: sourceEvidenceRecords
+  });
+  const matchingFindings = linkedFindings.filter((item) => {
+    if (findingsMatch(sourceFinding, item)) return true;
+    const candidateIdentity = collectEvidenceIdentity({
+      finding: item,
+      evidenceRecords: linkedEvidenceRecords
+    });
+    return evidenceIdentityMatches({ source: sourceIdentity, candidate: candidateIdentity });
+  });
   if (matchingFindings.length > 0) {
     return {
       linked_run_id: args.linkedRunId,
@@ -205,7 +257,7 @@ export async function upsertRuntimeFollowupFromReviewAction(args: {
   rootDirOrOptions?: string | PersistenceReadOptions;
 }): Promise<PersistedRuntimeFollowupRecord | null> {
   const actionType = args.input.action_type;
-  if (!["rerun_in_capable_env", "mark_manual_runtime_review_complete", "accept_without_runtime_validation"].includes(actionType)) {
+  if (!["rerun_in_capable_env", "adopt_rerun_outcome", "mark_manual_runtime_review_complete", "accept_without_runtime_validation"].includes(actionType)) {
     return null;
   }
   const findingId = args.input.finding_id ?? null;
@@ -271,6 +323,22 @@ export async function upsertRuntimeFollowupFromReviewAction(args: {
       resolved_by: null,
       resolution_action_type: null,
       resolution_notes: null
+    }, location);
+  }
+
+  if (actionType === "adopt_rerun_outcome") {
+    if (!existing) return null;
+    return writeFollowup({
+      ...existing,
+      status: "resolved",
+      resolved_at: createdAt,
+      resolved_by: args.input.reviewer_id,
+      resolution_action_type: actionType,
+      resolution_notes: args.input.notes ?? null,
+      metadata_json: {
+        ...(((existing.metadata_json as Record<string, unknown> | null) ?? {})),
+        adopted_outcome: String((args.input.metadata as Record<string, unknown> | null)?.adopted_outcome ?? existing.rerun_outcome ?? "pending")
+      }
     }, location);
   }
 
