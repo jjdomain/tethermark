@@ -134,6 +134,14 @@ npm run api
 npm run web
 ```
 
+Or start both the API and web UI together:
+
+```bash
+npm run oss
+```
+
+The `oss` launcher builds once, then starts the API and web UI together from the compiled Node entrypoints. It is intended to work across Windows, macOS, and Linux, and the repository CI includes an `oss:check` smoke path for all three OS families.
+
 By default the web UI serves on `http://127.0.0.1:8788` and proxies its backend calls to the API at `http://127.0.0.1:8787`.
 
 Useful environment variables:

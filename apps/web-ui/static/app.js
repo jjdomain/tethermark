@@ -1,6 +1,27 @@
-const { createElement: h, useEffect, useMemo, useState } = window.React;
+const { Component, createElement: createReactElement, isValidElement, useEffect, useMemo, useState } = window.React;
 const { createRoot } = window.ReactDOM;
 const appConfig = window.HARNESS_WEB_UI_CONFIG || { apiBaseUrl: "/api" };
+
+function sanitizeChild(child) {
+  if (child == null || typeof child === "string" || typeof child === "number" || typeof child === "boolean") {
+    return child;
+  }
+  if (Array.isArray(child)) {
+    return child.map((item) => sanitizeChild(item));
+  }
+  if (isValidElement(child)) {
+    return child;
+  }
+  try {
+    return JSON.stringify(child, null, 2);
+  } catch {
+    return String(child);
+  }
+}
+
+function h(type, props, ...children) {
+  return createReactElement(type, props, ...children.map((child) => sanitizeChild(child)));
+}
 
 const navItems = [
   ["dashboard", "Dashboard"],
@@ -9,6 +30,29 @@ const navItems = [
   ["followups", "Runtime Follow-ups"],
   ["reviews", "Reviews"],
   ["settings", "Settings"]
+];
+
+const pageDescriptions = {
+  dashboard: "Overview of active work, queue health, and next actions.",
+  runs: "Launch new scans and inspect persisted run details.",
+  jobs: "Track durable background work and retry or cancel jobs.",
+  followups: "Manage runtime follow-up reruns and adoption decisions.",
+  reviews: "Work the review inbox, assignments, and queued decisions.",
+  settings: "Configure providers, governance, workspaces, and project defaults."
+};
+
+const navGroups = [
+  {
+    label: "General",
+    items: [
+      ["dashboard", "Dashboard", "grid"],
+      ["runs", "Runs", "play"],
+      ["reviews", "Reviews", "users"],
+      ["jobs", "Jobs", "bars"],
+      ["followups", "Follow-ups", "spark"],
+      ["settings", "Settings", "gear"]
+    ]
+  }
 ];
 
 const emptySettings = {
@@ -47,6 +91,44 @@ const emptyLlmRegistry = {
   presets: []
 };
 const emptyIntegrationRegistry = [];
+
+class ViewErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  componentDidCatch(error) {
+    console.error("[tethermark:web-ui] view render failed", error);
+  }
+
+  componentDidUpdate(previousProps) {
+    if (this.state.error && previousProps.resetKey !== this.props.resetKey) {
+      this.setState({ error: null });
+    }
+  }
+
+  render() {
+    if (!this.state.error) {
+      return this.props.children;
+    }
+    return h("div", { className: "rounded-2xl border border-red-300 bg-red-50 px-4 py-4 text-sm text-red-800" }, [
+      h("div", { key: "title", className: "font-semibold" }, "This view failed to render."),
+      h("div", { key: "body", className: "mt-2" }, this.state.error?.message || "Unknown render error."),
+      h("div", { key: "hint", className: "mt-2 text-red-700" }, "Try switching views or refreshing. This error is now trapped instead of blanking the whole app."),
+      h("button", {
+        key: "retry",
+        type: "button",
+        className: "mt-3 rounded-xl border border-red-300 bg-white px-3 py-2 font-medium text-red-800",
+        onClick: () => this.setState({ error: null })
+      }, "Retry View")
+    ]);
+  }
+}
 
 function inferTargetKind(targetDefaults) {
   if (targetDefaults?.target_kind) return targetDefaults.target_kind;
@@ -557,15 +639,64 @@ function Badge({ children }) {
   return h("span", { className: cn("inline-flex rounded-full border px-2.5 py-1 text-xs uppercase tracking-[0.18em]", badgeTone(String(children))) }, children || "none");
 }
 
+function SidebarIcon({ kind }) {
+  const common = {
+    viewBox: "0 0 20 20",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.7",
+    strokeLinecap: "round",
+    strokeLinejoin: "round",
+    className: "h-4 w-4"
+  };
+  if (kind === "grid") return h("svg", common, [
+    h("rect", { key: "a", x: "3", y: "3", width: "5", height: "5", rx: "1" }),
+    h("rect", { key: "b", x: "12", y: "3", width: "5", height: "5", rx: "1" }),
+    h("rect", { key: "c", x: "3", y: "12", width: "5", height: "5", rx: "1" }),
+    h("rect", { key: "d", x: "12", y: "12", width: "5", height: "5", rx: "1" })
+  ]);
+  if (kind === "play") return h("svg", common, [
+    h("circle", { key: "a", cx: "10", cy: "10", r: "7" }),
+    h("path", { key: "b", d: "M8 7.5L13 10L8 12.5V7.5Z" })
+  ]);
+  if (kind === "users") return h("svg", common, [
+    h("circle", { key: "a", cx: "7", cy: "7", r: "2.5" }),
+    h("path", { key: "b", d: "M3.5 15C4.4 12.9 6 12 7 12C8 12 9.6 12.9 10.5 15" }),
+    h("circle", { key: "c", cx: "14", cy: "8", r: "2" }),
+    h("path", { key: "d", d: "M12.2 15C12.7 13.6 13.8 12.8 15 12.6C16.1 12.8 17.1 13.6 17.6 15" })
+  ]);
+  if (kind === "bars") return h("svg", common, [
+    h("path", { key: "a", d: "M4 16V10" }),
+    h("path", { key: "b", d: "M10 16V4" }),
+    h("path", { key: "c", d: "M16 16V7" })
+  ]);
+  if (kind === "spark") return h("svg", common, [
+    h("path", { key: "a", d: "M10 3L11.8 7.2L16 9L11.8 10.8L10 15L8.2 10.8L4 9L8.2 7.2L10 3Z" })
+  ]);
+  if (kind === "gear") return h("svg", common, [
+    h("circle", { key: "a", cx: "10", cy: "10", r: "2.5" }),
+    h("path", { key: "b", d: "M10 3.5V5.2M10 14.8V16.5M16.5 10H14.8M5.2 10H3.5M14.6 5.4L13.3 6.7M6.7 13.3L5.4 14.6M14.6 14.6L13.3 13.3M6.7 6.7L5.4 5.4" })
+  ]);
+  if (kind === "plus") return h("svg", common, [
+    h("circle", { key: "a", cx: "10", cy: "10", r: "8" }),
+    h("path", { key: "b", d: "M10 6V14M6 10H14" })
+  ]);
+  if (kind === "mail") return h("svg", common, [
+    h("rect", { key: "a", x: "3", y: "4.5", width: "14", height: "11", rx: "2" }),
+    h("path", { key: "b", d: "M4.5 6L10 10.2L15.5 6" })
+  ]);
+  return h("span", { className: "inline-block h-4 w-4" });
+}
+
 function Button({ children, variant = "default", className = "", ...props }) {
   return h(
     "button",
     {
       className: cn(
-        "inline-flex items-center justify-center rounded-full px-4 py-2 text-sm font-semibold transition-colors",
-        variant === "default" && "bg-primary text-white hover:opacity-90",
-        variant === "secondary" && "bg-secondary text-foreground hover:bg-stone-200",
-        variant === "outline" && "border border-border bg-white hover:bg-secondary",
+        "inline-flex items-center justify-center rounded-2xl px-4 py-2.5 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-60",
+        variant === "default" && "bg-slate-900 text-white hover:bg-slate-800",
+        variant === "secondary" && "bg-secondary text-foreground hover:bg-slate-200",
+        variant === "outline" && "border border-border bg-white text-slate-700 hover:bg-slate-50",
         className
       ),
       ...props
@@ -575,10 +706,56 @@ function Button({ children, variant = "default", className = "", ...props }) {
 }
 
 function Card({ title, description, children, className = "" }) {
-  return h("section", { className: cn("rounded-3xl border border-border bg-card p-6 shadow-soft", className) }, [
-    title ? h("h3", { key: "t", className: "font-serif text-2xl" }, title) : null,
-    description ? h("p", { key: "d", className: "mt-2 text-sm text-muted" }, description) : null,
+  return h("section", { className: cn("rounded-[28px] border border-border bg-card p-6 shadow-soft", className) }, [
+    title ? h("h3", { key: "t", className: "text-xl font-semibold tracking-tight text-slate-900" }, title) : null,
+    description ? h("p", { key: "d", className: "mt-2 text-sm leading-6 text-muted" }, description) : null,
     h("div", { key: "c", className: title || description ? "mt-5" : "" }, children)
+  ]);
+}
+
+function Modal({ open, title, description, children, onClose, size = "xl" }) {
+  if (!open) return null;
+  const widthClass = size === "lg" ? "max-w-4xl" : size === "full" ? "max-w-7xl" : "max-w-6xl";
+  return h("div", {
+    className: "fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-950/45 px-4 py-8 backdrop-blur-sm",
+    onClick: onClose
+  }, h("div", {
+    className: cn("w-full rounded-[32px] border border-slate-200 bg-white shadow-2xl", widthClass),
+    onClick: (event) => event.stopPropagation()
+  }, [
+    h("div", { key: "header", className: "flex items-start justify-between gap-6 border-b border-slate-200 px-6 py-5" }, [
+      h("div", { key: "copy" }, [
+        h("h2", { key: "title", className: "text-2xl font-semibold tracking-tight text-slate-950" }, title),
+        description ? h("p", { key: "description", className: "mt-2 max-w-3xl text-sm leading-6 text-slate-500" }, description) : null
+      ]),
+      h(Button, { key: "close", variant: "outline", onClick: onClose }, "Close")
+    ]),
+    h("div", { key: "body", className: "px-6 py-6" }, children)
+  ]));
+}
+
+function SectionPanel({ title, eyebrow, description, children, tone = "default" }) {
+  const toneClass = tone === "success"
+    ? "border-emerald-200 bg-emerald-50/70"
+    : tone === "warning"
+      ? "border-amber-200 bg-amber-50/70"
+      : tone === "danger"
+        ? "border-red-200 bg-red-50/70"
+        : "border-slate-200 bg-slate-50";
+  return h("section", { className: cn("rounded-3xl border px-5 py-5", toneClass) }, [
+    h("div", { key: "head" }, [
+      eyebrow ? h("div", { key: "eyebrow", className: "text-xs font-mono uppercase tracking-[0.18em] text-slate-500" }, eyebrow) : null,
+      h("div", { key: "title", className: cn("font-semibold text-slate-950", eyebrow ? "mt-2" : "") }, title),
+      description ? h("div", { key: "description", className: "mt-2 text-sm leading-6 text-slate-500" }, description) : null
+    ]),
+    h("div", { key: "body", className: "mt-4" }, children)
+  ]);
+}
+
+function LaunchStatusCard({ label, value }) {
+  return h("div", { className: "rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm" }, [
+    h("div", { key: "label", className: "font-medium text-slate-900" }, label),
+    h("div", { key: "value", className: "mt-1 text-slate-500" }, value)
   ]);
 }
 
@@ -590,62 +767,377 @@ function Field({ label, children }) {
 }
 
 function Input(props) {
-  return h("input", { className: "w-full rounded-xl border border-border bg-white px-3 py-2", ...props });
+  return h("input", { className: "w-full rounded-2xl border border-border bg-white px-4 py-2.5 text-sm text-slate-900 outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-200", ...props });
 }
 
 function Select(props, children) {
-  return h("select", { className: "w-full rounded-xl border border-border bg-white px-3 py-2", ...props }, children);
+  return h("select", { className: "w-full rounded-2xl border border-border bg-white px-4 py-2.5 text-sm text-slate-900 outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-200", ...props }, children);
 }
 
 function Textarea(props) {
-  return h("textarea", { className: "min-h-[110px] w-full rounded-xl border border-border bg-white px-3 py-2", ...props });
+  return h("textarea", { className: "min-h-[110px] w-full rounded-2xl border border-border bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-200", ...props });
 }
 
-function MetricCard({ label, value, hint }) {
-  return h(Card, {
-    title: null,
-    description: null,
-    className: "p-0"
-  }, h("div", { className: "p-6" }, [
-    h("div", { key: "l", className: "text-xs font-mono uppercase tracking-[0.28em] text-muted" }, label),
-    h("div", { key: "v", className: "mt-2 font-serif text-4xl" }, value),
-    h("div", { key: "h", className: "mt-2 text-sm text-muted" }, hint)
-  ]));
+function DashboardKpiCard({ label, value, hint, tone = "slate" }) {
+  const toneClasses = {
+    slate: "border-slate-200 bg-white text-slate-900",
+    emerald: "border-emerald-200 bg-white text-slate-900",
+    amber: "border-amber-200 bg-white text-slate-900",
+    blue: "border-sky-200 bg-white text-slate-900"
+  };
+  const dotClasses = {
+    slate: "bg-slate-400",
+    emerald: "bg-emerald-500",
+    amber: "bg-amber-500",
+    blue: "bg-sky-500"
+  };
+  return h("div", { className: cn("rounded-3xl border p-5 shadow-sm", toneClasses[tone] || toneClasses.slate) }, [
+    h("div", { key: "head", className: "flex items-center gap-2 text-sm text-slate-500" }, [
+      h("span", { key: "dot", className: cn("h-2.5 w-2.5 rounded-full", dotClasses[tone] || dotClasses.slate) }),
+      h("span", { key: "label" }, label)
+    ]),
+    h("div", { key: "value", className: "mt-4 font-sans text-4xl font-semibold tracking-tight text-slate-950" }, value),
+    h("div", { key: "hint", className: "mt-2 text-sm text-slate-500" }, hint)
+  ]);
+}
+
+function buildDashboardPostureSeries(runs) {
+  const now = new Date();
+  const months = [];
+  for (let index = 5; index >= 0; index -= 1) {
+    const date = new Date(now.getFullYear(), now.getMonth() - index, 1);
+    months.push({
+      key: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`,
+      label: date.toLocaleString(undefined, { month: "short" }),
+      scores: [],
+      runCount: 0
+    });
+  }
+  const monthMap = new Map(months.map((item) => [item.key, item]));
+  runs.forEach((run) => {
+    const createdAt = run?.created_at ? new Date(run.created_at) : null;
+    if (!createdAt || Number.isNaN(createdAt.getTime())) return;
+    const key = `${createdAt.getFullYear()}-${String(createdAt.getMonth() + 1).padStart(2, "0")}`;
+    const bucket = monthMap.get(key);
+    if (!bucket) return;
+    bucket.runCount += 1;
+    const numericScore = Number(run?.overall_score);
+    if (Number.isFinite(numericScore)) {
+      bucket.scores.push(numericScore);
+    }
+  });
+  let lastScore = 0;
+  return months.map((item) => {
+    const averageScore = item.scores.length
+      ? item.scores.reduce((sum, value) => sum + value, 0) / item.scores.length
+      : lastScore;
+    lastScore = averageScore;
+    return {
+      label: item.label,
+      score: Number(averageScore.toFixed(1)),
+      runCount: item.runCount
+    };
+  });
+}
+
+function buildLinePath(points) {
+  return points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" ");
+}
+
+function DashboardTrendCard({ title, subtitle, series }) {
+  if (!series.length) {
+    return h(Card, { title, description: subtitle, className: "border-slate-200 bg-white shadow-sm" }, h("div", { className: "text-sm text-slate-500" }, "No trend data yet."));
+  }
+  const width = 760;
+  const height = 250;
+  const padding = { top: 18, right: 18, bottom: 34, left: 18 };
+  const plotWidth = width - padding.left - padding.right;
+  const plotHeight = height - padding.top - padding.bottom;
+  const maxScore = Math.max(100, ...series.map((item) => item.score || 0));
+  const points = series.map((item, index) => ({
+    x: padding.left + (series.length === 1 ? plotWidth / 2 : (index / (series.length - 1)) * plotWidth),
+    y: padding.top + (1 - ((item.score || 0) / maxScore)) * plotHeight,
+    score: item.score || 0,
+    label: item.label
+  }));
+  const linePath = buildLinePath(points);
+  const areaPath = `${linePath} L ${points[points.length - 1].x} ${height - padding.bottom} L ${points[0].x} ${height - padding.bottom} Z`;
+  const latest = series[series.length - 1];
+  const previous = series[series.length - 2] || latest;
+  const delta = Number((latest.score - previous.score).toFixed(1));
+  return h(Card, { title, description: subtitle, className: "border-slate-200 bg-white shadow-sm" }, [
+    h("div", { key: "summary", className: "mb-4 flex flex-wrap items-end justify-between gap-4" }, [
+      h("div", { key: "value" }, [
+        h("div", { key: "score", className: "text-4xl font-semibold tracking-tight text-slate-950" }, `${latest.score}`),
+        h("div", { key: "hint", className: cn("mt-1 text-sm", delta >= 0 ? "text-emerald-600" : "text-red-600") }, `${delta >= 0 ? "+" : ""}${delta} vs previous month`)
+      ]),
+      h("div", { key: "runs", className: "text-sm text-slate-500" }, `${latest.runCount} run${latest.runCount === 1 ? "" : "s"} this month`)
+    ]),
+    h("svg", { key: "chart", viewBox: `0 0 ${width} ${height}`, className: "h-[260px] w-full overflow-visible" }, [
+      h("defs", { key: "defs" }, h("linearGradient", { id: "dashboard-posture-fill", x1: "0", x2: "0", y1: "0", y2: "1" }, [
+        h("stop", { key: "start", offset: "0%", stopColor: "#22c55e", stopOpacity: "0.28" }),
+        h("stop", { key: "end", offset: "100%", stopColor: "#22c55e", stopOpacity: "0.02" })
+      ])),
+      [0, 25, 50, 75, 100].map((tick) => {
+        const y = padding.top + (1 - (tick / maxScore)) * plotHeight;
+        return h("g", { key: `tick:${tick}` }, [
+          h("line", { key: "line", x1: padding.left, y1: y, x2: width - padding.right, y2: y, stroke: "#e2e8f0", strokeWidth: "1" }),
+          h("text", { key: "label", x: width - padding.right, y: y - 6, textAnchor: "end", fontSize: "11", fill: "#94a3b8" }, String(tick))
+        ]);
+      }),
+      h("path", { key: "area", d: areaPath, fill: "url(#dashboard-posture-fill)" }),
+      h("path", { key: "line", d: linePath, fill: "none", stroke: "#16a34a", strokeWidth: "4", strokeLinecap: "round", strokeLinejoin: "round" }),
+      points.map((point) => h("circle", { key: `point:${point.label}`, cx: point.x, cy: point.y, r: "4.5", fill: "#16a34a", stroke: "#ffffff", strokeWidth: "2" })),
+      points.map((point) => h("text", { key: `month:${point.label}`, x: point.x, y: height - 10, textAnchor: "middle", fontSize: "11", fill: "#64748b" }, point.label))
+    ])
+  ]);
 }
 
 function RunsTable({ runs, selectedRunId, onSelect }) {
-  return h("div", { className: "overflow-x-auto rounded-2xl border border-border" }, h("table", { className: "w-full text-sm" }, [
-    h("thead", { key: "h" }, h("tr", { className: "border-b border-border text-left text-xs uppercase tracking-[0.18em] text-muted" }, [
+  return h("div", { className: "overflow-x-auto rounded-2xl border border-slate-200" }, h("table", { className: "w-full text-sm" }, [
+    h("thead", { key: "h", className: "bg-slate-50" }, h("tr", { className: "text-left text-xs uppercase tracking-[0.18em] text-slate-500" }, [
       h("th", { key: "target", className: "px-4 py-3" }, "Target"),
       h("th", { key: "status", className: "px-4 py-3" }, "Status"),
       h("th", { key: "review", className: "px-4 py-3" }, "Review"),
-      h("th", { key: "package", className: "px-4 py-3" }, "Package"),
+      h("th", { key: "score", className: "px-4 py-3" }, "Score"),
       h("th", { key: "created", className: "px-4 py-3" }, "Created")
     ])),
     h("tbody", { key: "b" }, runs.length ? runs.map((run) => h("tr", {
       key: run.id,
-      className: cn("border-b border-border/80", onSelect && "cursor-pointer hover:bg-stone-50", selectedRunId === run.id && "bg-stone-100/70"),
+      className: cn("border-t border-slate-200", onSelect && "cursor-pointer hover:bg-slate-50", selectedRunId === run.id && "bg-slate-100"),
       onClick: onSelect ? () => onSelect(run.id) : undefined
     }, [
       h("td", { key: "target", className: "px-4 py-3" }, [
-        h("div", { key: "name", className: "font-medium" }, run.target?.canonical_name || run.target_summary?.canonical_name || run.target_id),
-        h("div", { key: "id", className: "text-xs text-muted" }, run.id)
+        h("div", { key: "name", className: "font-medium text-slate-900" }, run.target?.canonical_name || run.target_summary?.canonical_name || run.target_id),
+        h("div", { key: "id", className: "text-xs text-slate-500" }, `${run.id} • ${run.audit_package || "default package"}`)
       ]),
       h("td", { key: "status", className: "px-4 py-3" }, h(Badge, null, run.status)),
       h("td", { key: "review", className: "px-4 py-3" }, h(Badge, null, run.review_workflow?.status || "none")),
-      h("td", { key: "package", className: "px-4 py-3" }, run.audit_package),
-      h("td", { key: "created", className: "px-4 py-3" }, formatDate(run.created_at))
-    ])) : h("tr", null, h("td", { className: "px-4 py-8 text-center text-muted", colSpan: 5 }, "No runs available.")))
+      h("td", { key: "score", className: "px-4 py-3 font-medium text-slate-900" }, Number.isFinite(Number(run.overall_score)) ? Number(run.overall_score).toFixed(1) : "n/a"),
+      h("td", { key: "created", className: "px-4 py-3 text-slate-500" }, formatDate(run.created_at))
+    ])) : h("tr", null, h("td", { className: "px-4 py-8 text-center text-slate-500", colSpan: 5 }, "No runs available.")))
+  ]));
+}
+
+function RunInboxList({ runs, selectedRunId, onSelect }) {
+  return runs.length
+    ? h("div", { className: "divide-y divide-slate-200 overflow-hidden rounded-3xl border border-slate-200 bg-white" }, runs.map((run) => {
+      const targetName = run.target?.canonical_name || run.target_summary?.canonical_name || run.target_id;
+      const status = run.review_workflow?.status || run.status || "unknown";
+      return h("button", {
+        key: run.id,
+        type: "button",
+        className: cn(
+          "flex w-full items-start justify-between gap-4 px-5 py-4 text-left transition hover:bg-slate-50",
+          selectedRunId === run.id && "bg-slate-50"
+        ),
+        onClick: () => onSelect?.(run.id)
+      }, [
+        h("div", { key: "copy", className: "min-w-0 flex-1" }, [
+          h("div", { key: "title", className: "truncate font-medium text-slate-900" }, targetName),
+          h("div", { key: "meta", className: "mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-slate-500" }, [
+            h("span", { key: "run" }, run.id),
+            h("span", { key: "package" }, run.audit_package || "default package"),
+            h("span", { key: "age" }, formatDate(run.created_at))
+          ]),
+          h("div", { key: "submeta", className: "mt-2 flex flex-wrap gap-2" }, [
+            h(Badge, { key: "status" }, run.status),
+            h(Badge, { key: "review" }, status),
+            runtimeFollowupCount(run) > 0 ? h(Badge, { key: "followup" }, `follow-up ${runtimeFollowupCount(run)}`) : null
+          ].filter(Boolean))
+        ]),
+        h("div", { key: "score", className: "shrink-0 text-right" }, [
+          h("div", { key: "value", className: "text-lg font-semibold text-slate-950" }, Number.isFinite(Number(run.overall_score)) ? Number(run.overall_score).toFixed(1) : "n/a"),
+          h("div", { key: "label", className: "mt-1 text-xs uppercase tracking-[0.18em] text-slate-400" }, "Score")
+        ])
+      ]);
+    }))
+    : h("div", { className: "rounded-3xl border border-dashed border-slate-200 px-5 py-8 text-sm text-slate-500" }, "No runs available in the current scope.");
+}
+
+function LaunchAuditModal({
+  open,
+  onClose,
+  requestContext,
+  currentProject,
+  runForm,
+  updateRunForm,
+  auditPackages,
+  policyPacks,
+  llmRegistry,
+  runModelOptions,
+  selectedProvider,
+  launchReadiness,
+  preflightSummary,
+  preflightStale,
+  preflightCheckedAt,
+  preflightAcceptedAt,
+  preflightLoading,
+  applyProviderPreset,
+  runPreflight,
+  acceptPreflight,
+  applyPreflightRecommendations,
+  launchRun
+}) {
+  return h(Modal, {
+    open,
+    onClose,
+    size: "full",
+    title: "Launch Audit",
+    description: "Configure a new audit in grouped sections, validate it with preflight, then launch when the plan is accepted."
+  }, h("div", { className: "grid gap-6 xl:grid-cols-[1.35fr_0.65fr]" }, [
+    h("div", { key: "main", className: "space-y-4" }, [
+      h(SectionPanel, { key: "scope", eyebrow: "Context", title: "Scope and target", description: "Define what is being audited and which workspace/project owns the run." }, [
+        h("div", { key: "meta", className: "mb-4 grid gap-3 md:grid-cols-2" }, [
+          h(LaunchStatusCard, { key: "scope-card", label: "Current scope", value: `${requestContext.workspaceId}/${requestContext.projectId}` }),
+          h(LaunchStatusCard, { key: "project-card", label: "Project defaults", value: currentProject ? `${currentProject.name} (${currentProject.id})` : "No project selected" })
+        ]),
+        h("div", { key: "fields", className: "grid gap-4 md:grid-cols-2" }, [
+          h(Field, { key: "target-kind", label: "Target kind" }, Select({ value: runForm.target_kind, onChange: (event) => updateRunForm("target_kind", event.target.value) }, [
+            h("option", { key: "path", value: "path" }, "local path"),
+            h("option", { key: "repo", value: "repo" }, "repo url"),
+            h("option", { key: "endpoint", value: "endpoint" }, "endpoint url")
+          ])),
+          runForm.target_kind === "repo"
+            ? h(Field, { key: "repo", label: "Repository URL" }, h(Input, { value: runForm.repo_url, onChange: (event) => updateRunForm("repo_url", event.target.value), placeholder: "https://github.com/org/repo or git@github.com:org/repo.git" }))
+            : runForm.target_kind === "endpoint"
+              ? h(Field, { key: "endpoint", label: "Endpoint URL" }, h(Input, { value: runForm.endpoint_url, onChange: (event) => updateRunForm("endpoint_url", event.target.value), placeholder: "https://service.example.com/v1" }))
+              : h(Field, { key: "path", label: "Local Path" }, h(Input, { value: runForm.local_path, onChange: (event) => updateRunForm("local_path", event.target.value), placeholder: "fixtures/validation-targets/agent-tool-boundary-risky" }))
+        ])
+      ]),
+      h(SectionPanel, { key: "audit-profile", eyebrow: "Audit Profile", title: "Scan mode and policy", description: "Choose how deep the audit runs and which package/policy pack applies." }, h("div", { className: "grid gap-4 md:grid-cols-2" }, [
+        h(Field, { key: "mode", label: "Run mode" }, Select({ value: runForm.run_mode, onChange: (event) => updateRunForm("run_mode", event.target.value) }, [
+          h("option", { key: "static", value: "static" }, "static"),
+          h("option", { key: "build", value: "build" }, "build"),
+          h("option", { key: "runtime", value: "runtime" }, "runtime"),
+          h("option", { key: "validate", value: "validate" }, "validate")
+        ])),
+        h(Field, { key: "pkg", label: "Audit package" }, Select({ value: runForm.audit_package, onChange: (event) => updateRunForm("audit_package", event.target.value) }, [
+          ...auditPackages.map((item) => h("option", { key: item.id, value: item.id }, item.title + " (" + item.id + ")")),
+          !auditPackages.some((item) => item.id === runForm.audit_package) ? h("option", { key: runForm.audit_package || "custom-package", value: runForm.audit_package }, (runForm.audit_package || "custom") + " (custom)") : null
+        ].filter(Boolean))),
+        h(Field, { key: "policy-pack", label: "Policy pack" }, Select({ value: runForm.audit_policy_pack || "", onChange: (event) => updateRunForm("audit_policy_pack", event.target.value) }, [
+          h("option", { key: "default-empty", value: "" }, "default builtin policy"),
+          ...policyPacks.map((item) => h("option", { key: item.id, value: item.id }, item.name + " (" + item.id + ")")),
+          runForm.audit_policy_pack && !policyPacks.some((item) => item.id === runForm.audit_policy_pack) ? h("option", { key: runForm.audit_policy_pack, value: runForm.audit_policy_pack }, runForm.audit_policy_pack + " (custom)") : null
+        ].filter(Boolean)))
+      ])),
+      h(SectionPanel, { key: "provider", eyebrow: "Provider", title: "Provider and model", description: "Pick the provider route, then a model preset or custom override." }, [
+        h("div", { key: "presets", className: "mb-4 flex flex-wrap gap-3" }, (llmRegistry.presets || []).map((preset) => h(Button, {
+          key: preset.id,
+          variant: preset.provider_id === runForm.llm_provider && (preset.model || "") === (runForm.llm_model || "") ? "secondary" : "outline",
+          onClick: () => applyProviderPreset(preset.id, "run")
+        }, preset.label))),
+        h("div", { key: "fields", className: "grid gap-4 md:grid-cols-2" }, [
+          h(Field, { key: "provider", label: "Provider" }, Select({
+            value: runForm.llm_provider,
+            onChange: (event) => {
+              const nextProvider = event.target.value;
+              const nextDefinition = getProviderDefinition(llmRegistry, nextProvider);
+              updateRunForm("llm_provider", nextProvider);
+              updateRunForm("llm_model", nextDefinition?.default_model || "");
+            }
+          }, (llmRegistry.providers || []).map((item) => h("option", { key: item.id, value: item.id }, `${item.name} (${item.mode === "local_mock" ? "local mock" : "live api"})`)))),
+          h(Field, { key: "model", label: "Model preset" }, Select({ value: runForm.llm_model || "", onChange: (event) => updateRunForm("llm_model", event.target.value) }, [
+            h("option", { key: "provider-default", value: "" }, "provider default"),
+            ...runModelOptions.map((item) => h("option", { key: item.id, value: item.id }, `${item.label} (${item.id})`))
+          ])),
+          selectedProvider?.supports_custom_model
+            ? h(Field, { key: "model-custom", label: "Custom model override" }, h(Input, { value: runForm.llm_model || "", onChange: (event) => updateRunForm("llm_model", event.target.value), placeholder: "enter a custom model id" }))
+            : null
+        ])
+      ]),
+      h(SectionPanel, { key: "governance", eyebrow: "Governance", title: "Preflight and review controls", description: "Set strictness, runtime validation, and review visibility." }, h("div", { className: "grid gap-4 md:grid-cols-2" }, [
+        h(Field, { key: "preflight-strictness", label: "Preflight strictness" }, Select({ value: runForm.preflight_strictness, onChange: (event) => updateRunForm("preflight_strictness", event.target.value) }, [
+          h("option", { key: "standard", value: "standard" }, "standard"),
+          h("option", { key: "strict", value: "strict" }, "strict"),
+          h("option", { key: "lenient", value: "lenient" }, "lenient")
+        ])),
+        h(Field, { key: "runtime-allowed", label: "Runtime validation" }, Select({ value: runForm.runtime_allowed, onChange: (event) => updateRunForm("runtime_allowed", event.target.value) }, [
+          h("option", { key: "never", value: "never" }, "never"),
+          h("option", { key: "targeted_only", value: "targeted_only" }, "targeted only"),
+          h("option", { key: "allowed", value: "allowed" }, "allowed")
+        ])),
+        h(Field, { key: "review-severity", label: "Human review threshold" }, Select({ value: runForm.review_severity, onChange: (event) => updateRunForm("review_severity", event.target.value) }, [
+          h("option", { key: "critical", value: "critical" }, "critical"),
+          h("option", { key: "high", value: "high" }, "high"),
+          h("option", { key: "medium", value: "medium" }, "medium"),
+          h("option", { key: "low", value: "low" }, "low")
+        ])),
+        h(Field, { key: "review-visibility", label: "Default visibility" }, Select({ value: runForm.review_visibility, onChange: (event) => updateRunForm("review_visibility", event.target.value) }, [
+          h("option", { key: "public", value: "public" }, "public"),
+          h("option", { key: "internal", value: "internal" }, "internal"),
+          h("option", { key: "internal-only", value: "internal-only" }, "internal-only")
+        ]))
+      ]))
+    ]),
+    h("div", { key: "side", className: "space-y-4" }, [
+      h(SectionPanel, { key: "readiness", eyebrow: "Launch readiness", title: launchReadiness.canLaunch ? "Ready to launch" : "Needs attention", tone: launchReadiness.canLaunch ? "success" : launchReadiness.blockers.length || launchReadiness.issues.length ? "danger" : "warning" }, [
+        h("div", { key: "status-grid", className: "grid gap-3 text-sm text-slate-600" }, [
+          h(LaunchStatusCard, { key: "validation", label: "Input validation", value: launchReadiness.issues.length ? "needs fixes" : "ok" }),
+          h(LaunchStatusCard, { key: "preflight-status", label: "Preflight", value: launchReadiness.preflightStatus.replace(/_/g, " ") }),
+          h(LaunchStatusCard, { key: "accepted", label: "Accepted", value: launchReadiness.accepted ? "yes" : "no" }),
+          h(LaunchStatusCard, { key: "drift", label: "Profile drift", value: launchReadiness.profileDrift.length ? launchReadiness.profileDrift.join(", ") : "none" })
+        ]),
+        h("div", { key: "actions", className: "mt-4 flex flex-wrap gap-3" }, [
+          h(Button, { key: "preflight", variant: "outline", onClick: runPreflight }, preflightLoading ? "Running Preflight..." : "Run Preflight"),
+          h(Button, { key: "accept-preflight", variant: "secondary", onClick: acceptPreflight, disabled: !preflightSummary || preflightStale }, "Accept Preflight"),
+          h(Button, { key: "apply-preflight", variant: "outline", onClick: applyPreflightRecommendations, disabled: !preflightSummary?.launch_profile || !launchReadiness.profileDrift.length }, "Apply Recommended Profile"),
+          h(Button, { key: "launch", disabled: !launchReadiness.canLaunch, onClick: launchRun }, preflightSummary && !launchReadiness.accepted ? "Accept Preflight First" : "Start Run")
+        ]),
+        h("div", { key: "times", className: "mt-4 grid gap-2 text-sm text-slate-500" }, [
+          h("div", { key: "checked" }, "Checked: " + formatDate(preflightCheckedAt)),
+          h("div", { key: "accepted" }, "Accepted: " + formatDate(preflightAcceptedAt))
+        ])
+      ]),
+      launchReadiness.issues.length
+        ? h(SectionPanel, { key: "issues", title: "Launch input issues", tone: "danger" }, h("ul", { className: "space-y-1 text-sm text-red-800" }, launchReadiness.issues.map((item, index) => h("li", { key: index }, "- " + item))))
+        : null,
+      preflightSummary
+        ? h(SectionPanel, { key: "preflight-summary", eyebrow: "Preflight", title: "Latest preflight summary", description: preflightSummary.readiness.status.replace(/_/g, " "), tone: preflightSummary.readiness.status === "blocked" ? "danger" : preflightSummary.readiness.status === "ready_with_warnings" ? "warning" : "success" }, [
+          h("div", { key: "flags", className: "mb-4 flex flex-wrap gap-2" }, [
+            preflightStale ? h(Badge, { key: "stale" }, "stale") : null,
+            launchReadiness.accepted ? h(Badge, { key: "accepted" }, "accepted") : null
+          ].filter(Boolean)),
+          h("div", { key: "summary-grid", className: "grid gap-3" }, [
+            h(LaunchStatusCard, { key: "class", label: "Target class", value: preflightSummary.target.target_class + " (" + Math.round((preflightSummary.target.confidence || 0) * 100) + "%)" }),
+            h(LaunchStatusCard, { key: "package", label: "Recommended package", value: preflightSummary.recommended_audit_package.id }),
+            h(LaunchStatusCard, { key: "policy", label: "Policy pack", value: preflightSummary.selected_policy_pack.id || "default" })
+          ])
+        ])
+        : h(SectionPanel, { key: "preflight-empty", eyebrow: "Preflight", title: "No preflight summary yet", description: "Run preflight to verify target readiness, provider availability, and the planned audit profile before launch." }, h("div", { className: "text-sm text-slate-500" }, "Preflight results will appear here after the first validation run."))
+    ])
   ]));
 }
 
 function DetailList({ items }) {
+  function renderDetailValue(value) {
+    if (isValidElement(value)) return value;
+    if (value == null || value === "") return "n/a";
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+    if (Array.isArray(value)) {
+      return value.length ? value.map((item) => {
+        if (item == null) return "";
+        if (typeof item === "string" || typeof item === "number" || typeof item === "boolean") return String(item);
+        try {
+          return JSON.stringify(item);
+        } catch {
+          return String(item);
+        }
+      }).filter(Boolean).join(", ") : "n/a";
+    }
+    try {
+      return h("pre", { className: "overflow-x-auto whitespace-pre-wrap text-xs text-muted" }, JSON.stringify(value, null, 2));
+    } catch {
+      return String(value);
+    }
+  }
   return h("dl", { className: "grid gap-3 md:grid-cols-2" }, items.map((item) => h("div", {
     key: item.label,
     className: "rounded-2xl border border-border bg-white/70 px-4 py-3"
   }, [
     h("dt", { key: "label", className: "text-xs font-mono uppercase tracking-[0.18em] text-muted" }, item.label),
-    h("dd", { key: "value", className: "mt-2 text-sm font-medium text-foreground" }, item.value || "n/a")
+    h("dd", { key: "value", className: "mt-2 text-sm font-medium text-foreground" }, renderDetailValue(item.value))
   ])));
 }
 
@@ -658,13 +1150,13 @@ function ReviewQueueList({ runs, selectedRunId, onSelect, actorId }) {
       const dueSoonDispositionCount = Number(dispositionCounts.due_soon_disposition_count || 0);
       return h("div", {
         key: run.id,
-        className: cn("rounded-2xl border border-border bg-white/70 px-4 py-4", "cursor-pointer hover:bg-stone-50", selectedRunId === run.id && "bg-stone-100/70"),
+        className: cn("rounded-2xl border border-slate-200 bg-white px-4 py-4 shadow-sm", "cursor-pointer hover:bg-slate-50", selectedRunId === run.id && "border-slate-300 bg-slate-50"),
         onClick: () => onSelect?.(run.id)
       }, [
         h("div", { key: "head", className: "flex items-start justify-between gap-3" }, [
           h("div", { key: "copy" }, [
-            h("div", { key: "title", className: "font-medium" }, run.target?.canonical_name || run.target_summary?.canonical_name || run.target_id),
-            h("div", { key: "meta", className: "mt-1 text-sm text-muted" }, `${run.id} - reviewer ${run.review_workflow?.current_reviewer_id || "unassigned"}`)
+            h("div", { key: "title", className: "font-medium text-slate-900" }, run.target?.canonical_name || run.target_summary?.canonical_name || run.target_id),
+            h("div", { key: "meta", className: "mt-1 text-sm text-slate-500" }, `${run.id} • reviewer ${run.review_workflow?.current_reviewer_id || "unassigned"}`)
           ]),
           h("div", { key: "badges", className: "flex flex-wrap gap-2 justify-end" }, [
             h(Badge, { key: "status" }, run.review_workflow?.status || "none"),
@@ -674,7 +1166,7 @@ function ReviewQueueList({ runs, selectedRunId, onSelect, actorId }) {
             needsDispositionReview ? h(Badge, { key: "disposition-review" }, `disposition re-review ${dispositionCounts.findings_needing_disposition_review_count}`) : null
           ].filter(Boolean))
         ]),
-        h("div", { key: "details", className: "mt-3 grid gap-3 md:grid-cols-3 text-sm text-muted" }, [
+        h("div", { key: "details", className: "mt-3 grid gap-3 md:grid-cols-3 text-sm text-slate-500" }, [
           h("div", { key: "opened" }, `Opened ${formatDate(run.review_workflow?.opened_at || run.created_at)}`),
           h("div", { key: "age" }, `Queue age ${reviewAgeLabel(run)}`),
           h("div", { key: "last" }, `Last action ${run.review_workflow?.last_action_type || "none"}`)
@@ -864,8 +1356,7 @@ function RuntimeFollowupWorkspace({
                 }),
                 h("div", { key: "copy" }, [
                   h("div", { key: "title", className: "font-medium" }, followup.finding_title || followup.finding_id),
-                h("div", { key: "meta", className: "mt-1 text-sm text-muted" }, `${followup.run_id} • ${followup.followup_policy} • ${formatDate(followup.requested_at)}`)
-              ]),
+                  h("div", { key: "meta", className: "mt-1 text-sm text-muted" }, `${followup.run_id} • ${followup.followup_policy} • ${formatDate(followup.requested_at)}`)
                 ])
               ]),
               h("div", { key: "badges", className: "flex flex-wrap gap-2 justify-end" }, [
@@ -937,12 +1428,12 @@ function RuntimeFollowupWorkspace({
             h("div", { key: "outcome", className: "rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900" }, `Rerun outcome ${selectedFollowup.rerun_outcome || "pending"}`)
           ]),
           h("div", { key: "grid", className: "grid gap-4 xl:grid-cols-2" }, [
-            h("div", { key: "source", className: "rounded-2xl border border-border bg-white/70 px-4 py-4" }, [
-              h("div", { key: "title", className: "text-xs font-mono uppercase tracking-[0.18em] text-muted" }, "Source Finding"),
+            h("div", { key: "source", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4" }, [
+              h("div", { key: "title", className: "text-xs font-mono uppercase tracking-[0.18em] text-slate-400" }, "Source Finding"),
               sourceFinding
                 ? [
-                  h("div", { key: "name", className: "mt-3 font-medium" }, sourceFinding.title),
-                  h("div", { key: "meta", className: "mt-1 text-sm text-muted" }, `${sourceFinding.id} • ${sourceFinding.category} • ${sourceFinding.severity}`),
+                  h("div", { key: "name", className: "mt-3 font-medium text-slate-900" }, sourceFinding.title),
+                  h("div", { key: "meta", className: "mt-1 text-sm text-slate-500" }, `${sourceFinding.id} | ${sourceFinding.category} | ${sourceFinding.severity}`),
                   sourceEvaluation
                     ? h(DetailList, {
                       key: "source-eval",
@@ -957,8 +1448,8 @@ function RuntimeFollowupWorkspace({
                 ]
                 : h("div", { key: "empty", className: "mt-3 text-sm text-muted" }, "The source run is not currently loaded. Open the source run to inspect the original finding.")
             ]),
-            h("div", { key: "rerun", className: "rounded-2xl border border-border bg-white/70 px-4 py-4" }, [
-              h("div", { key: "title", className: "text-xs font-mono uppercase tracking-[0.18em] text-muted" }, "Linked Rerun"),
+            h("div", { key: "rerun", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4" }, [
+              h("div", { key: "title", className: "text-xs font-mono uppercase tracking-[0.18em] text-slate-400" }, "Linked Rerun"),
               rerunLoading
                 ? h("div", { key: "loading", className: "mt-3 text-sm text-muted" }, "Loading linked rerun detail...")
                 : rerunRunDetail?.summary?.summary
@@ -967,11 +1458,11 @@ function RuntimeFollowupWorkspace({
                       h(Badge, { key: "run-status" }, rerunRunDetail.summary.summary.status || "unknown"),
                       h(Badge, { key: "review-status" }, rerunRunDetail.summary.summary.review_workflow_status || "none")
                     ]),
-                    h("div", { key: "meta", className: "mt-2 text-sm text-muted" }, `${selectedFollowup.linked_run_id} • ${formatDate(rerunRunDetail.summary.summary.created_at)}`),
+                    h("div", { key: "meta", className: "mt-2 text-sm text-slate-500" }, `${selectedFollowup.linked_run_id} | ${formatDate(rerunRunDetail.summary.summary.created_at)}`),
                     rerunFinding
                       ? [
-                        h("div", { key: "finding-title", className: "mt-3 font-medium" }, rerunFinding.title),
-                        h("div", { key: "finding-meta", className: "mt-1 text-sm text-muted" }, `${rerunFinding.id} • ${rerunFinding.category} • ${rerunFinding.severity}`),
+                        h("div", { key: "finding-title", className: "mt-3 font-medium text-slate-900" }, rerunFinding.title),
+                        h("div", { key: "finding-meta", className: "mt-1 text-sm text-slate-500" }, `${rerunFinding.id} | ${rerunFinding.category} | ${rerunFinding.severity}`),
                         rerunEvaluation
                           ? h(DetailList, {
                             key: "rerun-eval",
@@ -1105,7 +1596,7 @@ function ReviewCommentsPanel({ comments, commentBody, commentFindingId, findings
 
 function ComparisonSummaryText(comparison) {
   const summary = comparison?.summary || {};
-  return `Changed ${summary.changed_finding_count || 0} · New ${summary.new_finding_count || 0} · Resolved ${summary.resolved_finding_count || 0} · Symbol matches ${summary.evidence_symbol_matched_count || 0}`;
+  return `Changed ${summary.changed_finding_count || 0} | New ${summary.new_finding_count || 0} | Resolved ${summary.resolved_finding_count || 0} | Symbol matches ${summary.evidence_symbol_matched_count || 0}`;
 }
 
 function deriveComparisonDetailDiffs(currentFinding, currentEvaluation, previousFinding, previousEvaluation) {
@@ -1129,6 +1620,7 @@ function RunDetailPanel({
   loading,
   comparison,
   comparisonLoading,
+  effectiveSettings,
   selectedFindingId,
   reviewAssignee,
   findingReviewState,
@@ -1171,11 +1663,35 @@ function RunDetailPanel({
   onOutboundActionTypeChange,
   onOutboundTargetNumberChange
 }) {
+  const [detailView, setDetailView] = useState("overview");
+  const [findingDetailView, setFindingDetailView] = useState("summary");
+  const detailTabs = [
+    ["overview", "Overview"],
+    ["findings", "Findings"],
+    ["review", "Review"],
+    ["runtime", "Runtime Validation"],
+    ["history", "History / Comparison"],
+    ["exports", "Exports / Integrations"]
+  ];
+  const panelGroups = {
+    overview: ["overview", "compare", "intent"],
+    findings: ["findings", "findings-rollup"],
+    review: ["assignment", "review-decisions", "handoff", "review-activity"],
+    runtime: ["runtime-followups", "sandbox-execution"],
+    history: ["comparison-preview", "comparison-export"],
+    exports: ["outbound", "report-exports", "indexed-exports", "audit-export", "webhook-deliveries"]
+  };
+  const findingDetailTabs = [
+    ["summary", "Summary"],
+    ["evidence", "Evidence"],
+    ["evaluation", "Evaluation"],
+    ["governance", "Governance"]
+  ];
   if (loading) {
-    return h(Card, { title: "Run Detail", description: "Loading persisted run detail and planned profile." }, h("div", { className: "text-sm text-muted" }, "Loading run detail..."));
+    return h(Card, { title: "Run Detail", description: "Loading persisted run detail and planned profile.", className: "border-slate-200 bg-white shadow-sm" }, h("div", { className: "text-sm text-slate-500" }, "Loading run detail..."));
   }
   if (!detail) {
-    return h(Card, { title: "Run Detail", description: "Select a run to compare planned launch posture with the executed configuration." }, h("div", { className: "text-sm text-muted" }, "No run selected."));
+    return h(Card, { title: "Run Detail", description: "Select a run to compare planned launch posture with the executed configuration.", className: "border-slate-200 bg-white shadow-sm" }, h("div", { className: "text-sm text-slate-500" }, "No run selected."));
   }
   const run = detail.run?.run || detail.run || {};
   const summary = detail.summary?.summary || {};
@@ -1283,31 +1799,44 @@ function RunDetailPanel({
       || summaryText.includes(selectedFinding.title.toLowerCase())
       || evidenceText.includes(selectedFinding.title.toLowerCase());
   });
-  return h("div", { className: "space-y-6" }, [
-    h(Card, { key: "overview", title: "Run Detail", description: "Persisted summary and review state for the selected run." }, [
+  const overviewItems = [
+    { label: "Run Id", value: summary.run_id || run.id },
+    { label: "Target", value: run.target?.canonical_name || run.target_summary?.canonical_name || run.target_id || "n/a" },
+    { label: "Status", value: summary.status || run.status },
+    { label: "Review", value: summary.review_workflow_status || run.review_workflow?.status || "none" },
+    { label: "Overall Score", value: String(summary.overall_score ?? run.overall_score ?? "n/a") },
+    { label: "Current Reviewer", value: summary.current_reviewer_id || run.review_workflow?.current_reviewer_id || "unassigned" },
+    { label: "Sandbox Readiness", value: summary.sandbox_execution?.readiness_status || "n/a" },
+    { label: "Created", value: formatDate(summary.created_at || run.created_at) }
+  ];
+  const findingsRollupItems = [
+    { label: "Needs Validation", value: String(findingEvaluations?.findings_needing_validation_count || 0) },
+    { label: "Runtime Follow-up Required", value: String(findingEvaluations?.runtime_followup_required_count || 0) },
+    { label: "Runtime Blocked", value: String(findingEvaluations?.runtime_validation_blocked_count || 0) },
+    { label: "Runtime Failed", value: String(findingEvaluations?.runtime_validation_failed_count || 0) },
+    { label: "Suppressed", value: String(findingEvaluations?.suppressed_finding_count || 0) },
+    { label: "Waived", value: String(findingEvaluations?.waived_finding_count || 0) },
+    { label: "Re-Review", value: String(findingEvaluations?.findings_needing_disposition_review_count || 0) },
+    { label: "Due Soon", value: String(dueSoonDispositionFindingSummaries.length) },
+    { label: "Conflicts", value: String((findingEvaluations?.conflict_pairs || []).length) },
+    { label: "Duplicates", value: String((findingEvaluations?.duplicate_groups || []).length) }
+  ];
+  const panels = [
+    h(Card, { key: "overview", title: "Run Detail", description: "Persisted summary and review state for the selected run.", className: "border-slate-200 bg-white shadow-sm" }, [
       h(DetailList, {
         key: "summary",
-        items: [
-          { label: "Run Id", value: summary.run_id || run.id },
-          { label: "Status", value: summary.status || run.status },
-          { label: "Review", value: summary.review_workflow_status || run.review_workflow?.status || "none" },
-          { label: "Rating", value: summary.rating || run.rating },
-          { label: "Overall Score", value: String(summary.overall_score ?? run.overall_score ?? "n/a") },
-          { label: "Sandbox Readiness", value: summary.sandbox_execution?.readiness_status || "n/a" },
-          { label: "Sandbox Attention", value: summary.sandbox_execution_attention_required ? "yes" : "no" },
-          { label: "Created", value: formatDate(summary.created_at || run.created_at) }
-        ]
+        items: overviewItems
       })
     ]),
-    h(Card, { key: "runtime-followups", title: "Runtime Follow-up Queue", description: "Linked rerun work items created from runtime-sensitive review decisions." }, runtimeFollowups.length
+    h(Card, { key: "runtime-followups", title: "Runtime Follow-up Queue", description: "Linked rerun work items created from runtime-sensitive review decisions.", className: "border-slate-200 bg-white shadow-sm" }, runtimeFollowups.length
       ? h("div", { className: "space-y-3" }, runtimeFollowups.map((followup) => h("div", {
         key: followup.id,
-        className: "rounded-2xl border border-border bg-white/70 px-4 py-3"
+        className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"
       }, [
         h("div", { key: "head", className: "flex flex-wrap items-center justify-between gap-3" }, [
           h("div", { key: "copy" }, [
-            h("div", { key: "title", className: "font-medium" }, followup.finding_title || followup.finding_id),
-            h("div", { key: "meta", className: "mt-1 text-sm text-muted" }, `${followup.followup_policy} - requested ${formatDate(followup.requested_at)} by ${followup.requested_by}`)
+            h("div", { key: "title", className: "font-medium text-slate-900" }, followup.finding_title || followup.finding_id),
+            h("div", { key: "meta", className: "mt-1 text-sm text-slate-500" }, `${followup.followup_policy} | requested ${formatDate(followup.requested_at)} by ${followup.requested_by}`)
           ]),
           h("div", { key: "badges", className: "flex flex-wrap gap-2" }, [
             h(Badge, { key: "status" }, followup.status),
@@ -1324,10 +1853,10 @@ function RunDetailPanel({
           ]
         }),
         followup.rerun_outcome_summary
-          ? h("div", { key: "outcome", className: "mt-2 text-sm text-muted" }, followup.rerun_outcome_summary)
+          ? h("div", { key: "outcome", className: "mt-2 text-sm text-slate-500" }, followup.rerun_outcome_summary)
           : null,
         followup.resolution_notes
-          ? h("div", { key: "notes", className: "mt-2 text-sm text-muted" }, followup.resolution_notes)
+          ? h("div", { key: "notes", className: "mt-2 text-sm text-slate-500" }, followup.resolution_notes)
           : null,
         h("div", { key: "actions", className: "mt-3 flex flex-wrap gap-3" }, [
           followup.rerun_request_json && (followup.status === "pending" || followup.status === "completed")
@@ -1335,11 +1864,11 @@ function RunDetailPanel({
             : null
         ].filter(Boolean))
       ])))
-      : h("div", { className: "text-sm text-muted" }, "No runtime follow-up items are linked to this run yet.")),
-    h(Card, { key: "compare", title: "Planned Vs Executed", description: "Preflight launch profile is compared against the resolved configuration stored for the completed run." }, [
+      : h("div", { className: "text-sm text-slate-500" }, "No runtime follow-up items are linked to this run yet.")),
+    h(Card, { key: "compare", title: "Planned Vs Executed", description: "Preflight launch profile is compared against the resolved configuration stored for the completed run.", className: "border-slate-200 bg-white shadow-sm" }, [
       plannedProfile
         ? h("div", { key: "planned", className: "space-y-4" }, [
-          h("div", { key: "planned-title", className: "text-xs font-mono uppercase tracking-[0.28em] text-muted" }, "Planned Launch Profile"),
+          h("div", { key: "planned-title", className: "text-xs font-mono uppercase tracking-[0.28em] text-slate-500" }, "Planned Launch Profile"),
           h(DetailList, {
             key: "planned-list",
             items: [
@@ -1374,9 +1903,9 @@ function RunDetailPanel({
             ].filter(Boolean))
             : null
         ])
-        : h("div", { key: "missing", className: "rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm text-muted" }, "No persisted preflight summary is available for this run."),
+        : h("div", { key: "missing", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-500" }, "No persisted preflight summary is available for this run."),
       h("div", { key: "executed", className: "mt-5 space-y-4" }, [
-        h("div", { key: "executed-title", className: "text-xs font-mono uppercase tracking-[0.28em] text-muted" }, "Executed Configuration"),
+        h("div", { key: "executed-title", className: "text-xs font-mono uppercase tracking-[0.28em] text-slate-500" }, "Executed Configuration"),
         h(DetailList, {
           key: "executed-list",
           items: [
@@ -1392,7 +1921,7 @@ function RunDetailPanel({
         })
       ])
     ]),
-    h(Card, { key: "sandbox-execution", title: "Sandbox Execution", description: "Bounded install/build/test/runtime-probe readiness derived for runtime-capable runs." }, sandboxExecution
+    h(Card, { key: "sandbox-execution", title: "Sandbox Execution", description: "Bounded install/build/test/runtime-probe readiness derived for runtime-capable runs.", className: "border-slate-200 bg-white shadow-sm" }, sandboxExecution
       ? h("div", { className: "space-y-4" }, [
         h(DetailList, {
           key: "sandbox-summary",
@@ -1414,18 +1943,18 @@ function RunDetailPanel({
           const artifactDetails = runtimeArtifactDetailItems(item.normalized_artifact);
           return h("div", {
             key: item.step_id,
-            className: "rounded-2xl border border-border bg-white/70 px-4 py-3"
+            className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"
           }, [
             h("div", { key: "row", className: "flex items-center justify-between gap-3" }, [
               h("div", { key: "copy" }, [
                 h("div", { key: "phase", className: "font-medium" }, `${planStep?.phase || "step"}: ${item.step_id}`),
-                h("div", { key: "command", className: "text-sm text-muted" }, (planStep?.command || []).join(" ")),
-                h("div", { key: "summary", className: "text-sm text-muted" }, item.summary),
-                h("div", { key: "adapter", className: "text-xs text-muted" }, `adapter ${item.adapter || planStep?.adapter || "unknown"}${item.normalized_artifact?.title ? ` - ${item.normalized_artifact.title}` : ""}`)
+                h("div", { key: "command", className: "text-sm text-slate-500" }, (planStep?.command || []).join(" ")),
+                h("div", { key: "summary", className: "text-sm text-slate-500" }, item.summary),
+                h("div", { key: "adapter", className: "text-xs text-slate-500" }, `adapter ${item.adapter || planStep?.adapter || "unknown"}${item.normalized_artifact?.title ? ` - ${item.normalized_artifact.title}` : ""}`)
               ]),
               h(Badge, { key: "status" }, item.status)
             ]),
-            h("div", { key: "meta", className: "mt-2 space-y-1 text-xs text-muted" }, [
+            h("div", { key: "meta", className: "mt-2 space-y-1 text-xs text-slate-500" }, [
               h("div", { key: "checked" }, `checked ${formatDate(item.checked_at)} via ${item.execution_runtime}`),
               item.duration_ms != null ? h("div", { key: "duration" }, `duration ${item.duration_ms} ms`) : null,
               item.exit_code != null ? h("div", { key: "exit" }, `exit code ${item.exit_code}`) : null,
@@ -1436,8 +1965,8 @@ function RunDetailPanel({
           ]);
         }))
       ])
-      : h("div", { className: "text-sm text-muted" }, "No sandbox execution planning data is available for this run.")),
-    h(Card, { key: "intent", title: "Launch Intent", description: "What the operator submitted and whether the most recent preflight was explicitly accepted." }, launchIntent
+      : h("div", { className: "text-sm text-slate-500" }, "No sandbox execution planning data is available for this run.")),
+    h(Card, { key: "intent", title: "Launch Intent", description: "What the operator submitted and whether the most recent preflight was explicitly accepted.", className: "border-slate-200 bg-white shadow-sm" }, launchIntent
       ? h("div", { className: "space-y-4" }, [
         h(DetailList, {
           key: "intent-list",
@@ -1469,11 +1998,11 @@ function RunDetailPanel({
           ]
         }),
         launchIntent.notes?.length
-          ? h("div", { className: "rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm text-muted" }, launchIntent.notes.join(" | "))
+          ? h("div", { className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-500" }, launchIntent.notes.join(" | "))
           : null
       ])
-      : h("div", { className: "text-sm text-muted" }, "No persisted launch intent is available for this run.")),
-    h(Card, { key: "outbound", title: "Outbound Preview", description: "Prepared GitHub-facing payloads only. This does not post anything externally." }, outboundPreview
+      : h("div", { className: "text-sm text-slate-500" }, "No persisted launch intent is available for this run.")),
+    h(Card, { key: "outbound", title: "Outbound Preview", description: "Prepared GitHub-facing payloads only. This does not post anything externally.", className: "border-slate-200 bg-white shadow-sm" }, outboundPreview
       ? h("div", { className: "space-y-4" }, [
         h("div", { key: "status-row", className: "flex flex-wrap gap-3" }, [
           h(Badge, { key: "mode" }, outboundPreview.policy?.mode || "disabled"),
@@ -1481,20 +2010,20 @@ function RunDetailPanel({
           h(Badge, { key: "approval" }, outboundPreview.readiness?.approved ? "approved" : "approval_pending"),
           h(Badge, { key: "verification" }, outboundPreview.readiness?.verified ? "verified" : "verification_pending")
         ]),
-        h("div", { key: "copy", className: "text-sm text-muted" }, (outboundPreview.readiness?.reasons || []).length ? outboundPreview.readiness.reasons.join(" ") : "Preview is available. External posting remains manual."),
+        h("div", { key: "copy", className: "text-sm text-slate-500" }, (outboundPreview.readiness?.reasons || []).length ? outboundPreview.readiness.reasons.join(" ") : "Preview is available. External posting remains manual."),
         outboundApproval
-          ? h("div", { key: "approved-meta", className: "rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm text-muted" }, `Approved by ${outboundApproval.approved_by} at ${formatDate(outboundApproval.approved_at)}`)
+          ? h("div", { key: "approved-meta", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-500" }, `Approved by ${outboundApproval.approved_by} at ${formatDate(outboundApproval.approved_at)}`)
           : null,
         outboundVerification
-          ? h("div", { key: "verification-meta", className: "rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm text-muted" }, `${outboundVerification.status} by ${outboundVerification.verified_by} at ${formatDate(outboundVerification.verified_at)}: ${outboundVerification.reason}`)
+          ? h("div", { key: "verification-meta", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-500" }, `${outboundVerification.status} by ${outboundVerification.verified_by} at ${formatDate(outboundVerification.verified_at)}: ${outboundVerification.reason}`)
           : null,
-        h("div", { key: "body", className: "rounded-2xl border border-border bg-white/70 p-4 text-sm whitespace-pre-wrap" }, outboundPreview.preview_summary?.body || "No outbound body prepared."),
+        h("div", { key: "body", className: "rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm whitespace-pre-wrap" }, outboundPreview.preview_summary?.body || "No outbound body prepared."),
         h("div", { key: "actions", className: "space-y-3" }, (outboundPreview.proposed_actions || []).map((item, index) => h("div", {
           key: item.action_type + ":" + index,
-          className: "rounded-2xl border border-border bg-stone-50 p-4"
+          className: "rounded-2xl border border-slate-200 bg-slate-50 p-4"
         }, [
           h("div", { key: "title", className: "font-medium" }, item.action_type),
-          h("pre", { key: "payload", className: "mt-2 overflow-x-auto text-xs text-muted" }, JSON.stringify(item.payload_preview, null, 2))
+          h("pre", { key: "payload", className: "mt-2 overflow-x-auto text-xs text-slate-500" }, JSON.stringify(item.payload_preview, null, 2))
         ]))),
         h("div", { key: "delivery-fields", className: "grid gap-4 md:grid-cols-2" }, [
           h(Field, { key: "action-type", label: "Outbound Action" }, Select({
@@ -1514,31 +2043,31 @@ function RunDetailPanel({
           h(Button, { key: "deliver", onClick: () => onExecuteOutboundDelivery?.(), disabled: !outboundPreview.readiness?.execute_allowed }, "Send To GitHub")
         ]),
         outboundSend
-          ? h("div", { key: "send-meta", className: "rounded-2xl border border-border bg-stone-50 px-4 py-3 text-sm text-muted" }, `${outboundSend.status} by ${outboundSend.attempted_by} at ${formatDate(outboundSend.attempted_at)}: ${outboundSend.reason}`)
+          ? h("div", { key: "send-meta", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-500" }, `${outboundSend.status} by ${outboundSend.attempted_by} at ${formatDate(outboundSend.attempted_at)}: ${outboundSend.reason}`)
           : null,
         outboundDelivery
-          ? h("div", { key: "delivery-meta", className: "rounded-2xl border border-border bg-stone-50 px-4 py-3 text-sm text-muted" }, `${outboundDelivery.status} by ${outboundDelivery.attempted_by} at ${formatDate(outboundDelivery.attempted_at)}: ${outboundDelivery.reason}${outboundDelivery.external_url ? ` (${outboundDelivery.external_url})` : ""}`)
+          ? h("div", { key: "delivery-meta", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-500" }, `${outboundDelivery.status} by ${outboundDelivery.attempted_by} at ${formatDate(outboundDelivery.attempted_at)}: ${outboundDelivery.reason}${outboundDelivery.external_url ? ` (${outboundDelivery.external_url})` : ""}`)
           : null
       ])
-      : h("div", { className: "text-sm text-muted" }, "No outbound preview is available for this run.")),
-    h(Card, { key: "webhook-deliveries", title: "Automation Webhooks", description: "Generic OSS automation hook deliveries for this run." }, webhookDeliveries.length
+      : h("div", { className: "text-sm text-slate-500" }, "No outbound preview is available for this run.")),
+    h(Card, { key: "webhook-deliveries", title: "Automation Webhooks", description: "Generic OSS automation hook deliveries for this run.", className: "border-slate-200 bg-white shadow-sm" }, webhookDeliveries.length
       ? h("div", { className: "space-y-3" }, webhookDeliveries.map((item) => h("div", {
         key: item.id,
-        className: "rounded-2xl border border-border bg-white/70 px-4 py-3"
+        className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"
       }, [
         h("div", { key: "row", className: "flex items-center justify-between gap-3" }, [
           h("div", { key: "copy" }, [
             h("div", { key: "event", className: "font-medium" }, item.event_type),
-            h("div", { key: "meta", className: "text-sm text-muted" }, `${item.status} - ${formatDate(item.attempted_at)} - ${item.target_url}`)
+            h("div", { key: "meta", className: "text-sm text-slate-500" }, `${item.status} | ${formatDate(item.attempted_at)} | ${item.target_url}`)
           ]),
           h(Badge, { key: "status" }, item.status)
         ]),
         item.response_summary
-          ? h("div", { key: "summary", className: "mt-2 text-sm text-muted" }, item.response_summary)
+          ? h("div", { key: "summary", className: "mt-2 text-sm text-slate-500" }, item.response_summary)
           : null
       ])))
-      : h("div", { className: "text-sm text-muted" }, "No generic webhook deliveries were recorded for this run.")),
-    h(Card, { key: "assignment", title: "Reviewer Assignment", description: "Assign ownership before review starts so the queue is explicitly owned." }, [
+      : h("div", { className: "text-sm text-slate-500" }, "No generic webhook deliveries were recorded for this run.")),
+    h(Card, { key: "assignment", title: "Reviewer Assignment", description: "Assign ownership before review starts so the queue is explicitly owned.", className: "border-slate-200 bg-white shadow-sm" }, [
       h("div", { key: "assignment-fields", className: "grid gap-4 md:grid-cols-[1fr_auto]" }, [
         h(Field, { key: "reviewer", label: "Assigned Reviewer" }, h(Input, {
           value: reviewAssignee || "",
@@ -1551,18 +2080,18 @@ function RunDetailPanel({
           disabled: !detail || !reviewAssignee
         }, "Assign Reviewer"))
       ]),
-      h("div", { key: "assignment-meta", className: "mt-3 text-sm text-muted" }, "Current reviewer: " + (summary.current_reviewer_id || run.review_workflow?.current_reviewer_id || "none"))
+      h("div", { key: "assignment-meta", className: "mt-3 text-sm text-slate-500" }, "Current reviewer: " + (summary.current_reviewer_id || run.review_workflow?.current_reviewer_id || "none"))
     ]),
-    h(Card, { key: "review-decisions", title: "Review Decisions", description: "Run-level reviewer actions and rerun gates." }, [
+    h(Card, { key: "review-decisions", title: "Review Decisions", description: "Run-level reviewer actions and rerun gates.", className: "border-slate-200 bg-white shadow-sm" }, [
       h("div", { key: "buttons", className: "flex flex-wrap gap-3" }, [
         h(Button, { key: "start", variant: "secondary", onClick: () => onRunReviewAction?.("start_review"), disabled: !detail }, "Start Review"),
         h(Button, { key: "approve", onClick: () => onRunReviewAction?.("approve_run"), disabled: !detail }, "Approve Run"),
         h(Button, { key: "reject", variant: "outline", onClick: () => onRunReviewAction?.("reject_run"), disabled: !detail }, "Reject Run"),
         h(Button, { key: "rerun", variant: "outline", onClick: () => onRunReviewAction?.("require_rerun"), disabled: !detail }, "Require Rerun")
       ]),
-      h("div", { key: "hint", className: "mt-3 text-sm text-muted" }, "Use the run-level controls after finding adjudication is complete, or force a rerun when validation is still required.")
+      h("div", { key: "hint", className: "mt-3 text-sm text-slate-500" }, "Use the run-level controls after finding adjudication is complete, or force a rerun when validation is still required.")
     ]),
-    h(Card, { key: "handoff", title: "Reviewer Handoff", description: "Compact reviewer context for reassignment, triage, and unresolved findings." }, reviewSummary
+    h(Card, { key: "handoff", title: "Reviewer Handoff", description: "Compact reviewer context for reassignment, triage, and unresolved findings.", className: "border-slate-200 bg-white shadow-sm" }, reviewSummary
       ? h("div", { className: "space-y-4" }, [
         h(DetailList, {
           key: "handoff-list",
@@ -1579,20 +2108,20 @@ function RunDetailPanel({
           ]
         }),
         reviewSummary.handoff.unresolved_finding_ids?.length
-          ? h("div", { key: "unresolved", className: "rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm" }, `Unresolved: ${reviewSummary.handoff.unresolved_finding_ids.join(", ")}`)
+          ? h("div", { key: "unresolved", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm" }, `Unresolved: ${reviewSummary.handoff.unresolved_finding_ids.join(", ")}`)
           : null,
         reviewSummary.handoff.findings_needing_disposition_review_ids?.length
           ? h("div", { key: "disposition-rereview", className: "rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900" }, `Disposition re-review: ${reviewSummary.handoff.findings_needing_disposition_review_ids.join(", ")}`)
           : null,
         reviewSummary.handoff.latest_notes?.length
-          ? h("div", { key: "latest-notes", className: "rounded-2xl border border-border bg-white/70 px-4 py-3" }, [
-            h("div", { key: "title", className: "text-xs font-mono uppercase tracking-[0.18em] text-muted" }, "Latest Notes"),
+          ? h("div", { key: "latest-notes", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+            h("div", { key: "title", className: "text-xs font-mono uppercase tracking-[0.18em] text-slate-500" }, "Latest Notes"),
             h("ul", { key: "list", className: "mt-2 space-y-1 text-sm" }, reviewSummary.handoff.latest_notes.map((note, index) => h("li", { key: `${index}:${note}` }, note)))
           ])
           : null
       ])
-      : h("div", { className: "text-sm text-muted" }, "No review summary is available for this run yet.")),
-    h(Card, { key: "findings", title: "Findings And Results", description: "Drill into persisted evidence, control impact, remediation, and adjudication for a selected finding." }, findings.length
+      : h("div", { className: "text-sm text-slate-500" }, "No review summary is available for this run yet.")),
+    h(Card, { key: "findings", title: "Findings And Results", description: "Drill into persisted evidence, control impact, remediation, and adjudication for a selected finding.", className: "border-slate-200 bg-white shadow-sm" }, findings.length
       ? h("div", { className: "grid gap-6 xl:grid-cols-[0.95fr_1.05fr]" }, [
         h("div", { key: "finding-list", className: "space-y-4" }, findings.map((finding) => {
         const state = findingReviewState?.[finding.id] || {};
@@ -1600,12 +2129,12 @@ function RunDetailPanel({
         const evaluationState = findingEvaluations?.evaluations?.find((item) => item.finding_id === finding.id) || null;
         return h("div", {
           key: finding.id,
-          className: cn("rounded-2xl border px-4 py-4", selectedFinding?.id === finding.id ? "border-primary bg-primary/5" : "border-border bg-white/70")
+          className: cn("rounded-2xl border px-4 py-4", selectedFinding?.id === finding.id ? "border-primary bg-primary/5" : "border-slate-200 bg-slate-50")
         }, [
           h("div", { key: "head", className: "flex items-start justify-between gap-3" }, [
             h("div", { key: "copy" }, [
               h("div", { key: "title", className: "font-medium" }, finding.title || finding.id),
-              h("div", { key: "meta", className: "mt-1 text-sm text-muted" }, `${finding.id} - ${finding.severity || "unknown"} severity`)
+              h("div", { key: "meta", className: "mt-1 text-sm text-slate-500" }, `${finding.id} | ${finding.severity || "unknown"} severity`)
             ]),
             h("div", { key: "badges", className: "flex flex-wrap gap-2 justify-end" }, [
               h(Badge, { key: "severity" }, (summaryState?.current_severity || finding.severity || "unknown")),
@@ -1613,61 +2142,33 @@ function RunDetailPanel({
             ].filter(Boolean))
           ]),
           finding.summary ? h("div", { key: "summary", className: "mt-3 text-sm text-foreground" }, finding.summary) : null,
-          summaryState ? h("div", { key: "status-row", className: "mt-3 grid gap-3 md:grid-cols-3 text-sm text-muted" }, [
+          summaryState ? h("div", { key: "status-row", className: "mt-3 grid gap-3 md:grid-cols-3 text-sm text-slate-500" }, [
             h("div", { key: "visibility" }, `Visibility ${summaryState.current_visibility || "unknown"}`),
             h("div", { key: "reviewer" }, `Last reviewer ${summaryState.last_reviewer_id || "none"}`),
             h("div", { key: "when" }, `Last action ${formatDate(summaryState.last_action_at)}`)
           ]) : null,
           summaryState?.notes?.length
-            ? h("div", { key: "notes", className: "mt-3 rounded-2xl border border-border bg-stone-50 px-4 py-3 text-sm" }, summaryState.notes.join(" | "))
+            ? h("div", { key: "notes", className: "mt-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm" }, summaryState.notes.join(" | "))
             : null,
-          h("div", { key: "inspect", className: "mt-4" }, h(Button, {
+          h("div", { key: "inspect", className: "mt-4 flex items-center justify-between gap-3" }, [
+            h("div", { key: "counts", className: "text-sm text-slate-500" }, [
+              runtimeFollowupCount({ review_summary_counts: { runtime_followup_required_count: evaluationState?.runtime_followup_policy && evaluationState.runtime_followup_policy !== "none" && evaluationState.runtime_followup_policy !== "not_applicable" ? 1 : 0 } }) ? "Runtime follow-up required" : "No runtime follow-up",
+              summaryState?.needs_disposition_review ? " | disposition re-review" : ""
+            ].join("")),
+            h(Button, {
             variant: selectedFinding?.id === finding.id ? "secondary" : "outline",
             onClick: () => onSelectFinding?.(finding.id)
-          }, selectedFinding?.id === finding.id ? "Viewing Detail" : "View Detail")),
-          h("div", { key: "controls", className: "mt-4 grid gap-4 md:grid-cols-3" }, [
-            h(Field, { key: "visibility", label: "Visibility" }, h(Select, {
-              value: state.visibility_override || summaryState?.current_visibility || "internal",
-              onChange: (event) => onFindingReviewStateChange?.(finding.id, "visibility_override", event.target.value)
-            }, [
-              h("option", { key: "internal", value: "internal" }, "internal"),
-              h("option", { key: "public", value: "public" }, "public")
-            ])),
-            h(Field, { key: "severity-select", label: "Downgrade Severity" }, h(Select, {
-              value: state.updated_severity || summaryState?.current_severity || "medium",
-              onChange: (event) => onFindingReviewStateChange?.(finding.id, "updated_severity", event.target.value)
-            }, ["critical", "high", "medium", "low", "info"].map((level) => h("option", { key: level, value: level }, level)))),
-            h(Field, { key: "notes", label: "Reviewer Notes" }, h(Input, {
-              value: state.notes || "",
-              onChange: (event) => onFindingReviewStateChange?.(finding.id, "notes", event.target.value),
-              placeholder: "optional reviewer notes"
-            }))
-          ]),
-          h("div", { key: "actions", className: "mt-4 flex flex-wrap gap-3" }, [
-            h(Button, { key: "confirm", variant: "secondary", onClick: () => onFindingReviewAction?.(finding, "confirm_finding") }, "Confirm"),
-            h(Button, { key: "suppress", variant: "outline", onClick: () => onFindingReviewAction?.(finding, "suppress_finding") }, "Suppress"),
-            h(Button, { key: "downgrade", variant: "outline", onClick: () => onFindingReviewAction?.(finding, "downgrade_severity") }, "Apply Downgrade"),
-            h(Button, { key: "validate", variant: "outline", onClick: () => onFindingReviewAction?.(finding, "request_validation") }, "Request Validation"),
-            evaluationState?.runtime_followup_policy === "rerun_in_capable_env"
-              ? h(Button, { key: "rerun-capable", variant: "outline", onClick: () => onFindingReviewAction?.(finding, "rerun_in_capable_env") }, "Rerun In Capable Env")
-              : null,
-            evaluationState?.runtime_followup_policy === "manual_runtime_review"
-              ? h(Button, { key: "manual-runtime-review", variant: "outline", onClick: () => onFindingReviewAction?.(finding, "mark_manual_runtime_review_complete") }, "Manual Runtime Review Complete")
-              : null,
-            evaluationState?.runtime_followup_policy !== "none" && evaluationState?.runtime_followup_policy !== "not_applicable"
-              ? h(Button, { key: "accept-runtime-gap", variant: "outline", onClick: () => onFindingReviewAction?.(finding, "accept_without_runtime_validation") }, "Accept Without Runtime Validation")
-              : null
-          ].filter(Boolean))
+          }, selectedFinding?.id === finding.id ? "Viewing Detail" : "Open"))])
         ]);
       })),
         selectedFinding
           ? h("div", { key: "finding-detail", className: "space-y-4" }, [
-            h("div", { key: "header", className: "rounded-2xl border border-border bg-white/70 px-4 py-4" }, [
+            h("div", { key: "header", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4" }, [
               h("div", { key: "title-row", className: "flex items-start justify-between gap-3" }, [
                 h("div", { key: "copy" }, [
-                  h("div", { key: "eyebrow", className: "text-xs font-mono uppercase tracking-[0.18em] text-muted" }, selectedFinding.category || "finding"),
+                  h("div", { key: "eyebrow", className: "text-xs font-mono uppercase tracking-[0.18em] text-slate-500" }, selectedFinding.category || "finding"),
                   h("h4", { key: "title", className: "mt-2 font-serif text-2xl" }, selectedFinding.title),
-                  h("div", { key: "meta", className: "mt-2 text-sm text-muted" }, `${selectedFinding.id} - confidence ${selectedFinding.confidence} - source ${selectedFinding.source}`)
+                  h("div", { key: "meta", className: "mt-2 text-sm text-slate-500" }, `${selectedFinding.id} | confidence ${selectedFinding.confidence} | source ${selectedFinding.source}`)
                 ]),
                 h("div", { key: "badges", className: "flex flex-wrap gap-2 justify-end" }, [
                   h(Badge, { key: "severity" }, selectedFindingSummary?.current_severity || selectedFinding.severity),
@@ -1677,10 +2178,53 @@ function RunDetailPanel({
               ]),
               h("div", { key: "description", className: "mt-4 text-sm leading-6 text-foreground" }, selectedFinding.description)
             ]),
+            h("div", { key: "finding-tabs", className: "rounded-2xl border border-slate-200 bg-white p-3" }, [
+              h("div", { key: "tab-list", className: "flex flex-wrap gap-2" }, findingDetailTabs.map(([id, label]) => h(Button, {
+                key: id,
+                variant: findingDetailView === id ? "secondary" : "outline",
+                onClick: () => setFindingDetailView(id),
+                className: findingDetailView === id ? "bg-slate-900 text-white hover:bg-slate-800" : ""
+              }, label)))
+            ]),
             selectedComparisonFinding
               ? h("div", { key: "comparison-context", className: "rounded-2xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-950" }, `Compared against prior finding ${selectedComparisonFinding.id} from run ${compareRunId || "n/a"}.`)
               : null,
-            h(Card, { key: "evidence", title: "Evidence And Impact", description: "Persisted evidence, linked standards, and direct control impact." }, [
+            findingDetailView === "summary" ? h(Card, { key: "review-controls", title: "Review Controls", description: "Primary adjudication controls for the selected finding." }, [
+              h("div", { key: "controls", className: "grid gap-4 md:grid-cols-3" }, [
+                h(Field, { key: "visibility", label: "Visibility" }, h(Select, {
+                  value: selectedFindingState.visibility_override || selectedFindingSummary?.current_visibility || "internal",
+                  onChange: (event) => onFindingReviewStateChange?.(selectedFinding.id, "visibility_override", event.target.value)
+                }, [
+                  h("option", { key: "internal", value: "internal" }, "internal"),
+                  h("option", { key: "public", value: "public" }, "public")
+                ])),
+                h(Field, { key: "severity-select", label: "Downgrade Severity" }, h(Select, {
+                  value: selectedFindingState.updated_severity || selectedFindingSummary?.current_severity || "medium",
+                  onChange: (event) => onFindingReviewStateChange?.(selectedFinding.id, "updated_severity", event.target.value)
+                }, ["critical", "high", "medium", "low", "info"].map((level) => h("option", { key: level, value: level }, level)))),
+                h(Field, { key: "notes", label: "Reviewer Notes" }, h(Input, {
+                  value: selectedFindingState.notes || "",
+                  onChange: (event) => onFindingReviewStateChange?.(selectedFinding.id, "notes", event.target.value),
+                  placeholder: "optional reviewer notes"
+                }))
+              ]),
+              h("div", { key: "actions", className: "mt-4 flex flex-wrap gap-3" }, [
+                h(Button, { key: "confirm", variant: "secondary", onClick: () => onFindingReviewAction?.(selectedFinding, "confirm_finding") }, "Confirm"),
+                h(Button, { key: "suppress", variant: "outline", onClick: () => onFindingReviewAction?.(selectedFinding, "suppress_finding") }, "Suppress"),
+                h(Button, { key: "downgrade", variant: "outline", onClick: () => onFindingReviewAction?.(selectedFinding, "downgrade_severity") }, "Apply Downgrade"),
+                h(Button, { key: "validate", variant: "outline", onClick: () => onFindingReviewAction?.(selectedFinding, "request_validation") }, "Request Validation"),
+                selectedFindingEvaluation?.runtime_followup_policy === "rerun_in_capable_env"
+                  ? h(Button, { key: "rerun-capable", variant: "outline", onClick: () => onFindingReviewAction?.(selectedFinding, "rerun_in_capable_env") }, "Rerun In Capable Env")
+                  : null,
+                selectedFindingEvaluation?.runtime_followup_policy === "manual_runtime_review"
+                  ? h(Button, { key: "manual-runtime-review", variant: "outline", onClick: () => onFindingReviewAction?.(selectedFinding, "mark_manual_runtime_review_complete") }, "Manual Runtime Review Complete")
+                  : null,
+                selectedFindingEvaluation?.runtime_followup_policy !== "none" && selectedFindingEvaluation?.runtime_followup_policy !== "not_applicable"
+                  ? h(Button, { key: "accept-runtime-gap", variant: "outline", onClick: () => onFindingReviewAction?.(selectedFinding, "accept_without_runtime_validation") }, "Accept Without Runtime Validation")
+                  : null
+              ].filter(Boolean))
+            ]) : null,
+            findingDetailView === "summary" || findingDetailView === "evidence" ? h(Card, { key: "evidence", title: "Evidence And Impact", description: "Persisted evidence, linked standards, and direct control impact." }, [
               h(DetailList, {
                 key: "evidence-summary",
                 items: [
@@ -1691,58 +2235,58 @@ function RunDetailPanel({
                   { label: "Active Disposition", value: selectedFindingSummary?.active_disposition_type ? `${selectedFindingSummary.active_disposition_type} (${selectedFindingSummary.active_disposition_scope})` : "none" }
                 ]
               }),
-              h("div", { key: "evidence-list", className: "mt-4 rounded-2xl border border-border bg-stone-50 px-4 py-3" }, [
-                h("div", { key: "title", className: "text-xs font-mono uppercase tracking-[0.18em] text-muted" }, "Evidence"),
+              h("div", { key: "evidence-list", className: "mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+                h("div", { key: "title", className: "text-xs font-mono uppercase tracking-[0.18em] text-slate-500" }, "Evidence"),
                 Array.isArray(selectedFinding.evidence_json) && selectedFinding.evidence_json.length
                   ? h("ul", { key: "list", className: "mt-3 space-y-2 text-sm" }, selectedFinding.evidence_json.map((item, index) => h("li", { key: `${index}:${item}` }, item)))
-                  : h("div", { key: "empty", className: "mt-3 text-sm text-muted" }, "No persisted evidence strings are available for this finding."),
+                  : h("div", { key: "empty", className: "mt-3 text-sm text-slate-500" }, "No persisted evidence strings are available for this finding."),
                 selectedFindingEvaluation?.runtime_evidence_locations?.length
                   ? h("div", { key: "locations", className: "mt-4" }, [
-                      h("div", { key: "title", className: "text-xs font-mono uppercase tracking-[0.18em] text-muted" }, "Normalized Evidence Locations"),
+                      h("div", { key: "title", className: "text-xs font-mono uppercase tracking-[0.18em] text-slate-500" }, "Normalized Evidence Locations"),
                       h("ul", { key: "list", className: "mt-3 space-y-2 text-sm" }, selectedFindingEvaluation.runtime_evidence_locations.map((location, index) => h("li", { key: `${index}:${formatEvidenceLocation(location)}` }, formatEvidenceLocation(location))))
                     ])
                   : null
               ])
-            ]),
-            h(Card, { key: "controls", title: "Affected Controls", description: "Normalized control results linked to the selected finding." }, relatedControls.length
+            ]) : null,
+            findingDetailView === "summary" || findingDetailView === "evidence" ? h(Card, { key: "controls", title: "Affected Controls", description: "Normalized control results linked to the selected finding." }, relatedControls.length
               ? h("div", { className: "space-y-3" }, relatedControls.map((control) => h("div", {
                 key: control.control_id,
-                className: "rounded-2xl border border-border bg-white/70 px-4 py-3"
+                className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"
               }, [
                 h("div", { key: "head", className: "flex items-center justify-between gap-3" }, [
                   h("div", { key: "copy" }, [
                     h("div", { key: "title", className: "font-medium" }, `${control.control_id} - ${control.title}`),
-                    h("div", { key: "meta", className: "text-sm text-muted" }, `${control.framework} / ${control.standard_ref}`)
+                    h("div", { key: "meta", className: "text-sm text-slate-500" }, `${control.framework} / ${control.standard_ref}`)
                   ]),
                   h(Badge, { key: "status" }, control.status)
                 ]),
                 Array.isArray(control.rationale_json) && control.rationale_json.length
-                  ? h("div", { key: "rationale", className: "mt-2 text-sm text-muted" }, control.rationale_json.join(" "))
+                  ? h("div", { key: "rationale", className: "mt-2 text-sm text-slate-500" }, control.rationale_json.join(" "))
                   : null
               ])))
-              : h("div", { className: "text-sm text-muted" }, "No normalized control results are linked to this finding.")),
-            h(Card, { key: "runtime-evidence", title: "Runtime Validation Evidence", description: "Normalized build, test, and runtime-probe records captured from bounded sandbox execution." }, relatedRuntimeEvidence.length
+              : h("div", { className: "text-sm text-slate-500" }, "No normalized control results are linked to this finding.")) : null,
+            findingDetailView === "summary" || findingDetailView === "evidence" ? h(Card, { key: "runtime-evidence", title: "Runtime Validation Evidence", description: "Normalized build, test, and runtime-probe records captured from bounded sandbox execution." }, relatedRuntimeEvidence.length
               ? h("div", { className: "space-y-3" }, relatedRuntimeEvidence.map((item) => h("div", {
                 key: item.id || item.evidence_id,
-                className: "rounded-2xl border border-border bg-white/70 px-4 py-3"
+                className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"
               }, [
                 h("div", { key: "head", className: "flex items-center justify-between gap-3" }, [
                   h("div", { key: "copy" }, [
                     h("div", { key: "title", className: "font-medium" }, getEvidenceMetadata(item)?.normalized_artifact?.title || item.source_id || "sandbox evidence"),
-                    h("div", { key: "meta", className: "text-sm text-muted" }, `${getEvidenceMetadata(item)?.phase || "unknown"} / ${getEvidenceMetadata(item)?.adapter || "unknown"} / ${getEvidenceMetadata(item)?.status || "unknown"}`)
+                    h("div", { key: "meta", className: "text-sm text-slate-500" }, `${getEvidenceMetadata(item)?.phase || "unknown"} / ${getEvidenceMetadata(item)?.adapter || "unknown"} / ${getEvidenceMetadata(item)?.status || "unknown"}`)
                   ]),
                   h(Badge, { key: "status" }, getEvidenceMetadata(item)?.status || "unknown")
                 ]),
                 h("div", { key: "summary", className: "mt-2 text-sm" }, item.summary),
                 getEvidenceLocations(item).length
-                  ? h("ul", { key: "locations", className: "mt-2 space-y-1 text-sm text-muted" }, getEvidenceLocations(item).map((location, index) => h("li", { key: `${index}:${formatEvidenceLocation(location)}` }, formatEvidenceLocation(location))))
+                  ? h("ul", { key: "locations", className: "mt-2 space-y-1 text-sm text-slate-500" }, getEvidenceLocations(item).map((location, index) => h("li", { key: `${index}:${formatEvidenceLocation(location)}` }, formatEvidenceLocation(location))))
                   : null,
                 runtimeArtifactDetailItems(getEvidenceMetadata(item)?.normalized_artifact).length
                   ? h(DetailList, { key: "runtime-artifact-details", items: runtimeArtifactDetailItems(getEvidenceMetadata(item)?.normalized_artifact) })
                   : null
               ])))
-              : h("div", { className: "text-sm text-muted" }, "No normalized runtime validation evidence is linked to this finding.")),
-            h(Card, { key: "review-grade", title: "Finding Evaluation", description: "Normalized evidence quality, duplicate/conflict analysis, and validation guidance derived from supervisor outputs." }, selectedFindingEvaluation
+              : h("div", { className: "text-sm text-slate-500" }, "No normalized runtime validation evidence is linked to this finding.")) : null,
+            findingDetailView === "summary" || findingDetailView === "evaluation" ? h(Card, { key: "review-grade", title: "Finding Evaluation", description: "Normalized evidence quality, duplicate/conflict analysis, and validation guidance derived from supervisor outputs." }, selectedFindingEvaluation
               ? h("div", { className: "space-y-4" }, [
                 h("div", { key: "badge-row", className: "flex flex-wrap gap-2" }, [
                   h(Badge, { key: "sufficiency" }, `evidence ${selectedFindingEvaluation.evidence_sufficiency}`),
@@ -1778,9 +2322,9 @@ function RunDetailPanel({
                     { label: "Review Due By", value: selectedFindingEvaluation.active_disposition_review_due_by ? formatDate(selectedFindingEvaluation.active_disposition_review_due_by) : "n/a" }
                   ]
                 }),
-                h("div", { key: "reasoning", className: "rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm" }, selectedFindingEvaluation.evidence_quality_summary || selectedFindingEvaluation.reasoning_summary),
+                h("div", { key: "reasoning", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm" }, selectedFindingEvaluation.evidence_quality_summary || selectedFindingEvaluation.reasoning_summary),
                 selectedFindingEvaluation.active_disposition_reason
-                  ? h("div", { key: "disposition-reason", className: "rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm" }, `Disposition reason: ${selectedFindingEvaluation.active_disposition_reason}`)
+                  ? h("div", { key: "disposition-reason", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm" }, `Disposition reason: ${selectedFindingEvaluation.active_disposition_reason}`)
                   : null,
                 selectedFindingEvaluation.disposition_review_reason
                   ? h("div", { key: "disposition-review-reason", className: "rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900" }, selectedFindingEvaluation.disposition_review_reason)
@@ -1827,7 +2371,7 @@ function RunDetailPanel({
                   ])
                   : null,
                 selectedFindingEvaluation.runtime_evidence_summaries?.length
-                  ? h("div", { key: "runtime-link-summaries", className: "rounded-2xl border border-sky-200 bg-white/80 px-4 py-3" }, [
+                  ? h("div", { key: "runtime-link-summaries", className: "rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3" }, [
                     h("div", { key: "title", className: "text-xs font-mono uppercase tracking-[0.18em] text-sky-700" }, "Linked Runtime Evidence"),
                     h("ul", { key: "list", className: "mt-2 space-y-1 text-sm text-foreground" }, selectedFindingEvaluation.runtime_evidence_summaries.map((item, index) => h("li", { key: `${index}:${item}` }, item)))
                   ])
@@ -1841,18 +2385,18 @@ function RunDetailPanel({
                 selectedFindingEvaluation.duplicate_with_finding_ids?.length || selectedFindingEvaluation.conflict_with_finding_ids?.length
                   ? h("div", { key: "relationships", className: "grid gap-3 md:grid-cols-2" }, [
                     selectedFindingEvaluation.duplicate_with_finding_ids?.length
-                      ? h("div", { key: "duplicates", className: "rounded-2xl border border-border bg-stone-50 px-4 py-3 text-sm" }, [
+                      ? h("div", { key: "duplicates", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm" }, [
                         h("div", { key: "title", className: "font-semibold" }, "Possible Duplicates"),
-                        h("div", { key: "body", className: "mt-2 text-muted" }, selectedFindingEvaluation.duplicate_with_finding_ids.join(", ")),
+                        h("div", { key: "body", className: "mt-2 text-slate-500" }, selectedFindingEvaluation.duplicate_with_finding_ids.join(", ")),
                         selectedFindingEvaluation.evidence_symbols?.length
                           ? h("div", { key: "reason", className: "mt-2 text-xs text-cyan-900" }, `Shared evidence identity: ${selectedFindingEvaluation.evidence_symbols.join(", ")}`)
                           : null
                       ])
                       : null,
                     selectedFindingEvaluation.conflict_with_finding_ids?.length
-                      ? h("div", { key: "conflicts", className: "rounded-2xl border border-border bg-stone-50 px-4 py-3 text-sm" }, [
+                      ? h("div", { key: "conflicts", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm" }, [
                         h("div", { key: "title", className: "font-semibold" }, "Conflicting Outcomes"),
-                        h("div", { key: "body", className: "mt-2 text-muted" }, selectedFindingEvaluation.conflict_with_finding_ids.join(", ")),
+                        h("div", { key: "body", className: "mt-2 text-slate-500" }, selectedFindingEvaluation.conflict_with_finding_ids.join(", ")),
                         selectedFindingEvaluation.evidence_symbols?.length
                           ? h("div", { key: "reason", className: "mt-2 text-xs text-amber-900" }, `Conflict linked by evidence identity: ${selectedFindingEvaluation.evidence_symbols.join(", ")}`)
                           : null
@@ -1861,7 +2405,7 @@ function RunDetailPanel({
                   ].filter(Boolean))
                   : null,
                 !selectedFindingEvaluation.evidence_quality_summary && relatedSupervisorGrade
-                  ? h("div", { key: "fallback", className: "text-sm text-muted" }, relatedSupervisorGrade.reasoning_summary)
+                  ? h("div", { key: "fallback", className: "text-sm text-slate-500" }, relatedSupervisorGrade.reasoning_summary)
                   : null
               ])
               : relatedSupervisorGrade
@@ -1873,8 +2417,8 @@ function RunDetailPanel({
                     { label: "Reasoning", value: relatedSupervisorGrade.reasoning_summary }
                   ]
                 })
-                : h("div", { className: "text-sm text-muted" }, "No normalized evaluation is available for this finding.")),
-            h(Card, { key: "finding-dispositions", title: "Suppressions And Waivers", description: "Create explicit run suppressions or project waivers with reason and optional expiry." }, [
+                : h("div", { className: "text-sm text-slate-500" }, "No normalized evaluation is available for this finding.")) : null,
+            findingDetailView === "summary" || findingDetailView === "governance" ? h(Card, { key: "finding-dispositions", title: "Suppressions And Waivers", description: "Create explicit run suppressions or project waivers with reason and optional expiry." }, [
               h("div", { key: "fields", className: "grid gap-4 md:grid-cols-2" }, [
                 h(Field, { key: "reason", label: "Reason" }, h(Textarea, {
                   value: selectedFindingState.disposition_reason || "",
@@ -1919,15 +2463,15 @@ function RunDetailPanel({
               selectedFindingDisposition?.active_dispositions?.length
                 ? h("div", { key: "active", className: "mt-4 space-y-3" }, selectedFindingDisposition.active_dispositions.map((item) => h("div", {
                   key: item.id,
-                  className: "rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm"
+                  className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm"
                 }, [
                   h("div", { key: "head", className: "flex items-center justify-between gap-3" }, [
                     h("div", { key: "kind", className: "font-medium" }, `${item.disposition_type} (${item.scope_level})`),
                     h(Badge, { key: "status" }, item.status)
                   ]),
-                  h("div", { key: "meta", className: "mt-1 text-muted" }, `${item.created_by} - ${formatDate(item.created_at)}${item.expires_at ? ` - expires ${formatDate(item.expires_at)}` : ""}`),
+                  h("div", { key: "meta", className: "mt-1 text-slate-500" }, `${item.created_by} | ${formatDate(item.created_at)}${item.expires_at ? ` | expires ${formatDate(item.expires_at)}` : ""}`),
                   item.metadata_json?.owner_id || item.metadata_json?.reviewed_at || item.metadata_json?.review_due_by
-                    ? h("div", { key: "governance", className: "mt-1 text-muted" }, `owner ${item.metadata_json?.owner_id || "n/a"} - reviewed ${item.metadata_json?.reviewed_at ? formatDate(item.metadata_json.reviewed_at) : "n/a"} - review due ${item.metadata_json?.review_due_by ? formatDate(item.metadata_json.review_due_by) : "n/a"}`)
+                    ? h("div", { key: "governance", className: "mt-1 text-slate-500" }, `owner ${item.metadata_json?.owner_id || "n/a"} | reviewed ${item.metadata_json?.reviewed_at ? formatDate(item.metadata_json.reviewed_at) : "n/a"} | review due ${item.metadata_json?.review_due_by ? formatDate(item.metadata_json.review_due_by) : "n/a"}`)
                     : null,
                   h("div", { key: "reason", className: "mt-2" }, item.reason),
                   h("div", { key: "actions", className: "mt-3 flex flex-wrap gap-2" }, [
@@ -1935,50 +2479,85 @@ function RunDetailPanel({
                     h(Button, { key: "revoke", variant: "outline", onClick: () => onRevokeFindingDisposition?.(selectedFinding, item) }, "Revoke")
                   ])
                 ])))
-                : h("div", { key: "empty", className: "mt-4 text-sm text-muted" }, "No active suppression or waiver applies to this finding.")
+                : h("div", { key: "empty", className: "mt-4 text-sm text-slate-500" }, "No active suppression or waiver applies to this finding.")
               ,
               selectedFindingDispositionHistory.length
                 ? h("div", { key: "history", className: "mt-4 space-y-3" }, selectedFindingDispositionHistory.map((item) => h("div", {
                   key: item.id,
-                  className: "rounded-2xl border border-border bg-stone-50 px-4 py-3 text-sm"
+                  className: "rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm"
                 }, [
                   h("div", { key: "head", className: "flex items-center justify-between gap-3" }, [
                     h("div", { key: "kind", className: "font-medium" }, `${item.disposition_type} (${item.scope_level})`),
                     h(Badge, { key: "status" }, item.status)
                   ]),
-                  h("div", { key: "meta", className: "mt-1 text-muted" }, `${item.created_by} - ${formatDate(item.created_at)}${item.expires_at ? ` - expires ${formatDate(item.expires_at)}` : ""}${item.revoked_at ? ` - revoked ${formatDate(item.revoked_at)}` : ""}`),
+                  h("div", { key: "meta", className: "mt-1 text-slate-500" }, `${item.created_by} | ${formatDate(item.created_at)}${item.expires_at ? ` | expires ${formatDate(item.expires_at)}` : ""}${item.revoked_at ? ` | revoked ${formatDate(item.revoked_at)}` : ""}`),
                   h("div", { key: "reason", className: "mt-2" }, item.reason)
                 ])))
                 : null
-            ]),
-            h(Card, { key: "remediation", title: "Remediation And Observations", description: "Run-level remediation memo and nearby audit observations relevant to the selected finding." }, [
+            ]) : null,
+            findingDetailView === "summary" || findingDetailView === "governance" ? h(Card, { key: "remediation", title: "Remediation And Observations", description: "Run-level remediation memo and nearby audit observations relevant to the selected finding." }, [
               remediation
-                ? h("div", { key: "remediation-copy", className: "rounded-2xl border border-border bg-white/70 px-4 py-3" }, [
+                ? h("div", { key: "remediation-copy", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
                   h("div", { key: "summary", className: "text-sm" }, remediation.summary),
                   Array.isArray(remediation.checklist_json) && remediation.checklist_json.length
-                    ? h("ul", { key: "checklist", className: "mt-3 space-y-2 text-sm text-muted" }, remediation.checklist_json.map((item, index) => h("li", { key: `${index}:${item}` }, item)))
+                    ? h("ul", { key: "checklist", className: "mt-3 space-y-2 text-sm text-slate-500" }, remediation.checklist_json.map((item, index) => h("li", { key: `${index}:${item}` }, item)))
                     : null
                 ])
-                : h("div", { key: "remediation-empty", className: "text-sm text-muted" }, "No remediation memo is available for this run."),
+                : h("div", { key: "remediation-empty", className: "text-sm text-slate-500" }, "No remediation memo is available for this run."),
               h("div", { key: "observations", className: "mt-4 space-y-3" }, relatedObservations.length
                 ? relatedObservations.map((item, index) => h("div", {
                   key: `${index}:${item.title || item.summary || "observation"}`,
-                  className: "rounded-2xl border border-border bg-stone-50 px-4 py-3"
+                  className: "rounded-2xl border border-slate-200 bg-white px-4 py-3"
                 }, [
                   h("div", { key: "title", className: "font-medium" }, item.title || "Observation"),
-                  h("div", { key: "summary", className: "mt-2 text-sm text-muted" }, item.summary || "n/a"),
+                  h("div", { key: "summary", className: "mt-2 text-sm text-slate-500" }, item.summary || "n/a"),
                   Array.isArray(item.evidence) && item.evidence.length
-                    ? h("div", { key: "evidence", className: "mt-2 text-xs text-muted" }, item.evidence.join(" | "))
+                    ? h("div", { key: "evidence", className: "mt-2 text-xs text-slate-500" }, item.evidence.join(" | "))
                     : null
                 ]))
-                : h("div", { className: "text-sm text-muted" }, "No related observations were matched for this finding."))
-            ])
+                : h("div", { className: "text-sm text-slate-500" }, "No related observations were matched for this finding."))
+            ]) : null
           ])
           : null
       ])
-      : h("div", { className: "text-sm text-muted" }, "No persisted findings are available for this run.")),
-    h(Card, { key: "notes-timeline", title: "Review Notes", description: "Reviewer notes separated from raw action history for faster handoff and audit context." }, h(ReviewNotesTimeline, { actions: reviewActions })),
-    h(Card, { key: "evaluation-overview", title: "Evaluation Overview", description: "Run-level result evaluation derived from findings, supervisor review, and review workflow." }, findingEvaluations
+      : h("div", { className: "text-sm text-slate-500" }, "No persisted findings are available for this run.")),
+    h(Card, { key: "review-activity", title: "Review Activity", description: "Assignment context, reviewer notes, discussion, and timeline are grouped into one activity surface.", className: "border-slate-200 bg-white shadow-sm" }, [
+      h("div", { key: "notes-block", className: "space-y-5" }, [
+        h("div", { key: "notes-head" }, [
+          h("div", { key: "label", className: "text-xs font-mono uppercase tracking-[0.18em] text-slate-500" }, "Reviewer Notes"),
+          h("div", { key: "body", className: "mt-3" }, h(ReviewNotesTimeline, { actions: reviewActions }))
+        ]),
+        h("div", { key: "discussion-head" }, [
+          h("div", { key: "label", className: "text-xs font-mono uppercase tracking-[0.18em] text-slate-500" }, "Discussion"),
+          h("div", { key: "body", className: "mt-3" }, h(ReviewCommentsPanel, {
+            comments: reviewComments,
+            commentBody,
+            commentFindingId,
+            findings,
+            onCommentBodyChange,
+            onCommentFindingChange,
+            onSubmitComment
+          }))
+        ]),
+        h("div", { key: "timeline-head" }, [
+          h("div", { key: "label", className: "text-xs font-mono uppercase tracking-[0.18em] text-slate-500" }, "Action Timeline"),
+          h("div", { key: "body", className: "mt-3" }, h(ReviewActionTimeline, { actions: reviewActions }))
+        ])
+      ])
+    ]),
+    h(Card, { key: "findings-rollup", title: "Findings Rollup", description: "Compact run-level findings and disposition summary for review decisions.", className: "border-slate-200 bg-white shadow-sm" }, [
+      h(DetailList, { key: "rollup", items: findingsRollupItems }),
+      findingEvaluations?.runtime_strengthened_finding_count || findingEvaluations?.runtime_generated_finding_count || findingEvaluations?.runtime_weakened_finding_count
+        ? h("div", { key: "runtime-impact", className: "mt-4 rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-900" },
+          `${findingEvaluations.runtime_strengthened_finding_count || 0} strengthened | ${findingEvaluations.runtime_generated_finding_count || 0} generated | ${findingEvaluations.runtime_weakened_finding_count || 0} weakened by runtime evidence`)
+        : null,
+      findingsNeedingDispositionReview.length
+        ? h("div", { key: "rereview", className: "mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900" },
+          `Disposition re-review queue: ${findingsNeedingDispositionReview.map((item) => item.finding_id).join(", ")}`)
+        : null
+    ]),
+    h(Card, { key: "notes-timeline", title: "Review Notes", description: "Reviewer notes separated from raw action history for faster handoff and audit context.", className: "border-slate-200 bg-white shadow-sm" }, h(ReviewNotesTimeline, { actions: reviewActions })),
+    h(Card, { key: "evaluation-overview", title: "Evaluation Overview", description: "Run-level result evaluation derived from findings, supervisor review, and review workflow.", className: "border-slate-200 bg-white shadow-sm" }, findingEvaluations
       ? h("div", { className: "space-y-4" }, [
         h(DetailList, {
           key: "evaluation-summary",
@@ -2041,20 +2620,20 @@ function RunDetailPanel({
           ])
           : null
       ])
-      : h("div", { className: "text-sm text-muted" }, "No evaluation summary is available for this run.")),
-    h(Card, { key: "disposition-lifecycle", title: "Disposition Lifecycle", description: "Track active suppressions/waivers, upcoming expiries, and findings that need explicit re-review." }, [
+      : h("div", { className: "text-sm text-slate-500" }, "No evaluation summary is available for this run.")),
+    h(Card, { key: "disposition-lifecycle", title: "Disposition Lifecycle", description: "Track active suppressions/waivers, upcoming expiries, and findings that need explicit re-review.", className: "border-slate-200 bg-white shadow-sm" }, [
       h("div", { key: "grid", className: "grid gap-4 lg:grid-cols-4" }, [
-        h("div", { key: "suppressed", className: "rounded-2xl border border-border bg-white/70 px-4 py-3" }, [
-          h("div", { key: "title", className: "text-xs font-mono uppercase tracking-[0.18em] text-muted" }, "Suppressed"),
+        h("div", { key: "suppressed", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "title", className: "text-xs font-mono uppercase tracking-[0.18em] text-slate-500" }, "Suppressed"),
           suppressedFindingSummaries.length
             ? h("ul", { key: "list", className: "mt-2 space-y-1 text-sm" }, suppressedFindingSummaries.map((item) => h("li", { key: item.finding_id }, `${item.finding_id}: ${item.title}`)))
-            : h("div", { key: "empty", className: "mt-2 text-sm text-muted" }, "No active suppressions.")
+            : h("div", { key: "empty", className: "mt-2 text-sm text-slate-500" }, "No active suppressions.")
         ]),
-        h("div", { key: "waived", className: "rounded-2xl border border-border bg-white/70 px-4 py-3" }, [
-          h("div", { key: "title", className: "text-xs font-mono uppercase tracking-[0.18em] text-muted" }, "Waived"),
+        h("div", { key: "waived", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "title", className: "text-xs font-mono uppercase tracking-[0.18em] text-slate-500" }, "Waived"),
           waivedFindingSummaries.length
             ? h("ul", { key: "list", className: "mt-2 space-y-1 text-sm" }, waivedFindingSummaries.map((item) => h("li", { key: item.finding_id }, `${item.finding_id}: ${item.title}`)))
-            : h("div", { key: "empty", className: "mt-2 text-sm text-muted" }, "No active waivers.")
+            : h("div", { key: "empty", className: "mt-2 text-sm text-slate-500" }, "No active waivers.")
         ]),
         h("div", { key: "expired", className: "rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3" }, [
           h("div", { key: "title", className: "text-xs font-mono uppercase tracking-[0.18em] text-amber-700" }, "Expired / Re-Review"),
@@ -2099,7 +2678,7 @@ function RunDetailPanel({
         ? h("div", { key: "rereview", className: "mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900" }, `Re-review queue: ${findingsNeedingDispositionReview.map((item) => item.finding_id).join(", ")}`)
         : null
     ]),
-    h(Card, { key: "discussion", title: "Review Discussion", description: "Comments are persisted separately from state-changing review actions." }, h(ReviewCommentsPanel, {
+    h(Card, { key: "discussion", title: "Review Discussion", description: "Comments are persisted separately from state-changing review actions.", className: "border-slate-200 bg-white shadow-sm" }, h(ReviewCommentsPanel, {
       comments: reviewComments,
       commentBody,
       commentFindingId,
@@ -2108,12 +2687,12 @@ function RunDetailPanel({
       onCommentFindingChange,
       onSubmitComment
     })),
-    h(Card, { key: "audit-export", title: "Review Audit Export", description: "Export workflow, actions, comments, and derived summary as a single JSON bundle." }, h(Button, {
+    h(Card, { key: "audit-export", title: "Review Audit Export", description: "Export workflow, actions, comments, and derived summary as a single JSON bundle.", className: "border-slate-200 bg-white shadow-sm" }, h(Button, {
       variant: "outline",
       onClick: onExportReviewAudit,
       disabled: !detail
     }, "Download Review Audit")),
-    h(Card, { key: "report-exports", title: "Report Exports", description: "Generate portable report formats from persisted findings and evaluation state." }, h("div", { className: "flex flex-wrap gap-3" }, [
+    h(Card, { key: "report-exports", title: "Report Exports", description: "Generate portable report formats from persisted findings and evaluation state.", className: "border-slate-200 bg-white shadow-sm" }, h("div", { className: "flex flex-wrap gap-3" }, [
       h(Button, {
         key: "executive",
         variant: "outline",
@@ -2133,23 +2712,23 @@ function RunDetailPanel({
         disabled: !detail
       }, "Download SARIF Report")
     ])),
-    h(Card, { key: "comparison-preview", title: "Run Comparison Preview", description: compareRunId ? "Live diff against the selected comparison run, including evidence-identity matches." : "Set a comparison run ID to preview changed, new, and resolved findings inline." }, comparisonLoading
-      ? h("div", { className: "text-sm text-muted" }, "Loading comparison preview...")
+    h(Card, { key: "comparison-preview", title: "Run Comparison Preview", description: compareRunId ? "Live diff against the selected comparison run, including evidence-identity matches." : "Set a comparison run ID to preview changed, new, and resolved findings inline.", className: "border-slate-200 bg-white shadow-sm" }, comparisonLoading
+      ? h("div", { className: "text-sm text-slate-500" }, "Loading comparison preview...")
       : !compareRunId
-        ? h("div", { className: "text-sm text-muted" }, "No comparison run selected.")
+        ? h("div", { className: "text-sm text-slate-500" }, "No comparison run selected.")
         : !comparisonPayload
-          ? h("div", { className: "text-sm text-muted" }, "Comparison preview unavailable for the selected run pair.")
+          ? h("div", { className: "text-sm text-slate-500" }, "Comparison preview unavailable for the selected run pair.")
           : h("div", { className: "space-y-4" }, [
             h("div", { key: "summary", className: "grid gap-3 md:grid-cols-4" }, [
-              h("div", { key: "overview", className: "rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm" }, ComparisonSummaryText(comparisonPayload)),
-              h("div", { key: "score", className: "rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm" }, `Score ${comparisonPayload.summary?.compare_to_overall_score ?? "n/a"} -> ${comparisonPayload.summary?.current_overall_score ?? "n/a"}`),
+              h("div", { key: "overview", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm" }, ComparisonSummaryText(comparisonPayload)),
+              h("div", { key: "score", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm" }, `Score ${comparisonPayload.summary?.compare_to_overall_score ?? "n/a"} -> ${comparisonPayload.summary?.current_overall_score ?? "n/a"}`),
               h("div", { key: "runtime-followup", className: "rounded-2xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-950" }, `Runtime follow-up ${comparisonPayload.summary?.compare_to_runtime_followup_required_count ?? 0} -> ${comparisonPayload.summary?.current_runtime_followup_required_count ?? 0}`),
               h("div", { key: "runtime-blocked", className: "rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900" }, `Runtime blocked ${comparisonPayload.summary?.compare_to_runtime_validation_blocked_count ?? 0} -> ${comparisonPayload.summary?.current_runtime_validation_blocked_count ?? 0}`)
             ]),
             changedComparisonItems.length ? h("div", { key: "changed", className: "space-y-3" }, [
-              h("div", { key: "label", className: "text-xs font-mono uppercase tracking-[0.18em] text-muted" }, "Changed Findings"),
-              h("div", { key: "navigation", className: "flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm" }, [
-                h("div", { key: "position", className: "text-muted" }, selectedChangedComparisonIndex >= 0
+              h("div", { key: "label", className: "text-xs font-mono uppercase tracking-[0.18em] text-slate-500" }, "Changed Findings"),
+              h("div", { key: "navigation", className: "flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm" }, [
+                h("div", { key: "position", className: "text-slate-500" }, selectedChangedComparisonIndex >= 0
                   ? `Viewing changed finding ${selectedChangedComparisonIndex + 1} of ${changedComparisonItems.length}.`
                   : `Select a changed finding to inspect both sides. ${changedComparisonItems.length} changed findings are available.`),
                 h("div", { key: "actions", className: "flex flex-wrap gap-2" }, [
@@ -2169,7 +2748,7 @@ function RunDetailPanel({
               ]),
               ...changedComparisonItems.slice(0, 6).map((item) => h("div", {
                 key: `changed:${item.current_finding_id || item.signature}`,
-                className: `rounded-2xl border px-4 py-3 ${selectedFindingId === item.current_finding_id || selectedComparisonFindingId === item.previous_finding_id ? "border-indigo-300 bg-indigo-50/70" : "border-border bg-white/70"}`
+                className: `rounded-2xl border px-4 py-3 ${selectedFindingId === item.current_finding_id || selectedComparisonFindingId === item.previous_finding_id ? "border-indigo-300 bg-indigo-50/70" : "border-slate-200 bg-slate-50"}`
               }, [
                 h("div", { key: "head", className: "flex flex-wrap items-center justify-between gap-3" }, [
                   h("div", { key: "title", className: "font-medium" }, `${item.title} (${item.category})`),
@@ -2178,7 +2757,7 @@ function RunDetailPanel({
                     item.shared_evidence_symbols?.length ? h(Badge, { key: "symbols", tone: "success" }, item.shared_evidence_symbols.join(", ")) : null
                   ].filter(Boolean))
                 ]),
-                h("div", { key: "meta", className: "mt-1 text-xs text-muted" }, `${item.previous_finding_id} -> ${item.current_finding_id}`),
+                h("div", { key: "meta", className: "mt-1 text-xs text-slate-500" }, `${item.previous_finding_id} -> ${item.current_finding_id}`),
                 item.changes?.length ? h("ul", { key: "changes", className: "mt-3 space-y-1 text-sm" }, item.changes.map((change) => h("li", { key: change.field }, `${change.field}: ${change.previous} -> ${change.current}`))) : null
               ].concat(item.current_finding_id ? [
                 h("div", { key: "actions", className: "mt-3 flex flex-wrap gap-3" }, [
@@ -2199,14 +2778,14 @@ function RunDetailPanel({
                   }, "Inspect Prior Finding") : null
                 ].filter(Boolean))
               ] : [])))
-            ]) : h("div", { key: "no-changes", className: "rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm text-muted" }, "No changed findings in this comparison."),
+            ]) : h("div", { key: "no-changes", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-500" }, "No changed findings in this comparison."),
             h("div", { key: "other-groups", className: "grid gap-4 md:grid-cols-2" }, [
-              h("div", { key: "new", className: "rounded-2xl border border-border bg-white/70 px-4 py-3" }, [
-                h("div", { key: "label", className: "text-xs font-mono uppercase tracking-[0.18em] text-muted" }, "New Findings"),
+              h("div", { key: "new", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+                h("div", { key: "label", className: "text-xs font-mono uppercase tracking-[0.18em] text-slate-500" }, "New Findings"),
                 comparisonPayload.new_findings?.length
                   ? h("div", { key: "list", className: "mt-2 space-y-2 text-sm" }, comparisonPayload.new_findings.slice(0, 6).map((item) => h("div", {
                     key: item.finding_id || item.signature,
-                    className: "rounded-xl border border-border/70 bg-background/60 px-3 py-2"
+                    className: "rounded-xl border border-slate-200 bg-white px-3 py-2"
                   }, [
                     h("div", { key: "text" }, `${item.title} (${item.category})${item.evidence_symbols?.length ? ` [${item.evidence_symbols.join(", ")}]` : ""}`),
                     item.finding_id ? h("div", { key: "actions", className: "mt-2" }, h(Button, {
@@ -2214,14 +2793,14 @@ function RunDetailPanel({
                       onClick: () => onSelectFinding?.(item.finding_id)
                     }, "Inspect Finding")) : null
                   ])))
-                  : h("div", { key: "empty", className: "mt-2 text-sm text-muted" }, "No new findings.")
+                  : h("div", { key: "empty", className: "mt-2 text-sm text-slate-500" }, "No new findings.")
               ]),
-              h("div", { key: "resolved", className: "rounded-2xl border border-border bg-white/70 px-4 py-3" }, [
-                h("div", { key: "label", className: "text-xs font-mono uppercase tracking-[0.18em] text-muted" }, "Resolved Findings"),
+              h("div", { key: "resolved", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+                h("div", { key: "label", className: "text-xs font-mono uppercase tracking-[0.18em] text-slate-500" }, "Resolved Findings"),
                 comparisonPayload.resolved_findings?.length
                   ? h("div", { key: "list", className: "mt-2 space-y-2 text-sm" }, comparisonPayload.resolved_findings.slice(0, 6).map((item) => h("div", {
                     key: item.finding_id || item.signature,
-                    className: "rounded-xl border border-border/70 bg-background/60 px-3 py-2"
+                    className: "rounded-xl border border-slate-200 bg-white px-3 py-2"
                   }, [
                     h("div", { key: "text" }, `${item.title} (${item.category})${item.evidence_symbols?.length ? ` [${item.evidence_symbols.join(", ")}]` : ""}`),
                     item.finding_id ? h("div", { key: "actions", className: "mt-2" }, h(Button, {
@@ -2229,7 +2808,7 @@ function RunDetailPanel({
                       onClick: () => onSelectComparisonFinding?.(item.finding_id)
                     }, "Inspect Prior Finding")) : null
                   ])))
-                  : h("div", { key: "empty", className: "mt-2 text-sm text-muted" }, "No resolved findings.")
+                  : h("div", { key: "empty", className: "mt-2 text-sm text-slate-500" }, "No resolved findings.")
               ])
             ]),
             compareRunId ? h(Card, {
@@ -2237,9 +2816,9 @@ function RunDetailPanel({
               title: "Prior Run Finding Detail",
               description: selectedComparisonFindingId ? "Inspect the matched finding from the comparison run." : "Choose a resolved finding to inspect prior-run context."
             }, comparisonDetailLoading
-              ? h("div", { className: "text-sm text-muted" }, "Loading prior-run detail...")
+              ? h("div", { className: "text-sm text-slate-500" }, "Loading prior-run detail...")
               : !selectedComparisonFinding
-                ? h("div", { className: "text-sm text-muted" }, "No prior-run finding selected.")
+                ? h("div", { className: "text-sm text-slate-500" }, "No prior-run finding selected.")
                 : h("div", { className: "space-y-3" }, [
                   h(DetailList, {
                     key: "comparison-finding",
@@ -2258,21 +2837,21 @@ function RunDetailPanel({
                         h("div", { key: "title", className: "text-xs font-mono uppercase tracking-[0.18em] text-indigo-700" }, "Changed Fields"),
                         h("ul", { key: "list", className: "mt-2 space-y-1 text-sm text-indigo-950" }, comparisonDetailDiffs.map((item) => h("li", { key: item.label }, `${item.label}: ${item.previous} -> ${item.current}`)))
                       ])
-                    : h("div", { key: "no-diffs", className: "rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm text-muted" }, "No field-level differences between the selected current and prior findings."),
-                  selectedComparisonFinding.description ? h("div", { key: "description", className: "rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm" }, selectedComparisonFinding.description) : null
+                    : h("div", { key: "no-diffs", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-500" }, "No field-level differences between the selected current and prior findings."),
+                  selectedComparisonFinding.description ? h("div", { key: "description", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm" }, selectedComparisonFinding.description) : null
                 ]))
               : null
           ])),
-    h(Card, { key: "indexed-exports", title: "Machine-readable Exports", description: "Per-run export catalog for versioned JSON contracts and portable report artifacts." }, indexedExports.length
+    h(Card, { key: "indexed-exports", title: "Machine-readable Exports", description: "Per-run export catalog for versioned JSON contracts and portable report artifacts.", className: "border-slate-200 bg-white shadow-sm" }, indexedExports.length
       ? h("div", { className: "space-y-3" }, indexedExports.map((item) => h("div", {
         key: `${item.export_type}:${item.format}:${item.route}`,
-        className: "rounded-2xl border border-border bg-white/70 px-4 py-3"
+        className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"
       }, [
         h("div", { key: "head", className: "flex flex-col gap-3 md:flex-row md:items-start md:justify-between" }, [
           h("div", { key: "meta", className: "space-y-1" }, [
             h("div", { key: "title", className: "font-medium text-foreground" }, `${item.export_type.replace(/_/g, " ")} (${item.format})`),
-            h("div", { key: "filename", className: "text-sm text-muted" }, item.filename),
-            h("div", { key: "route", className: "break-all text-xs font-mono text-muted" }, item.route),
+            h("div", { key: "filename", className: "text-sm text-slate-500" }, item.filename),
+            h("div", { key: "route", className: "break-all text-xs font-mono text-slate-500" }, item.route),
             item.schema_name ? h("div", { key: "schema", className: "text-xs font-mono uppercase tracking-[0.18em] text-emerald-700" }, `Schema ${item.schema_name}`) : null
           ]),
           h("div", { key: "actions", className: "flex items-center gap-2" }, [
@@ -2286,8 +2865,8 @@ function RunDetailPanel({
           ])
         ])
       ])))
-      : h("div", { className: "text-sm text-muted" }, "No export catalog is available for this run.")),
-    h(Card, { key: "comparison-export", title: "Run Comparison", description: "Compare this run against a prior run or linked rerun and export the diff." }, [
+      : h("div", { className: "text-sm text-slate-500" }, "No export catalog is available for this run.")),
+    h(Card, { key: "comparison-export", title: "Run Comparison", description: "Compare this run against a prior run or linked rerun and export the diff.", className: "border-slate-200 bg-white shadow-sm" }, [
       h("div", { key: "compare-controls", className: "grid gap-4 md:grid-cols-[1fr_auto_auto]" }, [
         h(Field, { key: "compare-to", label: "Compare To Run ID" }, h(Input, {
           value: compareRunId || "",
@@ -2305,21 +2884,41 @@ function RunDetailPanel({
           disabled: !detail || !compareRunId
         }, "Download Comparison Markdown"))
       ]),
-      h("div", { key: "hint", className: "mt-3 text-sm text-muted" }, "Use a previous run id or a linked rerun run id to export a direct run-to-run diff.")
+      h("div", { key: "hint", className: "mt-3 text-sm text-slate-500" }, "Use a previous run id or a linked rerun run id to export a direct run-to-run diff.")
     ]),
-    h(Card, { key: "timeline", title: "Review Timeline", description: "Persisted reviewer actions, assignment history, and adjudication trail." }, h(ReviewActionTimeline, { actions: reviewActions })),
-    h(Card, { key: "providers", title: "Provider Readiness", description: "Persisted preflight provider readiness at launch time." }, preflight?.provider_readiness?.length
+    h(Card, { key: "timeline", title: "Review Timeline", description: "Persisted reviewer actions, assignment history, and adjudication trail.", className: "border-slate-200 bg-white shadow-sm" }, h(ReviewActionTimeline, { actions: reviewActions })),
+    h(Card, { key: "providers", title: "Provider Readiness", description: "Persisted preflight provider readiness at launch time.", className: "border-slate-200 bg-white shadow-sm" }, preflight?.provider_readiness?.length
       ? h("div", { className: "space-y-3" }, preflight.provider_readiness.map((item) => h("div", {
         key: item.provider_id,
-        className: "rounded-2xl border border-border bg-white/70 px-4 py-3"
+        className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"
       }, [
         h("div", { key: "head", className: "flex items-center justify-between gap-3" }, [
           h("div", { key: "label", className: "font-medium" }, `${item.provider_id} (${item.provider_kind})`),
           h(Badge, { key: "status" }, item.status)
         ]),
-        h("div", { key: "summary", className: "mt-2 text-sm text-muted" }, item.summary)
+        h("div", { key: "summary", className: "mt-2 text-sm text-slate-500" }, item.summary)
       ])))
-      : h("div", { className: "text-sm text-muted" }, "No provider readiness data is available for this run."))
+      : h("div", { className: "text-sm text-slate-500" }, "No provider readiness data is available for this run."))
+  ];
+  const visiblePanels = panels.filter((panel) => panelGroups[detailView]?.includes(panel?.key));
+  return h("div", { className: "space-y-6" }, [
+    h("div", { key: "tabs", className: "sticky top-0 z-10 border border-slate-200 bg-white/95 p-3 backdrop-blur" }, [
+      h("div", { key: "tab-list", className: "flex flex-wrap gap-2" }, detailTabs.map(([id, label]) => h(Button, {
+        key: id,
+        variant: detailView === id ? "secondary" : "outline",
+        onClick: () => setDetailView(id),
+        className: detailView === id ? "bg-slate-900 text-white hover:bg-slate-800" : ""
+      }, label))),
+      h("div", { key: "tab-copy", className: "mt-3 text-sm text-slate-500" }, ({
+        overview: "Run provenance, launch intent, configuration drift, and provider/preflight posture.",
+        findings: "Finding evidence, evaluation, and disposition governance for the selected run.",
+        review: "Assignee, review actions, handoff context, notes, comments, and timeline.",
+        runtime: "Sandbox execution evidence and runtime follow-up work linked to the run.",
+        history: "Run-to-run comparison and prior-run context.",
+        exports: "Outbound sharing, exports, and automation delivery metadata."
+      })[detailView])
+    ]),
+    ...visiblePanels
   ]);
 }
 
@@ -2355,6 +2954,7 @@ function App() {
     }
   });
   const [runForm, setRunForm] = useState(deriveRunFormDefaults(null, emptyEffectiveSettings));
+  const [launchModalOpen, setLaunchModalOpen] = useState(false);
   const [docForm, setDocForm] = useState({ title: "", document_type: "policy", notes: "", content_text: "" });
   const [workspaceForm, setWorkspaceForm] = useState({ name: "", description: "" });
   const [projectForm, setProjectForm] = useState({ name: "", description: "" });
@@ -2435,6 +3035,36 @@ function App() {
     if (reviewFilter === "needs_disposition_review") return pendingReviews.filter((run) => Number(run.review_summary_counts?.findings_needing_disposition_review_count || 0) > 0);
     return pendingReviews;
   }, [pendingReviews, reviewFilter, reviewNotifications, requestContext.actorId]);
+  const recentRuns = useMemo(
+    () => [...runs].sort((left, right) => String(right.created_at || "").localeCompare(String(left.created_at || ""))).slice(0, 8),
+    [runs]
+  );
+  const averageScore = useMemo(() => {
+    const scores = runs.map((run) => Number(run?.overall_score)).filter((value) => Number.isFinite(value));
+    if (!scores.length) return "n/a";
+    return String((scores.reduce((sum, value) => sum + value, 0) / scores.length).toFixed(1));
+  }, [runs]);
+  const successfulRuns = useMemo(
+    () => runs.filter((run) => ["succeeded", "approved", "completed"].includes(run.status)).length,
+    [runs]
+  );
+  const openRuntimeFollowups = useMemo(
+    () => runtimeFollowups.filter((item) => item.status !== "completed").length,
+    [runtimeFollowups]
+  );
+  const overdueReviews = useMemo(
+    () => pendingReviews.filter((run) => isOverdueReview(run)).length,
+    [pendingReviews]
+  );
+  const averageReviewAgeHours = useMemo(() => {
+    if (!pendingReviews.length) return "0h";
+    const avgHours = pendingReviews.reduce((sum, run) => sum + hoursSince(reviewAnchor(run)), 0) / pendingReviews.length;
+    return avgHours >= 24 ? `${(avgHours / 24).toFixed(1)}d` : `${Math.round(avgHours)}h`;
+  }, [pendingReviews]);
+  const postureSeries = useMemo(
+    () => buildDashboardPostureSeries(runs),
+    [runs]
+  );
   const currentProject = useMemo(
     () => projects.find((project) => project.id === requestContext.projectId) || null,
     [projects, requestContext.projectId]
@@ -2903,6 +3533,27 @@ function App() {
     setPreflightStale(true);
     setNotice(`Applied launch preset: ${preset.label}. Re-run preflight before launch.`);
     setError("");
+  }
+
+  function launchRun() {
+    if (!launchReadiness.canLaunch) return;
+    act(
+      () => api("/runs", {
+        method: "POST",
+        body: JSON.stringify(buildLaunchRunRequest(runForm, requestContext, {
+          preflightCheckedAt,
+          preflightAcceptedAt,
+          preflightStale
+        }, effectiveSettings, llmRegistry))
+      }, requestContext).then((payload) => {
+        setLaunchModalOpen(false);
+        if (payload?.run?.id) {
+          setSelectedRunId(payload.run.id);
+          setView("runs");
+        }
+      }),
+      "Run launched."
+    );
   }
 
   function assignReviewer() {
@@ -3429,40 +4080,7 @@ function App() {
     setSelectedRuntimeFollowupIds([]);
   }
 
-  const dashboard = h("div", { className: "space-y-6" }, [
-    h("div", { key: "metrics", className: "grid gap-4 xl:grid-cols-4" }, [
-      h(MetricCard, { key: "runs", label: "Runs", value: String(stats.runs.total_runs || runs.length), hint: "Persisted audit history" }),
-    h(MetricCard, { key: "reviews", label: "Pending Reviews", value: String(pendingReviews.length), hint: "Human workflow queue" }),
-    h(MetricCard, { key: "targets", label: "Targets", value: String(stats.targets.total_targets || 0), hint: "Canonical target records" }),
-    h(MetricCard, { key: "jobs", label: "Async Jobs", value: String(jobs.length), hint: "Durable background jobs" })
-    ]),
-    h(Card, { key: "scope", title: "Workspace Context", description: "All runs, jobs, reviews, settings, and attached documents are scoped to this selection." }, [
-      h("div", { key: "fields", className: "grid gap-4 md:grid-cols-2 xl:grid-cols-4" }, [
-        h(Field, { key: "workspace", label: "Workspace" }, Select({
-          value: requestContext.workspaceId,
-          onChange: (event) => {
-            const workspaceId = event.target.value;
-            const workspaceProjects = projects.filter((item) => item.workspace_id === workspaceId);
-            updateRequestContext("workspaceId", workspaceId);
-            updateRequestContext("projectId", workspaceProjects[0]?.id || "default");
-          }
-        }, workspaces.length ? workspaces.map((workspace) => h("option", { key: workspace.id, value: workspace.id }, workspace.name + " (" + workspace.id + ")")) : [h("option", { key: "default", value: "default" }, "default")])),
-        h(Field, { key: "project", label: "Project" }, Select({
-          value: requestContext.projectId,
-          onChange: (event) => updateRequestContext("projectId", event.target.value)
-        }, projects.length ? projects.map((project) => h("option", { key: project.id, value: project.id }, project.name + " (" + project.id + ")")) : [h("option", { key: "default", value: "default" }, "default")])),
-        h(Field, { key: "actor", label: "Actor" }, h(Input, { value: requestContext.actorId, onChange: (event) => updateRequestContext("actorId", event.target.value) })),
-        h(Field, { key: "api", label: "API Key" }, h(Input, { type: "password", value: requestContext.apiKey, onChange: (event) => updateRequestContext("apiKey", event.target.value), placeholder: "Optional in auth=none mode" })),
-        h(Field, { key: "roles", label: "Effective Roles" }, h(Input, { value: effectiveRoles.join(", ") || "viewer", readOnly: true }))
-      ]),
-      h("div", { key: "trust-model", className: cn("mt-4 rounded-2xl border px-4 py-3 text-sm", authInfo.trusted_mode ? "border-amber-300 bg-amber-50 text-amber-800" : "border-emerald-300 bg-emerald-50 text-emerald-800") }, [
-        h("div", { key: "title", className: "font-semibold" }, authInfo.trusted_mode ? "Trusted Local Mode" : "Authenticated Mode"),
-        h("div", { key: "copy", className: "mt-1" }, authInfo.guidance),
-        h("div", { key: "meta", className: "mt-2 font-mono text-xs uppercase tracking-[0.18em]" }, `auth=${authInfo.auth_mode} • review_roles=${authInfo.review_roles_security}`)
-      ])
-    ]),
-    h("div", { key: "grid", className: "grid gap-6 xl:grid-cols-[1.1fr_0.9fr]" }, [
-      h(Card, { key: "launch", title: "Launch Run", description: "Trigger the normal engine path with persisted outputs and review workflow attached." }, [
+  const launchWorkbench = h(Card, { key: "launch", title: "Launch Run", description: "Trigger the normal engine path with persisted outputs and review workflow attached." }, [
         h("div", { key: "intake", className: "mb-5 grid gap-3 md:grid-cols-3" }, [
           h("div", { key: "scope", className: "rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm" }, [
             h("div", { key: "label", className: "font-medium" }, "Current Scope"),
@@ -3692,17 +4310,85 @@ function App() {
             h("ul", { key: "list", className: "mt-2 space-y-1" }, (preflightSummary.target.evidence || []).map((item, index) => h("li", { key: index }, "- " + item)))
           ])
         ]) : h("div", { key: "preflight-empty", className: "mt-5 rounded-2xl border border-dashed border-border px-4 py-3 text-sm text-muted" }, "Run preflight to verify target readiness, provider availability, and the planned audit profile before launch.")
+      ]);
+  const dashboard = h("div", { className: "space-y-6" }, [
+    h("div", { key: "kpis", className: "grid gap-4 lg:grid-cols-4" }, [
+      h(DashboardKpiCard, { key: "runs", label: "Total Runs", value: String(stats.runs.total_runs || runs.length), hint: "Persisted audit history", tone: "blue" }),
+      h(DashboardKpiCard, { key: "reviews", label: "Pending Reviews", value: String(pendingReviews.length), hint: `${overdueReviews} overdue`, tone: "amber" }),
+      h(DashboardKpiCard, { key: "score", label: "Avg Security Score", value: averageScore, hint: "Average overall score across scored runs", tone: "emerald" }),
+      h(DashboardKpiCard, { key: "followups", label: "Open Follow-ups", value: String(openRuntimeFollowups), hint: `${successfulRuns} successful runs`, tone: "slate" })
+    ]),
+    h("div", { key: "middle", className: "grid gap-6 xl:grid-cols-[1.6fr_0.75fr]" }, [
+      h(DashboardTrendCard, {
+        key: "trend",
+        title: "Security Posture",
+        subtitle: "Average run score over the last six months for the current workspace and project.",
+        series: postureSeries
+      }),
+      h(Card, { key: "review-health", title: "Review Health", description: "Second-row companion card: queue quality and operator workload." , className: "border-slate-200 bg-white shadow-sm" }, [
+        h("div", { key: "summary", className: "text-4xl font-semibold tracking-tight text-slate-950" }, String(pendingReviews.length)),
+        h("div", { key: "copy", className: "mt-2 text-sm text-slate-500" }, pendingReviews.length ? "Open review items currently require attention." : "Review queue is currently clear."),
+        h("div", { key: "bars", className: "mt-6 space-y-5" }, [
+          h("div", { key: "overdue" }, [
+            h("div", { key: "row", className: "flex items-center justify-between text-sm" }, [
+              h("span", { key: "label", className: "text-slate-600" }, "Overdue reviews"),
+              h("span", { key: "value", className: "font-medium text-slate-900" }, String(overdueReviews))
+            ]),
+            h("div", { key: "track", className: "mt-2 h-2 rounded-full bg-slate-100" }, h("div", {
+              className: "h-2 rounded-full bg-amber-500",
+              style: { width: `${pendingReviews.length ? Math.min(100, (overdueReviews / pendingReviews.length) * 100) : 0}%` }
+            }))
+          ]),
+          h("div", { key: "age" }, [
+            h("div", { key: "row", className: "flex items-center justify-between text-sm" }, [
+              h("span", { key: "label", className: "text-slate-600" }, "Average review age"),
+              h("span", { key: "value", className: "font-medium text-slate-900" }, averageReviewAgeHours)
+            ]),
+            h("div", { key: "track", className: "mt-2 h-2 rounded-full bg-slate-100" }, h("div", {
+              className: "h-2 rounded-full bg-sky-500",
+              style: { width: `${Math.min(100, pendingReviews.length ? (overdueReviews / Math.max(1, pendingReviews.length)) * 100 + 20 : 10)}%` }
+            }))
+          ]),
+          h("div", { key: "actions", className: "grid gap-3 pt-2" }, [
+            h(Button, { key: "reviews", onClick: () => setView("reviews") }, "Open Review Inbox"),
+            h(Button, { key: "runs", variant: "outline", onClick: () => setView("runs") }, "Open Runs Workspace")
+          ])
+        ])
+      ])
+    ]),
+    h(Card, { key: "recent-runs", title: "Recent Runs", description: "Latest persisted runs for the current workspace and project.", className: "border-slate-200 bg-white shadow-sm" }, [
+      h("div", { key: "toolbar", className: "mb-4 flex items-center justify-between gap-3" }, [
+        h("div", { key: "meta", className: "text-sm text-slate-500" }, `${recentRuns.length} recent run${recentRuns.length === 1 ? "" : "s"} shown`),
+        h(Button, { key: "open-all", variant: "outline", onClick: () => setView("runs") }, "View All Runs")
       ]),
-      h(Card, { key: "recent", title: "Recent Runs" }, runs.slice(0, 5).length ? runs.slice(0, 5).map((run) => h("div", {
-        key: run.id,
-        className: "mb-3 flex items-center justify-between rounded-2xl border border-border bg-white/70 px-4 py-3"
-      }, [
-        h("div", { key: "left" }, [
-          h("div", { key: "name", className: "font-medium" }, run.target?.canonical_name || run.target_summary?.canonical_name || run.target_id),
-          h("div", { key: "date", className: "text-sm text-muted" }, formatDate(run.created_at))
-        ]),
-        h(Badge, { key: "status" }, run.status)
-      ])) : h("div", { className: "text-sm text-muted" }, "No runs yet."))
+      recentRuns.length
+        ? h("div", { key: "table", className: "overflow-x-auto rounded-2xl border border-slate-200" }, h("table", { className: "w-full text-sm" }, [
+            h("thead", { key: "head", className: "bg-slate-50" }, h("tr", { className: "text-left text-xs uppercase tracking-[0.18em] text-slate-500" }, [
+              h("th", { key: "target", className: "px-4 py-3" }, "Target"),
+              h("th", { key: "status", className: "px-4 py-3" }, "Status"),
+              h("th", { key: "review", className: "px-4 py-3" }, "Review"),
+              h("th", { key: "score", className: "px-4 py-3" }, "Score"),
+              h("th", { key: "created", className: "px-4 py-3" }, "Created")
+            ])),
+            h("tbody", { key: "body" }, recentRuns.map((run) => h("tr", {
+              key: run.id,
+              className: "cursor-pointer border-t border-slate-200 hover:bg-slate-50",
+              onClick: () => {
+                setView("runs");
+                setSelectedRunId(run.id);
+              }
+            }, [
+              h("td", { key: "target", className: "px-4 py-4" }, [
+                h("div", { key: "name", className: "font-medium text-slate-900" }, run.target?.canonical_name || run.target_summary?.canonical_name || run.target_id),
+                h("div", { key: "id", className: "mt-1 text-xs text-slate-500" }, run.audit_package || "default package")
+              ]),
+              h("td", { key: "status", className: "px-4 py-4" }, h(Badge, null, run.status)),
+              h("td", { key: "review", className: "px-4 py-4" }, h(Badge, null, run.review_workflow?.status || "none")),
+              h("td", { key: "score", className: "px-4 py-4 font-medium text-slate-900" }, Number.isFinite(Number(run.overall_score)) ? String(Number(run.overall_score).toFixed(1)) : "n/a"),
+              h("td", { key: "created", className: "px-4 py-4 text-slate-500" }, formatDate(run.created_at))
+            ])))
+          ]))
+        : h("div", { key: "empty", className: "rounded-2xl border border-dashed border-slate-200 px-4 py-6 text-sm text-slate-500" }, "No runs available for the current scope.")
     ])
   ]);
 
@@ -3721,73 +4407,167 @@ function App() {
     ])
   ])) : h("div", { className: "text-sm text-muted" }, "No async jobs recorded."));
 
-  const runsView = h("div", { className: "grid gap-6 xl:grid-cols-[0.95fr_1.05fr]" }, [
-    h(Card, { key: "table", title: "Persisted Runs", description: "Select a run to inspect stored summary, preflight planning, and executed configuration." }, h(RunsTable, {
-      runs,
-      selectedRunId,
-      onSelect: setSelectedRunId
-    })),
-    h(RunDetailPanel, {
-      key: "detail",
-      detail: selectedRunDetail,
-      loading: selectedRunLoading,
-      comparison: selectedRunComparison,
-      comparisonLoading: selectedRunComparisonLoading,
-      comparisonDetail: comparisonRunDetail,
-      comparisonDetailLoading: comparisonRunLoading,
-      selectedFindingId,
-      selectedComparisonFindingId,
-      reviewAssignee,
-      findingReviewState,
-      onSelectFinding: setSelectedFindingId,
-      onSelectComparisonFinding: setSelectedComparisonFindingId,
-      onSelectComparisonPair: selectComparisonPair,
-      onReviewAssigneeChange: setReviewAssignee,
-      onAssignReviewer: assignReviewer,
-      onRunReviewAction: runReviewAction,
-      onFindingReviewStateChange: updateFindingReviewState,
-      onFindingReviewAction: findingReviewAction,
-      onFindingDispositionAction: findingDispositionAction,
-      onEditFindingDisposition: beginDispositionEdit,
-      onSaveFindingDispositionEdit: saveDispositionEdit,
-      onRevokeFindingDisposition: revokeDisposition,
-      reviewComments: selectedRunDetail?.reviewComments?.review_comments || [],
-      commentBody: reviewCommentBody,
-      commentFindingId: reviewCommentFindingId,
-      onCommentBodyChange: setReviewCommentBody,
-      onCommentFindingChange: setReviewCommentFindingId,
-      onSubmitComment: submitReviewComment,
-      onExportReviewAudit: exportReviewAudit,
-      onExportExecutiveReport: exportExecutiveReport,
-      onExportMarkdownReport: exportMarkdownReport,
-      onExportSarifReport: exportSarifReport,
-      onDownloadIndexedRunExport: downloadIndexedRunExport,
-      compareRunId,
-      onCompareRunIdChange: setCompareRunId,
-      onExportComparisonReport: exportComparisonReport,
-      onApproveOutbound: approveOutboundSharing,
+  const runsView = h("div", { className: "h-screen overflow-hidden" }, [
+    h("div", { key: "workspace", className: "grid h-full overflow-hidden border border-slate-200 bg-white xl:grid-cols-[420px_1fr]" }, [
+      h("section", { key: "queue", className: "flex min-h-0 flex-col border-b border-slate-200 xl:border-b-0 xl:border-r" }, [
+        h("div", { key: "queue-header", className: "border-b border-slate-200 px-5 py-5" }, [
+          h("div", { key: "top", className: "flex items-start justify-between gap-4" }, [
+            h("div", { key: "copy" }, [
+              h("h2", { key: "title", className: "text-2xl font-semibold tracking-tight text-slate-950" }, "Runs Inbox"),
+              h("p", { key: "desc", className: "mt-2 text-sm leading-6 text-slate-500" }, "Select a run from the queue, inspect the selected run on the right, and launch new audits from a dedicated modal.")
+            ]),
+            h("div", { key: "actions", className: "flex shrink-0 flex-wrap gap-3" }, [
+              h(Button, { key: "launch", onClick: () => setLaunchModalOpen(true) }, "Launch Audit"),
+              h(Button, { key: "reviews", variant: "outline", onClick: () => setView("reviews") }, "Open Reviews")
+            ])
+          ]),
+          h("div", { key: "queue-meta", className: "mt-4 flex items-center justify-between gap-3 text-sm text-slate-500" }, [
+            h("div", { key: "count" }, `${runs.length} run${runs.length === 1 ? "" : "s"} in current scope`),
+            h("div", { key: "latest" }, runs[0]?.created_at ? `Latest ${formatDate(runs[0].created_at)}` : "No recent activity")
+          ])
+        ]),
+        h("div", { key: "queue-list", className: "min-h-0 flex-1 overflow-y-auto" }, h(RunInboxList, {
+          runs,
+          selectedRunId,
+          onSelect: setSelectedRunId
+        }))
+      ]),
+      h("section", { key: "detail-pane", className: "min-w-0 overflow-y-auto bg-slate-50 px-5 py-5" }, h(RunDetailPanel, {
+        key: "detail",
+        detail: selectedRunDetail,
+        loading: selectedRunLoading,
+        comparison: selectedRunComparison,
+        comparisonLoading: selectedRunComparisonLoading,
+        effectiveSettings,
+        comparisonDetail: comparisonRunDetail,
+        comparisonDetailLoading: comparisonRunLoading,
+        selectedFindingId,
+        selectedComparisonFindingId,
+        reviewAssignee,
+        findingReviewState,
+        onSelectFinding: setSelectedFindingId,
+        onSelectComparisonFinding: setSelectedComparisonFindingId,
+        onSelectComparisonPair: selectComparisonPair,
+        onReviewAssigneeChange: setReviewAssignee,
+        onAssignReviewer: assignReviewer,
+        onRunReviewAction: runReviewAction,
+        onFindingReviewStateChange: updateFindingReviewState,
+        onFindingReviewAction: findingReviewAction,
+        onFindingDispositionAction: findingDispositionAction,
+        onEditFindingDisposition: beginDispositionEdit,
+        onSaveFindingDispositionEdit: saveDispositionEdit,
+        onRevokeFindingDisposition: revokeDisposition,
+        reviewComments: selectedRunDetail?.reviewComments?.review_comments || [],
+        commentBody: reviewCommentBody,
+        commentFindingId: reviewCommentFindingId,
+        onCommentBodyChange: setReviewCommentBody,
+        onCommentFindingChange: setReviewCommentFindingId,
+        onSubmitComment: submitReviewComment,
+        onExportReviewAudit: exportReviewAudit,
+        onExportExecutiveReport: exportExecutiveReport,
+        onExportMarkdownReport: exportMarkdownReport,
+        onExportSarifReport: exportSarifReport,
+        onDownloadIndexedRunExport: downloadIndexedRunExport,
+        compareRunId,
+        onCompareRunIdChange: setCompareRunId,
+        onExportComparisonReport: exportComparisonReport,
+        onApproveOutbound: approveOutboundSharing,
         onPrepareOutboundSend: prepareOutboundSend,
         onVerifyOutbound: verifyOutboundAccess,
         onExecuteOutboundDelivery: executeOutboundDelivery,
         onLaunchRuntimeFollowup: launchRuntimeFollowup,
         outboundActionType,
-      outboundTargetNumber,
-      onOutboundActionTypeChange: setOutboundActionType,
-      onOutboundTargetNumberChange: setOutboundTargetNumber
+        outboundTargetNumber,
+        onOutboundActionTypeChange: setOutboundActionType,
+        onOutboundTargetNumberChange: setOutboundTargetNumber
+      }))
+    ]),
+    h(LaunchAuditModal, {
+      key: "launch-modal",
+      open: launchModalOpen,
+      onClose: () => setLaunchModalOpen(false),
+      requestContext,
+      currentProject,
+      runForm,
+      updateRunForm,
+      auditPackages,
+      policyPacks,
+      llmRegistry,
+      runModelOptions,
+      selectedProvider,
+      launchReadiness,
+      preflightSummary,
+      preflightStale,
+      preflightCheckedAt,
+      preflightAcceptedAt,
+      preflightLoading,
+      applyProviderPreset,
+      runPreflight,
+      acceptPreflight,
+      applyPreflightRecommendations,
+      launchRun
     })
   ]);
 
   const reviewsView = h("div", { className: "grid gap-6 xl:grid-cols-[0.9fr_1.1fr]" }, [
     h("div", { key: "left", className: "space-y-6" }, [
-      h(Card, { key: "notifications", title: "My Review Notifications", description: "Unread and acknowledged review assignments for the current actor." }, reviewNotifications.length
+      h("div", { key: "review-summary", className: "grid gap-4 md:grid-cols-4" }, [
+        h("div", { key: "open", className: "rounded-3xl border border-slate-200 bg-white p-5 shadow-sm" }, [
+          h("div", { key: "label", className: "text-xs uppercase tracking-[0.18em] text-slate-400" }, "Open Queue"),
+          h("div", { key: "value", className: "mt-3 text-3xl font-semibold tracking-tight text-slate-950" }, String(pendingReviews.length))
+        ]),
+        h("div", { key: "overdue", className: "rounded-3xl border border-slate-200 bg-white p-5 shadow-sm" }, [
+          h("div", { key: "label", className: "text-xs uppercase tracking-[0.18em] text-slate-400" }, "Overdue"),
+          h("div", { key: "value", className: "mt-3 text-3xl font-semibold tracking-tight text-slate-950" }, String(overdueReviews))
+        ]),
+        h("div", { key: "mine", className: "rounded-3xl border border-slate-200 bg-white p-5 shadow-sm" }, [
+          h("div", { key: "label", className: "text-xs uppercase tracking-[0.18em] text-slate-400" }, "Assigned To Me"),
+          h("div", { key: "value", className: "mt-3 text-3xl font-semibold tracking-tight text-slate-950" }, String(pendingReviews.filter((run) => (run.review_workflow?.current_reviewer_id || "") === (requestContext.actorId || "")).length))
+        ]),
+        h("div", { key: "followup", className: "rounded-3xl border border-slate-200 bg-white p-5 shadow-sm" }, [
+          h("div", { key: "label", className: "text-xs uppercase tracking-[0.18em] text-slate-400" }, "Runtime Follow-up"),
+          h("div", { key: "value", className: "mt-3 text-3xl font-semibold tracking-tight text-slate-950" }, String(pendingReviews.filter((run) => runtimeFollowupCount(run) > 0).length))
+        ])
+      ]),
+      h(Card, { key: "queue-controls", title: "Review Inbox", description: "Filter the queue by ownership, urgency, and rerun pressure.", className: "border-slate-200 bg-white shadow-sm" }, [
+        h("div", { key: "controls", className: "grid gap-4 md:grid-cols-[220px_1fr]" }, [
+          h(Field, { key: "filter", label: "Queue Filter" }, h(Select, {
+            value: reviewFilter,
+            onChange: (event) => setReviewFilter(event.target.value)
+          }, [
+            h("option", { key: "mine", value: "my_assigned" }, "my assigned"),
+            h("option", { key: "unread", value: "unread_assignments" }, "unread assignments"),
+            h("option", { key: "reviewing", value: "in_review" }, "in review"),
+            h("option", { key: "overdue", value: "overdue" }, "overdue"),
+            h("option", { key: "due-soon", value: "due_soon" }, "due soon"),
+            h("option", { key: "runtime-followup", value: "runtime_followup" }, "runtime follow-up"),
+            h("option", { key: "disposition", value: "needs_disposition_review" }, "needs disposition re-review"),
+            h("option", { key: "rerun", value: "needs_rerun" }, "needs rerun"),
+            h("option", { key: "all", value: "all" }, "all open reviews")
+          ])),
+          h("div", { key: "chips", className: "grid gap-3 md:grid-cols-4" }, [
+            h("div", { key: "age", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600" }, `Average age: ${averageReviewAgeHours}`),
+            h("div", { key: "unread", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600" }, `Unread: ${reviewNotifications.filter((item) => item.status === "unread").length}`),
+            h("div", { key: "due", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600" }, `Due soon: ${pendingReviews.filter((run) => dispositionDueSoonCount(run) > 0).length}`),
+            h("div", { key: "disposition", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600" }, `Re-review: ${pendingReviews.filter((run) => Number(run.review_summary_counts?.findings_needing_disposition_review_count || 0) > 0).length}`)
+          ])
+        ]),
+        h("div", { key: "queue", className: "mt-5" }, h(ReviewQueueList, {
+          runs: filteredPendingReviews,
+          selectedRunId,
+          onSelect: setSelectedRunId,
+          actorId: requestContext.actorId
+        }))
+      ]),
+      h(Card, { key: "notifications", title: "My Review Notifications", description: "Unread and acknowledged review assignments for the current actor.", className: "border-slate-200 bg-white shadow-sm" }, reviewNotifications.length
         ? h("div", { className: "space-y-3" }, reviewNotifications.map((item) => h("div", {
           key: item.id,
-          className: "rounded-2xl border border-border bg-white/70 px-4 py-3"
+          className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"
         }, [
           h("div", { key: "row", className: "flex items-center justify-between gap-3" }, [
             h("div", { key: "copy" }, [
-              h("div", { key: "message", className: "font-medium" }, item.message),
-              h("div", { key: "meta", className: "text-sm text-muted" }, `${item.notification_type} - ${item.run_id} - ${formatDate(item.created_at)}`)
+              h("div", { key: "message", className: "font-medium text-slate-900" }, item.message),
+              h("div", { key: "meta", className: "text-sm text-slate-500" }, `${item.notification_type} • ${item.run_id} • ${formatDate(item.created_at)}`)
             ]),
             h(Badge, { key: "status" }, item.status)
           ]),
@@ -3799,39 +4579,15 @@ function App() {
           }, "Acknowledge") : null
         ])))
         : h("div", { className: "text-sm text-muted" }, "No review notifications for the current actor.")),
-      h(Card, { key: "queue-controls", title: "Queue Controls", description: "Filter the review queue by ownership, unread assignments, overdue work, and rerun follow-up." }, [
-        h(Field, { key: "filter", label: "Queue Filter" }, h(Select, {
-          value: reviewFilter,
-          onChange: (event) => setReviewFilter(event.target.value)
-        }, [
-          h("option", { key: "mine", value: "my_assigned" }, "my assigned"),
-          h("option", { key: "unread", value: "unread_assignments" }, "unread assignments"),
-          h("option", { key: "reviewing", value: "in_review" }, "in review"),
-          h("option", { key: "overdue", value: "overdue" }, "overdue"),
-          h("option", { key: "due-soon", value: "due_soon" }, "due soon"),
-          h("option", { key: "runtime-followup", value: "runtime_followup" }, "runtime follow-up"),
-          h("option", { key: "disposition", value: "needs_disposition_review" }, "needs disposition re-review"),
-          h("option", { key: "rerun", value: "needs_rerun" }, "needs rerun"),
-          h("option", { key: "all", value: "all" }, "all open reviews")
-        ])),
-        h("div", { key: "stats", className: "mt-4 grid gap-3 md:grid-cols-6" }, [
-          h("div", { key: "open", className: "rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm" }, `Open queue: ${pendingReviews.length}`),
-          h("div", { key: "overdue", className: "rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm" }, `Overdue: ${pendingReviews.filter((run) => isOverdueReview(run)).length}`),
-          h("div", { key: "mine", className: "rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm" }, `Assigned to me: ${pendingReviews.filter((run) => (run.review_workflow?.current_reviewer_id || "") === (requestContext.actorId || "")).length}`),
-          h("div", { key: "runtime-followup", className: "rounded-2xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-900" }, `Runtime follow-up: ${pendingReviews.filter((run) => runtimeFollowupCount(run) > 0).length}`),
-          h("div", { key: "due-soon", className: "rounded-2xl border border-orange-200 bg-orange-50 px-4 py-3 text-sm text-orange-900" }, `Due soon: ${pendingReviews.filter((run) => dispositionDueSoonCount(run) > 0).length}`),
-          h("div", { key: "disposition", className: "rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900" }, `Disposition re-review: ${pendingReviews.filter((run) => Number(run.review_summary_counts?.findings_needing_disposition_review_count || 0) > 0).length}`)
-        ])
-        ]),
-        h(Card, { key: "runtime-followup-queue", title: "Runtime Follow-up Queue", description: "Pending and linked rerun work items derived from runtime-sensitive findings." }, runtimeFollowups.length
+        h(Card, { key: "runtime-followup-queue", title: "Runtime Follow-up Queue", description: "Pending and linked rerun work items derived from runtime-sensitive findings.", className: "border-slate-200 bg-white shadow-sm" }, runtimeFollowups.length
           ? h("div", { className: "space-y-3" }, runtimeFollowups.map((item) => h("div", {
             key: item.id,
-            className: "rounded-2xl border border-border bg-white/70 px-4 py-3"
+            className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"
           }, [
             h("div", { key: "head", className: "flex items-center justify-between gap-3" }, [
               h("div", { key: "copy" }, [
-                h("div", { key: "title", className: "font-medium" }, item.finding_title || item.finding_id),
-                h("div", { key: "meta", className: "text-sm text-muted" }, `${item.run_id} - ${item.followup_policy} - ${formatDate(item.requested_at)}`)
+                h("div", { key: "title", className: "font-medium text-slate-900" }, item.finding_title || item.finding_id),
+                h("div", { key: "meta", className: "text-sm text-slate-500" }, `${item.run_id} • ${item.followup_policy} • ${formatDate(item.requested_at)}`)
               ]),
               h(Badge, { key: "status" }, item.status)
             ]),
@@ -3843,12 +4599,6 @@ function App() {
             ].filter(Boolean))
           ])))
           : h("div", { className: "text-sm text-muted" }, "No runtime follow-up work items in the current scope.")),
-        h(Card, { key: "queue", title: "Review Queue", description: "Runs waiting on human review, ordered by urgency and ownership." }, h(ReviewQueueList, {
-        runs: filteredPendingReviews,
-        selectedRunId,
-        onSelect: setSelectedRunId,
-        actorId: requestContext.actorId
-      }))
     ]),
     h(RunDetailPanel, {
       key: "detail",
@@ -3856,6 +4606,7 @@ function App() {
       loading: selectedRunLoading,
       comparison: selectedRunComparison,
       comparisonLoading: selectedRunComparisonLoading,
+      effectiveSettings,
       comparisonDetail: comparisonRunDetail,
       comparisonDetailLoading: comparisonRunLoading,
       selectedFindingId,
@@ -4360,36 +5111,74 @@ function App() {
     ])
   ]);
 
-  return h("div", { className: "grid min-h-screen lg:grid-cols-[280px_1fr]" }, [
-    h("aside", { key: "aside", className: "border-b border-border bg-card/80 px-6 py-8 lg:border-b-0 lg:border-r" }, [
-      h("div", { key: "eyebrow", className: "text-xs font-mono uppercase tracking-[0.28em] text-muted" }, "OSS Console"),
-      h("h1", { key: "title", className: "mt-4 font-serif text-4xl" }, "AI Security Harness"),
-      h("p", { key: "copy", className: "mt-3 text-sm text-muted" }, "Self-hosted runs, review workflow, async jobs, and persisted audit settings in one surface."),
-      h("nav", { key: "nav", className: "mt-8 grid gap-2" }, navItems.map(([itemView, label]) =>
+  return h("div", { className: "grid min-h-screen bg-background lg:grid-cols-[280px_1fr]" }, [
+    h("aside", { key: "aside", className: "border-b border-border bg-white px-4 py-5 lg:border-b-0 lg:border-r" }, [
+      h("div", { key: "brand", className: "flex items-center gap-3 px-2" }, [
+        h("div", { key: "logo", className: "flex h-8 w-8 items-center justify-center rounded-full border border-slate-300 text-slate-700" }, h(SidebarIcon, { kind: "spark" })),
+        h("div", { key: "name", className: "text-lg font-semibold text-slate-900" }, "AI Security Harness")
+      ]),
+      h("div", { key: "quick-row", className: "mt-6 flex items-center gap-2" }, [
         h("button", {
-          key: itemView,
-          onClick: () => setView(itemView),
-          className: cn("rounded-2xl border px-4 py-3 text-left font-medium", view === itemView ? "border-primary bg-primary/10 text-primary" : "border-border bg-white/70")
-        }, label)
-      )),
-      h("div", { key: "surface", className: "mt-8 rounded-3xl border border-border bg-stone-100/80 p-4 text-sm text-muted" }, "Query routes stay normalized. Artifact routes stay archival. Settings and attached documents are persisted through the same API.")
-    ]),
-    h("main", { key: "main", className: "px-5 py-6 lg:px-10" }, [
-      h("header", { key: "header", className: "flex flex-col gap-4 border-b border-border pb-5 sm:flex-row sm:items-end sm:justify-between" }, [
-        h("div", { key: "heading" }, [
-          h("div", { key: "eyebrow", className: "text-xs font-mono uppercase tracking-[0.28em] text-muted" }, "Web UI"),
-          h("h2", { key: "title", className: "mt-2 font-serif text-4xl" }, navItems.find(([item]) => item === view)?.[1] || "Dashboard")
+          key: "quick-create",
+          type: "button",
+          onClick: () => {
+            setView("runs");
+            setLaunchModalOpen(true);
+          },
+          className: "flex flex-1 items-center gap-2 rounded-2xl bg-slate-800 px-4 py-3 text-left text-sm font-semibold text-white hover:bg-slate-700"
+        }, [
+          h(SidebarIcon, { key: "icon", kind: "plus" }),
+          h("span", { key: "label" }, "Quick Create")
         ]),
-        h(Button, { key: "refresh", variant: "outline", onClick: load }, "Refresh")
+        h("button", {
+          key: "mail",
+          type: "button",
+          onClick: () => setView("reviews"),
+          className: "flex h-11 w-11 items-center justify-center rounded-2xl border border-border bg-white text-slate-700 hover:bg-slate-50"
+        }, h(SidebarIcon, { kind: "mail" }))
       ]),
-      h("div", { key: "auth-banner", className: cn("mt-6 rounded-2xl border px-4 py-3 text-sm", authInfo.trusted_mode ? "border-amber-300 bg-amber-50 text-amber-800" : "border-emerald-300 bg-emerald-50 text-emerald-800") }, [
-        h("div", { key: "title", className: "font-semibold" }, authInfo.trusted_mode ? "Trusted Local Mode" : "Authenticated Mode"),
-        h("div", { key: "body", className: "mt-1" }, authInfo.guidance),
-        h("div", { key: "meta", className: "mt-2 font-mono text-xs uppercase tracking-[0.18em]" }, `auth=${authInfo.auth_mode} • review_roles=${authInfo.review_roles_security}`)
-      ]),
-      error ? h("div", { key: "error", className: "mt-6 rounded-2xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700" }, error) : null,
-      notice ? h("div", { key: "notice", className: "mt-6 rounded-2xl border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm text-emerald-700" }, notice) : null,
-      h("div", { key: "view", className: "mt-6" }, view === "dashboard"
+      h("div", { key: "groups", className: "mt-6 space-y-6" }, navGroups.map((group) => h("div", { key: group.label }, [
+        h("div", { key: "label", className: "px-2 text-xs font-medium text-slate-400" }, group.label),
+        h("nav", { key: "items", className: "mt-3 grid gap-1.5" }, group.items.map(([itemView, label, icon]) =>
+          h("button", {
+            key: itemView,
+            type: "button",
+            onClick: () => setView(itemView),
+            className: cn(
+              "flex items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition-colors",
+              view === itemView ? "bg-slate-100 font-semibold text-slate-950" : "text-slate-700 hover:bg-slate-50"
+            )
+          }, [
+            h("span", { key: "icon", className: cn("text-slate-500", view === itemView && "text-slate-900") }, h(SidebarIcon, { kind: icon })),
+            h("span", { key: "text" }, label)
+          ])
+        ))
+      ]))),
+      h("div", { key: "footer", className: "mt-8 px-2 text-sm text-slate-500" }, [
+        h("div", { key: "scope", className: "font-medium text-slate-700" }, `${requestContext.workspaceId}/${requestContext.projectId}`),
+        h("div", { key: "desc", className: "mt-1" }, pageDescriptions[view] || "Focused workspace for operating the harness.")
+      ])
+    ]),
+    h("main", { key: "main", className: view === "runs" ? "min-w-0 h-screen overflow-hidden" : "px-5 py-6 lg:px-8" }, [
+      view !== "runs" ? h("header", { key: "header", className: "mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between" }, [
+        h("div", { key: "heading" }, [
+          h("h2", { key: "title", className: "text-3xl font-semibold tracking-tight text-slate-950" }, navItems.find(([item]) => item === view)?.[1] || "Dashboard"),
+          h("p", { key: "desc", className: "mt-1 text-sm text-slate-500" }, pageDescriptions[view] || "Focused workspace for operating the harness.")
+        ]),
+        h("div", { key: "actions", className: "flex items-center gap-3" }, [
+          h("div", { key: "status", className: "hidden flex-wrap gap-2 md:flex" }, [
+            h(Badge, { key: "auth" }, authInfo.trusted_mode ? "trusted_local" : authInfo.auth_mode || "authenticated"),
+            h(Badge, { key: "roles" }, effectiveRoles.join(",") || "viewer")
+          ]),
+          h(Button, { key: "refresh", variant: "outline", onClick: load }, "Refresh")
+        ])
+      ]) : null,
+      error ? h("div", { key: "error", className: cn(view === "runs" ? "m-4" : "mt-6", "rounded-2xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700") }, error) : null,
+      notice ? h("div", { key: "notice", className: cn(view === "runs" ? "m-4" : "mt-6", "rounded-2xl border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm text-emerald-700") }, notice) : null,
+      h(ViewErrorBoundary, {
+        key: `view:${view}`,
+        resetKey: `${view}:${selectedRunId || ""}:${selectedRuntimeFollowupId || ""}`
+      }, h("div", { key: "view", className: view === "runs" ? "" : "mt-6" }, view === "dashboard"
         ? dashboard
         : view === "runs"
           ? runsView
@@ -4399,7 +5188,7 @@ function App() {
               ? runtimeFollowupsView
               : view === "reviews"
                 ? reviewsView
-                : settingsView)
+                : settingsView))
     ])
   ]);
 }

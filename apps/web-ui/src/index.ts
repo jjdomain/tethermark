@@ -7,6 +7,10 @@ const host = "127.0.0.1";
 const port = Number(process.env.WEB_UI_PORT ?? "8788");
 const defaultApiBaseUrl = process.env.WEB_UI_API_BASE_URL ?? "http://127.0.0.1:8787";
 const staticDir = path.resolve(process.cwd(), "apps", "web-ui", "static");
+const vendorAssets = new Map<string, string>([
+  ["/vendor/react.production.min.js", path.resolve(process.cwd(), "node_modules", "react", "umd", "react.production.min.js")],
+  ["/vendor/react-dom.production.min.js", path.resolve(process.cwd(), "node_modules", "react-dom", "umd", "react-dom.production.min.js")]
+]);
 
 function contentTypeFor(filePath: string): string {
   if (filePath.endsWith(".html")) return "text/html; charset=utf-8";
@@ -50,6 +54,17 @@ async function proxyApiRequest(req: http.IncomingMessage, res: http.ServerRespon
 }
 
 async function serveStaticAsset(res: http.ServerResponse, pathname: string): Promise<boolean> {
+  const vendorAsset = vendorAssets.get(pathname);
+  if (vendorAsset) {
+    try {
+      const body = await fs.readFile(vendorAsset);
+      res.writeHead(200, { "content-type": contentTypeFor(vendorAsset) });
+      res.end(body);
+      return true;
+    } catch {
+      return false;
+    }
+  }
   const assetPath = safeJoin(staticDir, pathname);
   if (!assetPath) return false;
   try {

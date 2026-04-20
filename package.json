@@ -13,6 +13,8 @@
     "exports:check": "npm run build --silent && node dist/packages/core-engine/src/export-maintenance.js check",
     "exports:refresh": "npm run build --silent && node dist/packages/core-engine/src/export-maintenance.js refresh",
     "release:check": "npm run build --silent && npm test --silent && npm run exports:check && npm run scan -- validate-fixtures",
+    "oss": "npm run build --silent && node scripts/run-api-web.mjs",
+    "oss:check": "npm run build --silent && node scripts/check-oss.mjs",
     "scan": "npm run build --silent && node dist/apps/cli/src/index.js",
     "scan:self": "npm run build --silent && node dist/apps/cli/src/index.js scan path . --output ./.artifacts/runs/self-scan-ts --mode static",
     "api": "npm run build --silent && node dist/apps/api-server/src/index.js",
@@ -24,6 +26,8 @@
     "typescript": "^5.8.3"
   },
   "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
     "sql.js": "^1.13.0"
   }
 }
