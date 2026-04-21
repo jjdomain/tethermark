@@ -56,6 +56,7 @@ import { stageThreatModel } from "./stages/stage-threat-model.js";
 import { stageScoreAndPublishability } from "./stages/stage-score-and-publishability.js";
 import { stageApplyPolicyOverrides } from "./stages/stage-apply-policy-overrides.js";
 import { stageResolveConfig } from "./stages/stage-resolve-config.js";
+import { isAutoRunModeRequest, resolveRequestedOrAutoRunMode } from "./planner.js";
 
 type AssessmentCycle = Awaited<ReturnType<typeof stageAssessControls>>;
 
@@ -511,7 +512,15 @@ export class AuditEngine {
     const agentRuntime = new AgentRuntime({ provider: request.llm_provider, model: request.llm_model, apiKey: request.llm_api_key });
     const trace: TraceRecord = { trace_id: createId("trace"), run_id: runId, steps: [] };
     const observer = new RunObserver(runId);
-    observer.emit({ level: "info", stage: "run", actor: "orchestrator", eventType: "run_started", status: "running", details: { run_mode: request.run_mode ?? "static" } });
+    let effectiveRequest: AuditRequest = request;
+    observer.emit({
+      level: "info",
+      stage: "run",
+      actor: "orchestrator",
+      eventType: "run_started",
+      status: "running",
+      details: { run_mode: request.run_mode ?? (isAutoRunModeRequest(request) ? "auto" : "static") }
+    });
 
     try {
     const preflightSummary = await observer.observeStage({
@@ -525,6 +534,10 @@ export class AuditEngine {
       preflightSummary,
       submittedAt: nowIso()
     });
+    const preflightRunMode = preflightSummary.launch_profile.run_mode as AuditRequest["run_mode"];
+    effectiveRequest = preflightRunMode === request.run_mode
+      ? request
+      : { ...request, run_mode: preflightRunMode };
     trace.steps.push({ step: 1, actor: "stage_preflight", action: "preflight", summary: `Preflight classified target as ${preflightSummary.target.target_class} with readiness ${preflightSummary.readiness.status}.`, artifacts: ["preflight-summary.json"], timestamp: nowIso() });
     await artifactStore.writeJson(runId, "preflight-summary", preflightSummary);
     await artifactStore.writeJson(runId, "launch-intent", launchIntent);
@@ -533,10 +546,10 @@ export class AuditEngine {
     const resolvedConfigInitial: ResolvedConfigurationArtifact = await observer.observeStage({
       stage: "resolve_config",
       actor: "stage_resolve_config",
-      details: { requested_policy_pack: request.audit_policy_pack ?? null, requested_audit_package: request.audit_package ?? null },
+      details: { requested_policy_pack: effectiveRequest.audit_policy_pack ?? null, requested_audit_package: effectiveRequest.audit_package ?? null },
       fn: async () => stageResolveConfig({
         runId,
-        request,
+        request: effectiveRequest,
         auditPolicy,
         auditPackage: requestedAuditPackage
       })
@@ -548,8 +561,8 @@ export class AuditEngine {
     const prepared = await observer.observeStage({
       stage: "prepare_target",
       actor: "stage_prepare_target",
-      details: { target_kind: request.repo_url ? "repo" : request.local_path ? "path" : "endpoint" },
-      fn: async () => stagePrepareTarget(runId, request)
+      details: { target_kind: effectiveRequest.repo_url ? "repo" : effectiveRequest.local_path ? "path" : "endpoint" },
+      fn: async () => stagePrepareTarget(runId, effectiveRequest)
     });
     trace.steps.push({ step: trace.steps.length + 1, actor: "stage_prepare_target", action: "prepare_target", summary: `Prepared target with ${prepared.analysis.file_count} files and ${prepared.repoContext.documents.length} curated context documents.`, artifacts: [prepared.sandbox.target_dir], timestamp: nowIso() });
     await artifactStore.writeJson(runId, "sandbox", prepared.sandbox);
@@ -571,7 +584,7 @@ export class AuditEngine {
 
     const commitDiff = await computeCommitDiffGate({
       currentRunId: runId,
-      request,
+      request: effectiveRequest,
       target: prepared.target,
       auditPolicy
     });
@@ -579,16 +592,16 @@ export class AuditEngine {
     this.ensureRunNotCanceled(runId);
 
     const initialTargetClass = prepared.analysis.mcp_indicators.length > 0 ? "mcp_server_plugin_skill_package" : prepared.analysis.agent_indicators.length > 0 || prepared.analysis.tool_execution_indicators.length > 0 ? "tool_using_multi_turn_agent" : prepared.analysis.entry_points.length > 0 ? "runnable_local_app" : "repo_posture_only";
-    const auditPackage = resolveAuditPackage({ request, analysis: prepared.analysis, initialTargetClass: initialTargetClass as any });
-    const resolvedConfiguration = stageResolveConfig({
+    let auditPackage = resolveAuditPackage({ request: effectiveRequest, analysis: prepared.analysis, initialTargetClass: initialTargetClass as any });
+    let resolvedConfiguration = stageResolveConfig({
       runId,
-      request,
+      request: effectiveRequest,
       auditPolicy,
       auditPackage,
       initialTargetClass: initialTargetClass as any
     });
     await artifactStore.writeJson(runId, "resolved-config", resolvedConfiguration);
-    const controlCatalog = getCandidateControls({ analysis: prepared.analysis, targetClass: initialTargetClass as any, request });
+    let controlCatalog = getCandidateControls({ analysis: prepared.analysis, targetClass: initialTargetClass as any, request: effectiveRequest });
     const reused = await loadReusedStageArtifacts(commitDiff);
 
     let plannerArtifact = reused.plannerArtifact;
@@ -602,7 +615,7 @@ export class AuditEngine {
         details: { control_catalog_size: controlCatalog.length },
         fn: async () => stagePlanScope({
           runId,
-          request,
+          request: effectiveRequest,
           sandbox: prepared.sandbox,
           target: prepared.target,
           analysis: prepared.analysis,
@@ -620,6 +633,22 @@ export class AuditEngine {
     trace.steps.push({ step: 2, actor: "stage_plan_scope", action: "plan_scope", summary: `Planner selected ${plannerArtifact.selected_profile} and final class ${targetProfile.semantic_review.final_class}.`, artifacts: ["planner-artifact.json", "target-profile.json"], timestamp: nowIso() });
     await artifactStore.writeJson(runId, "planner-artifact", plannerArtifact);
     await artifactStore.writeJson(runId, "target-profile", targetProfile);
+    const semanticRunMode = resolveRequestedOrAutoRunMode({
+      request,
+      analysis: prepared.analysis,
+      targetClass: targetProfile.semantic_review.final_class
+    });
+    effectiveRequest = semanticRunMode === effectiveRequest.run_mode ? effectiveRequest : { ...effectiveRequest, run_mode: semanticRunMode };
+    auditPackage = resolveAuditPackage({ request: effectiveRequest, analysis: prepared.analysis, initialTargetClass: targetProfile.semantic_review.final_class as any });
+    resolvedConfiguration = stageResolveConfig({
+      runId,
+      request: effectiveRequest,
+      auditPolicy,
+      auditPackage,
+      initialTargetClass: targetProfile.semantic_review.final_class as any
+    });
+    controlCatalog = getCandidateControls({ analysis: prepared.analysis, targetClass: targetProfile.semantic_review.final_class as any, request: effectiveRequest });
+    await artifactStore.writeJson(runId, "resolved-config", resolvedConfiguration);
     this.ensureRunNotCanceled(runId);
 
     let threatModel = reused.threatModel;
@@ -632,7 +661,7 @@ export class AuditEngine {
         details: { target_class: targetProfile!.semantic_review.final_class },
         fn: async () => stageThreatModel({
           runId,
-          request,
+          request: effectiveRequest,
           sandbox: prepared.sandbox,
           target: prepared.target,
           analysis: prepared.analysis,
@@ -660,7 +689,7 @@ export class AuditEngine {
         details: { target_class: targetProfile!.semantic_review.final_class },
         fn: async () => stageSelectEvidence({
           runId,
-          request,
+          request: effectiveRequest,
           sandbox: prepared.sandbox,
           target: prepared.target,
           analysis: prepared.analysis,
@@ -718,7 +747,7 @@ export class AuditEngine {
         actor: "stage_assess_controls",
         details: { provider_count: evalSelection.baseline_tools.length + evalSelection.runtime_tools.length, lane_count: rerunLanePlans.length || lanePlans.length },
         fn: async () => stageAssessControls({
-          request,
+          request: effectiveRequest,
           sandbox: prepared.sandbox,
           target: prepared.target,
           analysis: prepared.analysis,
@@ -792,7 +821,7 @@ export class AuditEngine {
       details: { finding_count: cycle.findings.length },
       fn: async () => stageSkepticReview({
       runId,
-      request,
+      request: effectiveRequest,
       sandbox: prepared.sandbox,
       target: prepared.target,
       analysis: prepared.analysis,
@@ -839,7 +868,7 @@ export class AuditEngine {
       if (needsPlanner) {
         const replanned = await stagePlanScope({
           runId,
-          request,
+          request: effectiveRequest,
           sandbox: prepared.sandbox,
           target: prepared.target,
           analysis: prepared.analysis,
@@ -862,7 +891,7 @@ export class AuditEngine {
       if (needsPlanner || needsThreat) {
         currentThreatModel = await stageThreatModel({
           runId,
-          request,
+          request: effectiveRequest,
           sandbox: prepared.sandbox,
           target: prepared.target,
           analysis: prepared.analysis,
@@ -879,7 +908,7 @@ export class AuditEngine {
       if (needsPlanner || needsThreat || needsEval) {
         evalSelection = await stageSelectEvidence({
           runId,
-          request,
+          request: effectiveRequest,
           sandbox: prepared.sandbox,
           target: prepared.target,
           analysis: prepared.analysis,
@@ -899,7 +928,7 @@ export class AuditEngine {
       if (needsPlanner || needsThreat || needsEval || evidenceSubset.length > 0 || laneSubset.length > 0 || skepticReview.actions.some((action) => action.type === "reassess_control_subset" || action.type === "request_additional_evidence")) {
         const priorCycle = cycle;
         const reassessedCycle = await stageAssessControls({
-          request,
+          request: effectiveRequest,
           sandbox: prepared.sandbox,
           target: prepared.target,
           analysis: prepared.analysis,
@@ -959,7 +988,7 @@ export class AuditEngine {
 
       skepticReview = await stageSkepticReview({
         runId,
-        request,
+        request: effectiveRequest,
         sandbox: prepared.sandbox,
         target: prepared.target,
         analysis: prepared.analysis,
@@ -1057,7 +1086,7 @@ export class AuditEngine {
       details: { final_finding_count: findings.length },
       fn: async () => stageRemediation({
       runId,
-      request,
+      request: effectiveRequest,
       sandbox: prepared.sandbox,
       target: prepared.target,
       analysis: prepared.analysis,
@@ -1197,23 +1226,23 @@ export class AuditEngine {
       }
     };
 
-    const persistence = await persistAuditResult({ result, packageDefinition: auditPackage, request });
+    const persistence = await persistAuditResult({ result, packageDefinition: auditPackage, request: effectiveRequest });
     result.persistence = persistence;
     await persistPersistenceSummary({
       runId,
       targetId: prepared.target.target_id,
       createdAt: result.trace.steps[0]?.timestamp ?? new Date().toISOString(),
       summary: persistence,
-      request
+      request: effectiveRequest
     });
     result.artifacts.push(await artifactStore.writeJson(runId, "persistence-summary", persistence));
 
-    await exportArtifactsToOutputDir(runId, artifactDir, request.output_dir);
+    await exportArtifactsToOutputDir(runId, artifactDir, effectiveRequest.output_dir);
 
     await registerRunArtifactLocation({
       runId,
       artifactDir,
-      request,
+      request: effectiveRequest,
       status: "succeeded"
     });
 
@@ -1234,7 +1263,7 @@ export class AuditEngine {
       await registerRunArtifactLocation({
         runId,
         artifactDir,
-        request,
+        request: effectiveRequest,
         status: canceled ? "canceled" : "failed"
       }).catch(() => undefined);
       this.queue.update(runId, {

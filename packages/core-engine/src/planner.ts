@@ -13,6 +13,45 @@ export function classifyTarget(analysis: AnalysisSummary, request: AuditRequest)
   return buildHeuristicTargetProfile(analysis, request).primary_class;
 }
 
+export function getRequestedRunModeSelection(request: AuditRequest): "static" | "runtime" | "auto" | "default" {
+  const selection = String((request.hints as any)?.requested_run_mode_selection ?? "");
+  if (selection === "static" || selection === "runtime" || selection === "auto") {
+    return selection;
+  }
+  return "default";
+}
+
+export function isAutoRunModeRequest(request: AuditRequest): boolean {
+  return !request.run_mode && getRequestedRunModeSelection(request) === "auto";
+}
+
+export function resolveRequestedOrAutoRunMode(args: {
+  request: AuditRequest;
+  analysis?: AnalysisSummary | null;
+  targetClass?: TargetClass | null;
+}): NonNullable<AuditRequest["run_mode"]> {
+  if (args.request.run_mode) {
+    return args.request.run_mode;
+  }
+  const requestedSelection = getRequestedRunModeSelection(args.request);
+  if (requestedSelection === "default") {
+    return "static";
+  }
+
+  const targetClass = args.targetClass
+    ?? (args.analysis ? buildHeuristicTargetProfile(args.analysis, args.request).primary_class : args.request.endpoint_url ? "hosted_endpoint_black_box" : null);
+
+  if (targetClass === "repo_posture_only") {
+    return requestedSelection === "auto" ? "static" : "build";
+  }
+
+  if (targetClass === "runnable_local_app") {
+    return "build";
+  }
+
+  return "validate";
+}
+
 export function buildHeuristicTargetProfile(analysis: AnalysisSummary, request: AuditRequest): HeuristicTargetProfile {
   const evidence: string[] = [];
   const secondaryTraits = new Set<string>();

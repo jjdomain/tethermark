@@ -66,14 +66,16 @@ const BUILTIN_LLM_PROVIDERS: LlmProviderDefinition[] = [
     mode: "local_mock",
     requires_api_key: false,
     api_key_field: null,
-    default_model: null,
+    default_model: "mock-agent-runtime",
     supports_custom_model: false,
     description: "Deterministic local mock provider for fixtures, smoke tests, and offline UI validation.",
     notes: [
       "Best for local development and repeatable fixture validation.",
       "Does not require network access or external credentials."
     ],
-    models: [],
+    models: [
+      { id: "mock-agent-runtime", label: "Mock Agent Runtime", recommended_for: "fixtures, smoke tests, and offline validation" }
+    ],
     credential_fields: []
   },
   {
@@ -104,7 +106,10 @@ const BUILTIN_LLM_PROVIDERS: LlmProviderDefinition[] = [
     models: [
       { id: "gpt-5.4-mini", label: "GPT-5.4 Mini", recommended_for: "balanced default OSS usage" },
       { id: "gpt-5.4", label: "GPT-5.4", recommended_for: "deeper planning and review quality" },
-      { id: "gpt-5.2", label: "GPT-5.2", recommended_for: "stable professional work and lower cost than frontier" }
+      { id: "gpt-5.2", label: "GPT-5.2", recommended_for: "stable professional work and lower cost than frontier" },
+      { id: "gpt-4.1", label: "GPT-4.1", recommended_for: "broad compatibility and lower-cost live runs" },
+      { id: "gpt-4.1-mini", label: "GPT-4.1 Mini", recommended_for: "faster review passes and lower token cost" },
+      { id: "gpt-4.1-nano", label: "GPT-4.1 Nano", recommended_for: "very fast lightweight checks" }
     ]
   }
 ];

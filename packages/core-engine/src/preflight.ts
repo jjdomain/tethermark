@@ -5,7 +5,7 @@ import type { AnalysisSummary, AuditRequest, PreflightReadinessStatus, Preflight
 import { getBuiltinAuditPackage, resolveAuditPackage } from "./audit-packages.js";
 import { getBuiltinAuditPolicyPack, resolvePolicyPackReference } from "./audit-policy.js";
 import { getLocalBinaryExecutionCapability } from "./evidence-providers.js";
-import { buildHeuristicTargetProfile } from "./planner.js";
+import { buildHeuristicTargetProfile, resolveRequestedOrAutoRunMode } from "./planner.js";
 import { getPythonWorkerCapability } from "./python-worker.js";
 import { analyzeTarget } from "./repo.js";
 
@@ -70,7 +70,8 @@ function buildProviderReadiness(args: {
   const scorecardTargetAvailable = Boolean(args.request.repo_url || args.inferredRepoUrl);
   const fileSystemAvailable = Boolean(args.request.local_path && args.analysisAvailable);
   const deferredFilesystem = Boolean(args.request.repo_url && !args.request.local_path);
-  const runtimeCapable = args.request.run_mode === "build" || args.request.run_mode === "runtime" || args.request.run_mode === "validate";
+  const effectiveRunMode = resolveRequestedOrAutoRunMode({ request: args.request });
+  const runtimeCapable = effectiveRunMode === "build" || effectiveRunMode === "runtime" || effectiveRunMode === "validate";
 
   return [
     {
@@ -215,21 +216,23 @@ export async function buildPreflightSummary(request: AuditRequest): Promise<Pref
   }
 
   const heuristic = buildHeuristicTargetProfile(analysis, request);
+  const effectiveRunMode = resolveRequestedOrAutoRunMode({ request, analysis, targetClass: heuristic.primary_class });
+  const effectiveRequest = effectiveRunMode === request.run_mode ? request : { ...request, run_mode: effectiveRunMode };
   const recommendedPackage = blockers.length
     ? getBuiltinAuditPackage((request.audit_package ?? "agentic-static") as any)
-    : resolveAuditPackage({ request, analysis, initialTargetClass: heuristic.primary_class });
+    : resolveAuditPackage({ request: effectiveRequest, analysis, initialTargetClass: heuristic.primary_class });
   const selectedPolicyPack = resolvePolicyPackReference(request.audit_policy_pack);
   const localBinaryCapability = await getLocalBinaryExecutionCapability();
   const pythonWorkerCapability = await getPythonWorkerCapability();
   const providerReadiness = buildProviderReadiness({
-    request,
+    request: effectiveRequest,
     inferredRepoUrl,
     localBinaryCapability,
     pythonWorkerCapability,
     analysisAvailable
   });
 
-  if ((request.run_mode === "runtime" || request.run_mode === "validate") && request.hints?.preflight && typeof request.hints.preflight === "object") {
+  if ((effectiveRunMode === "runtime" || effectiveRunMode === "validate") && request.hints?.preflight && typeof request.hints.preflight === "object") {
     const runtimeAllowed = String((request.hints.preflight as any).runtime_allowed ?? "targeted_only");
     if (runtimeAllowed === "never") {
       blockers.push("Runtime-oriented run mode was requested while preflight runtime policy is set to never.");
@@ -239,7 +242,7 @@ export async function buildPreflightSummary(request: AuditRequest): Promise<Pref
   if (localBinaryCapability.status === "blocked") {
     warnings.push("Local binary providers are blocked in this host environment; static local-binary evidence will be skipped.");
   }
-  if ((request.run_mode === "build" || request.run_mode === "runtime" || request.run_mode === "validate") && pythonWorkerCapability.status !== "available") {
+  if ((effectiveRunMode === "build" || effectiveRunMode === "runtime" || effectiveRunMode === "validate") && pythonWorkerCapability.status !== "available") {
     warnings.push("Python worker adapters are unavailable in this host environment; bounded runtime-worker evidence will be skipped.");
   }
   if (!inferredRepoUrl && request.local_path) {
@@ -287,7 +290,7 @@ export async function buildPreflightSummary(request: AuditRequest): Promise<Pref
       source: selectedPolicyPack?.source ?? null
     },
     launch_profile: {
-      run_mode: request.run_mode ?? "static",
+      run_mode: effectiveRunMode,
       audit_package: request.audit_package ?? recommendedPackage?.id ?? "agentic-static",
       audit_policy_pack: request.audit_policy_pack ?? selectedPolicyPack?.id ?? "default",
       llm_provider: request.llm_provider ?? "mock",
