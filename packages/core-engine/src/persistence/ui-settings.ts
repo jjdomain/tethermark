@@ -141,6 +141,7 @@ function defaultUiSettingsForScope(args: {
     preflight_json: args.scope === "global" ? {
       enabled: true,
       strictness: "standard",
+      readiness_gate_policy: "risk_or_drift",
       runtime_allowed: "targeted_only",
       isolation_preference: "restricted_container_no_egress",
       include_defaults: [],

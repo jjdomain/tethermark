@@ -1026,6 +1026,7 @@ async function testPersistedReviewWorkflowAndActions(): Promise<void> {
 async function testApiResponsesUsePersistedState(): Promise<void> {
   await withTempDir("harness-api-persisted-", async (rootDir) => {
     const dueSoonReviewDue = new Date(Date.now() + 24 * 36e5).toISOString();
+    const reopenedReviewDue = new Date(Date.now() + 48 * 36e5).toISOString();
     const laterExpiry = new Date(Date.now() + 10 * 24 * 36e5).toISOString();
     const artifactRoot = path.join(rootDir, "artifacts", "run_api");
     await fs.mkdir(artifactRoot, { recursive: true });
@@ -1560,7 +1561,7 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
             reason: "reviewed project waiver after evidence refresh",
             owner_id: "lead-reviewer",
             reviewed_at: "2026-04-15T08:00:00.000Z",
-            review_due_by: "2026-04-22T08:00:00.000Z"
+            review_due_by: reopenedReviewDue
           })
         });
         const revokeDispositionResponse = await fetch(`http://127.0.0.1:${port}/runs/run_api/finding-dispositions/${encodeURIComponent(seededSuppression.id)}/revoke`, {
@@ -1788,7 +1789,7 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
         assert.equal(updateDispositionPayload.finding_disposition.reason, "reviewed project waiver after evidence refresh");
         assert.equal(updateDispositionPayload.finding_disposition.metadata_json.owner_id, "lead-reviewer");
         assert.equal(updateDispositionPayload.finding_disposition.metadata_json.reviewed_at, "2026-04-15T08:00:00.000Z");
-        assert.equal(updateDispositionPayload.finding_disposition.metadata_json.review_due_by, "2026-04-22T08:00:00.000Z");
+        assert.equal(updateDispositionPayload.finding_disposition.metadata_json.review_due_by, reopenedReviewDue);
         assert.equal(revokeDispositionPayload.finding_disposition.status, "revoked");
         assert.equal(revokeDispositionPayload.finding_disposition.metadata_json.revoked_by, "qa_api");
         assert.equal(findingDispositionsAfterMutationPayload.resolved_finding_dispositions.find((item: any) => item.finding_id === "finding_api_dup")?.effective_status, "revoked");

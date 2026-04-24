@@ -68,6 +68,11 @@ export interface ProviderConfig {
   provider?: "openai" | "mock";
   model?: string;
   apiKey?: string;
+  agentOverrides?: Record<string, {
+    provider?: "openai" | "mock";
+    model?: string;
+    apiKey?: string;
+  }>;
 }
 
 export interface ResolvedProviderConfig {
@@ -84,8 +89,8 @@ const AGENT_ENV_PREFIX: Record<string, string> = {
   threat_model_agent: "AUDIT_LLM_THREAT_MODEL",
   eval_selection_agent: "AUDIT_LLM_EVAL_SELECTION",
   audit_supervisor_agent: "AUDIT_LLM_SUPERVISOR",
-  skeptic_agent: "AUDIT_LLM_SKEPTIC",
-  remediation_agent: "AUDIT_LLM_REMEDIATION"
+  remediation_agent: "AUDIT_LLM_REMEDIATION",
+  lane_specialist_agent: "AUDIT_LLM_LANE_SPECIALIST"
 };
 
 function stripCodeFences(value: string): string {
@@ -309,7 +314,6 @@ function inferMockPayload(request: StructuredGenerationRequest): unknown {
         ]
       };
     case "audit_supervisor_agent":
-    case "skeptic_agent":
       return {
         summary: {
           overall_evidence_sufficiency: "medium",
@@ -339,11 +343,13 @@ function inferMockPayload(request: StructuredGenerationRequest): unknown {
 
 export function resolveAgentProviderConfig(agentName: string, baseConfig: ProviderConfig = {}): ResolvedProviderConfig {
   const prefix = AGENT_ENV_PREFIX[agentName];
+  const agentOverride = baseConfig.agentOverrides?.[agentName];
   const envProvider = prefix ? readEnv(`${prefix}_PROVIDER`) : undefined;
   const envModel = prefix ? readEnv(`${prefix}_MODEL`) : undefined;
   const agentApiKey = prefix ? readEnv(`${prefix}_API_KEY`) : undefined;
 
-  const apiKey = baseConfig.apiKey
+  const apiKey = agentOverride?.apiKey
+    ?? baseConfig.apiKey
     ?? agentApiKey
     ?? readEnv("AUDIT_LLM_API_KEY")
     ?? readEnv("LLM_API_KEY")
@@ -351,7 +357,7 @@ export function resolveAgentProviderConfig(agentName: string, baseConfig: Provid
     ?? undefined;
 
   let apiKeySource: ResolvedProviderConfig["apiKeySource"] = "none";
-  if (baseConfig.apiKey) {
+  if (agentOverride?.apiKey || baseConfig.apiKey) {
     apiKeySource = "request-level";
   } else if (agentApiKey) {
     apiKeySource = "agent-specific";
@@ -362,8 +368,8 @@ export function resolveAgentProviderConfig(agentName: string, baseConfig: Provid
   }
 
   return {
-    provider: (baseConfig.provider ?? envProvider ?? readEnv("AUDIT_LLM_PROVIDER") ?? (apiKey ? "openai" : "mock")) as "openai" | "mock",
-    model: baseConfig.model ?? envModel ?? readEnv("AUDIT_LLM_MODEL") ?? undefined,
+    provider: (agentOverride?.provider ?? baseConfig.provider ?? envProvider ?? readEnv("AUDIT_LLM_PROVIDER") ?? (apiKey ? "openai" : "mock")) as "openai" | "mock",
+    model: agentOverride?.model ?? baseConfig.model ?? envModel ?? readEnv("AUDIT_LLM_MODEL") ?? undefined,
     apiKey,
     apiKeySource
   };

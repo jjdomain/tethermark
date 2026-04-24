@@ -91,6 +91,152 @@ const emptyLlmRegistry = {
   presets: []
 };
 const emptyIntegrationRegistry = [];
+const auditLaneCatalog = [
+  { id: "repo_posture", title: "Repository posture", summary: "Repository hygiene, maintainer practices, security docs, release process, and governance signals." },
+  { id: "supply_chain", title: "Supply chain", summary: "Dependency, CI/CD, provenance, build trust, and workflow integrity analysis." },
+  { id: "agentic_controls", title: "Agentic controls", summary: "Tool-use safety, MCP exposure, autonomy boundaries, and agent-specific control review." },
+  { id: "data_exposure", title: "Data exposure", summary: "Secrets, logging leakage, model I/O handling, and sensitive data exposure review." },
+  { id: "runtime_validation", title: "Runtime validation", summary: "Bounded build, runtime, and validation-oriented checks." }
+];
+const agentConfigCatalog = [
+  { id: "planner_agent", title: "Planner Agent", env_prefix: "AUDIT_LLM_PLANNER" },
+  { id: "threat_model_agent", title: "Threat Model Agent", env_prefix: "AUDIT_LLM_THREAT_MODEL" },
+  { id: "eval_selection_agent", title: "Evidence Selection Agent", env_prefix: "AUDIT_LLM_EVAL_SELECTION" },
+  { id: "lane_specialist_agent", title: "Audit Area Review Agent", env_prefix: "AUDIT_LLM_LANE_SPECIALIST" },
+  { id: "audit_supervisor_agent", title: "Supervisor Agent", env_prefix: "AUDIT_LLM_SUPERVISOR" },
+  { id: "remediation_agent", title: "Remediation Agent", env_prefix: "AUDIT_LLM_REMEDIATION" }
+];
+const builtinPackageConfig = {
+  "baseline-static": {
+    run_mode: "static",
+    enabled_lanes: ["repo_posture", "supply_chain"],
+    max_agent_calls: 8,
+    max_total_tokens: 80000,
+    max_rerun_rounds: 1,
+    publishability_threshold: "medium"
+  },
+  "agentic-static": {
+    run_mode: "static",
+    enabled_lanes: ["repo_posture", "supply_chain", "agentic_controls", "data_exposure"],
+    max_agent_calls: 12,
+    max_total_tokens: 140000,
+    max_rerun_rounds: 1,
+    publishability_threshold: "high"
+  },
+  "deep-static": {
+    run_mode: "static",
+    enabled_lanes: ["repo_posture", "supply_chain", "agentic_controls", "data_exposure"],
+    max_agent_calls: 18,
+    max_total_tokens: 240000,
+    max_rerun_rounds: 2,
+    publishability_threshold: "high"
+  },
+  "runtime-validated": {
+    run_mode: "runtime",
+    enabled_lanes: ["repo_posture", "supply_chain", "agentic_controls", "data_exposure", "runtime_validation"],
+    max_agent_calls: 20,
+    max_total_tokens: 260000,
+    max_rerun_rounds: 2,
+    publishability_threshold: "high"
+  },
+  "premium-comprehensive": {
+    run_mode: "runtime",
+    enabled_lanes: ["repo_posture", "supply_chain", "agentic_controls", "data_exposure", "runtime_validation"],
+    max_agent_calls: 28,
+    max_total_tokens: 400000,
+    max_rerun_rounds: 3,
+    publishability_threshold: "high"
+  }
+};
+
+function defaultLanesForRunMode(value) {
+  if (value === "runtime" || value === "auto") {
+    return ["repo_posture", "supply_chain", "agentic_controls", "data_exposure", "runtime_validation"];
+  }
+  return ["repo_posture", "supply_chain", "agentic_controls", "data_exposure"];
+}
+
+function resolvePackageFormConfig(auditPackages, packageId) {
+  const packageDefinition = getAuditPackageDefinition(auditPackages, packageId);
+  if (packageDefinition) {
+    return {
+      run_mode: normalizeRunModeSelection(packageDefinition.run_mode),
+      enabled_lanes: [...(packageDefinition.enabled_lanes || [])],
+      max_agent_calls: Number(packageDefinition.max_agent_calls || 0),
+      max_total_tokens: Number(packageDefinition.max_total_tokens || 0),
+      max_rerun_rounds: Number(packageDefinition.max_rerun_rounds || 0),
+      publishability_threshold: packageDefinition.publishability_threshold || "high"
+    };
+  }
+  return builtinPackageConfig[packageId] || {
+    run_mode: "static",
+    enabled_lanes: defaultLanesForRunMode("static"),
+    max_agent_calls: 12,
+    max_total_tokens: 140000,
+    max_rerun_rounds: 1,
+    publishability_threshold: "high"
+  };
+}
+
+function buildEmptyAgentConfigs() {
+  return Object.fromEntries(agentConfigCatalog.map((item) => [item.id, { provider: "", model: "", api_key: "" }]));
+}
+
+function parseDelimitedText(value) {
+  if (typeof value !== "string") return [];
+  return [...new Set(value
+    .split(/[\n,]/)
+    .map((item) => item.trim())
+    .filter(Boolean))];
+}
+
+function sanitizeEnabledLanes(values, fallbackRunMode = "static") {
+  const allowed = new Set(auditLaneCatalog.map((item) => item.id));
+  const normalized = Array.isArray(values)
+    ? values.filter((item) => typeof item === "string" && allowed.has(item))
+    : [];
+  return normalized.length ? [...new Set(normalized)] : defaultLanesForRunMode(fallbackRunMode);
+}
+
+function runtimeAllowedForPackageConfig(packageConfig) {
+  return packageConfig.run_mode === "runtime" ? "targeted_only" : "never";
+}
+
+function reviewSeverityForPackageConfig(packageConfig) {
+  if (packageConfig.publishability_threshold === "low") return "low";
+  if (packageConfig.publishability_threshold === "medium") return "medium";
+  return "high";
+}
+
+function applyPresetDerivedFormState(form, auditPackages) {
+  const packageConfig = resolvePackageFormConfig(auditPackages, form.audit_package);
+  const laneRunMode = packageConfig.run_mode || "static";
+  return {
+    ...form,
+    run_mode: laneRunMode,
+    runtime_allowed: runtimeAllowedForPackageConfig(packageConfig),
+    review_severity: reviewSeverityForPackageConfig(packageConfig),
+    enabled_lanes: defaultLanesForRunMode(laneRunMode),
+    max_agent_calls: packageConfig.max_agent_calls,
+    max_total_tokens: packageConfig.max_total_tokens,
+    max_rerun_rounds: packageConfig.max_rerun_rounds,
+    publishability_threshold: packageConfig.publishability_threshold
+  };
+}
+
+function normalizeRunFormUpdate(current, key, value, auditPackages) {
+  let next = { ...current, [key]: value };
+  if (key === "run_mode") {
+    next.enabled_lanes = defaultLanesForRunMode(value || "static");
+  }
+  if (key === "audit_package" && current.use_audit_presets) {
+    next = applyPresetDerivedFormState(next, auditPackages);
+  }
+  if (key === "use_audit_presets") {
+    next = value ? applyPresetDerivedFormState(next, auditPackages) : { ...next };
+  }
+  return next;
+}
 
 class ViewErrorBoundary extends Component {
   constructor(props) {
@@ -142,27 +288,53 @@ function normalizeRunModeSelection(value) {
   return value || "";
 }
 
-function deriveRunFormDefaults(project, effectiveSettings) {
+function getAuditPackageDefinition(auditPackages, packageId) {
+  return (auditPackages || []).find((item) => item.id === packageId) || null;
+}
+
+function detectProviderForModel(registry, modelId) {
+  for (const provider of registry?.providers || []) {
+    if ((provider.models || []).some((model) => model.id === modelId)) return provider.id;
+  }
+  return "";
+}
+
+function deriveRunFormDefaults(project, effectiveSettings, auditPackages) {
   const targetDefaults = project?.target_defaults_json || {};
   const auditDefaults = effectiveSettings?.effective?.audit_defaults_json || {};
   const providerDefaults = effectiveSettings?.effective?.providers_json || {};
   const preflightDefaults = effectiveSettings?.effective?.preflight_json || {};
   const reviewDefaults = effectiveSettings?.effective?.review_json || {};
-  return {
+  const auditPackage = targetDefaults.audit_package || auditDefaults.audit_package || "agentic-static";
+  const runMode = normalizeRunModeSelection(targetDefaults.run_mode);
+  const defaults = {
     target_kind: inferTargetKind(targetDefaults),
     local_path: targetDefaults.local_path || "fixtures/validation-targets/agent-tool-boundary-risky",
     repo_url: targetDefaults.repo_url || "",
     endpoint_url: targetDefaults.endpoint_url || "",
-    run_mode: normalizeRunModeSelection(targetDefaults.run_mode),
-    audit_package: targetDefaults.audit_package || auditDefaults.audit_package || "agentic-static",
+    run_mode: runMode,
+    audit_package: auditPackage,
     audit_policy_pack: targetDefaults.audit_policy_pack || "",
     llm_provider: targetDefaults.llm_provider || providerDefaults.default_provider || "mock",
     llm_model: targetDefaults.llm_model || providerDefaults.default_model || "",
     preflight_strictness: targetDefaults.preflight_strictness || preflightDefaults.strictness || "standard",
     runtime_allowed: targetDefaults.runtime_allowed || preflightDefaults.runtime_allowed || "targeted_only",
     review_severity: targetDefaults.review_severity || reviewDefaults.require_human_review_for_severity || "high",
-    review_visibility: targetDefaults.review_visibility || reviewDefaults.default_visibility || "internal"
+    review_visibility: targetDefaults.review_visibility || reviewDefaults.default_visibility || "internal",
+    use_audit_presets: true,
+    enabled_lanes: [],
+    max_agent_calls: 0,
+    max_total_tokens: 0,
+    max_rerun_rounds: 0,
+    publishability_threshold: "high",
+    agent_configs: buildEmptyAgentConfigs(),
+    control_selection_mode: "automatic",
+    required_frameworks: [],
+    excluded_frameworks: [],
+    required_control_ids_text: "",
+    excluded_control_ids_text: ""
   };
+  return applyPresetDerivedFormState(defaults, auditPackages);
 }
 
 function getReviewCadenceDefaults(effectiveSettings) {
@@ -338,11 +510,11 @@ function buildSettingsIntegrationPayload(settings, registry, drafts) {
   return { credentials: nextCredentials, integrations: nextIntegrations };
 }
 
-function buildRunRequest(form, effectiveSettings, llmRegistry) {
+function buildRunRequest(form, effectiveSettings, llmRegistry, auditPackages) {
   const payload = {
-    audit_package: form.audit_package,
     llm_provider: form.llm_provider
   };
+  if (form.use_audit_presets && form.audit_package) payload.audit_package = form.audit_package;
   if (form.run_mode === "static") payload.run_mode = "static";
   if (form.audit_policy_pack) payload.audit_policy_pack = form.audit_policy_pack;
   if (form.llm_model) payload.llm_model = form.llm_model;
@@ -364,11 +536,46 @@ function buildRunRequest(form, effectiveSettings, llmRegistry) {
       default_visibility: form.review_visibility
     }
   };
+  if (!form.use_audit_presets) {
+    payload.hints.audit_package_overrides = {
+      enabled_lanes: sanitizeEnabledLanes(form.enabled_lanes, form.run_mode || "static"),
+      max_agent_calls: Math.max(1, Number(form.max_agent_calls || 0)),
+      max_total_tokens: Math.max(1, Number(form.max_total_tokens || 0)),
+      max_rerun_rounds: Math.max(1, Number(form.max_rerun_rounds || 0)),
+      publishability_threshold: ["low", "medium", "high"].includes(form.publishability_threshold) ? form.publishability_threshold : "high"
+    };
+  }
+  if (form.control_selection_mode === "constrained") {
+    const requiredControlIds = parseDelimitedText(form.required_control_ids_text);
+    const excludedControlIds = parseDelimitedText(form.excluded_control_ids_text);
+    payload.hints.planner_control_constraints = {
+      selection_mode: "constrained",
+      required_frameworks: Array.isArray(form.required_frameworks) ? [...new Set(form.required_frameworks.filter(Boolean))] : [],
+      excluded_frameworks: Array.isArray(form.excluded_frameworks) ? [...new Set(form.excluded_frameworks.filter(Boolean))] : [],
+      required_control_ids: requiredControlIds,
+      excluded_control_ids: excludedControlIds
+    };
+  }
+  const agentConfigs = form.agent_configs || {};
+  const agentOverrides = {};
+  for (const agent of agentConfigCatalog) {
+    const config = agentConfigs[agent.id] || {};
+    const model = typeof config.model === "string" && config.model.trim() ? config.model.trim() : "";
+    const apiKey = typeof config.api_key === "string" && config.api_key.trim() ? config.api_key.trim() : "";
+    const provider = config.provider || (model ? detectProviderForModel(llmRegistry, model) : "");
+    if (!model && !apiKey && !provider) continue;
+    agentOverrides[agent.id] = {
+      ...(provider ? { provider } : {}),
+      ...(model ? { model } : {}),
+      ...(apiKey ? { api_key: apiKey } : {})
+    };
+  }
+  if (Object.keys(agentOverrides).length) payload.hints.llm_agent_overrides = agentOverrides;
   return payload;
 }
 
-function buildLaunchRunRequest(form, requestContext, launchIntentState, effectiveSettings, llmRegistry) {
-  const payload = buildRunRequest(form, effectiveSettings, llmRegistry);
+function buildLaunchRunRequest(form, requestContext, launchIntentState, effectiveSettings, llmRegistry, auditPackages) {
+  const payload = buildRunRequest(form, effectiveSettings, llmRegistry, auditPackages);
   payload.hints = {
     ...(payload.hints || {}),
     launch_intent: {
@@ -407,7 +614,7 @@ function validateRunForm(form) {
   } else if (form.target_kind === "endpoint" && !/^https?:\/\//i.test(targetValue)) {
     issues.push("Endpoint targets should use an HTTP or HTTPS URL.");
   }
-  if (!form.audit_package) issues.push("Select an audit package.");
+  if (form.use_audit_presets && !form.audit_package) issues.push("Select an audit package.");
   if (!form.run_mode) issues.push("Select a run mode.");
   if (!form.llm_provider) issues.push("Select a provider.");
   return issues;
@@ -419,10 +626,11 @@ function deriveLaunchReadiness(form, preflightSummary, preflightAcceptedAt, pref
   const preflightStatus = preflightSummary?.readiness?.status || "not_run";
   const blockers = preflightSummary?.readiness?.blockers || [];
   const warnings = preflightSummary?.readiness?.warnings || [];
+  const readinessGatePolicy = String(effectiveSettings?.effective?.preflight_json?.readiness_gate_policy || "risk_or_drift");
   const recommendedProfile = preflightSummary?.launch_profile || null;
   const profileDrift = recommendedProfile
     ? [
-      recommendedProfile.audit_package && recommendedProfile.audit_package !== form.audit_package ? "audit package" : null,
+      form.use_audit_presets && recommendedProfile.audit_package && recommendedProfile.audit_package !== form.audit_package ? "audit package" : null,
       (recommendedProfile.audit_policy_pack || "") !== (form.audit_policy_pack || "") ? "policy pack" : null,
       form.run_mode && form.run_mode !== "auto" && recommendedProfile.run_mode && !(
         form.run_mode === "runtime" && (recommendedProfile.run_mode === "build" || recommendedProfile.run_mode === "validate" || recommendedProfile.run_mode === "runtime")
@@ -431,14 +639,27 @@ function deriveLaunchReadiness(form, preflightSummary, preflightAcceptedAt, pref
       (recommendedProfile.llm_model || "") !== (form.llm_model || "") ? "model" : null
     ].filter(Boolean)
     : [];
+  const requestedRuntimeFamily = form.run_mode === "auto" || form.run_mode === "runtime";
+  const readinessSignals = blockers.length > 0 || warnings.length > 0 || profileDrift.length > 0;
+  const requiresReadinessReview = readinessGatePolicy === "always"
+    ? true
+    : readinessGatePolicy === "never"
+      ? false
+      : requestedRuntimeFamily || readinessSignals;
+  const accepted = Boolean(preflightAcceptedAt) && !preflightStale;
+  const hasFreshReadinessSummary = Boolean(preflightSummary) && !preflightStale;
   return {
     issues,
     blockers,
     warnings,
     providerCredential,
     preflightStatus,
-    accepted: Boolean(preflightAcceptedAt) && !preflightStale,
-    canLaunch: issues.length === 0 && preflightStatus !== "blocked" && (!preflightSummary || Boolean(preflightAcceptedAt) && !preflightStale),
+    accepted,
+    requiresReadinessReview,
+    readinessGatePolicy,
+    canLaunch: issues.length === 0
+      && preflightStatus !== "blocked"
+      && (!requiresReadinessReview || (hasFreshReadinessSummary && accepted)),
     recommendedProfile,
     profileDrift
   };
@@ -810,6 +1031,13 @@ function Modal({ open, title, description, children, onClose, size = "xl" }) {
   ]));
 }
 
+function HoverCard({ trigger, children, side = "top", align = "start", openDelay = 120, closeDelay = 120 }) {
+  if (window.TethermarkUI?.HoverCard) {
+    return h(window.TethermarkUI.HoverCard, { trigger, side, align, openDelay, closeDelay }, children);
+  }
+  return trigger;
+}
+
 function SectionPanel({ title, eyebrow, description, children, tone = "default" }) {
   const toneClass = tone === "success"
     ? "border-emerald-200 bg-emerald-50/70"
@@ -836,22 +1064,34 @@ function LaunchStatusCard({ label, value }) {
 }
 
 function Field({ label, children }) {
+  if (window.TethermarkUI?.Field) {
+    return h(window.TethermarkUI.Field, { label }, children);
+  }
   return h("label", { className: "block space-y-2 text-sm" }, [
     h("span", { key: "l", className: "font-medium" }, label),
     children
   ]);
 }
 
-function Input(props) {
-  return h("input", { className: "w-full rounded-2xl border border-border bg-white px-4 py-2.5 text-sm text-slate-900 outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-200", ...props });
+function Input({ className = "", ...props }) {
+  if (window.TethermarkUI?.Input) {
+    return h(window.TethermarkUI.Input, { className, ...props });
+  }
+  return h("input", { className: cn("w-full rounded-2xl border border-border bg-white px-4 py-2.5 text-sm text-slate-900 outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-200 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400 disabled:opacity-100", className), ...props });
 }
 
-function Select(props, children) {
-  return h("select", { className: "w-full rounded-2xl border border-border bg-white px-4 py-2.5 text-sm text-slate-900 outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-200", ...props }, children);
+function Select({ className = "", ...props }, children) {
+  if (window.TethermarkUI?.Select) {
+    return h(window.TethermarkUI.Select, { className, ...props }, children);
+  }
+  return h("select", { className: cn("w-full rounded-2xl border border-border bg-white px-4 py-2.5 text-sm text-slate-900 outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-200 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400 disabled:opacity-100", className), ...props }, children);
 }
 
-function Textarea(props) {
-  return h("textarea", { className: "min-h-[110px] w-full rounded-2xl border border-border bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-200", ...props });
+function Textarea({ className = "", ...props }) {
+  if (window.TethermarkUI?.Textarea) {
+    return h(window.TethermarkUI.Textarea, { className, ...props });
+  }
+  return h("textarea", { className: cn("min-h-[110px] w-full rounded-2xl border border-border bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-200 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400 disabled:opacity-100", className), ...props });
 }
 
 function DashboardKpiCard({ label, value, hint, tone = "slate" }) {
@@ -1095,8 +1335,10 @@ function LaunchAuditModal({
       helpers: {
         Modal,
         Button,
+        HoverCard,
         Field,
         Input,
+        Textarea,
         Select,
         Badge,
         LaunchStatusCard,
@@ -1109,7 +1351,7 @@ function LaunchAuditModal({
     ? (launchReadiness.accepted ? "accepted" : (preflightSummary.readiness?.status || "ready").replace(/_/g, " "))
     : "not run";
   const targetStepComplete = Boolean(getRunTargetValue(runForm).trim()) && !launchReadiness.issues.some((issue) => issue.includes("target"));
-  const configStepComplete = Boolean(runForm.run_mode && runForm.audit_package && runForm.llm_provider);
+  const configStepComplete = Boolean(runForm.run_mode && runForm.llm_provider && (!runForm.use_audit_presets || runForm.audit_package));
   const requiredFieldsReady = targetStepComplete && configStepComplete;
   const activeModel = runModelOptions.find((item) => item.provider_id === runForm.llm_provider && item.id === runForm.llm_model) || null;
   const providerCredentialFields = selectedProvider?.credential_fields || [];
@@ -1988,7 +2230,7 @@ function App() {
       return defaultRequestContext;
     }
   });
-  const [runForm, setRunForm] = useState(deriveRunFormDefaults(null, emptyEffectiveSettings));
+  const [runForm, setRunForm] = useState(deriveRunFormDefaults(null, emptyEffectiveSettings, null));
   const [launchModalOpen, setLaunchModalOpen] = useState(false);
   const [docForm, setDocForm] = useState({ title: "", document_type: "policy", notes: "", content_text: "" });
   const [workspaceForm, setWorkspaceForm] = useState({ name: "", description: "" });
@@ -2158,7 +2400,7 @@ function App() {
   function updateRunForm(key, value) {
     setPreflightStale(true);
     setPreflightAcceptedAt(null);
-    setRunForm((current) => ({ ...current, [key]: value }));
+    setRunForm((current) => normalizeRunFormUpdate(current, key, value, auditPackages));
   }
 
   function updateSettings(section, key, value) {
@@ -2465,7 +2707,7 @@ function App() {
   }, [projects, requestContext.projectId]);
 
   useEffect(() => {
-    const defaults = deriveRunFormDefaults(currentProject, effectiveSettings);
+    const defaults = deriveRunFormDefaults(currentProject, effectiveSettings, auditPackages);
     setRunForm(defaults);
     setPreflightSummary(null);
     setPreflightStale(true);
@@ -2485,7 +2727,7 @@ function App() {
       review_severity: currentProject?.target_defaults_json?.review_severity || effectiveSettings.effective.review_json?.require_human_review_for_severity || "high",
       review_visibility: currentProject?.target_defaults_json?.review_visibility || effectiveSettings.effective.review_json?.default_visibility || "internal"
     });
-  }, [currentProject?.id, effectiveSettings.effective.audit_defaults_json, effectiveSettings.effective.providers_json, effectiveSettings.effective.preflight_json, effectiveSettings.effective.review_json]);
+  }, [currentProject?.id, auditPackages, effectiveSettings.effective.audit_defaults_json, effectiveSettings.effective.providers_json, effectiveSettings.effective.preflight_json, effectiveSettings.effective.review_json]);
 
   useEffect(() => {
     window.localStorage.setItem(contextStorageKey, JSON.stringify(requestContext));
@@ -2504,7 +2746,7 @@ function App() {
     setError("");
     setNotice("");
     setPreflightLoading(true);
-    api("/preflight", { method: "POST", body: JSON.stringify(buildRunRequest(runForm, effectiveSettings, llmRegistry)) }, requestContext)
+    api("/preflight", { method: "POST", body: JSON.stringify(buildRunRequest(runForm, effectiveSettings, llmRegistry, auditPackages)) }, requestContext)
       .then((payload) => {
         setPreflightSummary(payload.preflight || null);
         setPreflightStale(false);
@@ -2518,28 +2760,33 @@ function App() {
   function acceptPreflight() {
     if (!preflightSummary || preflightStale) return;
     setPreflightAcceptedAt(new Date().toISOString());
-    setNotice("Preflight accepted for launch.");
+    setNotice("Audit readiness accepted for launch.");
     setError("");
   }
 
   function applyPreflightRecommendations() {
     if (!preflightSummary?.launch_profile) return;
     const recommended = preflightSummary.launch_profile;
-    setRunForm((current) => ({
-      ...current,
-      audit_package: recommended.audit_package || current.audit_package,
-      audit_policy_pack: recommended.audit_policy_pack || "",
-      run_mode: recommended.run_mode || current.run_mode,
-      llm_provider: recommended.llm_provider || current.llm_provider,
-      llm_model: recommended.llm_model || "",
-      preflight_strictness: recommended.preflight_strictness || current.preflight_strictness,
-      runtime_allowed: recommended.runtime_allowed || current.runtime_allowed,
-      review_severity: recommended.review_severity || current.review_severity,
-      review_visibility: recommended.review_visibility || current.review_visibility
-    }));
+    setRunForm((current) => {
+      const next = {
+        ...current,
+        audit_package: recommended.audit_package || current.audit_package,
+        audit_policy_pack: recommended.audit_policy_pack || "",
+        run_mode: normalizeRunModeSelection(recommended.run_mode) || current.run_mode,
+        llm_provider: recommended.llm_provider || current.llm_provider,
+        llm_model: recommended.llm_model || "",
+        preflight_strictness: recommended.preflight_strictness || current.preflight_strictness,
+        runtime_allowed: recommended.runtime_allowed || current.runtime_allowed,
+        review_severity: recommended.review_severity || current.review_severity,
+        review_visibility: recommended.review_visibility || current.review_visibility
+      };
+      return current.use_audit_presets
+        ? applyPresetDerivedFormState(next, auditPackages)
+        : { ...next, enabled_lanes: defaultLanesForRunMode(next.run_mode || "static") };
+    });
     setPreflightAcceptedAt(null);
     setPreflightStale(true);
-    setNotice("Applied the recommended preflight profile. Re-run preflight to confirm the updated launch plan.");
+    setNotice("Applied the recommended audit readiness profile. Re-run the readiness check to confirm the updated launch plan.");
     setError("");
   }
 
@@ -2566,7 +2813,7 @@ function App() {
     }));
     setPreflightAcceptedAt(null);
     setPreflightStale(true);
-    setNotice(`Applied launch preset: ${preset.label}. Re-run preflight before launch.`);
+    setNotice(`Applied launch preset: ${preset.label}. Re-run the readiness check before launch.`);
     setError("");
   }
 
@@ -2579,7 +2826,7 @@ function App() {
           preflightCheckedAt,
           preflightAcceptedAt,
           preflightStale
-        }, effectiveSettings, llmRegistry))
+        }, effectiveSettings, llmRegistry, auditPackages))
       }, requestContext).then((payload) => {
         setLaunchModalOpen(false);
         if (payload?.run?.id) {
@@ -3127,7 +3374,13 @@ function App() {
           ]),
           h("div", { key: "launch-state", className: cn("rounded-2xl border px-4 py-3 text-sm", launchReadiness.canLaunch ? "border-emerald-200 bg-emerald-50/80 text-emerald-800" : "border-amber-200 bg-amber-50/80 text-amber-900") }, [
             h("div", { key: "label", className: "font-medium" }, "Launch Readiness"),
-            h("div", { key: "value", className: "mt-1" }, launchReadiness.canLaunch ? "Ready to launch." : preflightSummary && !launchReadiness.accepted && preflightSummary.readiness?.status !== "blocked" ? "Accept a fresh preflight before launch." : "Needs attention before launch.")
+            h("div", { key: "value", className: "mt-1" }, launchReadiness.canLaunch
+              ? "Ready to launch."
+              : launchReadiness.requiresReadinessReview && !preflightSummary
+                ? "Run audit readiness before launch."
+                : launchReadiness.requiresReadinessReview && preflightSummary && !launchReadiness.accepted && preflightSummary.readiness?.status !== "blocked"
+                  ? "Accept a fresh audit readiness review before launch."
+                  : "Needs attention before launch.")
           ])
         ]),
         h("div", { key: "fields", className: "grid gap-4 md:grid-cols-2" }, [
@@ -3271,7 +3524,7 @@ function App() {
                   preflightCheckedAt,
                   preflightAcceptedAt,
                   preflightStale
-                }, effectiveSettings, llmRegistry))
+                }, effectiveSettings, llmRegistry, auditPackages))
               }, requestContext),
               "Run launched."
             )
@@ -3902,6 +4155,14 @@ function App() {
           h("option", { key: "auto", value: "auto" }, "auto"),
           h("option", { key: "static", value: "static" }, "static"),
           h("option", { key: "runtime", value: "runtime" }, "runtime")
+        ])),
+        h(Field, { key: "readiness-gate", label: "Audit Readiness Gate" }, Select({
+          value: settings.preflight_json.readiness_gate_policy || "risk_or_drift",
+          onChange: (event) => updateSettings("preflight_json", "readiness_gate_policy", event.target.value)
+        }, [
+          h("option", { key: "risk", value: "risk_or_drift" }, "require for auto/runtime and risk or drift"),
+          h("option", { key: "always", value: "always" }, "always require readiness review"),
+          h("option", { key: "never", value: "never" }, "never require readiness review")
         ])),
         h(Field, { key: "review-renewal", label: "Disposition Renewal Days" }, h(Input, {
           type: "number",

@@ -126,6 +126,55 @@ Not completed:
 5. Add troubleshooting docs for Python, Docker, scanner installation, and OpenAI credentials.
 6. Add sample end-to-end audit runs for representative OSS repos.
 
+## Hosted-Only: Policy Pack Management
+
+This is a hosted-platform governance feature, not an OSS launch-surface requirement.
+
+OSS scope:
+- keep policy-pack selection in the run modal `Launch Profile`
+- keep built-in packs plus scope defaults from settings
+- allow the launch-profile dropdown to consume packs exposed by the engine API
+- do not add a full policy-pack CRUD/admin page to the OSS navigation
+
+Hosted scope:
+- add a dedicated `Policy Packs` page in the main navigation
+- support create, edit, archive, duplicate, and version actions for policy packs
+- support org, workspace, and project visibility plus inheritance/default assignment
+- support usage visibility showing which runs, projects, or defaults reference a pack
+- support change history and actor attribution for governance review
+
+Hosted policy-pack data model:
+- policy pack id
+- display name
+- description
+- status: draft, active, archived
+- scope owner: org, workspace, or project
+- version identifier and supersedes link
+- rules payload for publishability, review gating, runtime allowances, and control overrides
+- metadata for created_by, updated_by, approved_by, created_at, updated_at
+
+Hosted UI behavior:
+- `Policy Packs` list page shows status, scope, current default bindings, and last modified time
+- detail page shows metadata, rule summary, version history, and usage references
+- editor flow validates policy-pack structure before activation
+- launch-profile `Policy pack` dropdown reads from the same managed catalog and only allows packs visible to the current scope
+- audit readiness compares selected policy pack against any recommended policy pack and highlights drift
+
+Hosted API/persistence expectations:
+- add persistence-backed policy-pack records instead of relying only on built-in/static definitions
+- expose list/get/create/update/archive endpoints for hosted deployments
+- expose scope-filtered query endpoints used by the launch modal dropdown
+- persist default bindings separately from pack definitions so defaults can change without mutating pack content
+- keep per-run launch intent storing the resolved policy-pack id/version used at launch time
+
+Hosted rollout order:
+1. Define the policy-pack persistence schema and versioning model.
+2. Add hosted API endpoints plus scope-filtered list/read queries.
+3. Add hosted settings support for default policy-pack bindings by org, workspace, and project.
+4. Add the hosted `Policy Packs` navigation page and CRUD/detail flows.
+5. Update launch-profile and audit-readiness UI to consume managed policy-pack metadata and version labels.
+6. Add audit-log and usage views so operators can understand where a pack is active before changing defaults.
+
 ## Recommended Next Order
 
 1. Install or verify local Scorecard, Trivy, and Semgrep binaries.

@@ -45,6 +45,7 @@ The harness supports three database modes:
 - Backend target: PostgreSQL
 - Intended for shared internal production and downstream-integrated backends
 - Supports org or workspace tenancy, reviewer workflows, and history analytics
+- Adds governance-management surfaces such as hosted policy-pack lifecycle administration
 
 ## Implementation Note
 
@@ -218,3 +219,79 @@ Mechanisms:
 - public presentation and trend charts
 - publication workflows and reviewer UX
 - product-specific UX and metadata
+
+## Hosted Policy Pack Management
+
+Policy packs remain an engine concept because they affect launch resolution, supervisor behavior, publishability, and review gating. However, full policy-pack lifecycle management should be treated as a hosted platform capability rather than an OSS navigation requirement.
+
+### OSS behavior
+
+OSS should provide:
+- built-in policy packs
+- policy-pack defaults in settings
+- policy-pack selection in the run modal `Launch Profile`
+- audit-readiness visibility into the selected and recommended policy pack
+
+OSS should not carry:
+- a dedicated policy-pack management page in main navigation
+- multi-user policy approval workflow
+- policy-pack version history UI
+- policy-pack usage analytics across projects or tenants
+
+### Hosted behavior
+
+Hosted should add a first-class `Policy Packs` navigation page that manages the catalog feeding the launch-profile dropdown.
+
+Hosted responsibilities:
+- create, edit, duplicate, archive, and activate policy packs
+- maintain versioned policy-pack records
+- assign default packs at org, workspace, and project scope
+- expose visibility rules so only eligible packs appear in a run's launch-profile dropdown
+- show usage references before operators change or archive a pack
+- record actor attribution and change history for governance review
+
+### Hosted architecture split
+
+Engine/runtime layer:
+- resolves the effective policy pack for a run
+- applies policy-pack rules during planning, supervisor review, and publishability gating
+- persists the resolved policy-pack id and version in launch intent and run metadata
+- exposes scope-filtered policy-pack query APIs
+
+Hosted control-plane layer:
+- owns the `Policy Packs` CRUD and management UI
+- owns version-promotion workflows such as draft to active
+- owns approval/audit-log surfaces around policy changes
+- owns default-binding administration across orgs, workspaces, and projects
+
+### Managed policy-pack record
+
+Hosted policy-pack records should include:
+- stable id
+- display name
+- description
+- status: `draft`, `active`, `archived`
+- scope owner: org, workspace, or project
+- semantic version or revision number
+- supersedes pointer for version lineage
+- structured rules payload
+- metadata for created_by, updated_by, approved_by, created_at, updated_at
+
+The structured rules payload should be able to represent:
+- publishability thresholds
+- human-review gating thresholds
+- runtime-allowance constraints
+- allowed or disallowed audit packages
+- lane restrictions or mandatory lanes
+- control-family overlays or exception mappings
+- optional outbound/publication restrictions
+
+### Launch-profile integration
+
+The hosted launch modal should not edit policy-pack internals. It should only:
+- show the scope-visible policy-pack dropdown
+- show a brief description/version label for the selected pack
+- store the chosen pack id as part of run launch intent
+- surface drift in audit readiness when the recommended pack differs from the currently selected pack
+
+This keeps run launch lightweight while preserving governance control in the dedicated hosted management surface.

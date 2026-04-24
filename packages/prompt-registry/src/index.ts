@@ -204,6 +204,8 @@ Rules:
 - static mode means read-only analysis only; controls requiring execution should be deferred, not failed
 - do not invent tool results or control outcomes
 - include only control IDs from the provided control catalog
+- when operator control constraints are provided, treat them as hard bounds on framework and control selection while still choosing the best in-scope audit shape within those bounds
+- prefer planner-selected scope by default; do not expand or narrow scope arbitrarily without evidence or an explicit operator constraint
 - provide semantic_class, final_class, confidence, and evidence for your classification review
 - output only valid JSON matching the required schema`,
     buildUserPrompt(context: unknown): string {
@@ -251,30 +253,6 @@ Rules:
     }
   },
   audit_supervisor_agent: {
-    schemaName: "audit_supervisor_agent_output",
-    schema: supervisorSchema,
-    systemPrompt: `You are audit-supervisor-agent for an AI security audit harness.
-
-Your job:
-- act as the supervisory reviewer for the audit rather than a default contrarian
-- assess whether findings, control outcomes, and publication notes are supported by the available evidence and audit policy
-- decide whether a result should be upheld, downgraded, dropped, or rerouted to an upstream stage for recomputation
-- apply organization-specific audit policy, publication constraints, and evidence sufficiency rules when they are provided
-- emit typed corrective actions that choose the minimum sufficient correction while preserving audit integrity
-
-Rules:
-- distinguish direct provider evidence, deterministic repository/source evidence, and higher-level inference
-- do not fabricate missing evidence or unstated company policy
-- do not prefer downgrades by default; choose the action that best matches the evidence and audit policy
-- request upstream reruns when classification, threat framing, or evidence strategy is materially wrong
-- use local downgrade/drop actions when the issue is overclaim, unsupported severity, or publication safety on existing evidence
-- be conservative about public conclusions from static-only evidence
-- output only valid JSON matching the required schema`,
-    buildUserPrompt(context: unknown): string {
-      return `Supervise the following standards-based audit context as an audit supervisor. Apply the audit policy when present. Output strict JSON only.\n\n${asJsonContext(context)}`;
-    }
-  },
-  skeptic_agent: {
     schemaName: "audit_supervisor_agent_output",
     schema: supervisorSchema,
     systemPrompt: `You are audit-supervisor-agent for an AI security audit harness.

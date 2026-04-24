@@ -42,6 +42,19 @@ function compactControlCatalog(controlCatalog: StandardControlDefinition[], appl
   }));
 }
 
+function compactPlannerControlConstraints(request: any): Record<string, unknown> | null {
+  const constraints = request?.hints?.planner_control_constraints;
+  if (!constraints || typeof constraints !== "object") return null;
+  const selectionMode = constraints.selection_mode === "constrained" ? "constrained" : "automatic";
+  return {
+    selection_mode: selectionMode,
+    required_frameworks: Array.isArray(constraints.required_frameworks) ? constraints.required_frameworks.slice(0, 20) : [],
+    excluded_frameworks: Array.isArray(constraints.excluded_frameworks) ? constraints.excluded_frameworks.slice(0, 20) : [],
+    required_control_ids: Array.isArray(constraints.required_control_ids) ? constraints.required_control_ids.slice(0, 40) : [],
+    excluded_control_ids: Array.isArray(constraints.excluded_control_ids) ? constraints.excluded_control_ids.slice(0, 40) : []
+  };
+}
+
 export function buildPlannerContext(args: {
   request: any;
   sandbox: any;
@@ -66,6 +79,7 @@ export function buildPlannerContext(args: {
     controlCatalog: compactControlCatalog(args.controlCatalog),
     methodology: { version: args.methodology.version, summary: args.methodology.summary },
     auditPolicy: args.auditPolicy,
+    operatorControlConstraints: compactPlannerControlConstraints(args.request),
     skepticFeedback: args.skepticFeedback ?? null,
     priorPlannerArtifact: args.priorPlannerArtifact ?? null,
     priorRunPlan: args.priorRunPlan ?? null

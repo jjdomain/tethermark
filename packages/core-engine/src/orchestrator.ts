@@ -21,7 +21,7 @@ import type {
   TraceRecord
 } from "./contracts.js";
 import { resolveAuditPolicy } from "./audit-policy.js";
-import { getBuiltinAuditPackage, resolveAuditPackage } from "./audit-packages.js";
+import { getBuiltinAuditPackage, resolveAuditPackage, type AuditPackageDefinition } from "./audit-packages.js";
 import { ArtifactStore } from "./artifact-store.js";
 import { computeCommitDiffGate } from "./commit-diff.js";
 import { refreshLaneArtifacts } from "./lane-analyzers.js";
@@ -57,6 +57,7 @@ import { stageScoreAndPublishability } from "./stages/stage-score-and-publishabi
 import { stageApplyPolicyOverrides } from "./stages/stage-apply-policy-overrides.js";
 import { stageResolveConfig } from "./stages/stage-resolve-config.js";
 import { isAutoRunModeRequest, resolveRequestedOrAutoRunMode } from "./planner.js";
+import { AUDIT_LANES, type AuditLaneName } from "./audit-lanes.js";
 
 type AssessmentCycle = Awaited<ReturnType<typeof stageAssessControls>>;
 
@@ -78,6 +79,50 @@ function deriveRunLabel(request: AuditRequest): string {
 }
 function resolveArtifactStore(_request: AuditRequest): ArtifactStore {
   return new ArtifactStore(defaultArtifactRoot(), true);
+}
+
+function parseRuntimeProviderOverrides(request: AuditRequest): {
+  agentOverrides: Record<string, { provider?: "openai" | "mock"; model?: string; apiKey?: string }>;
+} {
+  const hints = request.hints as Record<string, any> | undefined;
+  const parseBucket = (value: unknown) => {
+    const result: Record<string, { provider?: "openai" | "mock"; model?: string; apiKey?: string }> = {};
+    if (!value || typeof value !== "object") return result;
+    for (const [key, raw] of Object.entries(value as Record<string, any>)) {
+      if (!raw || typeof raw !== "object") continue;
+      const provider = raw.provider === "openai" || raw.provider === "mock" ? raw.provider : undefined;
+      const model = typeof raw.model === "string" && raw.model.trim() ? raw.model.trim() : undefined;
+      const apiKey = typeof raw.api_key === "string" && raw.api_key.trim() ? raw.api_key.trim() : undefined;
+      if (provider || model || apiKey) result[key] = { provider, model, apiKey };
+    }
+    return result;
+  };
+  return {
+    agentOverrides: parseBucket(hints?.llm_agent_overrides)
+  };
+}
+
+function applyAuditPackageOverrides(request: AuditRequest, auditPackage: AuditPackageDefinition): AuditPackageDefinition {
+  const requested = (request.hints as any)?.audit_package_overrides;
+  if (!requested || typeof requested !== "object") return auditPackage;
+  const allowed = new Set(AUDIT_LANES.map((item) => item.lane_name));
+  const enabledLanes = Array.isArray(requested.enabled_lanes)
+    ? requested.enabled_lanes.filter((item: unknown): item is AuditLaneName => typeof item === "string" && allowed.has(item as AuditLaneName))
+    : auditPackage.enabled_lanes;
+  const maxAgentCalls = Number(requested.max_agent_calls);
+  const maxTotalTokens = Number(requested.max_total_tokens);
+  const maxRerunRounds = Number(requested.max_rerun_rounds);
+  const publishabilityThreshold = requested.publishability_threshold === "low" || requested.publishability_threshold === "medium" || requested.publishability_threshold === "high"
+    ? requested.publishability_threshold
+    : auditPackage.publishability_threshold;
+  return {
+    ...auditPackage,
+    enabled_lanes: enabledLanes.length ? Array.from(new Set<AuditLaneName>(enabledLanes)) : auditPackage.enabled_lanes,
+    max_agent_calls: Number.isInteger(maxAgentCalls) && maxAgentCalls > 0 ? maxAgentCalls : auditPackage.max_agent_calls,
+    max_total_tokens: Number.isInteger(maxTotalTokens) && maxTotalTokens > 0 ? maxTotalTokens : auditPackage.max_total_tokens,
+    max_rerun_rounds: Number.isInteger(maxRerunRounds) && maxRerunRounds > 0 ? maxRerunRounds : auditPackage.max_rerun_rounds,
+    publishability_threshold: publishabilityThreshold
+  };
 }
 
 async function exportArtifactsToOutputDir(runId: string, canonicalArtifactDir: string, outputDir?: string): Promise<void> {
@@ -509,7 +554,13 @@ export class AuditEngine {
     const staticBaseline = getStaticBaselineMethodology();
     const auditPolicy = resolveAuditPolicy(request);
     const requestedAuditPackage = request.audit_package ? getBuiltinAuditPackage(request.audit_package) : null;
-    const agentRuntime = new AgentRuntime({ provider: request.llm_provider, model: request.llm_model, apiKey: request.llm_api_key });
+    const runtimeOverrides = parseRuntimeProviderOverrides(request);
+    const agentRuntime = new AgentRuntime({
+      provider: request.llm_provider,
+      model: request.llm_model,
+      apiKey: request.llm_api_key,
+      agentOverrides: runtimeOverrides.agentOverrides
+    });
     const trace: TraceRecord = { trace_id: createId("trace"), run_id: runId, steps: [] };
     const observer = new RunObserver(runId);
     let effectiveRequest: AuditRequest = request;
@@ -592,7 +643,10 @@ export class AuditEngine {
     this.ensureRunNotCanceled(runId);
 
     const initialTargetClass = prepared.analysis.mcp_indicators.length > 0 ? "mcp_server_plugin_skill_package" : prepared.analysis.agent_indicators.length > 0 || prepared.analysis.tool_execution_indicators.length > 0 ? "tool_using_multi_turn_agent" : prepared.analysis.entry_points.length > 0 ? "runnable_local_app" : "repo_posture_only";
-    let auditPackage = resolveAuditPackage({ request: effectiveRequest, analysis: prepared.analysis, initialTargetClass: initialTargetClass as any });
+    let auditPackage = applyAuditPackageOverrides(
+      effectiveRequest,
+      resolveAuditPackage({ request: effectiveRequest, analysis: prepared.analysis, initialTargetClass: initialTargetClass as any })
+    );
     let resolvedConfiguration = stageResolveConfig({
       runId,
       request: effectiveRequest,
@@ -639,7 +693,10 @@ export class AuditEngine {
       targetClass: targetProfile.semantic_review.final_class
     });
     effectiveRequest = semanticRunMode === effectiveRequest.run_mode ? effectiveRequest : { ...effectiveRequest, run_mode: semanticRunMode };
-    auditPackage = resolveAuditPackage({ request: effectiveRequest, analysis: prepared.analysis, initialTargetClass: targetProfile.semantic_review.final_class as any });
+    auditPackage = applyAuditPackageOverrides(
+      effectiveRequest,
+      resolveAuditPackage({ request: effectiveRequest, analysis: prepared.analysis, initialTargetClass: targetProfile.semantic_review.final_class as any })
+    );
     resolvedConfiguration = stageResolveConfig({
       runId,
       request: effectiveRequest,
@@ -709,13 +766,14 @@ export class AuditEngine {
     await artifactStore.writeJson(runId, "eval-selection", evalSelection);
     this.ensureRunNotCanceled(runId);
 
-    const laneReuseDecisions = computeLaneReuseDecisions({ commitDiff, enabledLanes: auditPackage.enabled_lanes as any });
+    const enabledLanes = auditPackage.enabled_lanes;
+    const laneReuseDecisions = computeLaneReuseDecisions({ commitDiff, enabledLanes: enabledLanes as any });
     const lanePlans = await observer.observeStage({
       stage: "allocate_audit_lanes",
       actor: "stage_allocate_audit_lanes",
-      details: { enabled_lane_count: auditPackage.enabled_lanes.length },
+      details: { enabled_lane_count: enabledLanes.length },
       fn: async () => stageAllocateLanes({
-        enabledLanes: auditPackage.enabled_lanes as any,
+        enabledLanes: enabledLanes as any,
         plannerArtifact: plannerArtifact!,
         evalSelection,
         threatModel: threatModel!,
@@ -1181,7 +1239,7 @@ export class AuditEngine {
       run_id: runId,
       status: "succeeded",
       audit_package: auditPackage.id,
-      audit_lanes: auditPackage.enabled_lanes,
+      audit_lanes: enabledLanes,
       preflight_summary: preflightSummary,
       launch_intent: launchIntent,
       sandbox: prepared.sandbox,
