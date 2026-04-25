@@ -13,10 +13,38 @@ function getCurrentTargetSummary(runForm) {
   return runForm.local_path || "No local path selected";
 }
 
+function normalizePolicyPackId(policyPackId) {
+  return policyPackId || "default";
+}
+
 function getPolicyPackLabel(policyPacks, policyPackId) {
-  if (!policyPackId) return "Default builtin policy";
-  const match = (policyPacks || []).find((item) => item.id === policyPackId);
-  return match ? match.name : `${policyPackId} (custom)`;
+  const effectiveId = normalizePolicyPackId(policyPackId);
+  const match = (policyPacks || []).find((item) => item.id === effectiveId);
+  return match ? match.name : (effectiveId === "default" ? "Default built-in policy" : `${effectiveId} (custom)`);
+}
+
+function getResolvedModelLabel(runModelOptions, providerId, modelId) {
+  if (!modelId) return "";
+  const match = (runModelOptions || []).find((item) => item.provider_id === providerId && item.id === modelId)
+    || (runModelOptions || []).find((item) => item.id === modelId);
+  return match?.label || modelId;
+}
+
+function getLaunchPlanModelLabel(runForm, runModelOptions) {
+  const usingGlobalLlmConfig = runForm.use_global_llm_config !== false && Boolean(runForm.llm_model);
+  if (usingGlobalLlmConfig) {
+    return getResolvedModelLabel(runModelOptions, runForm.llm_provider, runForm.llm_model) || "Not selected";
+  }
+  const configuredAgentModels = agentConfigCatalog
+    .map((agent) => {
+      const config = runForm.agent_configs?.[agent.id] || {};
+      return getResolvedModelLabel(runModelOptions, config.provider, config.model);
+    })
+    .filter(Boolean);
+  const uniqueLabels = [...new Set(configuredAgentModels)];
+  if (!uniqueLabels.length) return "Not selected";
+  if (uniqueLabels.length === 1) return uniqueLabels[0];
+  return "Mixed";
 }
 
 const auditLaneCatalog = [
@@ -295,7 +323,6 @@ function LaunchAuditModalComponent({
     Input,
     Select,
     Badge,
-    LaunchStatusCard,
     cn,
     formatDate
   } = helpers;
@@ -304,17 +331,11 @@ function LaunchAuditModalComponent({
     : "not run";
   const targetStepComplete = Boolean(computeTargetValue(runForm).trim()) && !launchReadiness.issues.some((issue) => issue.includes("target"));
   const usingPresets = Boolean(runForm.use_audit_presets);
+  const globalModelAvailable = Boolean(runForm.llm_model);
+  const usingGlobalLlmConfig = runForm.use_global_llm_config !== false && globalModelAvailable;
   const configStepComplete = Boolean(runForm.run_mode && runForm.llm_provider && (!usingPresets || runForm.audit_package));
   const requiredFieldsReady = targetStepComplete && configStepComplete;
   const activeModel = runModelOptions.find((item) => item.provider_id === runForm.llm_provider && item.id === runForm.llm_model) || null;
-  const providerCredentialFields = selectedProvider?.credential_fields || [];
-  const apiKeyField = providerCredentialFields.find((field) => field.kind === "api_key") || providerCredentialFields[0] || {
-    id: "__llm_api_key",
-    label: "API key",
-    secret: true,
-    env_var: null,
-    placeholder: ""
-  };
   const selectedAuditPackage = (auditPackages || []).find((item) => item.id === runForm.audit_package) || null;
   const resolvedEnabledLanes = Array.isArray(runForm.enabled_lanes) ? runForm.enabled_lanes : [];
   const agentConfigs = runForm.agent_configs || {};
@@ -328,24 +349,22 @@ function LaunchAuditModalComponent({
   const availableRequiredControls = controlCatalog.filter((control) => !requiredControlIds.includes(control.id) && !requiredFrameworks.includes(control.framework));
   const availableExcludedControls = controlCatalog.filter((control) => !excludedControlIds.includes(control.id) && !excludedFrameworks.includes(control.framework));
   const currentTargetSummary = getCurrentTargetSummary(runForm);
+  const currentPolicyPackId = normalizePolicyPackId(runForm.audit_policy_pack || "");
   const currentProfileSummary = {
     target: currentTargetSummary,
     packageLabel: selectedAuditPackage ? selectedAuditPackage.title : (runForm.audit_package || "No package selected"),
-    policyPackLabel: getPolicyPackLabel(policyPacks, runForm.audit_policy_pack),
+    policyPackLabel: getPolicyPackLabel(policyPacks, currentPolicyPackId),
     runMode: runForm.run_mode || "Not selected",
-    modelLabel: activeModel?.label || runForm.llm_model || "Not selected",
+    modelLabel: getLaunchPlanModelLabel(runForm, runModelOptions),
     runtimeValidation: (runForm.runtime_allowed || "not set").replace(/_/g, " "),
-    reviewThreshold: runForm.review_severity || "not set",
-    laneCount: resolvedEnabledLanes.length,
-    readiness: preflightSummary
-      ? (launchReadiness.accepted ? "Accepted" : (preflightSummary.readiness?.status || "ready").replace(/_/g, " "))
-      : (launchReadiness.requiresReadinessReview ? "Needs readiness check" : "Optional")
+    reviewThreshold: runForm.review_severity || "not set"
   };
   const recommendedProfile = preflightSummary?.launch_profile || null;
+  const recommendedPolicyPackId = normalizePolicyPackId(recommendedProfile?.audit_policy_pack || "");
   const recommendedPackageLabel = recommendedProfile?.audit_package
     ? ((auditPackages || []).find((item) => item.id === recommendedProfile.audit_package)?.title || recommendedProfile.audit_package)
     : "Default package";
-  const recommendedPolicyLabel = getPolicyPackLabel(policyPacks, recommendedProfile?.audit_policy_pack || "");
+  const recommendedPolicyLabel = getPolicyPackLabel(policyPacks, recommendedPolicyPackId);
   const recommendedModelLabel = recommendedProfile?.llm_model
     ? `${recommendedProfile.llm_provider || "default"}/${recommendedProfile.llm_model}`
     : (recommendedProfile?.llm_provider || "Default provider/model");
@@ -362,7 +381,7 @@ function LaunchAuditModalComponent({
       label: "Policy pack",
       current: currentProfileSummary.policyPackLabel,
       recommended: recommendedPolicyLabel,
-      changed: (recommendedProfile.audit_policy_pack || "") !== (runForm.audit_policy_pack || "")
+      changed: recommendedPolicyPackId !== currentPolicyPackId
     },
     {
       id: "mode",
@@ -483,27 +502,26 @@ function LaunchAuditModalComponent({
         className: activeStep === id ? "bg-slate-900 text-white hover:bg-slate-800" : ""
       }, label)))
     ]),
-    h("section", { key: "current-profile-summary", className: "mb-4 rounded-[24px] border border-sky-200 bg-sky-50/70 px-5 py-4" }, [
+    h("section", { key: "current-launch-plan", className: "mb-4 rounded-[24px] border border-slate-200 bg-white px-4 py-4" }, [
       h("div", { key: "header", className: "flex flex-wrap items-center justify-between gap-3" }, [
         h("div", { key: "copy", className: "min-w-0 flex-1" }, [
-          h("div", { key: "title", className: "text-sm font-semibold text-slate-950" }, "Launch Summary"),
+          h("div", { key: "title", className: "text-sm font-semibold text-slate-950" }, "Current Launch Plan"),
           h("div", { key: "target", className: "mt-1 truncate text-sm text-slate-500" }, currentProfileSummary.target)
         ]),
-        h(Badge, { key: "readiness" }, `Audit readiness: ${currentProfileSummary.readiness}`)
+        h(Badge, { key: "readiness" }, `Readiness: ${launchReadiness.requiresReadinessReview ? (launchReadiness.accepted ? "accepted" : preflightStatus) : "optional"}`)
       ]),
-      h("div", { key: "chips", className: "mt-3 flex flex-wrap gap-2" }, [
-        ["Policy", currentProfileSummary.policyPackLabel],
+      h("div", { key: "items", className: "mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-5" }, [
+        ["Package", currentProfileSummary.packageLabel],
+        ["Policy pack", currentProfileSummary.policyPackLabel],
         ["Run mode", currentProfileSummary.runMode],
-        ["Model", currentProfileSummary.modelLabel],
-        ["Runtime", currentProfileSummary.runtimeValidation],
-        ["Review", currentProfileSummary.reviewThreshold],
-        ["Audit areas", String(currentProfileSummary.laneCount)]
+        ["Agent Model", currentProfileSummary.modelLabel],
+        ["Runtime / review", `${currentProfileSummary.runtimeValidation} runtime, ${currentProfileSummary.reviewThreshold}+ review`]
       ].map(([label, value]) => h("div", {
         key: label,
-        className: "inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-sm"
+        className: "rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2"
       }, [
-        h("span", { key: "label", className: "text-slate-500" }, `${label}:`),
-        h("span", { key: "value", className: "font-medium text-slate-900" }, value)
+        h("div", { key: "label", className: "text-xs font-medium uppercase tracking-[0.14em] text-slate-500" }, label),
+        h("div", { key: "value", className: "mt-1 text-sm text-slate-900" }, value)
       ])))
     ]),
     h("div", { key: "scroll-region", className: "min-h-0 flex-1 overflow-y-auto pr-1" }, [
@@ -549,7 +567,7 @@ function LaunchAuditModalComponent({
         ]) : null,
         activeStep === "launch" ? h("div", { key: "config-block", className: "space-y-5" }, [
           h("div", { key: "config-header" }, [
-            h("div", { key: "copy", className: "mt-1 text-sm text-slate-500" }, "Choose the audit family, whether to use presets, and the default model for this run.")
+            h("div", { key: "copy", className: "mt-1 text-sm text-slate-500" }, "Choose the audit family, package presets, and run-shape settings for this audit.")
           ]),
           h("div", { key: "preset-row", className: "mt-4 grid gap-3 md:grid-cols-2" }, [
             h(Field, {
@@ -591,16 +609,10 @@ function LaunchAuditModalComponent({
             h(Field, {
               key: "policy-pack",
               label: helpLabel("Policy pack", "Policy packs control audit supervision rules such as publication logic, waiver behavior, and review-oriented governance. Use the default built-in pack unless your workspace or project has a specific governance policy.")
-            }, Select({
-              value: runForm.audit_policy_pack || "",
-              onChange: (event) => updateRunForm("audit_policy_pack", event.target.value)
-            }, [
-              h("option", { key: "default-empty", value: "" }, "default builtin policy"),
-              ...policyPacks.map((item) => h("option", { key: item.id, value: item.id }, `${item.name} (${item.id})`)),
-              runForm.audit_policy_pack && !policyPacks.some((item) => item.id === runForm.audit_policy_pack)
-                ? h("option", { key: runForm.audit_policy_pack, value: runForm.audit_policy_pack }, `${runForm.audit_policy_pack} (custom)`)
-                : null
-            ].filter(Boolean)))
+            }, h("div", { className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600" }, [
+              h("div", { key: "value", className: "font-medium text-slate-900" }, getPolicyPackLabel(policyPacks, "default")),
+              h("div", { key: "note", className: "mt-1" }, "OSS uses the built-in default policy pack only.")
+            ]))
           ]),
           h("div", { key: "run-mode-row", className: "grid gap-3" }, [
             h(Field, { key: "mode", label: helpLabel("Run mode", "Choose whether the run stays static, uses runtime-capable validation, or lets the app automatically resolve the audit path from repo structure and planner analysis.") }, Select({
@@ -613,36 +625,6 @@ function LaunchAuditModalComponent({
               h("option", { key: "auto", value: "auto" }, "auto"),
               h("option", { key: "static", value: "static" }, "static"),
               h("option", { key: "runtime", value: "runtime" }, "runtime")
-            ]))
-          ]),
-          h("div", { key: "model-row", className: "grid gap-3 md:grid-cols-2" }, [
-            h(Field, { key: "model", label: helpLabel("LLM model", "This is the default model used for the main audit agents unless an agent-specific override is configured in Advanced Config.") }, Select({
-              value: activeModel?.value || "",
-              onChange: (event) => {
-                const selectedModel = runModelOptions.find((item) => item.value === event.target.value);
-                if (!selectedModel) return;
-                updateRunForm("llm_provider", selectedModel.provider_id);
-                updateRunForm("llm_model", selectedModel.id);
-              }
-            }, [
-              h("option", { key: "placeholder", value: "", disabled: true }, "select a model"),
-              ...(llmRegistry.providers || []).map((provider) => h("optgroup", {
-                key: provider.id,
-                label: provider.name
-              }, runModelOptions
-                .filter((item) => item.provider_id === provider.id)
-                .map((item) => h("option", { key: item.value, value: item.value }, item.label))))
-            ])),
-            h(Field, { key: "api-key", label: helpLabel("API key", "Optional per-run credential override for the currently selected model provider. Leave blank to use persisted settings or server environment values.") }, h("div", { className: "space-y-2" }, [
-              h(Input, {
-                type: apiKeyField.secret ? "password" : "text",
-                value: runForm[apiKeyField.id] || "",
-                onChange: (event) => updateRunForm(apiKeyField.id, event.target.value),
-                placeholder: apiKeyField.placeholder || (apiKeyField.env_var ? `uses ${apiKeyField.env_var}` : "")
-              }),
-              h("div", { className: "text-xs text-slate-500" }, apiKeyField.env_var
-                ? `Maps to ${apiKeyField.env_var}. Leave blank to use the persisted or server environment value.`
-                : "Leave blank to use the persisted or server environment value.")
             ]))
           ]),
           h("div", { key: "runtime-row", className: "grid gap-3" }, [
@@ -873,40 +855,63 @@ function LaunchAuditModalComponent({
           ]),
           h("div", { key: "agent-block", className: "space-y-4 rounded-2xl border border-slate-200 bg-white px-4 py-4" }, [
             h("div", { key: "agent-header" }, [
-              h("div", { key: "agent-title", className: "text-sm font-medium text-slate-900" }, "Agent and subagent models"),
-              h("div", { key: "agent-copy", className: "mt-1 text-sm text-slate-500" }, "Leave fields blank to inherit the global model and credentials.")
+              h("div", { key: "agent-title", className: "text-sm font-medium text-slate-900" }, "Agent Models"),
+              h("div", { key: "agent-copy", className: "mt-1 text-sm text-slate-500" }, "Use a single inherited LLM configuration for all agent stages, or switch to per-agent overrides below."),
+              h("label", { key: "agent-inherit-toggle", className: cn("mt-4 flex items-start gap-3 rounded-2xl border px-4 py-3", globalModelAvailable ? "border-slate-200 bg-slate-50" : "border-amber-200 bg-amber-50") }, [
+                h("input", {
+                  type: "checkbox",
+                  checked: usingGlobalLlmConfig && globalModelAvailable,
+                  disabled: !globalModelAvailable,
+                  onChange: (event) => updateRunForm("use_global_llm_config", event.target.checked)
+                }),
+                h("div", { key: "copy", className: "min-w-0" }, [
+                  h("div", { key: "label", className: "text-sm font-medium text-slate-900" }, "Use global LLM model and credential"),
+                  h("div", { key: "body", className: "mt-1 text-sm text-slate-500" }, globalModelAvailable
+                    ? `All agent stages inherit ${activeModel?.label || runForm.llm_model} and the configured provider credential from Settings.`
+                    : "No global LLM model is configured in Settings. Configure one there to enable inherited agent defaults.")
+                ])
+              ])
             ]),
             h("div", { key: "agent-grid", className: "space-y-4" }, agentConfigCatalog.map((agent) => {
               const config = agentConfigs[agent.id] || {};
               const agentModel = runModelOptions.find((item) => item.provider_id === config.provider && item.id === config.model)
                 || runModelOptions.find((item) => item.id === config.model)
                 || null;
-              return h("div", { key: agent.id, className: "rounded-2xl border border-slate-200 px-4 py-4" }, [
+              const agentOverrideProviders = (llmRegistry.providers || []).filter((provider) => provider.id !== "mock");
+              return h("div", {
+                key: agent.id,
+                className: cn(
+                  "rounded-2xl border border-slate-200 px-4 py-4 transition",
+                  usingGlobalLlmConfig ? "bg-slate-50 opacity-60" : "bg-white"
+                )
+              }, [
                 h("div", { key: "agent-meta", className: "mb-3" }, [
                   h("div", { key: "agent-name", className: "font-medium text-slate-900" }, helpLabel(agent.title, agent.help, `${agent.title} help`))
                 ]),
                 h("div", { key: "agent-fields", className: "grid gap-3 md:grid-cols-2" }, [
-                  h(Field, { key: "agent-model", label: helpLabel("LLM model", `Override the global model for the ${agent.title.toLowerCase()} stage only.`) }, Select({
+                  h(Field, { key: "agent-model", label: helpLabel("LLM model", `Choose the model used for the ${agent.title.toLowerCase()} stage when per-agent overrides are active.`) }, Select({
                     value: agentModel?.value || "",
+                    disabled: usingGlobalLlmConfig,
                     onChange: (event) => {
                       const selectedModel = runModelOptions.find((item) => item.value === event.target.value);
                       updateAgentConfig(agent.id, "provider", selectedModel?.provider_id || "");
                       updateAgentConfig(agent.id, "model", selectedModel?.id || "");
                     }
                   }, [
-                    h("option", { key: "inherit", value: "" }, "inherit global model"),
-                    ...(llmRegistry.providers || []).map((provider) => h("optgroup", { key: provider.id, label: provider.name }, runModelOptions
+                    h("option", { key: "placeholder", value: "" }, "select a model"),
+                    ...agentOverrideProviders.map((provider) => h("optgroup", { key: provider.id, label: provider.name }, runModelOptions
                       .filter((item) => item.provider_id === provider.id)
                       .map((item) => h("option", { key: `${agent.id}:${item.value}`, value: item.value }, item.label))))
                   ])),
                   h(Field, { key: "agent-api", label: helpLabel("API key", `Optional credential override for the ${agent.title.toLowerCase()} stage only.`) }, h("div", { className: "space-y-2" }, [
                     h(Input, {
                       type: "password",
+                      disabled: usingGlobalLlmConfig,
                       value: config.api_key || "",
                       onChange: (event) => updateAgentConfig(agent.id, "api_key", event.target.value),
                       placeholder: `uses ${agent.env_prefix}_API_KEY`
                     }),
-                    h("div", { className: "text-xs text-slate-500" }, `Maps to ${agent.env_prefix}_API_KEY. Leave blank to inherit the global or environment key.`)
+                    h("div", { className: "text-xs text-slate-500" }, `Maps to ${agent.env_prefix}_API_KEY. Leave blank to use the agent-specific or provider environment key.`)
                   ]))
                 ])
               ]);
@@ -956,23 +961,6 @@ function LaunchAuditModalComponent({
                 preflightStale ? h(Badge, { key: "stale" }, "stale") : null,
                 launchReadiness.accepted ? h(Badge, { key: "accepted" }, "accepted") : null
               ].filter(Boolean)),
-              h("div", { key: "top", className: "grid gap-4 md:grid-cols-3" }, [
-                h(LaunchStatusCard, {
-                  key: "class",
-                  label: "Target class",
-                  value: `${preflightSummary.target.target_class} (${Math.round((preflightSummary.target.confidence || 0) * 100)}%)`
-                }),
-                h(LaunchStatusCard, {
-                  key: "package",
-                  label: "Recommended package",
-                  value: preflightSummary.recommended_audit_package.id
-                }),
-                h(LaunchStatusCard, {
-                  key: "policy",
-                  label: "Selected policy pack",
-                  value: getPolicyPackLabel(policyPacks, preflightSummary.selected_policy_pack.id || "")
-                })
-              ]),
               preflightSummary.launch_profile
                 ? h("div", { key: "profile-compare", className: "mt-4 space-y-4 rounded-2xl border border-white/70 bg-white px-4 py-4 text-sm text-slate-500" }, [
                   h("div", { key: "title" }, [

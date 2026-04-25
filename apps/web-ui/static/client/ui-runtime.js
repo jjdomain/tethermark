@@ -9,6 +9,7 @@ import { clsx } from "https://esm.sh/clsx@2.1.1";
 import { twMerge } from "https://esm.sh/tailwind-merge@2.5.2";
 
 const h = React.createElement;
+const PortalContainerContext = React.createContext(null);
 
 function cn(...inputs) {
   return twMerge(clsx(...inputs));
@@ -98,7 +99,7 @@ function parseSelectChildren(children) {
 }
 
 function Field({ label, children }) {
-  return h("label", { className: "block space-y-2 text-sm" }, [
+  return h("div", { className: "block space-y-2 text-sm" }, [
     h("span", { key: "l", className: "font-medium" }, label),
     children
   ]);
@@ -120,6 +121,7 @@ function Textarea({ className = "", ...props }) {
 
 function Select({ className = "", value = "", onChange, disabled = false, children, ...props }) {
   const parsed = parseSelectChildren(children);
+  const portalContainer = React.useContext(PortalContainerContext);
   return h(SelectPrimitive.Root, {
     value: value || undefined,
     disabled,
@@ -136,10 +138,11 @@ function Select({ className = "", value = "", onChange, disabled = false, childr
       h(SelectPrimitive.Value, { key: "value", placeholder: parsed.placeholder }),
       h(SelectPrimitive.Icon, { key: "icon", className: "text-slate-500" }, h(ChevronDownIcon))
     ]),
-    h(SelectPrimitive.Portal, { key: "portal" },
+    h(SelectPrimitive.Portal, { key: "portal", container: portalContainer || undefined },
       h(SelectPrimitive.Content, {
         position: "popper",
         sideOffset: 8,
+        onCloseAutoFocus: (event) => event.preventDefault(),
         className: "z-[70] max-h-96 min-w-[var(--radix-select-trigger-width)] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"
       }, [
         h(SelectPrimitive.Viewport, { key: "viewport", className: "p-1" }, parsed.groups.map((group, groupIndex) => group.label
@@ -173,6 +176,7 @@ function Select({ className = "", value = "", onChange, disabled = false, childr
 }
 
 function Modal({ open, title, description, children, onClose, size = "xl" }) {
+  const [portalContainer, setPortalContainer] = React.useState(null);
   const widthClass = size === "lg" ? "max-w-4xl" : size === "full" ? "max-w-7xl" : "max-w-6xl";
   return h(Dialog.Root, {
     open,
@@ -186,11 +190,12 @@ function Modal({ open, title, description, children, onClose, size = "xl" }) {
     }),
     h(Dialog.Content, {
       key: "content",
+      ref: setPortalContainer,
       className: cn(
         "fixed left-1/2 top-1/2 z-50 w-[calc(100vw-2rem)] -translate-x-1/2 -translate-y-1/2 rounded-[32px] border border-slate-200 bg-white shadow-2xl outline-none",
         widthClass
       )
-    }, [
+    }, h(PortalContainerContext.Provider, { value: portalContainer }, [
       h("div", { key: "header", className: "flex items-start justify-between gap-6 border-b border-slate-200 px-6 py-5" }, [
         h("div", { key: "copy" }, [
           h(Dialog.Title, { key: "title", className: "text-2xl font-semibold tracking-tight text-slate-950" }, title),
@@ -204,7 +209,7 @@ function Modal({ open, title, description, children, onClose, size = "xl" }) {
           h(ScrollArea.Thumb, { className: "relative flex-1 rounded-full bg-slate-300" })
         )
       ])
-    ])
+    ]))
   ]));
 }
 
