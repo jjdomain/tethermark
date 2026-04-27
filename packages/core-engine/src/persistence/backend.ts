@@ -3,7 +3,6 @@ import path from "node:path";
 import type { DatabaseMode } from "../contracts.js";
 import type { PersistenceStore } from "./contracts.js";
 import { EmbeddedPersistenceStore } from "./embedded-store.js";
-import { HostedPersistenceStore } from "./hosted-store.js";
 import { LocalPersistenceStore } from "./local-store.js";
 
 export interface PersistenceLocation {
@@ -18,8 +17,7 @@ export interface PersistenceReadOptions {
 
 function resolveModeRootEnv(mode: DatabaseMode): string | undefined {
   if (mode === "embedded") return process.env.HARNESS_EMBEDDED_DB_ROOT;
-  if (mode === "local") return process.env.HARNESS_LOCAL_DB_ROOT;
-  return process.env.HARNESS_HOSTED_DB_ROOT;
+  return process.env.HARNESS_LOCAL_DB_ROOT;
 }
 
 export function resolvePersistenceMode(request?: { db_mode?: DatabaseMode } | null): DatabaseMode {
@@ -45,6 +43,5 @@ export function resolvePersistenceLocation(args?: PersistenceReadOptions): Persi
 export function createPersistenceStore(mode: DatabaseMode, rootDir?: string): PersistenceStore {
   const resolvedRoot = path.resolve(rootDir ?? defaultPersistenceRoot(mode));
   if (mode === "embedded") return new EmbeddedPersistenceStore(resolvedRoot);
-  if (mode === "local") return new LocalPersistenceStore(resolvedRoot);
-  return new HostedPersistenceStore(resolvedRoot);
+  return new LocalPersistenceStore(resolvedRoot);
 }

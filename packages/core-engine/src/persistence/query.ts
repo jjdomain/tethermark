@@ -70,7 +70,7 @@ export interface PersistedTargetListItem extends PersistedTargetRecord {
 
 export interface PersistedRunQuery {
   rootDir?: string;
-  dbMode?: "embedded" | "local" | "hosted";
+  dbMode?: "embedded" | "local";
   workspaceId?: string;
   projectId?: string;
   targetId?: string;

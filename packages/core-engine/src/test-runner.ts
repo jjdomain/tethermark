@@ -26,7 +26,7 @@ import { createPersistedReviewComment } from "./persistence/review-comments.js";
 import { buildFindingEvidenceFingerprint, createPersistedFindingDisposition } from "./persistence/finding-dispositions.js";
 import { readPersistedArtifactIndex, readPersistedCommitDiff, readPersistedControlResults, readPersistedEvents, readPersistedEvidenceRecords, readPersistedFindings, readPersistedLanePlans, readPersistedLaneResults, readPersistedLaneReuseDecisions, readPersistedLaneSpecialistOutputs, readPersistedMaintenanceHistory, readPersistedMetrics, readPersistedObservability, readPersistedResolvedConfiguration, readPersistedReviewActions, readPersistedReviewComments, readPersistedReviewDecision, readPersistedReviewWorkflow, readPersistedRunUsageSummary, readPersistedScoreSummary, readPersistedStageArtifact, readPersistedStageArtifacts, readPersistedToolAdapterSummary, readPersistedToolExecutions } from "./persistence/run-details.js";
 import { readPersistenceMetadata } from "./persistence/sqlite.js";
-import { listPersistedApiKeys, listPersistedUiDocuments, readPersistedUiSettings, updatePersistedUiSettings } from "./persistence/ui-settings.js";
+import { listPersistedUiDocuments, readPersistedUiSettings, updatePersistedUiSettings } from "./persistence/ui-settings.js";
 import { markRuntimeFollowupJobTerminal, markRuntimeFollowupLaunched, readPersistedRuntimeFollowup, upsertRuntimeFollowupFromReviewAction } from "./persistence/runtime-followups.js";
 import { LinuxContainerSandboxBackend } from "./sandbox/backends/linux-container.js";
 import { buildReviewSummary } from "./review-summary.js";
@@ -197,14 +197,13 @@ async function testBuildScanRequestParsesLlmFlags(): Promise<void> {
   assert.ok(parsed.request.local_path);
 }
 
-async function testModeAwarePersistenceStoresSeparateEmbeddedLocalAndHostedRoots(): Promise<void> {
+async function testModeAwarePersistenceStoresSeparateEmbeddedAndLocalRoots(): Promise<void> {
   await withTempDir("harness-db-modes-", async (rootDir) => {
     const embeddedRoot = path.join(rootDir, "embedded-db");
     const localRoot = path.join(rootDir, "local-db");
-    const hostedRoot = path.join(rootDir, "hosted-db");
     const packageDefinition = { id: "deep-static", title: "Deep Static", description: "", run_mode: "static", default_policy_profile: "default", requires_agents: true, lane_specialists_enabled: true, focus: [], minimum_tools: [], scorecard_weights: {} } as any;
 
-    const persistRun = async (mode: "embedded" | "local" | "hosted", targetRoot: string, runId: string): Promise<void> => {
+    const persistRun = async (mode: "embedded" | "local", targetRoot: string, runId: string): Promise<void> => {
       const store = createPersistenceStore(mode, targetRoot);
       await store.persistBundle({
         mode,
@@ -242,30 +241,23 @@ async function testModeAwarePersistenceStoresSeparateEmbeddedLocalAndHostedRoots
 
     await persistRun("embedded", embeddedRoot, "run_embedded");
     await persistRun("local", localRoot, "run_local");
-    await persistRun("hosted", hostedRoot, "run_hosted");
 
-    const [embeddedRun, localRun, hostedRun, embeddedMeta, localMeta, hostedMeta] = await Promise.all([
+    const [embeddedRun, localRun, embeddedMeta, localMeta] = await Promise.all([
       getPersistedRun("run_embedded", { rootDir: embeddedRoot, dbMode: "embedded" }),
       getPersistedRun("run_local", { rootDir: localRoot, dbMode: "local" }),
-      getPersistedRun("run_hosted", { rootDir: hostedRoot, dbMode: "hosted" }),
       readPersistenceMetadata(embeddedRoot),
-      readPersistenceMetadata(localRoot),
-      readPersistenceMetadata(hostedRoot)
+      readPersistenceMetadata(localRoot)
     ]);
 
     assert.equal(embeddedRun?.id, "run_embedded");
     assert.equal(localRun?.id, "run_local");
-    assert.equal(hostedRun?.id, "run_hosted");
     assert.equal(embeddedMeta?.database_mode, "embedded");
     assert.equal(localMeta?.database_mode, "local");
-    assert.equal(hostedMeta?.database_mode, "hosted");
     assert.equal(embeddedMeta?.persistence_schema_version, "1.1.0");
     assert.equal(embeddedMeta?.compatibility_status, "current");
     assert.equal(localRun?.resolved_configuration?.db_mode, "local");
-    assert.equal(hostedRun?.resolved_configuration?.db_mode, "hosted");
     assert.equal(await fs.stat(path.join(embeddedRoot, "runs", "run_embedded.json")).then(() => true).catch(() => false), true);
     assert.equal(await fs.stat(path.join(localRoot, "runs", "run_local.json")).then(() => true).catch(() => false), false);
-    assert.equal(await fs.stat(path.join(hostedRoot, "runs", "run_hosted.json")).then(() => true).catch(() => false), false);
   });
 }
 
@@ -2876,177 +2868,6 @@ async function testWebUiAndPersistedUiSettingsApi(): Promise<void> {
   });
 }
 
-async function testWorkspaceRegistryAndSettingsInheritance(): Promise<void> {
-  await withTempDir("harness-workspace-registry-", async (rootDir) => {
-    const embeddedRoot = path.join(rootDir, "embedded-db");
-    await withWorkingDir(rootDir, async () => {
-      process.env.HARNESS_EMBEDDED_DB_ROOT = embeddedRoot;
-      const apiServer = createApiServer();
-      await new Promise<void>((resolve) => apiServer.listen(0, "127.0.0.1", () => resolve()));
-      const apiAddress = apiServer.address();
-      assert.ok(apiAddress && typeof apiAddress !== "string");
-      const apiBaseUrl = `http://127.0.0.1:${apiAddress.port}`;
-      const headers = {
-        "content-type": "application/json",
-        "x-harness-workspace": "alpha",
-        "x-harness-project": "red",
-        "x-harness-actor": "alice"
-      };
-      try {
-        const workspaceCreate = await fetch(`${apiBaseUrl}/ui/workspaces`, {
-          method: "POST",
-          headers,
-          body: JSON.stringify({ id: "alpha", name: "Alpha Team", description: "primary workspace" })
-        });
-        assert.equal(workspaceCreate.status, 201);
-
-        const projectCreate = await fetch(`${apiBaseUrl}/ui/projects`, {
-          method: "POST",
-          headers,
-          body: JSON.stringify({ name: "Red Project", description: "primary project", target_defaults: { local_path_prefix: "fixtures/" } })
-        });
-        assert.equal(projectCreate.status, 201);
-
-        const workspacesResponse = await fetch(`${apiBaseUrl}/ui/workspaces`, { headers });
-        const workspacesPayload = await workspacesResponse.json() as any;
-        assert.equal(workspacesPayload.workspaces.length, 1);
-        assert.equal(workspacesPayload.workspaces[0]?.id, "alpha");
-
-        const projectsResponse = await fetch(`${apiBaseUrl}/ui/projects?workspace_id=alpha`, { headers: { ...headers, "x-harness-workspace": "alpha" } });
-        const projectsPayload = await projectsResponse.json() as any;
-        assert.equal(projectsPayload.projects.length, 1);
-        assert.equal(projectsPayload.projects[0]?.id, "red-project");
-
-        const globalUpdate = await fetch(`${apiBaseUrl}/ui/settings?scope_level=global`, {
-          method: "PUT",
-          headers,
-          body: JSON.stringify({ providers: { default_provider: "openai", default_model: "gpt-5.4" } })
-        });
-        assert.equal(globalUpdate.status, 200);
-
-        const workspaceUpdate = await fetch(`${apiBaseUrl}/ui/settings?scope_level=workspace`, {
-          method: "PUT",
-          headers: { ...headers, "x-harness-workspace": "alpha" },
-          body: JSON.stringify({ audit_defaults: { audit_package: "deep-static" } })
-        });
-        assert.equal(workspaceUpdate.status, 200);
-
-        const projectUpdate = await fetch(`${apiBaseUrl}/ui/settings?scope_level=project`, {
-          method: "PUT",
-          headers: { ...headers, "x-harness-workspace": "alpha", "x-harness-project": "red-project" },
-          body: JSON.stringify({ review: { default_visibility: "internal-only" } })
-        });
-        assert.equal(projectUpdate.status, 200);
-
-        const effectiveResponse = await fetch(`${apiBaseUrl}/ui/settings?scope_level=effective`, {
-          headers: { ...headers, "x-harness-workspace": "alpha", "x-harness-project": "red-project" }
-        });
-        const effectivePayload = await effectiveResponse.json() as any;
-        assert.equal(effectivePayload.settings.providers_json.default_provider, "openai");
-        assert.equal(effectivePayload.settings.audit_defaults_json.audit_package, "deep-static");
-        assert.equal(effectivePayload.settings.review_json.default_visibility, "internal-only");
-        assert.equal(effectivePayload.layers.global.providers_json.default_provider, "openai");
-        assert.equal(effectivePayload.layers.workspace.audit_defaults_json.audit_package, "deep-static");
-        assert.equal(effectivePayload.layers.project.review_json.default_visibility, "internal-only");
-
-        const projectUpdateResponse = await fetch(`${apiBaseUrl}/ui/projects/red-project`, {
-          method: "PUT",
-          headers: { ...headers, "x-harness-workspace": "alpha", "x-harness-project": "red-project" },
-          body: JSON.stringify({
-            description: "updated project defaults",
-            target_defaults: {
-              target_kind: "repo",
-              repo_url: "https://github.com/example/red-project",
-              audit_policy_pack: "default",
-              preflight_strictness: "strict",
-              runtime_allowed: "allowed",
-              review_severity: "medium",
-              review_visibility: "internal-only"
-            }
-          })
-        });
-        const projectUpdatePayload = await projectUpdateResponse.json() as any;
-        assert.equal(projectUpdateResponse.status, 200);
-        assert.equal(projectUpdatePayload.project.target_defaults_json.target_kind, "repo");
-        assert.equal(projectUpdatePayload.project.target_defaults_json.repo_url, "https://github.com/example/red-project");
-        assert.equal(projectUpdatePayload.project.target_defaults_json.audit_policy_pack, "default");
-        assert.equal(projectUpdatePayload.project.target_defaults_json.preflight_strictness, "strict");
-        assert.equal(projectUpdatePayload.project.target_defaults_json.runtime_allowed, "allowed");
-        assert.equal(projectUpdatePayload.project.target_defaults_json.review_severity, "medium");
-        assert.equal(projectUpdatePayload.project.target_defaults_json.review_visibility, "internal-only");
-      } finally {
-        delete process.env.HARNESS_EMBEDDED_DB_ROOT;
-        await new Promise<void>((resolve, reject) => apiServer.close((error) => error ? reject(error) : resolve()));
-      }
-    });
-  });
-}
-
-async function testPersistedWorkspaceApiKeysAuthenticateRequests(): Promise<void> {
-  await withTempDir("harness-api-keys-", async (rootDir) => {
-    const embeddedRoot = path.join(rootDir, "embedded-db");
-    await withWorkingDir(rootDir, async () => {
-      process.env.HARNESS_EMBEDDED_DB_ROOT = embeddedRoot;
-      process.env.HARNESS_API_AUTH_MODE = "none";
-      delete process.env.HARNESS_API_KEY;
-      let apiServer = createApiServer();
-      await new Promise<void>((resolve) => apiServer.listen(0, "127.0.0.1", () => resolve()));
-      let apiAddress = apiServer.address();
-      assert.ok(apiAddress && typeof apiAddress !== "string");
-      let apiBaseUrl = `http://127.0.0.1:${apiAddress.port}`;
-      const headers = {
-        "content-type": "application/json",
-        "x-harness-workspace": "alpha",
-        "x-harness-project": "red-project",
-        "x-harness-actor": "alice"
-      };
-      try {
-        const createdResponse = await fetch(`${apiBaseUrl}/ui/api-keys`, {
-          method: "POST",
-          headers,
-          body: JSON.stringify({ label: "workspace automation" })
-        });
-        const createdPayload = await createdResponse.json() as any;
-        assert.equal(createdResponse.status, 201);
-        assert.match(createdPayload.api_key, /^hsk_/);
-
-        const persistedKeys = await listPersistedApiKeys("alpha", { rootDir: embeddedRoot, dbMode: "embedded" });
-        assert.equal(persistedKeys.length, 1);
-        assert.equal(persistedKeys[0]?.label, "workspace automation");
-
-        await new Promise<void>((resolve, reject) => apiServer.close((error) => error ? reject(error) : resolve()));
-
-        process.env.HARNESS_API_AUTH_MODE = "api_key";
-        apiServer = createApiServer();
-        await new Promise<void>((resolve) => apiServer.listen(0, "127.0.0.1", () => resolve()));
-        apiAddress = apiServer.address();
-        assert.ok(apiAddress && typeof apiAddress !== "string");
-        apiBaseUrl = `http://127.0.0.1:${apiAddress.port}`;
-
-        const authedResponse = await fetch(`${apiBaseUrl}/ui/settings`, {
-          headers: {
-            "x-api-key": createdPayload.api_key,
-            "x-harness-workspace": "alpha",
-            "x-harness-project": "red-project",
-            "x-harness-actor": "alice"
-          }
-        });
-        const authedPayload = await authedResponse.json() as any;
-        assert.equal(authedResponse.status, 200);
-        assert.equal(authedPayload.settings.providers_json.default_provider, "mock");
-
-        const refreshedKeys = await listPersistedApiKeys("alpha", { rootDir: embeddedRoot, dbMode: "embedded" });
-        assert.ok(refreshedKeys[0]?.last_used_at);
-      } finally {
-        delete process.env.HARNESS_EMBEDDED_DB_ROOT;
-        delete process.env.HARNESS_API_AUTH_MODE;
-        delete process.env.HARNESS_API_KEY;
-        await new Promise<void>((resolve, reject) => apiServer.close((error) => error ? reject(error) : resolve()));
-      }
-    });
-  });
-}
-
 async function testPreflightApiSummarizesReadiness(): Promise<void> {
   await withTempDir("harness-preflight-api-", async (rootDir) => {
     const embeddedRoot = path.join(rootDir, "embedded-db");
@@ -3095,7 +2916,7 @@ async function testPreflightApiSummarizesReadiness(): Promise<void> {
   });
 }
 
-async function testApiWorkspaceScopingAndActorOwnedReviewActions(): Promise<void> {
+async function testApiProjectScopingAndActorOwnedReviewActions(): Promise<void> {
   await withTempDir("harness-api-scope-", async (rootDir) => {
     const embeddedRoot = path.join(rootDir, "embedded-db");
     const fixtureRoot = path.resolve(process.cwd(), "fixtures", "validation-targets");
@@ -3112,14 +2933,12 @@ async function testApiWorkspaceScopingAndActorOwnedReviewActions(): Promise<void
       const alphaHeaders = {
         "content-type": "application/json",
         "x-api-key": "scope-secret",
-        "x-harness-workspace": "alpha",
         "x-harness-project": "red",
         "x-harness-actor": "alice"
       };
       const betaHeaders = {
         "content-type": "application/json",
         "x-api-key": "scope-secret",
-        "x-harness-workspace": "beta",
         "x-harness-project": "blue",
         "x-harness-actor": "bob"
       };
@@ -3154,12 +2973,14 @@ async function testApiWorkspaceScopingAndActorOwnedReviewActions(): Promise<void
         const alphaRunsResponse = await fetch(`${apiBaseUrl}/runs`, { headers: alphaHeaders });
         const alphaRunsPayload = await alphaRunsResponse.json() as any;
         assert.equal(alphaRunsPayload.runs.length, 1);
-        assert.equal(alphaRunsPayload.runs[0].workspace_id, "alpha");
+        assert.equal(alphaRunsPayload.runs[0].workspace_id, "default");
+        assert.equal(alphaRunsPayload.runs[0].project_id, "red");
 
         const betaRunsResponse = await fetch(`${apiBaseUrl}/runs`, { headers: betaHeaders });
         const betaRunsPayload = await betaRunsResponse.json() as any;
         assert.equal(betaRunsPayload.runs.length, 1);
-        assert.equal(betaRunsPayload.runs[0].workspace_id, "beta");
+        assert.equal(betaRunsPayload.runs[0].workspace_id, "default");
+        assert.equal(betaRunsPayload.runs[0].project_id, "blue");
 
         const forbiddenCrossScopeRun = await fetch(`${apiBaseUrl}/runs/${encodeURIComponent(alphaRunPayload.run_id)}`, { headers: betaHeaders });
         assert.equal(forbiddenCrossScopeRun.status, 404);
@@ -3176,173 +2997,21 @@ async function testApiWorkspaceScopingAndActorOwnedReviewActions(): Promise<void
         const reviewActionPayload = await reviewActionResponse.json() as any;
         assert.equal(reviewActionResponse.status, 200);
         assert.equal(reviewActionPayload.action.reviewer_id, "alice");
-        assert.equal(reviewActionPayload.workflow.workspace_id, "alpha");
+        assert.equal(reviewActionPayload.workflow.workspace_id, "default");
+        assert.equal(reviewActionPayload.workflow.project_id, "red");
 
         const persistedAlphaRun = await getPersistedRun(alphaRunPayload.run_id, { rootDir: embeddedRoot, dbMode: "embedded" });
         const persistedBetaRun = await getPersistedRun(betaRunPayload.run_id, { rootDir: embeddedRoot, dbMode: "embedded" });
-        assert.equal(persistedAlphaRun?.workspace_id, "alpha");
+        assert.equal(persistedAlphaRun?.workspace_id, "default");
+        assert.equal(persistedAlphaRun?.project_id, "red");
         assert.equal(persistedAlphaRun?.requested_by, "alice");
-        assert.equal(persistedBetaRun?.workspace_id, "beta");
+        assert.equal(persistedBetaRun?.workspace_id, "default");
+        assert.equal(persistedBetaRun?.project_id, "blue");
         assert.equal(persistedBetaRun?.requested_by, "bob");
       } finally {
         delete process.env.HARNESS_EMBEDDED_DB_ROOT;
         delete process.env.HARNESS_API_AUTH_MODE;
         delete process.env.HARNESS_API_KEY;
-        await new Promise<void>((resolve, reject) => apiServer.close((error) => error ? reject(error) : resolve()));
-      }
-    });
-  });
-}
-
-async function testReviewGovernancePermissionsEnforceRoleBindings(): Promise<void> {
-  await withTempDir("harness-review-governance-", async (rootDir) => {
-    const embeddedRoot = path.join(rootDir, "embedded-db");
-    const fixtureRoot = path.resolve(process.cwd(), "fixtures", "validation-targets");
-    await stageBuiltinCoreEngineData(rootDir);
-    await withWorkingDir(rootDir, async () => {
-      process.env.HARNESS_EMBEDDED_DB_ROOT = embeddedRoot;
-      process.env.HARNESS_API_AUTH_MODE = "none";
-      const apiServer = createApiServer();
-      await new Promise<void>((resolve) => apiServer.listen(0, "127.0.0.1", () => resolve()));
-      const apiAddress = apiServer.address();
-      assert.ok(apiAddress && typeof apiAddress !== "string");
-      const apiBaseUrl = `http://127.0.0.1:${apiAddress.port}`;
-      const ownerHeaders = {
-        "content-type": "application/json",
-        "x-harness-workspace": "alpha",
-        "x-harness-project": "red",
-        "x-harness-actor": "owner"
-      };
-      const leadHeaders = {
-        "content-type": "application/json",
-        "x-harness-workspace": "alpha",
-        "x-harness-project": "red",
-        "x-harness-actor": "lead"
-      };
-      const reviewerHeaders = {
-        "content-type": "application/json",
-        "x-harness-workspace": "alpha",
-        "x-harness-project": "red",
-        "x-harness-actor": "alice"
-      };
-      const viewerHeaders = {
-        "content-type": "application/json",
-        "x-harness-workspace": "alpha",
-        "x-harness-project": "red",
-        "x-harness-actor": "bob"
-      };
-
-      try {
-        const workspaceResponse = await fetch(`${apiBaseUrl}/ui/workspaces`, {
-          method: "POST",
-          headers: ownerHeaders,
-          body: JSON.stringify({ id: "alpha", name: "Alpha Workspace" })
-        });
-        assert.equal(workspaceResponse.status, 201);
-
-        const ownerBindingsResponse = await fetch(`${apiBaseUrl}/ui/workspace-role-bindings`, { headers: ownerHeaders });
-        const ownerBindingsPayload = await ownerBindingsResponse.json() as any;
-        assert.equal(ownerBindingsResponse.status, 200);
-        assert.equal(ownerBindingsPayload.effective_roles[0], "admin");
-        assert.equal(ownerBindingsPayload.workspace_role_bindings.length, 1);
-        assert.equal(ownerBindingsPayload.workspace_role_bindings[0]?.actor_id, "owner");
-
-        for (const [headers, actorId, role] of [
-          [ownerHeaders, "lead", "triage_lead"],
-          [ownerHeaders, "alice", "reviewer"],
-          [ownerHeaders, "bob", "viewer"]
-        ] as const) {
-          const response = await fetch(`${apiBaseUrl}/ui/workspace-role-bindings`, {
-            method: "POST",
-            headers,
-            body: JSON.stringify({ actor_id: actorId, role })
-          });
-          assert.equal(response.status, 201);
-        }
-
-        const runResponse = await fetch(`${apiBaseUrl}/runs`, {
-          method: "POST",
-          headers: ownerHeaders,
-          body: JSON.stringify({
-            local_path: path.join(fixtureRoot, "agent-tool-boundary-risky"),
-            run_mode: "static",
-            audit_package: "agentic-static",
-            llm_provider: "mock"
-          })
-        });
-        const runPayload = await runResponse.json() as any;
-        assert.equal(runResponse.status, 200);
-
-        const reviewerAssignResponse = await fetch(`${apiBaseUrl}/runs/${encodeURIComponent(runPayload.run_id)}/review-actions`, {
-          method: "POST",
-          headers: reviewerHeaders,
-          body: JSON.stringify({
-            action_type: "assign_reviewer",
-            assigned_reviewer_id: "alice",
-            notes: "should be rejected for reviewer role"
-          })
-        });
-        assert.equal(reviewerAssignResponse.status, 403);
-
-        const viewerCommentResponse = await fetch(`${apiBaseUrl}/runs/${encodeURIComponent(runPayload.run_id)}/review-comments`, {
-          method: "POST",
-          headers: viewerHeaders,
-          body: JSON.stringify({
-            body: "viewer cannot comment"
-          })
-        });
-        assert.equal(viewerCommentResponse.status, 403);
-
-        const leadAssignResponse = await fetch(`${apiBaseUrl}/runs/${encodeURIComponent(runPayload.run_id)}/review-actions`, {
-          method: "POST",
-          headers: leadHeaders,
-          body: JSON.stringify({
-            action_type: "assign_reviewer",
-            assigned_reviewer_id: "alice",
-            notes: "assigning reviewer ownership"
-          })
-        });
-        const leadAssignPayload = await leadAssignResponse.json() as any;
-        assert.equal(leadAssignResponse.status, 200);
-        assert.equal(leadAssignPayload.workflow.current_reviewer_id, "alice");
-        assert.equal(leadAssignPayload.notification.reviewer_id, "alice");
-
-        const viewerAuditResponse = await fetch(`${apiBaseUrl}/runs/${encodeURIComponent(runPayload.run_id)}/review-audit`, {
-          headers: viewerHeaders
-        });
-        assert.equal(viewerAuditResponse.status, 403);
-
-        const reviewerApproveResponse = await fetch(`${apiBaseUrl}/runs/${encodeURIComponent(runPayload.run_id)}/review-actions`, {
-          method: "POST",
-          headers: reviewerHeaders,
-          body: JSON.stringify({
-            action_type: "approve_run",
-            notes: "assigned reviewer can approve"
-          })
-        });
-        const reviewerApprovePayload = await reviewerApproveResponse.json() as any;
-        assert.equal(reviewerApproveResponse.status, 200);
-        assert.equal(reviewerApprovePayload.workflow.status, "approved");
-        assert.equal(reviewerApprovePayload.action.reviewer_id, "alice");
-
-        const reviewerCommentResponse = await fetch(`${apiBaseUrl}/runs/${encodeURIComponent(runPayload.run_id)}/review-comments`, {
-          method: "POST",
-          headers: reviewerHeaders,
-          body: JSON.stringify({
-            body: "assigned reviewer note"
-          })
-        });
-        assert.equal(reviewerCommentResponse.status, 200);
-
-        const reviewerAuditResponse = await fetch(`${apiBaseUrl}/runs/${encodeURIComponent(runPayload.run_id)}/review-audit`, {
-          headers: reviewerHeaders
-        });
-        const reviewerAuditPayload = await reviewerAuditResponse.json() as any;
-        assert.equal(reviewerAuditResponse.status, 200);
-        assert.equal(reviewerAuditPayload.review_audit.workflow.current_reviewer_id, "alice");
-      } finally {
-        delete process.env.HARNESS_EMBEDDED_DB_ROOT;
-        delete process.env.HARNESS_API_AUTH_MODE;
         await new Promise<void>((resolve, reject) => apiServer.close((error) => error ? reject(error) : resolve()));
       }
     });
@@ -4140,7 +3809,7 @@ async function testRunComparisonUsesEvidenceSymbolsForMatching(): Promise<void> 
 async function main(): Promise<void> {
   const tests: Array<[string, () => Promise<void>]> = [
     ["buildScanRequest parses llm flags", testBuildScanRequestParsesLlmFlags],
-    ["mode-aware persistence stores separate embedded local and hosted roots", testModeAwarePersistenceStoresSeparateEmbeddedLocalAndHostedRoots],
+    ["mode-aware persistence stores separate embedded and local roots", testModeAwarePersistenceStoresSeparateEmbeddedAndLocalRoots],
     ["compactBundleExports prunes optional debug bundles", testCompactBundleExportsPrunesOptionalDebugBundles],
     ["readPersistedLaneSpecialistOutputs from sqlite", testReadPersistedLaneSpecialistOutputsFromSqlite],
     ["backfillEmbeddedPersistence migrates lane specialists", testBackfillEmbeddedPersistenceMigratesLaneSpecialists],
@@ -4162,11 +3831,8 @@ async function main(): Promise<void> {
     ["canonical target identity groups repo clone and endpoint variants", testCanonicalTargetIdentityGroupsRepoCloneAndEndpointVariants],
     ["artifact policy classifies persisted and artifact-only outputs", testArtifactPolicyClassifiesPersistedAndArtifactOnlyOutputs],
     ["web ui and persisted ui settings api", testWebUiAndPersistedUiSettingsApi],
-    ["workspace registry and settings inheritance", testWorkspaceRegistryAndSettingsInheritance],
-    ["persisted workspace api keys authenticate requests", testPersistedWorkspaceApiKeysAuthenticateRequests],
     ["preflight api summarizes readiness", testPreflightApiSummarizesReadiness],
-    ["api workspace scoping and actor-owned review actions", testApiWorkspaceScopingAndActorOwnedReviewActions],
-    ["review governance permissions enforce role bindings", testReviewGovernancePermissionsEnforceRoleBindings],
+    ["api project scoping and actor-owned review actions", testApiProjectScopingAndActorOwnedReviewActions],
       ["validateFixtures passes for bundled targets", testValidateFixturesPassesForBundledTargets],
       ["local binary providers short-circuit when spawn is blocked", testLocalBinaryProvidersShortCircuitWhenSpawnBlocked],
       ["python worker providers report blocked runtime capability when disabled", testPythonWorkerProvidersReportBlockedWhenDisabled],

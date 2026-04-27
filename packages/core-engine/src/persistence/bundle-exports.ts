@@ -65,9 +65,9 @@ export function resolveBundleExportPolicy(mode: DatabaseMode = "embedded"): Bund
     database_mode: mode,
     policy: "debug_optional",
     enabled: enabledOverride ?? false,
-    retention_days: retentionOverride ?? 7,
+    retention_days: retentionOverride ?? 14,
     notes: [
-      "Hosted mode treats bundle exports as temporary debug material rather than canonical storage.",
+      "Local mode treats bundle exports as temporary debug material rather than canonical storage.",
       "Use compact maintenance to prune old bundle exports after short-lived debugging windows."
     ]
   };

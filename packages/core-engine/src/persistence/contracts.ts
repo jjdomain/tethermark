@@ -429,7 +429,7 @@ export interface PersistedFindingDispositionRecord {
 
 export interface PersistedUiSettingsRecord {
   id: string;
-  scope: "global" | "workspace" | "project";
+  scope: "global" | "project";
   scope_id: string;
   workspace_id: string | null;
   project_id: string | null;
@@ -460,27 +460,6 @@ export interface PersistedUiDocumentRecord {
   updated_at: string;
 }
 
-export interface PersistedWorkspaceRecord {
-  id: string;
-  name: string;
-  description: string | null;
-  default_project_id: string | null;
-  settings_inheritance_enabled: boolean;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface PersistedWorkspaceRoleBindingRecord {
-  id: string;
-  workspace_id: string;
-  actor_id: string;
-  role: ReviewActorRole;
-  created_by: string | null;
-  created_at: string;
-  updated_at: string;
-  revoked_at: string | null;
-}
-
 export interface PersistedProjectRecord {
   id: string;
   workspace_id: string;
@@ -489,18 +468,6 @@ export interface PersistedProjectRecord {
   target_defaults_json: unknown;
   created_at: string;
   updated_at: string;
-}
-
-export interface PersistedApiKeyRecord {
-  id: string;
-  workspace_id: string;
-  label: string;
-  key_prefix: string;
-  secret_sha256: string;
-  created_by: string | null;
-  created_at: string;
-  last_used_at: string | null;
-  revoked_at: string | null;
 }
 
 export interface PersistedAsyncJobRecord {

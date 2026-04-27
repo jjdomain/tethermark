@@ -1,15 +1,12 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 
 import { deriveScopeId, normalizeProjectId, normalizeWorkspaceId } from "../request-scope.js";
 import type { PersistenceReadOptions } from "./backend.js";
 import { resolvePersistenceLocation } from "./backend.js";
 import type {
-  PersistedApiKeyRecord,
   PersistedProjectRecord,
   PersistedUiDocumentRecord,
-  PersistedUiSettingsRecord,
-  PersistedWorkspaceRecord,
-  PersistedWorkspaceRoleBindingRecord
+  PersistedUiSettingsRecord
 } from "./contracts.js";
 import { ensureSqliteSchema, openSqliteDatabase, readSqliteTable, saveSqliteDatabase, upsertSqliteRecord } from "./sqlite.js";
 
@@ -42,17 +39,8 @@ export interface UiSettingsResolution {
   effective: PersistedUiSettingsRecord;
   layers: {
     global: PersistedUiSettingsRecord;
-    workspace: PersistedUiSettingsRecord;
     project: PersistedUiSettingsRecord;
   };
-}
-
-export interface WorkspaceInput {
-  id?: string;
-  name: string;
-  description?: string | null;
-  default_project_id?: string | null;
-  settings_inheritance_enabled?: boolean;
 }
 
 export interface ProjectInput {
@@ -63,25 +51,8 @@ export interface ProjectInput {
   target_defaults?: Record<string, unknown>;
 }
 
-export interface ApiKeyInput {
-  label: string;
-  created_by?: string | null;
-  workspace_id?: string;
-}
-
-export interface WorkspaceRoleBindingInput {
-  workspace_id?: string;
-  actor_id: string;
-  role: PersistedWorkspaceRoleBindingRecord["role"];
-  created_by?: string | null;
-}
-
 function nowIso(): string {
   return new Date().toISOString();
-}
-
-function sha256(value: string): string {
-  return createHash("sha256").update(value).digest("hex");
 }
 
 function mergeJson(base: Record<string, unknown>, override: unknown): Record<string, unknown> {
@@ -109,9 +80,7 @@ function defaultUiSettingsForScope(args: {
   const projectId = args.projectId ? normalizeProjectId(args.projectId) : null;
   const scopeId = args.scope === "global"
     ? "global/default"
-    : args.scope === "workspace"
-      ? `workspace/${workspaceId}`
-      : deriveScopeId({ workspaceId: workspaceId ?? "default", projectId: projectId ?? "default" });
+    : deriveScopeId({ workspaceId: workspaceId ?? "default", projectId: projectId ?? "default" });
   return {
     id: scopeId,
     scope: args.scope,
@@ -120,9 +89,9 @@ function defaultUiSettingsForScope(args: {
     project_id: projectId,
     updated_at: updatedAt,
     providers_json: args.scope === "global" ? {
-      default_provider: "mock",
-      default_model: "mock-agent-runtime",
-      mock_mode: true,
+      default_provider: "",
+      default_model: "",
+      mock_mode: false,
       agent_overrides: {}
     } : {},
     credentials_json: args.scope === "global" ? {
@@ -204,13 +173,13 @@ function mergeSettingsLayers(layers: UiSettingsResolution["layers"]): PersistedU
     workspace_id: layers.project.workspace_id,
     project_id: layers.project.project_id,
     updated_at: layers.project.updated_at,
-    providers_json: mergeJson(mergeJson(layers.global.providers_json as Record<string, unknown>, layers.workspace.providers_json), layers.project.providers_json),
-    credentials_json: mergeJson(mergeJson(layers.global.credentials_json as Record<string, unknown>, layers.workspace.credentials_json), layers.project.credentials_json),
-    audit_defaults_json: mergeJson(mergeJson(layers.global.audit_defaults_json as Record<string, unknown>, layers.workspace.audit_defaults_json), layers.project.audit_defaults_json),
-    preflight_json: mergeJson(mergeJson(layers.global.preflight_json as Record<string, unknown>, layers.workspace.preflight_json), layers.project.preflight_json),
-    review_json: mergeJson(mergeJson(layers.global.review_json as Record<string, unknown>, layers.workspace.review_json), layers.project.review_json),
-    integrations_json: mergeJson(mergeJson(layers.global.integrations_json as Record<string, unknown>, layers.workspace.integrations_json), layers.project.integrations_json),
-    test_mode_json: mergeJson(mergeJson(layers.global.test_mode_json as Record<string, unknown>, layers.workspace.test_mode_json), layers.project.test_mode_json)
+    providers_json: mergeJson(layers.global.providers_json as Record<string, unknown>, layers.project.providers_json),
+    credentials_json: mergeJson(layers.global.credentials_json as Record<string, unknown>, layers.project.credentials_json),
+    audit_defaults_json: mergeJson(layers.global.audit_defaults_json as Record<string, unknown>, layers.project.audit_defaults_json),
+    preflight_json: mergeJson(layers.global.preflight_json as Record<string, unknown>, layers.project.preflight_json),
+    review_json: mergeJson(layers.global.review_json as Record<string, unknown>, layers.project.review_json),
+    integrations_json: mergeJson(layers.global.integrations_json as Record<string, unknown>, layers.project.integrations_json),
+    test_mode_json: mergeJson(layers.global.test_mode_json as Record<string, unknown>, layers.project.test_mode_json)
   };
 }
 
@@ -219,11 +188,6 @@ async function openUiDb(rootDirOrOptions?: string | PersistenceReadOptions) {
   const db = await openSqliteDatabase(location.rootDir);
   ensureSqliteSchema(db);
   return { db, location };
-}
-
-function listWorkspaceRows(db: any): PersistedWorkspaceRecord[] {
-  return readSqliteTable<PersistedWorkspaceRecord>(db, "workspaces")
-    .sort((left, right) => left.name.localeCompare(right.name));
 }
 
 function listProjectRows(db: any, workspaceId?: string): PersistedProjectRecord[] {
@@ -236,89 +200,14 @@ function listSettingRows(db: any): PersistedUiSettingsRecord[] {
   return readSqliteTable<PersistedUiSettingsRecord>(db, "ui_settings");
 }
 
-function listApiKeyRows(db: any, workspaceId?: string): PersistedApiKeyRecord[] {
-  return readSqliteTable<PersistedApiKeyRecord>(db, "api_keys")
-    .filter((item) => !workspaceId || item.workspace_id === workspaceId)
-    .sort((left, right) => right.created_at.localeCompare(left.created_at));
-}
-
-function listWorkspaceRoleBindingRows(db: any, workspaceId?: string): PersistedWorkspaceRoleBindingRecord[] {
-  return readSqliteTable<PersistedWorkspaceRoleBindingRecord>(db, "workspace_role_bindings")
-    .filter((item) => !workspaceId || item.workspace_id === workspaceId)
-    .filter((item) => !item.revoked_at)
-    .sort((left, right) => left.actor_id.localeCompare(right.actor_id) || left.created_at.localeCompare(right.created_at));
-}
-
 function findSetting(rows: PersistedUiSettingsRecord[], args: { scope: PersistedUiSettingsRecord["scope"]; workspaceId?: string; projectId?: string }): PersistedUiSettingsRecord {
   if (args.scope === "global") {
     return rows.find((item) => item.scope === "global") ?? defaultUiSettingsForScope({ scope: "global" });
-  }
-  if (args.scope === "workspace") {
-    const workspaceId = normalizeWorkspaceId(args.workspaceId);
-    return rows.find((item) => item.scope === "workspace" && item.workspace_id === workspaceId)
-      ?? defaultUiSettingsForScope({ scope: "workspace", workspaceId });
   }
   const workspaceId = normalizeWorkspaceId(args.workspaceId);
   const projectId = normalizeProjectId(args.projectId);
   return rows.find((item) => item.scope === "project" && item.workspace_id === workspaceId && item.project_id === projectId)
     ?? defaultUiSettingsForScope({ scope: "project", workspaceId, projectId });
-}
-
-export async function listPersistedWorkspaces(rootDirOrOptions?: string | PersistenceReadOptions): Promise<PersistedWorkspaceRecord[]> {
-  const { db } = await openUiDb(rootDirOrOptions);
-  try {
-    return listWorkspaceRows(db);
-  } finally {
-    db.close();
-  }
-}
-
-export async function createPersistedWorkspace(input: WorkspaceInput & { created_by?: string | null }, rootDirOrOptions?: string | PersistenceReadOptions): Promise<PersistedWorkspaceRecord> {
-  const { db, location } = await openUiDb(rootDirOrOptions);
-  try {
-    const timestamp = nowIso();
-    const id = normalizeWorkspaceId(input.id ?? input.name);
-    const record: PersistedWorkspaceRecord = {
-      id,
-      name: input.name.trim(),
-      description: input.description?.trim() || null,
-      default_project_id: input.default_project_id ? normalizeProjectId(input.default_project_id) : null,
-      settings_inheritance_enabled: input.settings_inheritance_enabled ?? true,
-      created_at: timestamp,
-      updated_at: timestamp
-    };
-    upsertSqliteRecord({
-      db,
-      tableName: "workspaces",
-      recordKey: record.id,
-      payload: record,
-      createdAt: record.created_at
-    });
-    if (input.created_by?.trim()) {
-      const binding: PersistedWorkspaceRoleBindingRecord = {
-        id: `${record.id}:${input.created_by.trim()}`,
-        workspace_id: record.id,
-        actor_id: input.created_by.trim(),
-        role: "admin",
-        created_by: input.created_by.trim(),
-        created_at: timestamp,
-        updated_at: timestamp,
-        revoked_at: null
-      };
-      upsertSqliteRecord({
-        db,
-        tableName: "workspace_role_bindings",
-        recordKey: binding.id,
-        payload: binding,
-        createdAt: binding.created_at,
-        parentKey: binding.workspace_id
-      });
-    }
-    await saveSqliteDatabase(location.rootDir, db, location.mode);
-    return record;
-  } finally {
-    db.close();
-  }
 }
 
 export async function listPersistedProjects(workspaceId?: string, rootDirOrOptions?: string | PersistenceReadOptions): Promise<PersistedProjectRecord[]> {
@@ -355,8 +244,6 @@ export async function createPersistedProject(input: ProjectInput, rootDirOrOptio
       created_at: timestamp,
       updated_at: timestamp
     };
-    const workspaces = listWorkspaceRows(db);
-    const existingWorkspace = workspaces.find((item) => item.id === workspaceId);
     upsertSqliteRecord({
       db,
       tableName: "projects",
@@ -365,19 +252,6 @@ export async function createPersistedProject(input: ProjectInput, rootDirOrOptio
       createdAt: record.created_at,
       parentKey: record.workspace_id
     });
-    if (existingWorkspace && !existingWorkspace.default_project_id) {
-      upsertSqliteRecord({
-        db,
-        tableName: "workspaces",
-        recordKey: existingWorkspace.id,
-        payload: {
-          ...existingWorkspace,
-          default_project_id: record.id,
-          updated_at: timestamp
-        },
-        createdAt: existingWorkspace.created_at
-      });
-    }
     await saveSqliteDatabase(location.rootDir, db, location.mode);
     return record;
   } finally {
@@ -413,174 +287,13 @@ export async function updatePersistedProject(projectId: string, input: ProjectIn
   }
 }
 
-export async function listPersistedApiKeys(workspaceId?: string, rootDirOrOptions?: string | PersistenceReadOptions): Promise<PersistedApiKeyRecord[]> {
-  const { db } = await openUiDb(rootDirOrOptions);
-  try {
-    return listApiKeyRows(db, workspaceId ? normalizeWorkspaceId(workspaceId) : undefined);
-  } finally {
-    db.close();
-  }
-}
-
-export async function createPersistedApiKey(input: ApiKeyInput, rootDirOrOptions?: string | PersistenceReadOptions): Promise<{ record: PersistedApiKeyRecord; api_key: string }> {
-  const { db, location } = await openUiDb(rootDirOrOptions);
-  try {
-    const workspaceId = normalizeWorkspaceId(input.workspace_id);
-    const timestamp = nowIso();
-    const apiKey = `hsk_${randomUUID().replace(/-/g, "")}`;
-    const record: PersistedApiKeyRecord = {
-      id: randomUUID(),
-      workspace_id: workspaceId,
-      label: input.label.trim(),
-      key_prefix: apiKey.slice(0, 12),
-      secret_sha256: sha256(apiKey),
-      created_by: input.created_by?.trim() || null,
-      created_at: timestamp,
-      last_used_at: null,
-      revoked_at: null
-    };
-    upsertSqliteRecord({
-      db,
-      tableName: "api_keys",
-      recordKey: `${workspaceId}:${record.id}`,
-      payload: record,
-      createdAt: record.created_at,
-      parentKey: workspaceId
-    });
-    await saveSqliteDatabase(location.rootDir, db, location.mode);
-    return { record, api_key: apiKey };
-  } finally {
-    db.close();
-  }
-}
-
-export async function revokePersistedApiKey(apiKeyId: string, workspaceId?: string, rootDirOrOptions?: string | PersistenceReadOptions): Promise<PersistedApiKeyRecord | null> {
-  const { db, location } = await openUiDb(rootDirOrOptions);
-  try {
-    const normalizedWorkspace = normalizeWorkspaceId(workspaceId);
-    const existing = listApiKeyRows(db, normalizedWorkspace).find((item) => item.id === apiKeyId && !item.revoked_at);
-    if (!existing) return null;
-    const revoked: PersistedApiKeyRecord = {
-      ...existing,
-      revoked_at: nowIso()
-    };
-    upsertSqliteRecord({
-      db,
-      tableName: "api_keys",
-      recordKey: `${revoked.workspace_id}:${revoked.id}`,
-      payload: revoked,
-      createdAt: revoked.created_at,
-      parentKey: revoked.workspace_id
-    });
-    await saveSqliteDatabase(location.rootDir, db, location.mode);
-    return revoked;
-  } finally {
-    db.close();
-  }
-}
-
-export async function authenticatePersistedApiKey(apiKey: string, workspaceId?: string, rootDirOrOptions?: string | PersistenceReadOptions): Promise<PersistedApiKeyRecord | null> {
-  const { db, location } = await openUiDb(rootDirOrOptions);
-  try {
-    const normalizedWorkspace = normalizeWorkspaceId(workspaceId);
-    const hashed = sha256(apiKey);
-    const existing = listApiKeyRows(db, normalizedWorkspace).find((item) => item.secret_sha256 === hashed && !item.revoked_at);
-    if (!existing) return null;
-    const updated: PersistedApiKeyRecord = {
-      ...existing,
-      last_used_at: nowIso()
-    };
-    upsertSqliteRecord({
-      db,
-      tableName: "api_keys",
-      recordKey: `${updated.workspace_id}:${updated.id}`,
-      payload: updated,
-      createdAt: updated.created_at,
-      parentKey: updated.workspace_id
-    });
-    await saveSqliteDatabase(location.rootDir, db, location.mode);
-    return updated;
-  } finally {
-    db.close();
-  }
-}
-
-export async function listPersistedWorkspaceRoleBindings(workspaceId?: string, rootDirOrOptions?: string | PersistenceReadOptions): Promise<PersistedWorkspaceRoleBindingRecord[]> {
-  const { db } = await openUiDb(rootDirOrOptions);
-  try {
-    return listWorkspaceRoleBindingRows(db, workspaceId ? normalizeWorkspaceId(workspaceId) : undefined);
-  } finally {
-    db.close();
-  }
-}
-
-export async function upsertPersistedWorkspaceRoleBinding(input: WorkspaceRoleBindingInput, rootDirOrOptions?: string | PersistenceReadOptions): Promise<PersistedWorkspaceRoleBindingRecord> {
-  const { db, location } = await openUiDb(rootDirOrOptions);
-  try {
-    const workspaceId = normalizeWorkspaceId(input.workspace_id);
-    const actorId = input.actor_id.trim();
-    if (!actorId) throw new Error("actor_id_required");
-    const existing = listWorkspaceRoleBindingRows(db, workspaceId).find((item) => item.actor_id === actorId) ?? null;
-    const timestamp = nowIso();
-    const record: PersistedWorkspaceRoleBindingRecord = {
-      id: `${workspaceId}:${actorId}`,
-      workspace_id: workspaceId,
-      actor_id: actorId,
-      role: input.role,
-      created_by: existing?.created_by ?? input.created_by?.trim() ?? null,
-      created_at: existing?.created_at ?? timestamp,
-      updated_at: timestamp,
-      revoked_at: null
-    };
-    upsertSqliteRecord({
-      db,
-      tableName: "workspace_role_bindings",
-      recordKey: record.id,
-      payload: record,
-      createdAt: record.created_at,
-      parentKey: record.workspace_id
-    });
-    await saveSqliteDatabase(location.rootDir, db, location.mode);
-    return record;
-  } finally {
-    db.close();
-  }
-}
-
-export async function revokePersistedWorkspaceRoleBinding(workspaceId: string, actorId: string, rootDirOrOptions?: string | PersistenceReadOptions): Promise<PersistedWorkspaceRoleBindingRecord | null> {
-  const { db, location } = await openUiDb(rootDirOrOptions);
-  try {
-    const normalizedWorkspace = normalizeWorkspaceId(workspaceId);
-    const normalizedActor = actorId.trim();
-    const existing = listWorkspaceRoleBindingRows(db, normalizedWorkspace).find((item) => item.actor_id === normalizedActor) ?? null;
-    if (!existing) return null;
-    const revoked: PersistedWorkspaceRoleBindingRecord = {
-      ...existing,
-      updated_at: nowIso(),
-      revoked_at: nowIso()
-    };
-    upsertSqliteRecord({
-      db,
-      tableName: "workspace_role_bindings",
-      recordKey: revoked.id,
-      payload: revoked,
-      createdAt: revoked.created_at,
-      parentKey: revoked.workspace_id
-    });
-    await saveSqliteDatabase(location.rootDir, db, location.mode);
-    return revoked;
-  } finally {
-    db.close();
-  }
-}
-
 export async function readPersistedUiSettings(rootDirOrOptions?: string | PersistenceReadOptions, scope?: UiScopeInput): Promise<PersistedUiSettingsRecord> {
   const resolution = await resolvePersistedUiSettings(rootDirOrOptions, scope);
   return resolution.effective;
 }
 
 export async function readPersistedUiSettingsLayer(
-  scopeLevel: "global" | "workspace" | "project",
+  scopeLevel: "global" | "project",
   rootDirOrOptions?: string | PersistenceReadOptions,
   scope?: UiScopeInput
 ): Promise<PersistedUiSettingsRecord> {
@@ -603,7 +316,6 @@ export async function resolvePersistedUiSettings(rootDirOrOptions?: string | Per
     const resolvedProject = resolveProjectRecord(scope, projects);
     const layers = {
       global: findSetting(settingsRows, { scope: "global" }),
-      workspace: findSetting(settingsRows, { scope: "workspace", workspaceId: resolvedProject.workspaceId }),
       project: findSetting(settingsRows, { scope: "project", workspaceId: resolvedProject.workspaceId, projectId: resolvedProject.projectId })
     };
     return {
@@ -618,7 +330,7 @@ export async function resolvePersistedUiSettings(rootDirOrOptions?: string | Per
 export async function updatePersistedUiSettings(
   input: UiSettingsInput,
   rootDirOrOptions?: string | PersistenceReadOptions,
-  scope?: UiScopeInput & { scopeLevel?: "global" | "workspace" | "project" }
+  scope?: UiScopeInput & { scopeLevel?: "global" | "project" }
 ): Promise<PersistedUiSettingsRecord> {
   const { db, location } = await openUiDb(rootDirOrOptions);
   try {
@@ -630,9 +342,9 @@ export async function updatePersistedUiSettings(
     const current = findSetting(settingsRows, { scope: scopeLevel, workspaceId, projectId });
     const next: PersistedUiSettingsRecord = {
       ...current,
-      id: scopeLevel === "global" ? "global/default" : scopeLevel === "workspace" ? `workspace/${workspaceId}` : projectScopeId(workspaceId, projectId),
+      id: scopeLevel === "global" ? "global/default" : projectScopeId(workspaceId, projectId),
       scope: scopeLevel,
-      scope_id: scopeLevel === "global" ? "global/default" : scopeLevel === "workspace" ? `workspace/${workspaceId}` : projectScopeId(workspaceId, projectId),
+      scope_id: scopeLevel === "global" ? "global/default" : projectScopeId(workspaceId, projectId),
       workspace_id: scopeLevel === "global" ? null : workspaceId,
       project_id: scopeLevel === "project" ? projectId : null,
       updated_at: timestamp,

@@ -11,20 +11,20 @@ function usage(): void {
   console.log(`Tethermark CLI
 
 Usage:
-  npm run scan -- scan path <local-path> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|build|runtime|validate] [--package <id>] [--db-mode embedded|local|hosted] [--llm-provider openai|mock] [--llm-model <id>] [--llm-api-key <value>]
-  npm run scan -- scan repo <repo-url> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|build|runtime|validate] [--package <id>] [--db-mode embedded|local|hosted] [--llm-provider openai|mock] [--llm-model <id>] [--llm-api-key <value>]
-  npm run scan -- scan endpoint <url> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|runtime|validate] [--package <id>] [--db-mode embedded|local|hosted] [--llm-provider openai|mock] [--llm-model <id>] [--llm-api-key <value>]
+npm run scan -- scan path <local-path> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|build|runtime|validate] [--package <id>] [--db-mode embedded|local] [--llm-provider openai|mock] [--llm-model <id>] [--llm-api-key <value>]
+npm run scan -- scan repo <repo-url> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|build|runtime|validate] [--package <id>] [--db-mode embedded|local] [--llm-provider openai|mock] [--llm-model <id>] [--llm-api-key <value>]
+npm run scan -- scan endpoint <url> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|runtime|validate] [--package <id>] [--db-mode embedded|local] [--llm-provider openai|mock] [--llm-model <id>] [--llm-api-key <value>]
   npm run scan -- migrate embedded-db [--root <dir>] [--dry-run]
   npm run scan -- migrate cleanup-json-mirrors [--root <dir>] [--dry-run]
   npm run scan -- migrate compact-bundle-exports [--root <dir>] [--retention-days <n>] [--dry-run]
   npm run scan -- reconstruct run <run-id> [--root <dir>] [--dry-run]
   npm run scan -- reconstruct runs [--root <dir>] [--target-id <id>] [--status <status>] [--audit-package <id>] [--run-mode <mode>] [--target-class <class>] [--rating <rating>] [--publishability-status <status>] [--policy-pack-id <id>] [--since <iso>] [--until <iso>] [--requires-human-review true|false] [--has-findings true|false] [--limit <n>] [--dry-run]
   npm run scan -- validate-persistence [--root <dir>] [--target-id <id>] [--status <status>] [--audit-package <id>] [--run-mode <mode>] [--target-class <class>] [--rating <rating>] [--publishability-status <status>] [--policy-pack-id <id>] [--since <iso>] [--until <iso>] [--requires-human-review true|false] [--has-findings true|false] [--limit <n>]
-  npm run scan -- validate-fixtures [--root <dir>] [--fixture <id>] [--package <id>] [--db-mode embedded|local|hosted] [--persistence-root <dir>] [--llm-provider openai|mock] [--llm-model <id>]
-  npm run scan -- review queue [--root <dir>] [--db-mode embedded|local|hosted] [--status <review-status>] [--limit <n>]
-  npm run scan -- review status <run-id> [--root <dir>] [--db-mode embedded|local|hosted]
-  npm run scan -- review action <run-id> --reviewer <id> --action <type> [--assigned-reviewer <id>] [--finding-id <id>] [--previous-severity <level>] [--updated-severity <level>] [--visibility public|internal] [--notes <text>] [--root <dir>] [--db-mode embedded|local|hosted]
-  npm run scan -- review notifications [--reviewer <id>] [--status unread|acknowledged] [--root <dir>] [--db-mode embedded|local|hosted]
+npm run scan -- validate-fixtures [--root <dir>] [--fixture <id>] [--package <id>] [--db-mode embedded|local] [--persistence-root <dir>] [--llm-provider openai|mock] [--llm-model <id>]
+npm run scan -- review queue [--root <dir>] [--db-mode embedded|local] [--status <review-status>] [--limit <n>]
+npm run scan -- review status <run-id> [--root <dir>] [--db-mode embedded|local]
+npm run scan -- review action <run-id> --reviewer <id> --action <type> [--assigned-reviewer <id>] [--finding-id <id>] [--previous-severity <level>] [--updated-severity <level>] [--visibility public|internal] [--notes <text>] [--root <dir>] [--db-mode embedded|local]
+npm run scan -- review notifications [--reviewer <id>] [--status unread|acknowledged] [--root <dir>] [--db-mode embedded|local]
 `);
 }
 

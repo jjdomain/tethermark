@@ -93,19 +93,10 @@ import {
   listPersistedUiDocuments,
   createPersistedUiDocument,
   deletePersistedUiDocument,
-  listPersistedWorkspaces,
-  createPersistedWorkspace,
   listPersistedProjects,
   createPersistedProject,
   getPersistedProject,
   updatePersistedProject,
-  listPersistedWorkspaceRoleBindings,
-  upsertPersistedWorkspaceRoleBinding,
-  revokePersistedWorkspaceRoleBinding,
-  listPersistedApiKeys,
-  createPersistedApiKey,
-  revokePersistedApiKey,
-  authenticatePersistedApiKey,
   listPersistedRuntimeFollowups,
   readPersistedRuntimeFollowup,
   upsertRuntimeFollowupFromReviewAction,
@@ -114,14 +105,12 @@ import {
   buildPreflightSummary,
   canCommentOnReview,
   canExportReviewAudit,
-  canManageWorkspaceRoles,
   canPerformReviewAction,
   buildGithubOutboundPreview,
   executeGithubOutboundDelivery,
   normalizeGithubExecutionConfig,
   normalizeGithubIntegrationPolicy,
   verifyGithubRepositoryAccess,
-  resolveEffectiveWorkspaceRoles,
   normalizeActorId,
   normalizeProjectId,
   normalizeWorkspaceId,
@@ -510,14 +499,6 @@ type UiSettingsBody = {
   test_mode?: Record<string, unknown>;
 };
 
-type WorkspaceBody = {
-  id?: string;
-  name: string;
-  description?: string | null;
-  default_project_id?: string | null;
-  settings_inheritance_enabled?: boolean;
-};
-
 type ProjectBody = {
   id?: string;
   name: string;
@@ -533,15 +514,6 @@ type UiDocumentBody = {
   content_text: string;
   notes?: string | null;
   tags?: string[];
-};
-
-type ApiKeyBody = {
-  label: string;
-};
-
-type WorkspaceRoleBindingBody = {
-  actor_id: string;
-  role: ReviewActorRole;
 };
 
 type FindingDispositionBody = {
@@ -570,7 +542,6 @@ type RequestContext = {
   projectId: string;
   actorId: string;
   roles: ReviewActorRole[];
-  workspaceHasRoleBindings: boolean;
 };
 
 function sendJson(res: http.ServerResponse, status: number, payload: unknown): void {
@@ -608,7 +579,7 @@ function buildAuthInfo() {
     review_roles_security: identityEnforced ? "enforced" : "advisory",
     guidance: identityEnforced
       ? "API requests require configured authentication. Review roles and assignments are enforced against the authenticated actor."
-      : "No authentication is enforced. Workspace roles and review ownership are suitable only for trusted internal deployments and local operator use."
+      : "No authentication is enforced. Review ownership is suitable only for trusted internal deployments and local operator use."
   };
 }
 
@@ -616,18 +587,15 @@ async function authenticateRequest(req: http.IncomingMessage): Promise<{ ok: tru
   const authMode = getAuthMode();
   const expectedApiKey = getExpectedApiKey();
   const providedApiKey = readHeader(req, "x-api-key");
-  const workspaceId = normalizeWorkspaceId(readHeader(req, "x-harness-workspace"));
+  const workspaceId = "default";
   const projectId = normalizeProjectId(readHeader(req, "x-harness-project"));
   const actorId = normalizeActorId(readHeader(req, "x-harness-actor"));
   const finalizeContext = async (): Promise<RequestContext> => {
-    const bindings = await listPersistedWorkspaceRoleBindings(workspaceId);
-    const actorBindings = bindings.filter((item) => item.actor_id === actorId).map((item) => item.role);
     return {
       workspaceId,
       projectId,
       actorId,
-      roles: resolveEffectiveWorkspaceRoles({ workspaceRoles: actorBindings, workspaceHasBindings: bindings.length > 0 }),
-      workspaceHasRoleBindings: bindings.length > 0
+      roles: ["admin"]
     };
   };
   if (authMode === "api_key") {
@@ -640,17 +608,7 @@ async function authenticateRequest(req: http.IncomingMessage): Promise<{ ok: tru
         context: await finalizeContext()
       };
     }
-    const persistedKey = await authenticatePersistedApiKey(providedApiKey, workspaceId);
-    if (!persistedKey) {
-      if (!expectedApiKey) {
-        return { ok: false, status: 401, error: "unauthorized" };
-      }
-      return { ok: false, status: 401, error: "unauthorized" };
-    }
-    return {
-      ok: true,
-      context: await finalizeContext()
-    };
+    return { ok: false, status: 401, error: "unauthorized" };
   }
   if (authMode !== "none" && authMode !== "api_key") {
       return { ok: false, status: 500, error: "api_key_auth_not_configured" };
@@ -826,12 +784,6 @@ function matchUiProject(url: URL): { projectId: string } | null {
   const match = url.pathname.match(/^\/ui\/projects\/([^/]+)$/);
   if (!match) return null;
   return { projectId: decodeURIComponent(match[1] ?? "") };
-}
-
-function matchUiWorkspaceRoleBinding(url: URL): { actorId: string } | null {
-  const match = url.pathname.match(/^\/ui\/workspace-role-bindings\/([^/]+)$/);
-  if (!match) return null;
-  return { actorId: decodeURIComponent(match[1] ?? "") };
 }
 
 function matchRunsReconstruct(url: URL): boolean {
@@ -1151,6 +1103,10 @@ export function createApiServer(): http.Server {
 
   if (req.method === "GET" && url.pathname === "/ui/settings") {
     const scopeLevel = (url.searchParams.get("scope_level") as "global" | "workspace" | "project" | "effective" | null) ?? "effective";
+    if (scopeLevel === "workspace") {
+      sendJson(res, 404, { error: "hosted_only", feature: "workspace_settings" });
+      return;
+    }
     if (scopeLevel === "effective") {
       const resolution = await resolvePersistedUiSettings(undefined, context);
       sendJson(res, 200, { settings: resolution.effective, layers: resolution.layers });
@@ -1165,27 +1121,11 @@ export function createApiServer(): http.Server {
     try {
       const body = await readJson<UiSettingsBody>(req);
       const scopeLevel = (url.searchParams.get("scope_level") as "global" | "workspace" | "project" | null) ?? "project";
-      sendJson(res, 200, { settings: await updatePersistedUiSettings(body, undefined, { ...context, scopeLevel }) });
-    } catch (error) {
-      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
-    }
-    return;
-  }
-
-  if (req.method === "GET" && url.pathname === "/ui/workspaces") {
-    const workspaces = await listPersistedWorkspaces();
-    sendJson(res, 200, { workspaces });
-    return;
-  }
-
-  if (req.method === "POST" && url.pathname === "/ui/workspaces") {
-    try {
-      const body = await readJson<WorkspaceBody>(req);
-      if (!body.name) {
-        sendJson(res, 400, { error: "name_required" });
+      if (scopeLevel === "workspace") {
+        sendJson(res, 404, { error: "hosted_only", feature: "workspace_settings" });
         return;
       }
-      sendJson(res, 201, { workspace: await createPersistedWorkspace({ ...body, created_by: context.actorId }) });
+      sendJson(res, 200, { settings: await updatePersistedUiSettings(body, undefined, { ...context, scopeLevel }) });
     } catch (error) {
       sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
     }
@@ -1194,66 +1134,6 @@ export function createApiServer(): http.Server {
 
   if (req.method === "GET" && url.pathname === "/ui/projects") {
     sendJson(res, 200, { projects: await listPersistedProjects(url.searchParams.get("workspace_id") ?? context.workspaceId) });
-    return;
-  }
-
-  if (req.method === "GET" && url.pathname === "/ui/workspace-role-bindings") {
-    sendJson(res, 200, {
-      workspace_role_bindings: await listPersistedWorkspaceRoleBindings(url.searchParams.get("workspace_id") ?? context.workspaceId),
-      effective_roles: context.roles
-    });
-    return;
-  }
-
-  if (req.method === "POST" && url.pathname === "/ui/workspace-role-bindings") {
-    if (!canManageWorkspaceRoles(context.roles)) {
-      sendJson(res, 403, { error: "forbidden", required_role: "admin" });
-      return;
-    }
-    try {
-      const body = await readJson<WorkspaceRoleBindingBody>(req);
-      sendJson(res, 201, {
-        workspace_role_binding: await upsertPersistedWorkspaceRoleBinding({
-          workspace_id: context.workspaceId,
-          actor_id: body.actor_id,
-          role: body.role,
-          created_by: context.actorId
-        })
-      });
-    } catch (error) {
-      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
-    }
-    return;
-  }
-
-  if (req.method === "GET" && url.pathname === "/ui/api-keys") {
-    sendJson(res, 200, {
-      api_keys: (await listPersistedApiKeys(context.workspaceId)).map((item) => ({
-        id: item.id,
-        workspace_id: item.workspace_id,
-        label: item.label,
-        key_prefix: item.key_prefix,
-        created_by: item.created_by,
-        created_at: item.created_at,
-        last_used_at: item.last_used_at,
-        revoked_at: item.revoked_at
-      }))
-    });
-    return;
-  }
-
-  if (req.method === "POST" && url.pathname === "/ui/api-keys") {
-    try {
-      const body = await readJson<ApiKeyBody>(req);
-      if (!body.label?.trim()) {
-        sendJson(res, 400, { error: "label_required" });
-        return;
-      }
-      const created = await createPersistedApiKey({ label: body.label, created_by: context.actorId, workspace_id: context.workspaceId });
-      sendJson(res, 201, { api_key_record: created.record, api_key: created.api_key });
-    } catch (error) {
-      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
-    }
     return;
   }
 
@@ -1294,33 +1174,6 @@ export function createApiServer(): http.Server {
     } catch (error) {
       sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
     }
-    return;
-  }
-
-  const uiApiKey = req.method === "DELETE" ? url.pathname.match(/^\/ui\/api-keys\/([^/]+)$/) : null;
-  if (uiApiKey) {
-    const keyId = decodeURIComponent(uiApiKey[1] ?? "");
-    const revoked = await revokePersistedApiKey(keyId, context.workspaceId);
-    if (!revoked) {
-      sendJson(res, 404, { error: "api_key_not_found", api_key_id: keyId });
-      return;
-    }
-    sendJson(res, 200, { revoked: true, api_key_id: keyId });
-    return;
-  }
-
-  const uiWorkspaceRoleBinding = req.method === "DELETE" ? matchUiWorkspaceRoleBinding(url) : null;
-  if (uiWorkspaceRoleBinding) {
-    if (!canManageWorkspaceRoles(context.roles)) {
-      sendJson(res, 403, { error: "forbidden", required_role: "admin" });
-      return;
-    }
-    const revoked = await revokePersistedWorkspaceRoleBinding(context.workspaceId, uiWorkspaceRoleBinding.actorId);
-    if (!revoked) {
-      sendJson(res, 404, { error: "workspace_role_binding_not_found", actor_id: uiWorkspaceRoleBinding.actorId });
-      return;
-    }
-    sendJson(res, 200, { revoked: true, actor_id: uiWorkspaceRoleBinding.actorId });
     return;
   }
 

@@ -61,9 +61,7 @@ export async function validateFixtures(args?: {
   const dbMode = args?.dbMode ?? "embedded";
   const envVar = dbMode === "embedded"
     ? "HARNESS_EMBEDDED_DB_ROOT"
-    : dbMode === "local"
-      ? "HARNESS_LOCAL_DB_ROOT"
-      : "HARNESS_HOSTED_DB_ROOT";
+    : "HARNESS_LOCAL_DB_ROOT";
   const previousRoot = process.env[envVar];
   const persistenceRoot = path.resolve(args?.persistenceRoot ?? await fs.mkdtemp(path.join(os.tmpdir(), `harness-fixture-${dbMode}-`)));
 

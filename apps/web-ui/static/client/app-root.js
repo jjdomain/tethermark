@@ -38,7 +38,7 @@ const pageDescriptions = {
   jobs: "Track durable background work and retry or cancel jobs.",
   followups: "Manage runtime follow-up reruns and adoption decisions.",
   reviews: "Work the review inbox, assignments, and queued decisions.",
-  settings: "Configure providers, governance, workspaces, and project defaults."
+  settings: "Configure agent models, audit defaults, governance, and project defaults."
 };
 
 const navGroups = [
@@ -75,7 +75,6 @@ const emptyEffectiveSettings = {
   effective: emptySettings,
   layers: {
     global: emptySettings,
-    workspace: emptySettings,
     project: emptySettings
   }
 };
@@ -84,7 +83,7 @@ const defaultAuthInfo = {
   identity_enforced: false,
   trusted_mode: true,
   review_roles_security: "advisory",
-  guidance: "No authentication is enforced. Workspace roles and review ownership are suitable only for trusted internal deployments and local operator use."
+  guidance: "No authentication is enforced. Review ownership is suitable only for trusted internal deployments and local operator use."
 };
 const emptyLlmRegistry = {
   providers: [],
@@ -148,6 +147,20 @@ const builtinPackageConfig = {
     publishability_threshold: "high"
   }
 };
+const auditPackageDisplayOrder = ["baseline-static", "agentic-static", "deep-static", "runtime-validated"];
+const hiddenOssAuditPackages = new Set(["premium-comprehensive"]);
+
+function getVisibleAuditPackages(auditPackages) {
+  const visible = (auditPackages || []).filter((item) => item?.id && !hiddenOssAuditPackages.has(item.id));
+  return [...visible].sort((a, b) => {
+    const aIndex = auditPackageDisplayOrder.indexOf(a.id);
+    const bIndex = auditPackageDisplayOrder.indexOf(b.id);
+    const normalizedA = aIndex === -1 ? Number.MAX_SAFE_INTEGER : aIndex;
+    const normalizedB = bIndex === -1 ? Number.MAX_SAFE_INTEGER : bIndex;
+    if (normalizedA !== normalizedB) return normalizedA - normalizedB;
+    return String(a.title || a.id).localeCompare(String(b.title || b.id));
+  });
+}
 
 function defaultLanesForRunMode(value) {
   if (value === "runtime" || value === "auto") {
@@ -180,6 +193,19 @@ function resolvePackageFormConfig(auditPackages, packageId) {
 
 function buildEmptyAgentConfigs() {
   return Object.fromEntries(agentConfigCatalog.map((item) => [item.id, { provider: "", model: "", api_key: "" }]));
+}
+
+function buildAgentConfigsFromOverrides(agentOverrides) {
+  const configs = buildEmptyAgentConfigs();
+  for (const agent of agentConfigCatalog) {
+    const override = agentOverrides?.[agent.id] || {};
+    configs[agent.id] = {
+      provider: typeof override.provider === "string" ? override.provider : "",
+      model: typeof override.model === "string" ? override.model : "",
+      api_key: typeof override.api_key === "string" ? override.api_key : ""
+    };
+  }
+  return configs;
 }
 
 function parseDelimitedText(value) {
@@ -299,6 +325,16 @@ function detectProviderForModel(registry, modelId) {
   return "";
 }
 
+function normalizeRealAuditModelSelection(providerId, modelId) {
+  if (providerId === "mock" || modelId === "mock-agent-runtime") {
+    return { providerId: "", modelId: "" };
+  }
+  return {
+    providerId: providerId || "",
+    modelId: modelId || ""
+  };
+}
+
 function deriveRunFormDefaults(project, effectiveSettings, auditPackages) {
   const targetDefaults = project?.target_defaults_json || {};
   const auditDefaults = effectiveSettings?.effective?.audit_defaults_json || {};
@@ -307,6 +343,10 @@ function deriveRunFormDefaults(project, effectiveSettings, auditPackages) {
   const reviewDefaults = effectiveSettings?.effective?.review_json || {};
   const auditPackage = targetDefaults.audit_package || auditDefaults.audit_package || "agentic-static";
   const runMode = normalizeRunModeSelection(targetDefaults.run_mode);
+  const normalizedModelSelection = normalizeRealAuditModelSelection(
+    targetDefaults.llm_provider || providerDefaults.default_provider || "",
+    targetDefaults.llm_model || providerDefaults.default_model || ""
+  );
   const defaults = {
     target_kind: inferTargetKind(targetDefaults),
     local_path: targetDefaults.local_path || "fixtures/validation-targets/agent-tool-boundary-risky",
@@ -315,8 +355,8 @@ function deriveRunFormDefaults(project, effectiveSettings, auditPackages) {
     run_mode: runMode,
     audit_package: auditPackage,
     audit_policy_pack: "default",
-    llm_provider: targetDefaults.llm_provider || providerDefaults.default_provider || "mock",
-    llm_model: targetDefaults.llm_model || providerDefaults.default_model || "",
+    llm_provider: normalizedModelSelection.providerId,
+    llm_model: normalizedModelSelection.modelId,
     preflight_strictness: targetDefaults.preflight_strictness || preflightDefaults.strictness || "standard",
     runtime_allowed: targetDefaults.runtime_allowed || preflightDefaults.runtime_allowed || "targeted_only",
     review_severity: targetDefaults.review_severity || reviewDefaults.require_human_review_for_severity || "high",
@@ -328,7 +368,7 @@ function deriveRunFormDefaults(project, effectiveSettings, auditPackages) {
     max_rerun_rounds: 0,
     publishability_threshold: "high",
     use_global_llm_config: true,
-    agent_configs: buildEmptyAgentConfigs(),
+    agent_configs: buildAgentConfigsFromOverrides(providerDefaults.agent_overrides),
     control_selection_mode: "automatic",
     required_frameworks: [],
     excluded_frameworks: [],
@@ -470,7 +510,7 @@ function getProviderCredentialStatus(registry, providerId, effectiveSettings, ov
 
 function buildSettingsCredentialsPayload(settings, registry, drafts) {
   const nextCredentials = { ...(settings?.credentials_json || {}) };
-  const providerId = settings?.providers_json?.default_provider || "mock";
+  const providerId = settings?.providers_json?.default_provider || "";
   for (const field of getProviderCredentialFields(registry, providerId)) {
     if (!field.secret) continue;
     if (!Object.prototype.hasOwnProperty.call(drafts || {}, field.id)) continue;
@@ -478,6 +518,11 @@ function buildSettingsCredentialsPayload(settings, registry, drafts) {
     nextCredentials[field.id] = nextValue ? nextValue : null;
   }
   return nextCredentials;
+}
+
+function getProviderApiFieldId(registry, providerId) {
+  const provider = getProviderDefinition(registry, providerId);
+  return provider?.credential_fields?.find((field) => field.kind === "api_key")?.id || provider?.api_key_field || "";
 }
 
 function getIntegrationDefinition(registry, integrationId) {
@@ -557,10 +602,11 @@ function buildRunRequest(form, effectiveSettings, llmRegistry, auditPackages) {
       excluded_control_ids: excludedControlIds
     };
   }
-  const agentConfigs = form.agent_configs || {};
+  const settingsAgentDefaults = buildAgentConfigsFromOverrides(effectiveSettings?.effective?.providers_json?.agent_overrides);
+  const agentConfigs = form.use_global_llm_config === false ? (form.agent_configs || {}) : settingsAgentDefaults;
   const agentOverrides = {};
   const usingGlobalLlmConfig = form.use_global_llm_config !== false && Boolean(form.llm_model);
-  if (!usingGlobalLlmConfig) {
+  if (!usingGlobalLlmConfig || Object.values(settingsAgentDefaults).some((config) => config.provider || config.model || config.api_key)) {
     for (const agent of agentConfigCatalog) {
       const config = agentConfigs[agent.id] || {};
       const model = typeof config.model === "string" && config.model.trim() ? config.model.trim() : "";
@@ -630,13 +676,20 @@ function validateRunForm(form) {
   }
   if (form.use_audit_presets && !form.audit_package) issues.push("Select an audit package.");
   if (!form.run_mode) issues.push("Select a run mode.");
-  if (!form.llm_provider) issues.push("Select a provider.");
+  if (!form.llm_provider || !form.llm_model) issues.push("Select a default model in Model Configuration before launching a real audit.");
   return issues;
 }
 
 function deriveLaunchReadiness(form, preflightSummary, preflightAcceptedAt, preflightStale, effectiveSettings, llmRegistry) {
   const issues = validateRunForm(form);
   const providerCredential = getProviderCredentialStatus(llmRegistry, form.llm_provider, effectiveSettings, form);
+  const selectedProvider = getProviderDefinition(llmRegistry, form.llm_provider);
+  const usingMockProvider = selectedProvider?.mode === "local_mock";
+  if (usingMockProvider) {
+    issues.push("Mock Agent Runtime is for dev/test only. Select a live default model in Model Configuration to enable real audits.");
+  } else if (form.llm_provider && form.llm_model && !providerCredential.configured) {
+    issues.push("Configure the API key for the selected default model in Model Configuration before launching a real audit.");
+  }
   const preflightStatus = preflightSummary?.readiness?.status || "not_run";
   const blockers = preflightSummary?.readiness?.blockers || [];
   const warnings = preflightSummary?.readiness?.warnings || [];
@@ -1379,7 +1432,7 @@ function LaunchAuditModal({
     description: "Choose a target, confirm the audit configuration, run preflight if needed, then launch."
   }, h("div", { className: "max-h-[calc(100vh-11rem)] space-y-4 overflow-y-auto pr-1" }, [
     h("div", { key: "meta-row", className: "flex flex-wrap items-center gap-x-5 gap-y-2 border-b border-slate-200 pb-3 text-xs uppercase tracking-[0.16em] text-slate-500" }, [
-      h("div", { key: "scope" }, `Scope: ${requestContext.workspaceId}/${requestContext.projectId}`),
+      h("div", { key: "scope" }, `Project: ${requestContext.projectId}`),
       h("div", { key: "project" }, `Project defaults: ${currentProject ? currentProject.name : "none"}`),
       h("div", { key: "model" }, `Model: ${activeModel?.label || runForm.llm_model || "none"}`)
     ]),
@@ -1437,7 +1490,6 @@ function LaunchAuditModal({
               onChange: (event) => updateRunForm("run_mode", event.target.value)
             }, [
               h("option", { key: "placeholder", value: "", disabled: true }, "select run mode"),
-              h("option", { key: "auto", value: "auto" }, "auto"),
               h("option", { key: "static", value: "static" }, "static"),
               h("option", { key: "runtime", value: "runtime" }, "runtime")
             ])),
@@ -1445,8 +1497,8 @@ function LaunchAuditModal({
               value: runForm.audit_package,
               onChange: (event) => updateRunForm("audit_package", event.target.value)
             }, [
-              ...auditPackages.map((item) => h("option", { key: item.id, value: item.id }, `${item.title} (${item.id})`)),
-              !auditPackages.some((item) => item.id === runForm.audit_package)
+              ...visibleAuditPackages.map((item) => h("option", { key: item.id, value: item.id }, `${item.title} (${item.id})`)),
+              !visibleAuditPackages.some((item) => item.id === runForm.audit_package)
                 ? h("option", { key: runForm.audit_package || "custom-package", value: runForm.audit_package }, `${runForm.audit_package || "custom"} (custom)`)
                 : null
             ].filter(Boolean))),
@@ -1505,10 +1557,10 @@ function LaunchAuditModal({
       ].filter(Boolean))
     ]),
     launchReadiness.issues.length
-      ? h("div", { key: "issues", className: "rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800" }, [
-        h("div", { key: "title", className: "font-medium" }, "Input issues"),
-        h("ul", { key: "list", className: "mt-2 space-y-1" }, launchReadiness.issues.map((item, index) => h("li", { key: index }, `- ${item}`)))
-      ])
+        ? h("div", { key: "issues", className: "rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800" }, [
+          h("div", { key: "title", className: "font-medium" }, "Input issues"),
+          h("ul", { key: "list", className: "mt-2 space-y-1" }, launchReadiness.issues.map((item, index) => h("li", { key: index }, `- ${item}`)))
+        ])
       : null,
     preflightSummary
       ? h("section", {
@@ -2211,10 +2263,6 @@ function App() {
   const [providerCredentialDrafts, setProviderCredentialDrafts] = useState({});
   const [integrationCredentialDrafts, setIntegrationCredentialDrafts] = useState({});
   const [documents, setDocuments] = useState([]);
-  const [apiKeys, setApiKeys] = useState([]);
-  const [workspaceRoleBindings, setWorkspaceRoleBindings] = useState([]);
-  const [effectiveRoles, setEffectiveRoles] = useState([]);
-  const [workspaces, setWorkspaces] = useState([]);
   const [projects, setProjects] = useState([]);
   const [auditPackages, setAuditPackages] = useState([]);
   const [policyPacks, setPolicyPacks] = useState([]);
@@ -2224,11 +2272,11 @@ function App() {
   const [authInfo, setAuthInfo] = useState(defaultAuthInfo);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [settingsScopeLevel, setSettingsScopeLevel] = useState("project");
-  const [settingsSubpage, setSettingsSubpage] = useState("engine");
+  const [settingsSubpage, setSettingsSubpage] = useState("llm");
   const [requestContext, setRequestContext] = useState(() => {
     try {
-      return { ...defaultRequestContext, ...(JSON.parse(window.localStorage.getItem(contextStorageKey) || "{}")) };
+      const persisted = JSON.parse(window.localStorage.getItem(contextStorageKey) || "{}");
+      return { ...defaultRequestContext, ...persisted, workspaceId: "default" };
     } catch {
       return defaultRequestContext;
     }
@@ -2236,9 +2284,7 @@ function App() {
   const [runForm, setRunForm] = useState(deriveRunFormDefaults(null, emptyEffectiveSettings, null));
   const [launchModalOpen, setLaunchModalOpen] = useState(false);
   const [docForm, setDocForm] = useState({ title: "", document_type: "policy", notes: "", content_text: "" });
-  const [workspaceForm, setWorkspaceForm] = useState({ name: "", description: "" });
   const [projectForm, setProjectForm] = useState({ name: "", description: "" });
-  const [roleBindingForm, setRoleBindingForm] = useState({ actor_id: "", role: "reviewer" });
   const [projectEditor, setProjectEditor] = useState({
     id: "",
     name: "",
@@ -2253,8 +2299,6 @@ function App() {
     review_severity: "high",
     review_visibility: "internal"
   });
-  const [apiKeyForm, setApiKeyForm] = useState({ label: "" });
-  const [latestCreatedApiKey, setLatestCreatedApiKey] = useState("");
   const [preflightSummary, setPreflightSummary] = useState(null);
   const [preflightLoading, setPreflightLoading] = useState(false);
   const [preflightStale, setPreflightStale] = useState(true);
@@ -2361,18 +2405,42 @@ function App() {
     () => getSelectableRunModelOptions(llmRegistry, runForm.llm_provider, runForm.llm_model),
     [llmRegistry, runForm.llm_provider, runForm.llm_model]
   );
+  const visibleAuditPackages = useMemo(
+    () => getVisibleAuditPackages(auditPackages),
+    [auditPackages]
+  );
   const settingsProvider = useMemo(
-    () => getProviderDefinition(llmRegistry, settings.providers_json.default_provider || "mock"),
+    () => getProviderDefinition(llmRegistry, settings.providers_json.default_provider || ""),
     [llmRegistry, settings.providers_json.default_provider]
   );
-  const settingsModelOptions = useMemo(
-    () => getModelOptionsForProvider(llmRegistry, settings.providers_json.default_provider || "mock", settings.providers_json.default_model || ""),
+  const settingsModelCatalog = useMemo(
+    () => getSelectableRunModelOptions(llmRegistry, settings.providers_json.default_provider || "", settings.providers_json.default_model || ""),
     [llmRegistry, settings.providers_json.default_provider, settings.providers_json.default_model]
   );
-  const settingsProviderCredentialFields = useMemo(
-    () => getProviderCredentialFields(llmRegistry, settings.providers_json.default_provider || "mock"),
+  const settingsDefaultModelValue = useMemo(() => {
+    const providerId = settings.providers_json.default_provider || "";
+    const modelId = settings.providers_json.default_model || "";
+    if (!modelId || providerId === "mock") return "";
+    return `${providerId}:${modelId}`;
+  }, [settings.providers_json.default_provider, settings.providers_json.default_model]);
+  const settingsDefaultApiFieldId = useMemo(
+    () => getProviderApiFieldId(llmRegistry, settings.providers_json.default_provider || ""),
     [llmRegistry, settings.providers_json.default_provider]
   );
+  const settingsAgentOverrides = useMemo(
+    () => settings.providers_json?.agent_overrides || {},
+    [settings.providers_json]
+  );
+  const settingsAgentRoutingModelCatalog = useMemo(
+    () => getSelectableRunModelOptions(llmRegistry, "", "").filter((item) => item.provider_id !== "mock"),
+    [llmRegistry]
+  );
+  const realAuditModelReady = useMemo(() => {
+    if (!settings.providers_json.default_provider || !settings.providers_json.default_model) return false;
+    const provider = getProviderDefinition(llmRegistry, settings.providers_json.default_provider);
+    if (!provider || provider.mode === "local_mock") return false;
+    return getProviderCredentialStatus(llmRegistry, settings.providers_json.default_provider, effectiveSettings).configured;
+  }, [settings.providers_json.default_provider, settings.providers_json.default_model, llmRegistry, effectiveSettings]);
   const githubIntegration = useMemo(
     () => getIntegrationDefinition(integrationRegistry, "github_outbound"),
     [integrationRegistry]
@@ -2410,6 +2478,22 @@ function App() {
     setSettings((current) => ({ ...current, [section]: { ...(current[section] || {}), [key]: value } }));
   }
 
+  function updateSettingsAgentOverride(agentId, nextPatch) {
+    setSettings((current) => ({
+      ...current,
+      providers_json: {
+        ...(current.providers_json || {}),
+        agent_overrides: {
+          ...((current.providers_json || {}).agent_overrides || {}),
+          [agentId]: {
+            ...(((current.providers_json || {}).agent_overrides || {})[agentId] || {}),
+            ...nextPatch
+          }
+        }
+      }
+    }));
+  }
+
   function updateProviderCredentialDraft(fieldId, value) {
     setProviderCredentialDrafts((current) => ({ ...current, [fieldId]: value }));
   }
@@ -2419,12 +2503,14 @@ function App() {
   }
 
   function updateRequestContext(key, value) {
-    setRequestContext((current) => ({ ...current, [key]: value }));
+    setRequestContext((current) => ({ ...current, [key]: key === "workspaceId" ? "default" : value }));
   }
 
   function updateProjectEditor(key, value) {
     setProjectEditor((current) => ({ ...current, [key]: value }));
   }
+
+  const currentSettingsScopeLevel = settingsSubpage === "project" ? "project" : "global";
 
   function load() {
     setError("");
@@ -2435,11 +2521,8 @@ function App() {
       api("/stats/runs", undefined, requestContext),
       api("/stats/targets", undefined, requestContext),
       api("/ui/settings?scope_level=effective", undefined, requestContext),
-      api("/ui/settings?scope_level=" + encodeURIComponent(settingsScopeLevel), undefined, requestContext),
-      api("/ui/api-keys", undefined, requestContext),
-      api("/ui/workspace-role-bindings", undefined, requestContext),
+      api("/ui/settings?scope_level=" + encodeURIComponent(currentSettingsScopeLevel), undefined, requestContext),
       api("/ui/documents", undefined, requestContext),
-      api("/ui/workspaces", undefined, requestContext),
       api("/ui/projects?workspace_id=" + encodeURIComponent(requestContext.workspaceId), undefined, requestContext),
       api("/audit-packages", undefined, requestContext),
       api("/policy-packs", undefined, requestContext),
@@ -2447,7 +2530,7 @@ function App() {
       api("/integrations", undefined, requestContext),
       api("/review-notifications?reviewer_id=" + encodeURIComponent(requestContext.actorId || "anonymous"), undefined, requestContext),
       api("/runtime-followups", undefined, requestContext)
-    ]).then(([authInfoPayload, runsPayload, jobsPayload, runStatsPayload, targetStatsPayload, effectiveSettingsPayload, settingsPayload, apiKeysPayload, roleBindingsPayload, documentsPayload, workspacesPayload, projectsPayload, auditPackagesPayload, policyPacksPayload, llmProvidersPayload, integrationsPayload, notificationsPayload, runtimeFollowupsPayload]) => {
+    ]).then(([authInfoPayload, runsPayload, jobsPayload, runStatsPayload, targetStatsPayload, effectiveSettingsPayload, settingsPayload, documentsPayload, projectsPayload, auditPackagesPayload, policyPacksPayload, llmProvidersPayload, integrationsPayload, notificationsPayload, runtimeFollowupsPayload]) => {
       setAuthInfo(authInfoPayload || defaultAuthInfo);
       setRuns(runsPayload.runs || []);
       setJobs(jobsPayload.jobs || []);
@@ -2459,11 +2542,7 @@ function App() {
       setSettings(settingsPayload.settings || emptySettings);
       setProviderCredentialDrafts({});
       setIntegrationCredentialDrafts({});
-      setApiKeys(apiKeysPayload.api_keys || []);
-      setWorkspaceRoleBindings(roleBindingsPayload.workspace_role_bindings || []);
-      setEffectiveRoles(roleBindingsPayload.effective_roles || []);
       setDocuments(documentsPayload.documents || []);
-      setWorkspaces(workspacesPayload.workspaces || []);
       setProjects(projectsPayload.projects || []);
       setAuditPackages(auditPackagesPayload.audit_packages || []);
       setPolicyPacks((policyPacksPayload.policy_packs || []).filter((item) => item.id === "default"));
@@ -2643,7 +2722,7 @@ function App() {
 
   useEffect(() => {
     load();
-  }, [requestContext.workspaceId, requestContext.projectId, requestContext.actorId, requestContext.apiKey, settingsScopeLevel]);
+  }, [requestContext.workspaceId, requestContext.projectId, requestContext.actorId, requestContext.apiKey, currentSettingsScopeLevel]);
 
   useEffect(() => {
     if (!runs.length) {
@@ -3368,8 +3447,8 @@ function App() {
   const launchWorkbench = h(Card, { key: "launch", title: "Launch Run", description: "Trigger the normal engine path with persisted outputs and review workflow attached." }, [
         h("div", { key: "intake", className: "mb-5 grid gap-3 md:grid-cols-3" }, [
           h("div", { key: "scope", className: "rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm" }, [
-            h("div", { key: "label", className: "font-medium" }, "Current Scope"),
-            h("div", { key: "value", className: "mt-1 text-muted" }, `${requestContext.workspaceId}/${requestContext.projectId}`)
+            h("div", { key: "label", className: "font-medium" }, "Current Project"),
+            h("div", { key: "value", className: "mt-1 text-muted" }, requestContext.projectId)
           ]),
           h("div", { key: "project", className: "rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm" }, [
             h("div", { key: "label", className: "font-medium" }, "Project Defaults"),
@@ -3399,13 +3478,12 @@ function App() {
               : h(Field, { key: "path", label: "Local Path" }, h(Input, { value: runForm.local_path, onChange: (event) => updateRunForm("local_path", event.target.value), placeholder: "fixtures/validation-targets/agent-tool-boundary-risky" })),
           h(Field, { key: "mode", label: "Run Mode" }, Select({ value: runForm.run_mode, onChange: (event) => updateRunForm("run_mode", event.target.value) }, [
             h("option", { key: "placeholder", value: "", disabled: true }, "select run mode"),
-            h("option", { key: "auto", value: "auto" }, "auto"),
             h("option", { key: "static", value: "static" }, "static"),
             h("option", { key: "runtime", value: "runtime" }, "runtime")
           ])),
           h(Field, { key: "pkg", label: "Audit Package" }, Select({ value: runForm.audit_package, onChange: (event) => updateRunForm("audit_package", event.target.value) }, [
-            ...auditPackages.map((item) => h("option", { key: item.id, value: item.id }, item.title + " (" + item.id + ")")),
-            !auditPackages.some((item) => item.id === runForm.audit_package) ? h("option", { key: runForm.audit_package || "custom-package", value: runForm.audit_package }, (runForm.audit_package || "custom") + " (custom)") : null
+            ...visibleAuditPackages.map((item) => h("option", { key: item.id, value: item.id }, item.title + " (" + item.id + ")")),
+            !visibleAuditPackages.some((item) => item.id === runForm.audit_package) ? h("option", { key: runForm.audit_package || "custom-package", value: runForm.audit_package }, (runForm.audit_package || "custom") + " (custom)") : null
           ].filter(Boolean))),
           h(Field, { key: "policy-pack", label: "Policy Pack" }, h("div", { className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600" }, [
             h("div", { key: "value", className: "font-medium text-slate-900" }, getPolicyPackDisplayLabel(policyPacks, "default")),
@@ -3612,7 +3690,7 @@ function App() {
       h(DashboardTrendCard, {
         key: "trend",
         title: "Security Posture",
-        subtitle: "Average run score over the last six months for the current workspace and project.",
+        subtitle: "Average run score over the last six months for the current project.",
         series: postureSeries
       }),
       h(Card, { key: "review-health", title: "Review Health", description: "Second-row companion card: queue quality and operator workload." , className: "border-slate-200 bg-white shadow-sm" }, [
@@ -3641,12 +3719,12 @@ function App() {
           ]),
           h("div", { key: "actions", className: "grid gap-3 pt-2" }, [
             h(Button, { key: "reviews", onClick: () => setView("reviews") }, "Open Review Inbox"),
-            h(Button, { key: "runs", variant: "outline", onClick: () => setView("runs") }, "Open Runs Workspace")
+            h(Button, { key: "runs", variant: "outline", onClick: () => setView("runs") }, "Open Runs")
           ])
         ])
       ])
     ]),
-    h(Card, { key: "recent-runs", title: "Recent Runs", description: "Latest persisted runs for the current workspace and project.", className: "border-slate-200 bg-white shadow-sm" }, [
+    h(Card, { key: "recent-runs", title: "Recent Runs", description: "Latest persisted runs for the current project.", className: "border-slate-200 bg-white shadow-sm" }, [
       h("div", { key: "toolbar", className: "mb-4 flex items-center justify-between gap-3" }, [
         h("div", { key: "meta", className: "text-sm text-slate-500" }, `${recentRuns.length} recent run${recentRuns.length === 1 ? "" : "s"} shown`),
         h(Button, { key: "open-all", variant: "outline", onClick: () => setView("runs") }, "View All Runs")
@@ -3992,83 +4070,197 @@ function App() {
   const defaultPolicyPublicationRules = defaultPolicyPack?.policy?.publication_rules || [];
 
   const settingsNavItems = [
-    { id: "engine", label: "Engine", description: "Providers, defaults, integrations, and runtime settings." },
+    { id: "llm", label: "Agent Configuration", description: "Default models, credentials, and agent routing." },
+    { id: "audit", label: "Audit Defaults", description: "Default package and run-mode posture." },
+    { id: "review", label: "Readiness / Review", description: "Readiness gates and review cadence defaults." },
+    { id: "integrations", label: "Integrations", description: "Outbound delivery and repository integration settings." },
+    { id: "project", label: "Project Defaults", description: "Current project metadata and default launch settings." },
     { id: "policy", label: "Policy Pack", description: "Default OSS supervision policy details." },
-    { id: "workspace", label: "Workspace", description: "Workspace registry and current project defaults." },
-    { id: "access", label: "Access", description: "Roles and workspace API keys." },
     { id: "documents", label: "Documents", description: "Attached policy and reference documents." }
   ];
 
-  const settingsEnginePanel = h("div", { className: "space-y-6" }, [
-    h(Card, { key: "settings", title: "Engine Settings", description: "Persisted provider, audit, preflight, review, and integration defaults." }, [
-      h("div", { key: "scopeLevel", className: "mb-4 grid gap-4 md:grid-cols-2" }, [
-        h(Field, { key: "edit-scope", label: "Edit Scope" }, Select({ value: settingsScopeLevel, onChange: (event) => setSettingsScopeLevel(event.target.value) }, [
-          h("option", { key: "global", value: "global" }, "global defaults"),
-          h("option", { key: "workspace", value: "workspace" }, "workspace defaults"),
-          h("option", { key: "project", value: "project" }, "project overrides")
-        ])),
-        h(Field, { key: "effective-package", label: "Effective Package" }, h(Input, { value: effectiveSettings.effective.audit_defaults_json.audit_package || "", readOnly: true }))
+  const saveSettings = () => act(
+    () => api("/ui/settings?scope_level=" + encodeURIComponent(currentSettingsScopeLevel), {
+      method: "PUT",
+      body: JSON.stringify((() => {
+        const integrationPayload = buildSettingsIntegrationPayload(settings, integrationRegistry, integrationCredentialDrafts);
+        return {
+          providers: settings.providers_json,
+          credentials: {
+            ...integrationPayload.credentials,
+            ...buildSettingsCredentialsPayload(settings, llmRegistry, providerCredentialDrafts)
+          },
+          audit_defaults: settings.audit_defaults_json,
+          preflight: settings.preflight_json,
+          review: settings.review_json,
+          integrations: {
+            ...settings.integrations_json,
+            ...integrationPayload.integrations
+          },
+          test_mode: settings.test_mode_json
+        };
+      })())
+    }, requestContext).then((payload) => {
+      setSettings(payload.settings || emptySettings);
+      setProviderCredentialDrafts({});
+      setIntegrationCredentialDrafts({});
+      return api("/ui/settings?scope_level=effective", undefined, requestContext).then((effectivePayload) => setEffectiveSettings({ effective: effectivePayload.settings || emptySettings, layers: effectivePayload.layers || emptyEffectiveSettings.layers }));
+    }),
+    "Settings saved."
+  );
+
+  const applySettingsModelSelection = (selectionValue) => {
+    const selectedModel = settingsModelCatalog.find((item) => item.value === selectionValue);
+    updateSettings("providers_json", "default_provider", selectedModel?.provider_id || "");
+    updateSettings("providers_json", "default_model", selectedModel?.id || "");
+  };
+
+  const settingsLlmPanel = h("div", { className: "space-y-6" }, [
+    h(Card, { key: "llm-defaults", title: "Agent Configuration" }, [
+      h("div", {
+        key: "intro",
+        className: "mb-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 text-sm text-slate-700"
+      }, [
+        h("div", { key: "title", className: "font-medium text-slate-900" }, "Configure how models are chosen for audits"),
+        h("div", { key: "body", className: "mt-1" }, "Choose one default live model and API key for all agents. If a specific agent needs a different model, set it below in the agent-specific section. If a run sets its own agent model in the launch modal, that run-specific choice is used instead of the settings on this page.")
       ]),
-      h("div", { key: "provider-presets", className: "mb-4 flex flex-wrap gap-3" }, (llmRegistry.presets || []).map((preset) => h(Button, {
-        key: preset.id,
-        variant: preset.provider_id === (settings.providers_json.default_provider || "mock") && (preset.model || "") === (settings.providers_json.default_model || "") ? "secondary" : "outline",
-        onClick: () => applyProviderPreset(preset.id, "settings")
-      }, preset.label))),
-      settingsProvider ? h("div", { key: "provider-summary", className: cn("mb-4 rounded-2xl border px-4 py-3 text-sm", settingsProvider.mode === "local_mock" ? "border-emerald-200 bg-emerald-50/80 text-emerald-800" : "border-sky-200 bg-sky-50/80 text-sky-900") }, [
-        h("div", { key: "title", className: "font-medium" }, `${settingsProvider.name} default (${settingsProvider.mode === "local_mock" ? "local mock" : "live api"})`),
-        h("div", { key: "copy", className: "mt-1" }, settingsProvider.description),
-        h("div", { key: "cred", className: "mt-2" }, getProviderCredentialStatus(llmRegistry, settings.providers_json.default_provider || "mock", effectiveSettings).note),
-        settingsProviderCredentialFields.length
-          ? h("div", { key: "cred-fields", className: "mt-3 grid gap-3 md:grid-cols-2" }, settingsProviderCredentialFields.map((field) => {
-            const status = getProviderCredentialFieldStatus(llmRegistry, settings.providers_json.default_provider || "mock", field.id);
-            const persistedOverride = settings.credentials_json?.[field.id];
-            const persistedHere = typeof persistedOverride === "string" ? persistedOverride.trim().length > 0 : Boolean(persistedOverride);
-            const draftValue = providerCredentialDrafts[field.id] || "";
-            return h("div", {
-              key: field.id,
-              className: "rounded-2xl border border-current/20 bg-white/70 px-4 py-3"
-            }, [
-              h("div", { key: "label", className: "font-medium text-foreground" }, field.label),
-              field.help_text ? h("div", { key: "help", className: "mt-1 text-xs text-muted" }, field.help_text) : null,
-              h("div", { key: "status", className: "mt-2 text-xs font-mono uppercase tracking-[0.18em] text-muted" }, status?.note || "No credential metadata available."),
-              h(Input, {
-                key: "input",
-                type: field.secret ? "password" : "text",
-                value: field.secret ? draftValue : (settings.credentials_json?.[field.id] || ""),
-                onChange: (event) => field.secret
-                  ? updateProviderCredentialDraft(field.id, event.target.value)
-                  : updateSettings("credentials_json", field.id, event.target.value || null),
-                placeholder: field.secret
-                  ? (persistedHere ? `stored value present${status?.source === "environment" ? " and env fallback available" : ""}; enter a new value to replace` : field.placeholder || "")
-                  : (field.placeholder || "")
-              }),
-              h("div", { key: "controls", className: "mt-3 flex flex-wrap gap-2" }, [
-                field.secret && draftValue
-                  ? h("div", { key: "pending", className: "text-xs text-emerald-700" }, "Pending replacement will be saved.")
-                  : null,
-                field.secret
-                  ? h(Button, {
-                    key: "clear-draft",
-                    variant: "outline",
-                    onClick: () => updateProviderCredentialDraft(field.id, "")
-                  }, "Clear Draft")
-                  : null,
-                h(Button, {
-                  key: "remove",
-                  variant: "outline",
-                  onClick: () => {
-                    updateSettings("credentials_json", field.id, null);
-                    updateProviderCredentialDraft(field.id, "");
-                  },
-                  disabled: !persistedHere && status?.source !== "persisted"
-                }, status?.source === "persisted" || persistedHere ? "Clear Persisted Override" : "No Persisted Override")
-              ].filter(Boolean)),
-              field.env_var ? h("div", { key: "env", className: "mt-2 text-xs text-muted" }, `Env fallback: ${field.env_var}`) : null
-            ]);
-          }))
-          : null
-      ]) : null,
-      h("div", { key: "integration-cards", className: "mb-4 grid gap-4 lg:grid-cols-2" }, [githubIntegration, genericWebhookIntegration].filter(Boolean).map((integration) => {
+      h("div", { key: "global-model-header", className: "mb-3" }, [
+        h("div", { key: "title", className: "font-medium text-slate-900" }, "Global Agent Default Model"),
+        h("div", { key: "copy", className: "mt-1 text-sm text-slate-500" }, "This default model is used for all agents unless a specific agent is assigned a different model below.")
+      ]),
+      h("div", { key: "global-defaults", className: "grid gap-4 md:grid-cols-2" }, [
+        h(Field, { key: "model", label: "Default Model" }, Select({
+          value: settingsDefaultModelValue,
+          onChange: (event) => applySettingsModelSelection(event.target.value)
+        }, [
+          h("option", { key: "placeholder", value: "" }, "select a model"),
+          ...(llmRegistry.providers || []).map((provider) => h("optgroup", { key: provider.id, label: provider.name }, settingsModelCatalog
+            .filter((item) => item.provider_id === provider.id && item.provider_id !== "mock")
+            .map((item) => h("option", { key: item.value, value: item.value }, item.label))))
+        ])),
+        h(Field, { key: "api", label: "API key" }, h("div", { className: "space-y-2" }, [
+          h(Input, {
+            type: "password",
+            value: settingsDefaultApiFieldId ? (providerCredentialDrafts[settingsDefaultApiFieldId] || "") : "",
+            onChange: (event) => settingsDefaultApiFieldId && updateProviderCredentialDraft(settingsDefaultApiFieldId, event.target.value),
+            placeholder: settingsDefaultApiFieldId || "no api key required"
+          }),
+          h("div", { className: "text-xs text-slate-500" }, settingsDefaultApiFieldId
+            ? `Maps to ${settingsDefaultApiFieldId}. Leave blank to keep the persisted or environment-backed provider key.`
+            : "The selected default model does not require a persisted API key.")
+        ]))
+      ]),
+      h("div", { key: "agent-routing", className: "mt-5 space-y-4" }, [
+        h("div", { key: "title" }, [
+          h("div", { key: "heading", className: "font-medium text-slate-900" }, "Specific Agent Model"),
+          h("div", { key: "copy", className: "mt-1 text-sm text-slate-500" }, "Use this section only when one agent should use a different model than the global default above.")
+        ]),
+        h("div", { key: "rows", className: "space-y-3" }, agentConfigCatalog.map((agent) => {
+          const override = settingsAgentOverrides[agent.id] || {};
+          const providerId = override.provider || "";
+          const modelValue = providerId && override.model ? `${providerId}:${override.model}` : "";
+          return h("div", { key: agent.id, className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4" }, [
+            h("div", { key: "meta", className: "mb-3 flex flex-wrap items-center justify-between gap-3" }, [
+              h("div", { key: "copy" }, [
+                h("div", { key: "name", className: "font-medium text-slate-900" }, agent.title),
+                h("div", { key: "inherit", className: "mt-1 text-sm text-slate-500" }, providerId
+                  ? "Uses this provider and model by default unless a run overrides it."
+                  : "Inherits the global provider and model by default.")
+              ]),
+              h(Button, {
+                key: "clear",
+                variant: "outline",
+                onClick: () => updateSettingsAgentOverride(agent.id, { provider: "", model: "", api_key: "" }),
+                disabled: !providerId && !(override.model || "") && !(override.api_key || "")
+              }, "Inherit Global")
+            ]),
+            h("div", { key: "fields", className: "grid gap-4 md:grid-cols-2" }, [
+              h(Field, { key: "model", label: "Model" }, Select({
+                value: modelValue,
+                onChange: (event) => {
+                  const selectedModel = settingsAgentRoutingModelCatalog.find((item) => item.value === event.target.value);
+                  updateSettingsAgentOverride(agent.id, {
+                    provider: selectedModel?.provider_id || "",
+                    model: selectedModel?.id || ""
+                  });
+                }
+              }, [
+                h("option", { key: "inherit", value: "" }, "inherit global model"),
+                ...(llmRegistry.providers || [])
+                  .filter((provider) => provider.id !== "mock")
+                  .map((provider) => h("optgroup", { key: provider.id, label: provider.name }, settingsAgentRoutingModelCatalog
+                    .filter((item) => item.provider_id === provider.id)
+                    .map((item) => h("option", { key: `${agent.id}:${item.value}`, value: item.value }, item.label))))
+              ])),
+              h(Field, { key: "api", label: "API key" }, h("div", { className: "space-y-2" }, [
+                h(Input, {
+                  type: "password",
+                  value: override.api_key || "",
+                  onChange: (event) => updateSettingsAgentOverride(agent.id, { api_key: event.target.value }),
+                  placeholder: `uses ${agent.env_prefix}_API_KEY`
+                }),
+                h("div", { className: "text-xs text-slate-500" }, `Maps to ${agent.env_prefix}_API_KEY. Leave blank to use the agent-specific or provider environment key.`)
+              ]))
+            ])
+          ]);
+        }))
+      ]),
+      h(Button, { key: "save", className: "mt-5", onClick: saveSettings }, "Save Settings")
+    ])
+  ]);
+
+  const settingsAuditPanel = h("div", { className: "space-y-6" }, [
+    h(Card, { key: "audit-defaults", title: "Audit Defaults", description: "Default launch posture when a run or project does not specify a narrower audit shape." }, [
+      h("div", { key: "fields", className: "grid gap-4 md:grid-cols-2" }, [
+        h(Field, { key: "package", label: "Audit Package" }, Select({
+          value: settings.audit_defaults_json.audit_package || "",
+          onChange: (event) => updateSettings("audit_defaults_json", "audit_package", event.target.value)
+        }, [
+          ...visibleAuditPackages.map((item) => h("option", { key: item.id, value: item.id }, item.title + " (" + item.id + ")")),
+          settings.audit_defaults_json.audit_package && !visibleAuditPackages.some((item) => item.id === settings.audit_defaults_json.audit_package)
+            ? h("option", { key: settings.audit_defaults_json.audit_package, value: settings.audit_defaults_json.audit_package }, settings.audit_defaults_json.audit_package + " (custom)")
+            : null
+        ].filter(Boolean))),
+        h(Field, { key: "mode", label: "Run Mode" }, Select({ value: normalizeRunModeSelection(settings.audit_defaults_json.run_mode) || "static", onChange: (event) => updateSettings("audit_defaults_json", "run_mode", event.target.value) }, [
+          h("option", { key: "static", value: "static" }, "static"),
+          h("option", { key: "runtime", value: "runtime" }, "runtime")
+        ]))
+      ]),
+      h(Button, { key: "save", className: "mt-5", onClick: saveSettings }, "Save Settings")
+    ])
+  ]);
+
+  const settingsReviewPanel = h("div", { className: "space-y-6" }, [
+    h(Card, { key: "readiness-review", title: "Readiness / Review", description: "Controls when readiness is required and how long review decisions remain valid." }, [
+      h("div", { key: "fields", className: "grid gap-4 md:grid-cols-2" }, [
+        h(Field, { key: "readiness-gate", label: "Audit Readiness Gate" }, Select({
+          value: settings.preflight_json.readiness_gate_policy || "risk_or_drift",
+          onChange: (event) => updateSettings("preflight_json", "readiness_gate_policy", event.target.value)
+        }, [
+          h("option", { key: "risk", value: "risk_or_drift" }, "require for runtime or drift"),
+          h("option", { key: "always", value: "always" }, "always require readiness review"),
+          h("option", { key: "never", value: "never" }, "never require readiness review")
+        ])),
+        h(Field, { key: "review-renewal", label: "Disposition Renewal Days" }, h(Input, {
+          type: "number",
+          min: 1,
+          value: settings.review_json.disposition_renewal_days || 30,
+          onChange: (event) => updateSettings("review_json", "disposition_renewal_days", Math.max(1, Number(event.target.value || 30)))
+        })),
+        h(Field, { key: "review-window", label: "Waiver Review Window Days" }, h(Input, {
+          type: "number",
+          min: 1,
+          value: settings.review_json.disposition_review_window_days || 30,
+          onChange: (event) => updateSettings("review_json", "disposition_review_window_days", Math.max(1, Number(event.target.value || 30)))
+        }))
+      ]),
+      h(Button, { key: "save", className: "mt-5", onClick: saveSettings }, "Save Settings")
+    ])
+  ]);
+
+  const settingsIntegrationsPanel = h("div", { className: "space-y-6" }, [
+    h(Card, { key: "integration-cards", title: "Integrations", description: "Configure outbound delivery and repository integration defaults." }, [
+      h("div", { key: "cards", className: "grid gap-4 lg:grid-cols-2" }, [githubIntegration, genericWebhookIntegration].filter(Boolean).map((integration) => {
         const integrationStatus = getIntegrationCredentialStatus(integrationRegistry, integration.id);
         return h("div", {
           key: integration.id,
@@ -4109,16 +4301,8 @@ function App() {
                   : (field.placeholder || "")
               }),
               h("div", { key: "controls", className: "mt-3 flex flex-wrap gap-2" }, [
-                field.secret && draftValue
-                  ? h("div", { key: "pending", className: "text-xs text-emerald-700" }, "Pending replacement will be saved.")
-                  : null,
-                field.secret
-                  ? h(Button, {
-                    key: "clear-draft",
-                    variant: "outline",
-                    onClick: () => updateIntegrationCredentialDraft(field.id, "")
-                  }, "Clear Draft")
-                  : null,
+                field.secret && draftValue ? h("div", { key: "pending", className: "text-xs text-emerald-700" }, "Pending replacement will be saved.") : null,
+                field.secret ? h(Button, { key: "clear-draft", variant: "outline", onClick: () => updateIntegrationCredentialDraft(field.id, "") }, "Clear Draft") : null,
                 h(Button, {
                   key: "remove",
                   variant: "outline",
@@ -4134,64 +4318,7 @@ function App() {
           }))
         ]);
       })),
-      h("div", { key: "fields", className: "grid gap-4 md:grid-cols-2" }, [
-        h(Field, { key: "provider", label: "Default Provider" }, Select({
-          value: settings.providers_json.default_provider || "mock",
-          onChange: (event) => {
-            const nextProvider = event.target.value;
-            const nextDefinition = getProviderDefinition(llmRegistry, nextProvider);
-            updateSettings("providers_json", "default_provider", nextProvider);
-            updateSettings("providers_json", "default_model", nextDefinition?.default_model || "");
-          }
-        }, (llmRegistry.providers || []).map((item) => h("option", { key: item.id, value: item.id }, `${item.name} (${item.mode === "local_mock" ? "local mock" : "live api"})`)))),
-        h(Field, { key: "model", label: "Default Model Preset" }, Select({
-          value: settings.providers_json.default_model || "",
-          onChange: (event) => updateSettings("providers_json", "default_model", event.target.value)
-        }, [
-          h("option", { key: "provider-default", value: "" }, "provider default"),
-          ...settingsModelOptions.map((item) => h("option", { key: item.id, value: item.id }, `${item.label} (${item.id})`))
-        ])),
-        settingsProvider?.supports_custom_model
-          ? h(Field, { key: "model-custom", label: "Custom Default Model" }, h(Input, {
-            value: settings.providers_json.default_model || "",
-            onChange: (event) => updateSettings("providers_json", "default_model", event.target.value),
-            placeholder: "optional custom model id"
-          }))
-          : null,
-        h(Field, { key: "package", label: "Audit Package" }, Select({
-          value: settings.audit_defaults_json.audit_package || "",
-          onChange: (event) => updateSettings("audit_defaults_json", "audit_package", event.target.value)
-        }, [
-          ...auditPackages.map((item) => h("option", { key: item.id, value: item.id }, item.title + " (" + item.id + ")")),
-          settings.audit_defaults_json.audit_package && !auditPackages.some((item) => item.id === settings.audit_defaults_json.audit_package)
-            ? h("option", { key: settings.audit_defaults_json.audit_package, value: settings.audit_defaults_json.audit_package }, settings.audit_defaults_json.audit_package + " (custom)")
-            : null
-        ].filter(Boolean))),
-        h(Field, { key: "mode", label: "Run Mode" }, Select({ value: normalizeRunModeSelection(settings.audit_defaults_json.run_mode) || "static", onChange: (event) => updateSettings("audit_defaults_json", "run_mode", event.target.value) }, [
-          h("option", { key: "auto", value: "auto" }, "auto"),
-          h("option", { key: "static", value: "static" }, "static"),
-          h("option", { key: "runtime", value: "runtime" }, "runtime")
-        ])),
-        h(Field, { key: "readiness-gate", label: "Audit Readiness Gate" }, Select({
-          value: settings.preflight_json.readiness_gate_policy || "risk_or_drift",
-          onChange: (event) => updateSettings("preflight_json", "readiness_gate_policy", event.target.value)
-        }, [
-          h("option", { key: "risk", value: "risk_or_drift" }, "require for auto/runtime and risk or drift"),
-          h("option", { key: "always", value: "always" }, "always require readiness review"),
-          h("option", { key: "never", value: "never" }, "never require readiness review")
-        ])),
-        h(Field, { key: "review-renewal", label: "Disposition Renewal Days" }, h(Input, {
-          type: "number",
-          min: 1,
-          value: settings.review_json.disposition_renewal_days || 30,
-          onChange: (event) => updateSettings("review_json", "disposition_renewal_days", Math.max(1, Number(event.target.value || 30)))
-        })),
-        h(Field, { key: "review-window", label: "Waiver Review Window Days" }, h(Input, {
-          type: "number",
-          min: 1,
-          value: settings.review_json.disposition_review_window_days || 30,
-          onChange: (event) => updateSettings("review_json", "disposition_review_window_days", Math.max(1, Number(event.target.value || 30)))
-        })),
+      h("div", { key: "fields", className: "mt-5 grid gap-4 md:grid-cols-2" }, [
         h(Field, { key: "completion-webhook", label: "Async Completion Webhook" }, h(Input, { value: settings.integrations_json.completion_webhook_url || "", onChange: (event) => updateSettings("integrations_json", "completion_webhook_url", event.target.value || null) })),
         h(Field, { key: "generic-webhook-events", label: "Generic Webhook Events" }, h(Textarea, {
           value: (settings.integrations_json.generic_webhook_events || []).join("\n"),
@@ -4221,39 +4348,7 @@ function App() {
         ])),
         h(Field, { key: "endpoints", label: "Configured Endpoints" }, h(Textarea, { value: (settings.credentials_json.configured_endpoints || []).join("\n"), onChange: (event) => updateSettings("credentials_json", "configured_endpoints", event.target.value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean)) }))
       ]),
-      h(Button, {
-        key: "save",
-        className: "mt-5",
-        onClick: () => act(
-          () => api("/ui/settings?scope_level=" + encodeURIComponent(settingsScopeLevel), {
-            method: "PUT",
-            body: JSON.stringify((() => {
-              const integrationPayload = buildSettingsIntegrationPayload(settings, integrationRegistry, integrationCredentialDrafts);
-              return {
-                providers: settings.providers_json,
-                credentials: {
-                  ...integrationPayload.credentials,
-                  ...buildSettingsCredentialsPayload(settings, llmRegistry, providerCredentialDrafts)
-                },
-                audit_defaults: settings.audit_defaults_json,
-                preflight: settings.preflight_json,
-                review: settings.review_json,
-                integrations: {
-                  ...settings.integrations_json,
-                  ...integrationPayload.integrations
-                },
-                test_mode: settings.test_mode_json
-              };
-            })())
-          }, requestContext).then((payload) => {
-            setSettings(payload.settings || emptySettings);
-            setProviderCredentialDrafts({});
-            setIntegrationCredentialDrafts({});
-            return api("/ui/settings?scope_level=effective", undefined, requestContext).then((effectivePayload) => setEffectiveSettings({ effective: effectivePayload.settings || emptySettings, layers: effectivePayload.layers || emptyEffectiveSettings.layers }));
-          }),
-          "Settings saved."
-        )
-      }, "Save Settings")
+      h(Button, { key: "save", className: "mt-5", onClick: saveSettings }, "Save Settings")
     ])
   ]);
 
@@ -4285,23 +4380,23 @@ function App() {
     ])
   ]);
 
-  const settingsWorkspacePanel = h("div", { className: "space-y-6" }, [
-    h(Card, { key: "workspace-admin", title: "Workspace Registry", description: "Create and manage workspace and project selectors for the OSS console." }, [
-      h("div", { key: "workspace-fields", className: "grid gap-4" }, [
-        h(Field, { key: "workspace-name", label: "New Workspace" }, h(Input, { value: workspaceForm.name, onChange: (event) => setWorkspaceForm((current) => ({ ...current, name: event.target.value })) })),
-        h(Field, { key: "workspace-desc", label: "Description" }, h(Input, { value: workspaceForm.description, onChange: (event) => setWorkspaceForm((current) => ({ ...current, description: event.target.value })) })),
-        h(Button, {
-          key: "workspace-create",
-          variant: "outline",
-          onClick: () => act(
-            () => api("/ui/workspaces", { method: "POST", body: JSON.stringify(workspaceForm) }, requestContext).then(() => setWorkspaceForm({ name: "", description: "" })),
-            "Workspace created."
-          )
-        }, "Create Workspace"),
-        h(Field, { key: "project-name", label: "New Project In Current Workspace" }, h(Input, { value: projectForm.name, onChange: (event) => setProjectForm((current) => ({ ...current, name: event.target.value })) })),
+  const settingsProjectPanel = h("div", { className: "space-y-6" }, [
+    h(Card, {
+      key: "project-defaults-intro",
+      title: "Project Defaults",
+      description: "These settings apply only to the current project and override installation defaults for this project."
+    }, [
+      h("div", { key: "summary", className: "grid gap-4 md:grid-cols-2" }, [
+        h(Field, { key: "current-project", label: "Current Project" }, h(Input, { value: requestContext.projectId || "", readOnly: true })),
+        h(Field, { key: "effective-package", label: "Effective Audit Package" }, h(Input, { value: effectiveSettings.effective.audit_defaults_json.audit_package || "", readOnly: true }))
+      ])
+    ]),
+    h(Card, { key: "project-create", title: "Projects", description: "Create a project for this installation and manage its default launch settings." }, [
+      h("div", { key: "project-create-fields", className: "grid gap-4" }, [
+        h(Field, { key: "project-name", label: "New Project" }, h(Input, { value: projectForm.name, onChange: (event) => setProjectForm((current) => ({ ...current, name: event.target.value })) })),
         h(Field, { key: "project-desc", label: "Project Description" }, h(Input, { value: projectForm.description, onChange: (event) => setProjectForm((current) => ({ ...current, description: event.target.value })) })),
         h(Button, {
-          key: "project-create",
+          key: "project-create-button",
           variant: "outline",
           onClick: () => act(
             () => api("/ui/projects", { method: "POST", body: JSON.stringify(projectForm) }, requestContext).then(() => setProjectForm({ name: "", description: "" })),
@@ -4310,7 +4405,7 @@ function App() {
         }, "Create Project")
       ])
     ]),
-    h(Card, { key: "project-defaults", title: "Current Project", description: "Edit project metadata and target defaults used by the run launcher for this scope." }, currentProject ? [
+    h(Card, { key: "project-defaults", title: "Current Project Defaults", description: "Edit current project metadata and the default launch settings used by OSS runs for this project." }, currentProject ? [
       h("div", { key: "project-fields", className: "grid gap-4" }, [
         h(Field, { key: "project-name-edit", label: "Project Name" }, h(Input, { value: projectEditor.name, onChange: (event) => updateProjectEditor("name", event.target.value) })),
         h(Field, { key: "project-description-edit", label: "Description" }, h(Input, { value: projectEditor.description, onChange: (event) => updateProjectEditor("description", event.target.value) })),
@@ -4375,76 +4470,7 @@ function App() {
           "Project defaults saved."
         )
       }, "Save Project Defaults")
-    ] : h("div", { className: "text-sm text-muted" }, "Create a project in the current workspace to manage target defaults."))
-  ]);
-
-  const settingsAccessPanel = h("div", { className: "space-y-6" }, [
-    h(Card, { key: "workspace-roles", title: "Workspace Review Roles", description: "Explicit reviewer governance for assignment, approval, comments, and audit export." }, [
-      h("div", { key: "role-form", className: "grid gap-4" }, [
-        h(Field, { key: "role-actor", label: "Actor Id" }, h(Input, {
-          value: roleBindingForm.actor_id,
-          onChange: (event) => setRoleBindingForm((current) => ({ ...current, actor_id: event.target.value }))
-        })),
-        h(Field, { key: "role-select", label: "Role" }, Select({
-          value: roleBindingForm.role,
-          onChange: (event) => setRoleBindingForm((current) => ({ ...current, role: event.target.value }))
-        }, [
-          h("option", { key: "admin", value: "admin" }, "admin"),
-          h("option", { key: "triage", value: "triage_lead" }, "triage lead"),
-          h("option", { key: "reviewer", value: "reviewer" }, "reviewer"),
-          h("option", { key: "viewer", value: "viewer" }, "viewer")
-        ])),
-        h(Button, {
-          key: "role-save",
-          variant: "outline",
-          onClick: () => act(
-            () => api("/ui/workspace-role-bindings", { method: "POST", body: JSON.stringify(roleBindingForm) }, requestContext).then(() => setRoleBindingForm({ actor_id: "", role: "reviewer" })),
-            "Workspace role saved."
-          )
-        }, "Save Role Binding")
-      ]),
-      h("div", { key: "role-list", className: "mt-5 space-y-3" }, workspaceRoleBindings.length ? workspaceRoleBindings.map((binding) => h("div", {
-        key: binding.id,
-        className: "flex items-center justify-between rounded-2xl border border-border bg-white/70 px-4 py-3"
-      }, [
-        h("div", { key: "copy" }, [
-          h("div", { key: "actor", className: "font-medium" }, binding.actor_id),
-          h("div", { key: "meta", className: "text-sm text-muted" }, `${binding.role} - updated ${formatDate(binding.updated_at)}`)
-        ]),
-        h(Button, {
-          key: "revoke",
-          variant: "outline",
-          onClick: () => act(() => api("/ui/workspace-role-bindings/" + encodeURIComponent(binding.actor_id), { method: "DELETE" }, requestContext), "Workspace role revoked.")
-        }, "Revoke")
-      ])) : h("div", { className: "text-sm text-muted" }, "No explicit bindings yet. Legacy-open mode treats actors as admin until a binding is created."))
-    ]),
-    h(Card, { key: "api-keys", title: "Workspace API Keys", description: "Create and revoke persisted API keys for this workspace when auth mode is api_key." }, [
-      h("div", { key: "api-key-fields", className: "grid gap-4" }, [
-        h(Field, { key: "api-key-label", label: "New API Key Label" }, h(Input, { value: apiKeyForm.label, onChange: (event) => setApiKeyForm({ label: event.target.value }) })),
-        h(Button, {
-          key: "api-key-create",
-          variant: "outline",
-          onClick: () => act(
-            () => api("/ui/api-keys", { method: "POST", body: JSON.stringify(apiKeyForm) }, requestContext).then((payload) => {
-              setApiKeyForm({ label: "" });
-              setLatestCreatedApiKey(payload.api_key || "");
-            }),
-            "API key created."
-          )
-        }, "Create API Key"),
-        latestCreatedApiKey ? h("div", { key: "api-key-secret", className: "rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800" }, "Copy this key now: " + latestCreatedApiKey) : null
-      ]),
-      h("div", { key: "api-key-list", className: "mt-5 space-y-3" }, apiKeys.length ? apiKeys.map((item) => h("div", {
-        key: item.id,
-        className: "flex items-center justify-between rounded-2xl border border-border bg-white/70 px-4 py-3"
-      }, [
-        h("div", { key: "copy" }, [
-          h("div", { key: "label", className: "font-medium" }, item.label),
-          h("div", { key: "meta", className: "text-sm text-muted" }, item.key_prefix + " - created " + formatDate(item.created_at) + " - last used " + formatDate(item.last_used_at))
-        ]),
-        h(Button, { key: "revoke", variant: "outline", onClick: () => act(() => api("/ui/api-keys/" + encodeURIComponent(item.id), { method: "DELETE" }, requestContext), "API key revoked.") }, "Revoke")
-      ])) : h("div", { className: "text-sm text-muted" }, "No persisted workspace API keys yet."))
-    ])
+    ] : h("div", { className: "text-sm text-muted" }, "Create a project to manage project-specific defaults for repeated OSS audits."))
   ]);
 
   const settingsDocumentsPanel = h("div", { className: "space-y-6" }, [
@@ -4478,12 +4504,14 @@ function App() {
   ]);
 
   const settingsSubpageContent = {
-    engine: settingsEnginePanel,
+    llm: settingsLlmPanel,
+    audit: settingsAuditPanel,
+    review: settingsReviewPanel,
+    integrations: settingsIntegrationsPanel,
+    project: settingsProjectPanel,
     policy: settingsPolicyPanel,
-    workspace: settingsWorkspacePanel,
-    access: settingsAccessPanel,
     documents: settingsDocumentsPanel
-  }[settingsSubpage] || settingsEnginePanel;
+  }[settingsSubpage] || settingsLlmPanel;
 
   const settingsView = h("section", { className: "overflow-hidden rounded-3xl border border-slate-200 bg-white xl:grid xl:grid-cols-[220px_minmax(0,1fr)]" }, [
     h("aside", { key: "settings-nav", className: "border-b border-slate-200 bg-slate-50/80 px-4 py-5 xl:border-b-0 xl:border-r xl:min-h-full" }, [
@@ -4555,20 +4583,19 @@ function App() {
         ))
       ]))),
       h("div", { key: "footer", className: "mt-8 px-2 text-sm text-slate-500" }, [
-        h("div", { key: "scope", className: "font-medium text-slate-700" }, `${requestContext.workspaceId}/${requestContext.projectId}`),
-        h("div", { key: "desc", className: "mt-1" }, pageDescriptions[view] || "Focused workspace for operating the harness.")
+        h("div", { key: "scope", className: "font-medium text-slate-700" }, `Project: ${requestContext.projectId}`),
+        h("div", { key: "desc", className: "mt-1" }, pageDescriptions[view] || "Focused audit console for operating the harness.")
       ])
     ]),
     h("main", { key: "main", className: view === "runs" ? "min-w-0 h-screen overflow-hidden" : "px-5 py-6 lg:px-8" }, [
       view !== "runs" ? h("header", { key: "header", className: "mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between" }, [
         h("div", { key: "heading" }, [
           h("h2", { key: "title", className: "text-3xl font-semibold tracking-tight text-slate-950" }, navItems.find(([item]) => item === view)?.[1] || "Dashboard"),
-          h("p", { key: "desc", className: "mt-1 text-sm text-slate-500" }, pageDescriptions[view] || "Focused workspace for operating the harness.")
+          h("p", { key: "desc", className: "mt-1 text-sm text-slate-500" }, pageDescriptions[view] || "Focused audit console for operating the harness.")
         ]),
         h("div", { key: "actions", className: "flex items-center gap-3" }, [
           h("div", { key: "status", className: "hidden flex-wrap gap-2 md:flex" }, [
-            h(Badge, { key: "auth" }, authInfo.trusted_mode ? "trusted_local" : authInfo.auth_mode || "authenticated"),
-            h(Badge, { key: "roles" }, effectiveRoles.join(",") || "viewer")
+            h(Badge, { key: "auth" }, authInfo.trusted_mode ? "trusted_local" : authInfo.auth_mode || "authenticated")
           ]),
           h(Button, { key: "refresh", variant: "outline", onClick: load }, "Refresh")
         ])

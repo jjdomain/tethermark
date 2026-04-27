@@ -145,12 +145,12 @@ export function resolveObservabilityRetentionPolicy(mode: DatabaseMode = "embedd
   }
   return {
     database_mode: mode,
-    raw_event_retention_days: retentionDays("HARNESS_OBSERVABILITY_RAW_EVENT_RETENTION_DAYS", 365),
-    raw_metric_retention_days: retentionDays("HARNESS_OBSERVABILITY_RAW_METRIC_RETENTION_DAYS", 365),
-    rollup_retention_days: retentionDays("HARNESS_OBSERVABILITY_ROLLUP_RETENTION_DAYS", 3650),
-    bundle_export_retention_days: retentionDays("HARNESS_OBSERVABILITY_BUNDLE_RETENTION_DAYS", 365),
+    raw_event_retention_days: retentionDays("HARNESS_OBSERVABILITY_RAW_EVENT_RETENTION_DAYS", 90),
+    raw_metric_retention_days: retentionDays("HARNESS_OBSERVABILITY_RAW_METRIC_RETENTION_DAYS", 90),
+    rollup_retention_days: retentionDays("HARNESS_OBSERVABILITY_ROLLUP_RETENTION_DAYS", 730),
+    bundle_export_retention_days: retentionDays("HARNESS_OBSERVABILITY_BUNDLE_RETENTION_DAYS", 90),
     notes: [
-      "Hosted mode keeps raw observability longer for audit support and incident review.",
+      "Local mode keeps raw observability longer for audit support and incident review.",
       "Rollups should be treated as the durable cost and token history surface."
     ]
   };

@@ -23,6 +23,47 @@ function getPolicyPackLabel(policyPacks, policyPackId) {
   return match ? match.name : (effectiveId === "default" ? "Default built-in policy" : `${effectiveId} (custom)`);
 }
 
+const auditPackageDisplayOrder = ["baseline-static", "agentic-static", "deep-static", "runtime-validated"];
+const hiddenOssAuditPackages = new Set(["premium-comprehensive"]);
+const auditPackageDescriptions = {
+  "baseline-static": "Lightweight repository and supply-chain posture review.",
+  "agentic-static": "Standard static audit for agentic systems and data exposure.",
+  "deep-static": "Deeper static audit with more exhaustive review passes.",
+  "runtime-validated": "Static audit plus targeted runtime validation."
+};
+
+function getVisibleAuditPackages(auditPackages) {
+  const visible = (auditPackages || []).filter((item) => item?.id && !hiddenOssAuditPackages.has(item.id));
+  return [...visible].sort((a, b) => {
+    const aIndex = auditPackageDisplayOrder.indexOf(a.id);
+    const bIndex = auditPackageDisplayOrder.indexOf(b.id);
+    const normalizedA = aIndex === -1 ? Number.MAX_SAFE_INTEGER : aIndex;
+    const normalizedB = bIndex === -1 ? Number.MAX_SAFE_INTEGER : bIndex;
+    if (normalizedA !== normalizedB) return normalizedA - normalizedB;
+    return String(a.title || a.id).localeCompare(String(b.title || b.id));
+  });
+}
+
+function getAuditLaneTitle(laneId) {
+  return auditLaneCatalog.find((lane) => lane.id === laneId)?.title || laneId;
+}
+
+function getAuditPackageDetails(auditPackages, packageId) {
+  const definition = (auditPackages || []).find((item) => item.id === packageId) || null;
+  if (!definition && !packageId) return null;
+  const runMode = definition?.run_mode === "validate" ? "runtime" : (definition?.run_mode || "static");
+  return {
+    id: packageId,
+    title: definition?.title || packageId || "Custom package",
+    description: auditPackageDescriptions[packageId] || "Custom audit package.",
+    runMode,
+    auditAreas: (definition?.enabled_lanes || []).map(getAuditLaneTitle),
+    limits: definition
+      ? `${definition.max_agent_calls || 0} agent calls, ${Number(definition.max_total_tokens || 0).toLocaleString()} tokens, ${definition.max_rerun_rounds || 0} rerun${Number(definition.max_rerun_rounds || 0) === 1 ? "" : "s"}`
+      : null
+  };
+}
+
 function getResolvedModelLabel(runModelOptions, providerId, modelId) {
   if (!modelId) return "";
   const match = (runModelOptions || []).find((item) => item.provider_id === providerId && item.id === modelId)
@@ -32,16 +73,19 @@ function getResolvedModelLabel(runModelOptions, providerId, modelId) {
 
 function getLaunchPlanModelLabel(runForm, runModelOptions) {
   const usingGlobalLlmConfig = runForm.use_global_llm_config !== false && Boolean(runForm.llm_model);
-  if (usingGlobalLlmConfig) {
-    return getResolvedModelLabel(runModelOptions, runForm.llm_provider, runForm.llm_model) || "Not selected";
-  }
   const configuredAgentModels = agentConfigCatalog
     .map((agent) => {
       const config = runForm.agent_configs?.[agent.id] || {};
+      if (usingGlobalLlmConfig) {
+        return getResolvedModelLabel(runModelOptions, config.provider || runForm.llm_provider, config.model || runForm.llm_model);
+      }
       return getResolvedModelLabel(runModelOptions, config.provider, config.model);
     })
     .filter(Boolean);
   const uniqueLabels = [...new Set(configuredAgentModels)];
+  if (usingGlobalLlmConfig && !uniqueLabels.length) {
+    return getResolvedModelLabel(runModelOptions, runForm.llm_provider, runForm.llm_model) || "Not selected";
+  }
   if (!uniqueLabels.length) return "Not selected";
   if (uniqueLabels.length === 1) return uniqueLabels[0];
   return "Mixed";
@@ -337,6 +381,8 @@ function LaunchAuditModalComponent({
   const requiredFieldsReady = targetStepComplete && configStepComplete;
   const activeModel = runModelOptions.find((item) => item.provider_id === runForm.llm_provider && item.id === runForm.llm_model) || null;
   const selectedAuditPackage = (auditPackages || []).find((item) => item.id === runForm.audit_package) || null;
+  const visibleAuditPackages = getVisibleAuditPackages(auditPackages);
+  const selectedPackageDetails = getAuditPackageDetails(auditPackages, runForm.audit_package);
   const resolvedEnabledLanes = Array.isArray(runForm.enabled_lanes) ? runForm.enabled_lanes : [];
   const agentConfigs = runForm.agent_configs || {};
   const [activeStep, setActiveStep] = useState("target");
@@ -569,41 +615,58 @@ function LaunchAuditModalComponent({
           h("div", { key: "config-header" }, [
             h("div", { key: "copy", className: "mt-1 text-sm text-slate-500" }, "Choose the audit family, package presets, and run-shape settings for this audit.")
           ]),
-          h("div", { key: "preset-row", className: "mt-4 grid gap-3 md:grid-cols-2" }, [
-            h(Field, {
-              key: "preset-toggle-field",
-              label: h("span", { className: "inline-flex items-center gap-2" }, [
-                h("span", { key: "text" }, "Audit presets"),
-                h(HoverCard, {
-                  key: "hover",
-                  side: "top",
-                  align: "start",
-                  trigger: h("button", {
-                    type: "button",
-                    className: "inline-flex h-5 w-5 items-center justify-center rounded-full border border-slate-200 bg-white text-[11px] font-semibold text-slate-500 hover:bg-slate-50",
-                    "aria-label": "Audit presets help"
-                  }, "?")
-                }, "Presets lock package-derived depth, budget, publishability, and audit area settings. Turn this off for full custom configuration.")
+          h("div", { key: "preset-panel", className: "space-y-4 rounded-2xl border border-slate-200 bg-white px-4 py-4" }, [
+            h("div", { key: "preset-header" }, [
+              h("div", { key: "title", className: "text-sm font-medium text-slate-900" }, helpLabel("Audit presets", "Presets lock package-derived depth, budget, publishability, and audit area settings. Turn this off for full custom configuration.")),
+              h("div", { key: "copy", className: "mt-1 text-sm text-slate-500" }, "Choose a curated audit shape, then review the selected preset details below.")
+            ]),
+            h("div", { key: "preset-row", className: "grid gap-3 md:grid-cols-2" }, [
+              h(Field, {
+                key: "preset-toggle-field",
+                label: "Preset mode"
+              }, h("label", { className: "flex h-11 items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4" }, [
+                h("input", {
+                  type: "checkbox",
+                  checked: usingPresets,
+                  onChange: (event) => updateRunForm("use_audit_presets", event.target.checked)
+                }),
+                h("span", { className: "font-medium text-slate-900" }, "Use audit presets")
+              ])),
+              h(Field, { key: "pkg", label: helpLabel("Preset package", "Audit packages are curated presets that set distinct audit shapes for OSS: lightweight static posture, standard agentic static review, deeper static review, or runtime-validated review.") }, Select({
+                value: runForm.audit_package,
+                disabled: !usingPresets,
+                className: !usingPresets ? "border-slate-200 bg-slate-100 text-slate-400" : "",
+                onChange: (event) => applyAuditPackage(event.target.value)
+              }, [
+                ...visibleAuditPackages.map((item) => h("option", { key: item.id, value: item.id }, item.title)),
+                !visibleAuditPackages.some((item) => item.id === runForm.audit_package)
+                  ? h("option", { key: runForm.audit_package || "custom-package", value: runForm.audit_package }, `${runForm.audit_package || "custom"} (custom)`)
+                  : null
+                ].filter(Boolean)))
+            ]),
+            selectedPackageDetails ? h("div", { key: "preset-details", className: cn("rounded-2xl border px-4 py-4", usingPresets ? "border-slate-200 bg-slate-50" : "border-slate-200 bg-slate-50/70 opacity-70") }, [
+              h("div", { key: "top", className: "flex flex-wrap items-start justify-between gap-3" }, [
+                h("div", { key: "copy", className: "min-w-0 flex-1" }, [
+                  h("div", { key: "name", className: "font-medium text-slate-900" }, selectedPackageDetails.title),
+                  h("div", { key: "description", className: "mt-1 text-sm text-slate-500" }, selectedPackageDetails.description)
+                ]),
+                h(Badge, { key: "mode" }, selectedPackageDetails.runMode === "runtime" ? "Runtime validated" : "Static")
+              ]),
+              h("div", { key: "meta", className: "mt-3 grid gap-3 md:grid-cols-3" }, [
+                h("div", { key: "areas" }, [
+                  h("div", { key: "label", className: "text-xs font-medium uppercase tracking-[0.14em] text-slate-500" }, "Audit areas"),
+                  h("div", { key: "value", className: "mt-1 text-sm text-slate-900" }, selectedPackageDetails.auditAreas.join(", "))
+                ]),
+                h("div", { key: "shape" }, [
+                  h("div", { key: "label", className: "text-xs font-medium uppercase tracking-[0.14em] text-slate-500" }, "Run shape"),
+                  h("div", { key: "value", className: "mt-1 text-sm text-slate-900" }, selectedPackageDetails.runMode === "runtime" ? "Static + targeted runtime validation" : "Static only")
+                ]),
+                h("div", { key: "limits" }, [
+                  h("div", { key: "label", className: "text-xs font-medium uppercase tracking-[0.14em] text-slate-500" }, "Effort limits"),
+                  h("div", { key: "value", className: "mt-1 text-sm text-slate-900" }, selectedPackageDetails.limits || "Custom")
+                ])
               ])
-            }, h("label", { className: "flex h-11 items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4" }, [
-              h("input", {
-                type: "checkbox",
-                checked: usingPresets,
-                onChange: (event) => updateRunForm("use_audit_presets", event.target.checked)
-              }),
-              h("span", { className: "font-medium text-slate-900" }, "Use audit presets")
-            ])),
-            h(Field, { key: "pkg", label: helpLabel("Preset package", "Audit packages are curated presets that set depth, audit area coverage, and review strictness. With audit presets enabled, this drives the locked package-derived settings below.") }, Select({
-              value: runForm.audit_package,
-              disabled: !usingPresets,
-              className: !usingPresets ? "border-slate-200 bg-slate-100 text-slate-400" : "",
-              onChange: (event) => applyAuditPackage(event.target.value)
-            }, [
-              ...auditPackages.map((item) => h("option", { key: item.id, value: item.id }, `${item.title} (${item.id})`)),
-              !auditPackages.some((item) => item.id === runForm.audit_package)
-                ? h("option", { key: runForm.audit_package || "custom-package", value: runForm.audit_package }, `${runForm.audit_package || "custom"} (custom)`)
-                : null
-              ].filter(Boolean)))
+            ]) : null
           ]),
           h("div", { key: "policy-row", className: "grid gap-3" }, [
             h(Field, {
@@ -615,14 +678,13 @@ function LaunchAuditModalComponent({
             ]))
           ]),
           h("div", { key: "run-mode-row", className: "grid gap-3" }, [
-            h(Field, { key: "mode", label: helpLabel("Run mode", "Choose whether the run stays static, uses runtime-capable validation, or lets the app automatically resolve the audit path from repo structure and planner analysis.") }, Select({
+            h(Field, { key: "mode", label: helpLabel("Run mode", "Choose whether the run stays static or allows runtime-capable validation. When audit presets are enabled, the selected package resolves this for you.") }, Select({
               value: runForm.run_mode,
               disabled: usingPresets,
               className: usingPresets ? "border-slate-200 bg-slate-100 text-slate-400" : "",
               onChange: (event) => updateRunForm("run_mode", event.target.value)
             }, [
               h("option", { key: "placeholder", value: "", disabled: true }, "select run mode"),
-              h("option", { key: "auto", value: "auto" }, "auto"),
               h("option", { key: "static", value: "static" }, "static"),
               h("option", { key: "runtime", value: "runtime" }, "runtime")
             ]))

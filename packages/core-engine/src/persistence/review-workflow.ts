@@ -74,7 +74,7 @@ export async function readPersistedReviewActions(runId: string, rootDirOrOptions
 
 export async function listPersistedReviewNotifications(args?: {
   rootDir?: string;
-  dbMode?: "embedded" | "local" | "hosted";
+  dbMode?: "embedded" | "local";
   workspaceId?: string;
   projectId?: string;
   reviewerId?: string;

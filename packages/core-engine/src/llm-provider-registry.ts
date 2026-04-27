@@ -62,19 +62,19 @@ export interface LlmProviderPreset {
 const BUILTIN_LLM_PROVIDERS: LlmProviderDefinition[] = [
   {
     id: "mock",
-    name: "Mock",
+    name: "Mock (Dev/Test)",
     mode: "local_mock",
     requires_api_key: false,
     api_key_field: null,
     default_model: "mock-agent-runtime",
     supports_custom_model: false,
-    description: "Deterministic local mock provider for fixtures, smoke tests, and offline UI validation.",
+    description: "Deterministic local mock provider for fixtures, smoke tests, onboarding samples, and offline UI validation.",
     notes: [
       "Best for local development and repeatable fixture validation.",
       "Does not require network access or external credentials."
     ],
     models: [
-      { id: "mock-agent-runtime", label: "Mock Agent Runtime", recommended_for: "fixtures, smoke tests, and offline validation" }
+      { id: "mock-agent-runtime", label: "Mock Agent Runtime (dev/test only)", recommended_for: "fixtures, smoke tests, onboarding samples, and offline validation" }
     ],
     credential_fields: []
   },
@@ -117,7 +117,7 @@ const BUILTIN_LLM_PROVIDERS: LlmProviderDefinition[] = [
 const BUILTIN_LLM_PROVIDER_PRESETS: LlmProviderPreset[] = [
   {
     id: "local_mock",
-    label: "Local Mock",
+    label: "Local Mock (Dev/Test)",
     provider_id: "mock",
     model: null,
     summary: "Deterministic local preset for fixtures, smoke tests, and fast UI checks."

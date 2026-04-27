@@ -2,23 +2,10 @@ import type { HumanReviewActionType, ReviewActorRole } from "./contracts.js";
 import type { PersistedReviewWorkflowRecord } from "./persistence/contracts.js";
 
 export type ReviewPermission =
-  | "manage_roles"
   | "assign_reviewer"
   | "review_action"
   | "comment"
   | "export_review_audit";
-
-export function resolveEffectiveWorkspaceRoles(args: {
-  workspaceRoles: ReviewActorRole[];
-  workspaceHasBindings: boolean;
-}): ReviewActorRole[] {
-  if (!args.workspaceHasBindings) return ["admin"];
-  return args.workspaceRoles.length ? args.workspaceRoles : ["viewer"];
-}
-
-export function canManageWorkspaceRoles(roles: ReviewActorRole[]): boolean {
-  return roles.includes("admin");
-}
 
 function canOperateOnReview(args: {
   roles: ReviewActorRole[];
