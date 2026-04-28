@@ -23,7 +23,7 @@ export interface PersistenceMetadata {
   updated_at: string;
 }
 
-export type EmbeddedPersistenceMetadata = PersistenceMetadata;
+export type LocalPersistenceMetadata = PersistenceMetadata;
 
 export const PERSISTENCE_SCHEMA_VERSION = "1.1.0";
 
@@ -40,7 +40,7 @@ export function sqliteDbPath(rootDir: string): string {
   return path.join(rootDir, "harness.sqlite");
 }
 
-export function embeddedPersistenceMetadataPath(rootDir: string): string {
+export function localPersistenceMetadataPath(rootDir: string): string {
   return path.join(rootDir, "persistence-meta.json");
 }
 
@@ -78,18 +78,18 @@ export async function writePersistenceMetadata(rootDir: string, databaseMode: Da
     updated_at: new Date().toISOString()
   };
   await fs.mkdir(rootDir, { recursive: true });
-  await fs.writeFile(embeddedPersistenceMetadataPath(rootDir), `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
+  await fs.writeFile(localPersistenceMetadataPath(rootDir), `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
   return metadata;
 }
 
-export async function writeEmbeddedPersistenceMetadata(rootDir: string): Promise<EmbeddedPersistenceMetadata> {
+export async function writeLocalPersistenceMetadata(rootDir: string): Promise<LocalPersistenceMetadata> {
   const { resolveBundleExportPolicy } = await import("./bundle-exports.js");
-  return writePersistenceMetadata(rootDir, "embedded", resolveBundleExportPolicy("embedded"));
+  return writePersistenceMetadata(rootDir, "local", resolveBundleExportPolicy("local"));
 }
 
 export async function readPersistenceMetadata(rootDir: string): Promise<PersistenceMetadata | null> {
   try {
-    const raw = await fs.readFile(embeddedPersistenceMetadataPath(rootDir), "utf8");
+    const raw = await fs.readFile(localPersistenceMetadataPath(rootDir), "utf8");
     const parsed = JSON.parse(raw) as Partial<PersistenceMetadata> & Record<string, unknown>;
     const warnings: string[] = Array.isArray(parsed.warnings) ? parsed.warnings.map((item) => String(item)) : [];
     const schemaVersion = typeof parsed.persistence_schema_version === "string" && parsed.persistence_schema_version
@@ -103,16 +103,17 @@ export async function readPersistenceMetadata(rootDir: string): Promise<Persiste
     if (compatibilityStatus !== "current") {
       warnings.push(`Persistence metadata schema ${schemaVersion} differs from expected ${PERSISTENCE_SCHEMA_VERSION}.`);
     }
+    const databaseMode: DatabaseMode = "local";
     return {
       persistence_schema_version: schemaVersion,
-      database_mode: (parsed.database_mode as DatabaseMode | undefined) ?? "embedded",
+      database_mode: databaseMode,
       backend_kind: "sqlite_file",
       sqlite_path: typeof parsed.sqlite_path === "string" && parsed.sqlite_path ? parsed.sqlite_path : sqliteDbPath(rootDir),
       bundle_exports_dir: typeof parsed.bundle_exports_dir === "string" && parsed.bundle_exports_dir ? parsed.bundle_exports_dir : path.join(rootDir, "runs"),
       bundle_export_policy: (parsed.bundle_export_policy && typeof parsed.bundle_export_policy === "object"
         ? parsed.bundle_export_policy as BundleExportPolicy
         : {
-            database_mode: (parsed.database_mode as DatabaseMode | undefined) ?? "embedded",
+            database_mode: databaseMode,
             policy: "debug_optional",
             enabled: true,
             retention_days: 30,
@@ -128,11 +129,11 @@ export async function readPersistenceMetadata(rootDir: string): Promise<Persiste
   }
 }
 
-export async function readEmbeddedPersistenceMetadata(rootDir: string): Promise<EmbeddedPersistenceMetadata | null> {
+export async function readLocalPersistenceMetadata(rootDir: string): Promise<LocalPersistenceMetadata | null> {
   return readPersistenceMetadata(rootDir);
 }
 
-export async function saveSqliteDatabase(rootDir: string, db: any, databaseMode: DatabaseMode = "embedded", bundleExportPolicy?: BundleExportPolicy): Promise<void> {
+export async function saveSqliteDatabase(rootDir: string, db: any, databaseMode: DatabaseMode = "local", bundleExportPolicy?: BundleExportPolicy): Promise<void> {
   await fs.mkdir(rootDir, { recursive: true });
   const bytes = db.export();
   await fs.writeFile(sqliteDbPath(rootDir), Buffer.from(bytes));
@@ -171,6 +172,7 @@ export function upsertSqliteRecord(args: {
   targetSnapshotId?: string | null;
   parentKey?: string | null;
 }): void {
+  const normalizeBindValue = (value: string | number | boolean | null | undefined): string | number | boolean | null => value ?? null;
   const statement = args.db.prepare(`
     INSERT INTO records (table_name, record_key, run_id, created_at, target_id, target_snapshot_id, parent_key, payload_json)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -183,13 +185,13 @@ export function upsertSqliteRecord(args: {
       payload_json=excluded.payload_json
   `);
   statement.run([
-    args.tableName,
-    args.recordKey,
-    args.runId ?? null,
-    args.createdAt ?? null,
-    args.targetId ?? null,
-    args.targetSnapshotId ?? null,
-    args.parentKey ?? null,
+    String(args.tableName ?? ""),
+    String(args.recordKey ?? ""),
+    normalizeBindValue(args.runId),
+    normalizeBindValue(args.createdAt),
+    normalizeBindValue(args.targetId),
+    normalizeBindValue(args.targetSnapshotId),
+    normalizeBindValue(args.parentKey),
     JSON.stringify(args.payload ?? null)
   ]);
   statement.free();
@@ -197,7 +199,7 @@ export function upsertSqliteRecord(args: {
 
 export function readSqliteTable<T>(db: any, tableName: string): T[] {
   const statement = db.prepare(`SELECT payload_json FROM records WHERE table_name = ?`);
-  statement.bind([tableName]);
+  statement.bind([String(tableName ?? "")]);
   const rows: T[] = [];
   while (statement.step()) {
     const row = statement.getAsObject() as { payload_json?: string };

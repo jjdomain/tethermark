@@ -116,33 +116,7 @@ function retentionDays(name: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-export function resolveObservabilityRetentionPolicy(mode: DatabaseMode = "embedded"): ObservabilityRetentionPolicy {
-  if (mode === "embedded") {
-    return {
-      database_mode: mode,
-      raw_event_retention_days: retentionDays("HARNESS_OBSERVABILITY_RAW_EVENT_RETENTION_DAYS", 30),
-      raw_metric_retention_days: retentionDays("HARNESS_OBSERVABILITY_RAW_METRIC_RETENTION_DAYS", 30),
-      rollup_retention_days: retentionDays("HARNESS_OBSERVABILITY_ROLLUP_RETENTION_DAYS", 365),
-      bundle_export_retention_days: retentionDays("HARNESS_OBSERVABILITY_BUNDLE_RETENTION_DAYS", 30),
-      notes: [
-        "Embedded mode keeps short-lived raw observability for local debugging.",
-        "Rollups are intended to outlive raw event streams for cost and usage history."
-      ]
-    };
-  }
-  if (mode === "local") {
-    return {
-      database_mode: mode,
-      raw_event_retention_days: retentionDays("HARNESS_OBSERVABILITY_RAW_EVENT_RETENTION_DAYS", 90),
-      raw_metric_retention_days: retentionDays("HARNESS_OBSERVABILITY_RAW_METRIC_RETENTION_DAYS", 90),
-      rollup_retention_days: retentionDays("HARNESS_OBSERVABILITY_ROLLUP_RETENTION_DAYS", 730),
-      bundle_export_retention_days: retentionDays("HARNESS_OBSERVABILITY_BUNDLE_RETENTION_DAYS", 90),
-      notes: [
-        "Local mode favors longer raw retention for team dashboards and debugging.",
-        "Rollups remain the preferred long-term query surface for historical usage."
-      ]
-    };
-  }
+export function resolveObservabilityRetentionPolicy(mode: DatabaseMode = "local"): ObservabilityRetentionPolicy {
   return {
     database_mode: mode,
     raw_event_retention_days: retentionDays("HARNESS_OBSERVABILITY_RAW_EVENT_RETENTION_DAYS", 90),
@@ -164,7 +138,7 @@ export async function readPersistedObservabilitySummary(runId: string, options?:
     readPersistedAgentInvocations(runId, options),
     readPersistedToolExecutions(runId, options)
   ]);
-  const mode = typeof options === "string" || !options ? "embedded" : options.dbMode ?? "embedded";
+  const mode = typeof options === "string" || !options ? "local" : options.dbMode ?? "local";
 
   const stageEventCounts = new Map<string, number>();
   for (const event of events) {
@@ -290,7 +264,7 @@ export async function readPersistedObservabilitySummary(runId: string, options?:
 }
 
 export async function getPersistedObservabilityHistory(args?: PersistedRunQuery): Promise<PersistedObservabilityHistory> {
-  const mode = args?.dbMode ?? "embedded";
+  const mode = args?.dbMode ?? "local";
   const runs = await listPersistedRuns({ ...args, limit: Number.MAX_SAFE_INTEGER });
   const summaries = await Promise.all(runs.map(async (run) => ({
     run,

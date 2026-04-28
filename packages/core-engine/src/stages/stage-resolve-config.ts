@@ -39,7 +39,7 @@ export function stageResolveConfig(args: {
       run_mode: args.request.run_mode ?? "static",
       requested_audit_package: args.request.audit_package ?? null,
       requested_policy_pack: args.request.audit_policy_pack ?? null,
-      db_mode: args.request.db_mode ?? (process.env.HARNESS_DB_MODE as DatabaseMode | undefined) ?? "embedded",
+      db_mode: args.request.db_mode ?? (process.env.HARNESS_DB_MODE as DatabaseMode | undefined) ?? "local",
       output_dir: args.request.output_dir ?? null
     },
     policy_pack: {

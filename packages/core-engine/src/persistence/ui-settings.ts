@@ -89,8 +89,8 @@ function defaultUiSettingsForScope(args: {
     project_id: projectId,
     updated_at: updatedAt,
     providers_json: args.scope === "global" ? {
-      default_provider: "",
-      default_model: "",
+      default_provider: "mock",
+      default_model: "mock-agent-runtime",
       mock_mode: false,
       agent_overrides: {}
     } : {},

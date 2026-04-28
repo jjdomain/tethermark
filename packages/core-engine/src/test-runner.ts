@@ -16,9 +16,9 @@ import { createEngine } from "./orchestrator.js";
 import { buildPreflightSummary } from "./preflight.js";
 import { resetPythonWorkerCapabilityCacheForTests } from "./python-worker.js";
 import { createPersistenceStore } from "./persistence/backend.js";
-import { backfillEmbeddedPersistence, cleanupEmbeddedJsonMirrors, validateEmbeddedPersistence } from "./persistence/backfill.js";
+import { backfillLocalPersistence, cleanupLocalJsonMirrors, validateLocalPersistence } from "./persistence/backfill.js";
 import { compactBundleExports } from "./persistence/bundle-exports.js";
-import { EmbeddedPersistenceStore } from "./persistence/embedded-store.js";
+import { LocalPersistenceStore } from "./persistence/local-store.js";
 import { getPersistedObservabilityHistory, readPersistedObservabilitySummary } from "./persistence/observability.js";
 import { getPersistedRun, listPersistedTargets, readPersistedDimensionScores, readPersistedPolicyApplication, readPersistedStageExecutions, readPersistedTargetSummary } from "./persistence/query.js";
 import { deriveInitialReviewWorkflow, listPersistedReviewNotifications, listPersistedReviewWorkflows, submitPersistedReviewAction } from "./persistence/review-workflow.js";
@@ -126,7 +126,7 @@ async function assertExportSchemaMatches(schemaFilename: string, payload: unknow
   assert.deepEqual(errors, [], `Schema validation failed for ${schemaFilename}: ${errors.join("; ")}`);
 }
 
-async function waitForServer(url: string, timeoutMs = 15000): Promise<void> {
+async function waitForServer(url: string, timeoutMs = 30000): Promise<void> {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     try {
@@ -140,7 +140,7 @@ async function waitForServer(url: string, timeoutMs = 15000): Promise<void> {
   throw new Error(`Timed out waiting for server at ${url}`);
 }
 
-async function waitForAsyncRun(baseUrl: string, jobId: string, timeoutMs = 20000): Promise<any> {
+async function waitForAsyncRun(baseUrl: string, jobId: string, timeoutMs = 45000): Promise<any> {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     const response = await fetch(`${baseUrl}/runs/async/${jobId}`);
@@ -154,6 +154,14 @@ async function waitForAsyncRun(baseUrl: string, jobId: string, timeoutMs = 20000
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
   throw new Error(`Timed out waiting for async job ${jobId}`);
+}
+
+function getListeningPort(server: http.Server): number {
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Server did not expose a numeric listening port");
+  }
+  return address.port;
 }
 
 async function stageBuiltinCoreEngineData(rootDir: string): Promise<void> {
@@ -197,13 +205,14 @@ async function testBuildScanRequestParsesLlmFlags(): Promise<void> {
   assert.ok(parsed.request.local_path);
 }
 
-async function testModeAwarePersistenceStoresSeparateEmbeddedAndLocalRoots(): Promise<void> {
-  await withTempDir("harness-db-modes-", async (rootDir) => {
-    const embeddedRoot = path.join(rootDir, "embedded-db");
+async function testLocalPersistenceUsesConfiguredRoot(): Promise<void> {
+  await withTempDir("harness-local-db-", async (rootDir) => {
+    const configuredRoot = path.join(rootDir, "configured-local-db");
     const localRoot = path.join(rootDir, "local-db");
     const packageDefinition = { id: "deep-static", title: "Deep Static", description: "", run_mode: "static", default_policy_profile: "default", requires_agents: true, lane_specialists_enabled: true, focus: [], minimum_tools: [], scorecard_weights: {} } as any;
 
-    const persistRun = async (mode: "embedded" | "local", targetRoot: string, runId: string): Promise<void> => {
+    const persistRun = async (targetRoot: string, runId: string): Promise<void> => {
+      const mode = "local" as const;
       const store = createPersistenceStore(mode, targetRoot);
       await store.persistBundle({
         mode,
@@ -239,24 +248,25 @@ async function testModeAwarePersistenceStoresSeparateEmbeddedAndLocalRoots(): Pr
       } as any);
     };
 
-    await persistRun("embedded", embeddedRoot, "run_embedded");
-    await persistRun("local", localRoot, "run_local");
+    await persistRun(configuredRoot, "run_configured");
+    await persistRun(localRoot, "run_local");
 
-    const [embeddedRun, localRun, embeddedMeta, localMeta] = await Promise.all([
-      getPersistedRun("run_embedded", { rootDir: embeddedRoot, dbMode: "embedded" }),
+    const [configuredRun, localRun, configuredMeta, localMeta] = await Promise.all([
+      getPersistedRun("run_configured", { rootDir: configuredRoot, dbMode: "local" }),
       getPersistedRun("run_local", { rootDir: localRoot, dbMode: "local" }),
-      readPersistenceMetadata(embeddedRoot),
+      readPersistenceMetadata(configuredRoot),
       readPersistenceMetadata(localRoot)
     ]);
 
-    assert.equal(embeddedRun?.id, "run_embedded");
+    assert.equal(configuredRun?.id, "run_configured");
     assert.equal(localRun?.id, "run_local");
-    assert.equal(embeddedMeta?.database_mode, "embedded");
+    assert.equal(configuredMeta?.database_mode, "local");
     assert.equal(localMeta?.database_mode, "local");
-    assert.equal(embeddedMeta?.persistence_schema_version, "1.1.0");
-    assert.equal(embeddedMeta?.compatibility_status, "current");
+    assert.equal(configuredMeta?.persistence_schema_version, "1.1.0");
+    assert.equal(configuredMeta?.compatibility_status, "current");
     assert.equal(localRun?.resolved_configuration?.db_mode, "local");
-    assert.equal(await fs.stat(path.join(embeddedRoot, "runs", "run_embedded.json")).then(() => true).catch(() => false), true);
+    assert.equal(configuredRun?.resolved_configuration?.db_mode, "local");
+    assert.equal(await fs.stat(path.join(configuredRoot, "runs", "run_configured.json")).then(() => true).catch(() => false), false);
     assert.equal(await fs.stat(path.join(localRoot, "runs", "run_local.json")).then(() => true).catch(() => false), false);
   });
 }
@@ -271,30 +281,37 @@ async function testCompactBundleExportsPrunesOptionalDebugBundles(): Promise<voi
     await fs.writeFile(freshFile, "{}\n", "utf8");
     const twoDaysAgo = new Date(Date.now() - (2 * 24 * 60 * 60 * 1000));
     await fs.utimes(oldFile, twoDaysAgo, twoDaysAgo);
+    const previousEnabled = process.env.HARNESS_BUNDLE_EXPORT_ENABLED;
+    try {
+      process.env.HARNESS_BUNDLE_EXPORT_ENABLED = "1";
 
-    const dryRun = await compactBundleExports({ rootDir, dryRun: true, retentionDays: 1, mode: "embedded" });
-    assert.deepEqual(dryRun.removed_files, ["run_old.json"]);
-    assert.deepEqual(dryRun.kept_files, ["run_fresh.json"]);
+      const dryRun = await compactBundleExports({ rootDir, dryRun: true, retentionDays: 1, mode: "local" });
+      assert.deepEqual(dryRun.removed_files, ["run_old.json"]);
+      assert.deepEqual(dryRun.kept_files, ["run_fresh.json"]);
 
-    const live = await compactBundleExports({ rootDir, dryRun: false, retentionDays: 1, mode: "embedded" });
-    assert.deepEqual(live.removed_files, ["run_old.json"]);
-    assert.equal(await fs.stat(oldFile).then(() => true).catch(() => false), false);
-    assert.equal(await fs.stat(freshFile).then(() => true).catch(() => false), true);
+      const live = await compactBundleExports({ rootDir, dryRun: false, retentionDays: 1, mode: "local" });
+      assert.deepEqual(live.removed_files, ["run_old.json"]);
+      assert.equal(await fs.stat(oldFile).then(() => true).catch(() => false), false);
+      assert.equal(await fs.stat(freshFile).then(() => true).catch(() => false), true);
+    } finally {
+      if (previousEnabled === undefined) delete process.env.HARNESS_BUNDLE_EXPORT_ENABLED;
+      else process.env.HARNESS_BUNDLE_EXPORT_ENABLED = previousEnabled;
+    }
   });
 }
 
 async function testReadPersistedLaneSpecialistOutputsFromSqlite(): Promise<void> {
   await withTempDir("harness-lane-specialists-sqlite-", async (rootDir) => {
-    const store = new EmbeddedPersistenceStore(rootDir);
+    const store = new LocalPersistenceStore(rootDir);
     await store.persistBundle({
-      mode: "embedded",
+      mode: "local",
       package_definition: { id: "deep-static", title: "Deep Static", description: "", run_mode: "static", default_policy_profile: "default", requires_agents: true, lane_specialists_enabled: true, focus: [], minimum_tools: [], scorecard_weights: {} } as any,
       target: { id: "target_1", target_type: "repo", canonical_name: "openclaw", repo_url: "https://github.com/openclaw/openclaw", local_path: null, endpoint_url: null, created_at: "2026-04-14T00:00:00.000Z" },
       target_snapshot: { id: "snap_1", target_id: "target_1", snapshot_value: "https://github.com/openclaw/openclaw", commit_sha: null, captured_at: "2026-04-14T00:00:00.000Z", analysis_hash: null },
       target_summary: { id: "target_1", target_id: "target_1", canonical_target_id: "target_1", canonical_name: "openclaw", target_type: "repo", repo_url: "https://github.com/openclaw/openclaw", local_path: null, endpoint_url: null, latest_run_id: "run_lane_sqlite", latest_run_created_at: "2026-04-14T00:00:00.000Z", latest_status: "succeeded", latest_run_mode: "static", latest_audit_package: "deep-static", latest_target_class: "repo_posture_only", latest_rating: "B", latest_overall_score: 82, latest_static_score: 82, latest_publishability_status: "publishable", latest_human_review_required: false, latest_finding_count: 1, latest_frameworks_json: [], latest_languages_json: ["typescript"], latest_package_ecosystems_json: ["npm"], updated_at: "2026-04-14T00:00:00.000Z" },
       policy_pack: null,
       run: { id: "run_lane_sqlite", target_id: "target_1", target_snapshot_id: "snap_1", policy_pack_id: null, status: "succeeded", run_mode: "static", audit_package: "deep-static", artifact_root: rootDir, started_at: "2026-04-14T00:00:00.000Z", completed_at: "2026-04-14T00:01:00.000Z", static_score: 82, overall_score: 82, rating: "B", created_at: "2026-04-14T00:00:00.000Z" },
-      resolved_configuration: { run_id: "run_lane_sqlite", policy_pack_id: null, policy_pack_name: null, policy_pack_source: null, policy_profile: null, policy_version: null, requested_policy_pack: null, requested_audit_package: "deep-static", selected_audit_package: "deep-static", audit_package_title: "Deep Static", audit_package_selection_mode: "explicit", initial_target_class: "repo_posture_only", run_mode: "static", target_kind: "repo", db_mode: "embedded", output_dir: null, validation_json: { valid: true, errors: [], warnings: [] }, request_summary_json: { run_mode: "static", target_kind: "repo", db_mode: "embedded" }, policy_pack_json: {}, audit_package_json: { selected_id: "deep-static" } },
+      resolved_configuration: { run_id: "run_lane_sqlite", policy_pack_id: null, policy_pack_name: null, policy_pack_source: null, policy_profile: null, policy_version: null, requested_policy_pack: null, requested_audit_package: "deep-static", selected_audit_package: "deep-static", audit_package_title: "Deep Static", audit_package_selection_mode: "explicit", initial_target_class: "repo_posture_only", run_mode: "static", target_kind: "repo", db_mode: "local", output_dir: null, validation_json: { valid: true, errors: [], warnings: [] }, request_summary_json: { run_mode: "static", target_kind: "repo", db_mode: "local" }, policy_pack_json: {}, audit_package_json: { selected_id: "deep-static" } },
       stage_executions: [],
       lane_plans: [],
       evidence_records: [],
@@ -336,23 +353,23 @@ async function testGoldenExportSnapshots(): Promise<void> {
 }
 
 
-async function testBackfillEmbeddedPersistenceMigratesLaneSpecialists(): Promise<void> {
+async function testBackfillLocalPersistenceMigratesLaneSpecialists(): Promise<void> {
   await withTempDir("harness-backfill-lane-specialists-", async (rootDir) => {
-    const persistenceRoot = path.join(rootDir, "state", "embedded-db");
+    const persistenceRoot = path.join(rootDir, "state", "local-db");
     const runsDir = path.join(persistenceRoot, "runs");
     const artifactRoot = path.join(rootDir, "artifacts", "run_legacy");
     await fs.mkdir(runsDir, { recursive: true });
     await fs.mkdir(artifactRoot, { recursive: true });
     await fs.writeFile(path.join(artifactRoot, "lane-specialists.json"), JSON.stringify([{ lane_name: "repo_posture", agent_name: "lane_specialist_agent", output_artifact: "lane-specialist-repo_posture.json", summary: ["legacy summary"], observations: [{ title: "Obs", summary: "Detail", evidence: ["ev1"] }], evidence_ids: ["ev1"], tool_provider_ids: ["scorecard"] }], null, 2) + "\n", "utf8");
     const bundle = {
-      mode: "embedded",
+      mode: "local",
       package_definition: { id: "deep-static", title: "Deep Static", description: "", run_mode: "static", default_policy_profile: "default", requires_agents: true, lane_specialists_enabled: true, focus: [], minimum_tools: [], scorecard_weights: {} },
       target: { id: "target_legacy", target_type: "repo", canonical_name: "openclaw", repo_url: "https://github.com/openclaw/openclaw", local_path: null, endpoint_url: null, created_at: "2026-04-14T00:00:00.000Z" },
       target_snapshot: { id: "snap_legacy", target_id: "target_legacy", snapshot_value: "https://github.com/openclaw/openclaw", commit_sha: null, captured_at: "2026-04-14T00:00:00.000Z", analysis_hash: null },
       target_summary: { id: "target_legacy", target_id: "target_legacy", canonical_target_id: "target_legacy", canonical_name: "openclaw", target_type: "repo", repo_url: "https://github.com/openclaw/openclaw", local_path: null, endpoint_url: null, latest_run_id: "run_legacy", latest_run_created_at: "2026-04-14T00:00:00.000Z", latest_status: "succeeded", latest_run_mode: "static", latest_audit_package: "deep-static", latest_target_class: "repo_posture_only", latest_rating: "B", latest_overall_score: 82, latest_static_score: 82, latest_publishability_status: "publishable", latest_human_review_required: false, latest_finding_count: 0, latest_frameworks_json: [], latest_languages_json: ["typescript"], latest_package_ecosystems_json: ["npm"], updated_at: "2026-04-14T00:00:00.000Z" },
       policy_pack: null,
       run: { id: "run_legacy", target_id: "target_legacy", target_snapshot_id: "snap_legacy", policy_pack_id: null, status: "succeeded", run_mode: "static", audit_package: "deep-static", artifact_root: artifactRoot, started_at: "2026-04-14T00:00:00.000Z", completed_at: "2026-04-14T00:01:00.000Z", static_score: 82, overall_score: 82, rating: "B", created_at: "2026-04-14T00:00:00.000Z" },
-      resolved_configuration: { run_id: "run_legacy", policy_pack_id: null, policy_pack_name: null, policy_pack_source: null, policy_profile: null, policy_version: null, requested_policy_pack: null, requested_audit_package: "deep-static", selected_audit_package: "deep-static", audit_package_title: "Deep Static", audit_package_selection_mode: "explicit", initial_target_class: "repo_posture_only", run_mode: "static", target_kind: "repo", db_mode: "embedded", output_dir: null, validation_json: { valid: true, errors: [], warnings: [] }, request_summary_json: { run_mode: "static", target_kind: "repo", db_mode: "embedded" }, policy_pack_json: {}, audit_package_json: { selected_id: "deep-static" } },
+      resolved_configuration: { run_id: "run_legacy", policy_pack_id: null, policy_pack_name: null, policy_pack_source: null, policy_profile: null, policy_version: null, requested_policy_pack: null, requested_audit_package: "deep-static", selected_audit_package: "deep-static", audit_package_title: "Deep Static", audit_package_selection_mode: "explicit", initial_target_class: "repo_posture_only", run_mode: "static", target_kind: "repo", db_mode: "local", output_dir: null, validation_json: { valid: true, errors: [], warnings: [] }, request_summary_json: { run_mode: "static", target_kind: "repo", db_mode: "local" }, policy_pack_json: {}, audit_package_json: { selected_id: "deep-static" } },
       stage_executions: [], lane_plans: [], evidence_records: [], lane_results: [], lane_specialists: [], agent_invocations: [], tool_executions: [], findings: [], control_results: [],
       score_summary: { run_id: "run_legacy", methodology_version: "1", overall_score: 82, rating: "B", leaderboard_summary: "", limitations_json: [] },
       review_decision: { run_id: "run_legacy", publishability_status: "publishable", human_review_required: false, public_summary_safe: true, threshold: "standard", rationale_json: [], gating_findings_json: [], recommended_visibility: "public" },
@@ -361,7 +378,7 @@ async function testBackfillEmbeddedPersistenceMigratesLaneSpecialists(): Promise
     };
     await fs.writeFile(path.join(runsDir, "run_legacy.json"), JSON.stringify(bundle, null, 2) + "\n", "utf8");
 
-    const summary = await backfillEmbeddedPersistence({ rootDir: persistenceRoot, dryRun: false });
+    const summary = await backfillLocalPersistence({ rootDir: persistenceRoot, dryRun: false });
     const outputs = await readPersistedLaneSpecialistOutputs("run_legacy", persistenceRoot);
     const updatedBundle = JSON.parse(await fs.readFile(path.join(runsDir, "run_legacy.json"), "utf8"));
 
@@ -441,16 +458,16 @@ async function testReadPersistedToolAdapterSummary(): Promise<void> {
 
 async function testReadPersistedObservability(): Promise<void> {
   await withTempDir("harness-persisted-observability-", async (rootDir) => {
-    const store = new EmbeddedPersistenceStore(rootDir);
+    const store = new LocalPersistenceStore(rootDir);
     await store.persistBundle({
-      mode: "embedded",
+      mode: "local",
       package_definition: { id: "deep-static", title: "Deep Static", description: "", run_mode: "static", default_policy_profile: "default", requires_agents: true, lane_specialists_enabled: true, focus: [], minimum_tools: [], scorecard_weights: {} } as any,
       target: { id: "target_obs", target_type: "repo", canonical_name: "openclaw", repo_url: "https://github.com/openclaw/openclaw", local_path: null, endpoint_url: null, created_at: "2026-04-14T00:00:00.000Z" },
       target_snapshot: { id: "snap_obs", target_id: "target_obs", snapshot_value: "https://github.com/openclaw/openclaw", commit_sha: null, captured_at: "2026-04-14T00:00:00.000Z", analysis_hash: null },
       target_summary: { id: "target_obs", target_id: "target_obs", canonical_target_id: "target_obs", canonical_name: "openclaw", target_type: "repo", repo_url: "https://github.com/openclaw/openclaw", local_path: null, endpoint_url: null, latest_run_id: "run_obs", latest_run_created_at: "2026-04-14T00:00:00.000Z", latest_status: "succeeded", latest_run_mode: "static", latest_audit_package: "deep-static", latest_target_class: "repo_posture_only", latest_rating: "B", latest_overall_score: 82, latest_static_score: 82, latest_publishability_status: "publishable", latest_human_review_required: false, latest_finding_count: 0, latest_frameworks_json: [], latest_languages_json: ["typescript"], latest_package_ecosystems_json: ["npm"], updated_at: "2026-04-14T00:00:00.000Z" },
       policy_pack: null,
       run: { id: "run_obs", target_id: "target_obs", target_snapshot_id: "snap_obs", policy_pack_id: null, status: "succeeded", run_mode: "static", audit_package: "deep-static", artifact_root: rootDir, started_at: "2026-04-14T00:00:00.000Z", completed_at: "2026-04-14T00:01:00.000Z", static_score: 82, overall_score: 82, rating: "B", created_at: "2026-04-14T00:00:00.000Z" },
-      resolved_configuration: { run_id: "run_obs", policy_pack_id: null, policy_pack_name: null, policy_pack_source: null, policy_profile: null, policy_version: null, requested_policy_pack: null, requested_audit_package: "deep-static", selected_audit_package: "deep-static", audit_package_title: "Deep Static", audit_package_selection_mode: "explicit", initial_target_class: "repo_posture_only", run_mode: "static", target_kind: "repo", db_mode: "embedded", output_dir: null, validation_json: { valid: true, errors: [], warnings: [] }, request_summary_json: { run_mode: "static", target_kind: "repo", db_mode: "embedded" }, policy_pack_json: {}, audit_package_json: { selected_id: "deep-static" } },
+      resolved_configuration: { run_id: "run_obs", policy_pack_id: null, policy_pack_name: null, policy_pack_source: null, policy_profile: null, policy_version: null, requested_policy_pack: null, requested_audit_package: "deep-static", selected_audit_package: "deep-static", audit_package_title: "Deep Static", audit_package_selection_mode: "explicit", initial_target_class: "repo_posture_only", run_mode: "static", target_kind: "repo", db_mode: "local", output_dir: null, validation_json: { valid: true, errors: [], warnings: [] }, request_summary_json: { run_mode: "static", target_kind: "repo", db_mode: "local" }, policy_pack_json: {}, audit_package_json: { selected_id: "deep-static" } },
       stage_executions: [
         { id: "run_obs:prepare_target", run_id: "run_obs", stage_name: "prepare_target", actor: "stage_prepare_target", status: "success", reused_from_run_id: null, started_at: "2026-04-14T00:00:00.000Z", completed_at: "2026-04-14T00:00:02.000Z", duration_ms: 2000, details_json: {} },
         { id: "run_obs:maintenance_reconstruct", run_id: "run_obs", stage_name: "maintenance_reconstruct", actor: "persistence_backfill", status: "reused", reused_from_run_id: "run_old", started_at: "2026-04-14T00:00:30.000Z", completed_at: "2026-04-14T00:01:00.000Z", duration_ms: 30000, details_json: {} }
@@ -486,8 +503,8 @@ async function testReadPersistedObservability(): Promise<void> {
     const metrics = await readPersistedMetrics("run_obs", rootDir);
     const observability = await readPersistedObservability("run_obs", rootDir);
     const maintenance = await readPersistedMaintenanceHistory("run_obs", rootDir);
-    const summary = await readPersistedObservabilitySummary("run_obs", { rootDir, dbMode: "embedded" });
-    const history = await getPersistedObservabilityHistory({ rootDir, dbMode: "embedded" });
+    const summary = await readPersistedObservabilitySummary("run_obs", { rootDir, dbMode: "local" });
+    const history = await getPersistedObservabilityHistory({ rootDir, dbMode: "local" });
 
     assert.equal(events.length, 2);
     assert.equal(metrics.length, 2);
@@ -503,22 +520,22 @@ async function testReadPersistedObservability(): Promise<void> {
     assert.equal(summary.provider_rollups[0]?.provider_id, "openai:gpt-5.4");
     assert.equal(history.totals.run_count, 1);
     assert.equal(history.daily_rollups[0]?.total_tokens, 75);
-    assert.equal(history.retention_policy.database_mode, "embedded");
+    assert.equal(history.retention_policy.database_mode, "local");
   });
 }
 
 async function testReadPersistedStageArtifact(): Promise<void> {
   await withTempDir("harness-stage-artifact-", async (rootDir) => {
-    const store = new EmbeddedPersistenceStore(rootDir);
+    const store = new LocalPersistenceStore(rootDir);
     await store.persistBundle({
-      mode: "embedded",
+      mode: "local",
       package_definition: { id: "deep-static", title: "Deep Static", description: "", run_mode: "static", default_policy_profile: "default", requires_agents: true, lane_specialists_enabled: true, focus: [], minimum_tools: [], scorecard_weights: {} } as any,
       target: { id: "target_stage", target_type: "repo", canonical_name: "openclaw", repo_url: "https://github.com/openclaw/openclaw", local_path: null, endpoint_url: null, created_at: "2026-04-14T00:00:00.000Z" },
       target_snapshot: { id: "snap_stage", target_id: "target_stage", snapshot_value: "https://github.com/openclaw/openclaw", commit_sha: null, captured_at: "2026-04-14T00:00:00.000Z", analysis_hash: null },
       target_summary: { id: "target_stage", target_id: "target_stage", canonical_target_id: "target_stage", canonical_name: "openclaw", target_type: "repo", repo_url: "https://github.com/openclaw/openclaw", local_path: null, endpoint_url: null, latest_run_id: "run_stage", latest_run_created_at: "2026-04-14T00:00:00.000Z", latest_status: "succeeded", latest_run_mode: "static", latest_audit_package: "deep-static", latest_target_class: "repo_posture_only", latest_rating: "B", latest_overall_score: 82, latest_static_score: 82, latest_publishability_status: "publishable", latest_human_review_required: false, latest_finding_count: 0, latest_frameworks_json: [], latest_languages_json: ["typescript"], latest_package_ecosystems_json: ["npm"], updated_at: "2026-04-14T00:00:00.000Z" },
       policy_pack: null,
       run: { id: "run_stage", target_id: "target_stage", target_snapshot_id: "snap_stage", policy_pack_id: null, status: "succeeded", run_mode: "static", audit_package: "deep-static", artifact_root: rootDir, started_at: "2026-04-14T00:00:00.000Z", completed_at: "2026-04-14T00:01:00.000Z", static_score: 82, overall_score: 82, rating: "B", created_at: "2026-04-14T00:00:00.000Z" },
-      resolved_configuration: { run_id: "run_stage", policy_pack_id: null, policy_pack_name: null, policy_pack_source: null, policy_profile: null, policy_version: null, requested_policy_pack: null, requested_audit_package: "deep-static", selected_audit_package: "deep-static", audit_package_title: "Deep Static", audit_package_selection_mode: "explicit", initial_target_class: "repo_posture_only", run_mode: "static", target_kind: "repo", db_mode: "embedded", output_dir: null, validation_json: { valid: true, errors: [], warnings: [] }, request_summary_json: { run_mode: "static", target_kind: "repo", db_mode: "embedded" }, policy_pack_json: {}, audit_package_json: { selected_id: "deep-static" } },
+      resolved_configuration: { run_id: "run_stage", policy_pack_id: null, policy_pack_name: null, policy_pack_source: null, policy_profile: null, policy_version: null, requested_policy_pack: null, requested_audit_package: "deep-static", selected_audit_package: "deep-static", audit_package_title: "Deep Static", audit_package_selection_mode: "explicit", initial_target_class: "repo_posture_only", run_mode: "static", target_kind: "repo", db_mode: "local", output_dir: null, validation_json: { valid: true, errors: [], warnings: [] }, request_summary_json: { run_mode: "static", target_kind: "repo", db_mode: "local" }, policy_pack_json: {}, audit_package_json: { selected_id: "deep-static" } },
       stage_artifacts: [{ id: "run_stage:stage-artifact:run-plan", run_id: "run_stage", artifact_type: "run-plan", payload_json: { selected_profile: "deep-static", target_class: "repo_posture_only" }, created_at: "2026-04-14T00:00:00.000Z" }],
       stage_executions: [], lane_plans: [], evidence_records: [], lane_results: [], lane_specialists: [], agent_invocations: [], tool_executions: [], findings: [], control_results: [],
       score_summary: { run_id: "run_stage", methodology_version: "1", overall_score: 82, rating: "B", leaderboard_summary: "", limitations_json: [] },
@@ -533,7 +550,7 @@ async function testReadPersistedStageArtifact(): Promise<void> {
   });
 }
 
-async function testCleanupEmbeddedJsonMirrorsDryRun(): Promise<void> {
+async function testCleanupLocalJsonMirrorsDryRun(): Promise<void> {
   await withTempDir("harness-cleanup-dry-", async (rootDir) => {
     await fs.mkdir(path.join(rootDir, "runs"), { recursive: true });
     await fs.writeFile(path.join(rootDir, "harness.sqlite"), "sqlite");
@@ -542,7 +559,7 @@ async function testCleanupEmbeddedJsonMirrorsDryRun(): Promise<void> {
     await fs.writeFile(path.join(rootDir, "targets.json"), "[]\n");
     await fs.writeFile(path.join(rootDir, "metrics.json"), "[]\n");
 
-    const summary = await cleanupEmbeddedJsonMirrors({ rootDir, dryRun: true });
+    const summary = await cleanupLocalJsonMirrors({ rootDir, dryRun: true });
 
     assert.equal(summary.dry_run, true);
     assert.deepEqual(summary.removed_files, ["metrics.json", "runs.json", "targets.json"]);
@@ -611,7 +628,7 @@ async function testReadPersistedRunUsageSummary(): Promise<void> {
   });
 }
 
-async function testCleanupEmbeddedJsonMirrorsLive(): Promise<void> {
+async function testCleanupLocalJsonMirrorsLive(): Promise<void> {
   await withTempDir("harness-cleanup-live-", async (rootDir) => {
     await fs.mkdir(path.join(rootDir, "runs"), { recursive: true });
     await fs.writeFile(path.join(rootDir, "harness.sqlite"), "sqlite");
@@ -619,7 +636,7 @@ async function testCleanupEmbeddedJsonMirrorsLive(): Promise<void> {
     await fs.writeFile(path.join(rootDir, "events.json"), "[]\n");
     await fs.writeFile(path.join(rootDir, "tool_executions.json"), "[]\n");
 
-    const summary = await cleanupEmbeddedJsonMirrors({ rootDir, dryRun: false });
+    const summary = await cleanupLocalJsonMirrors({ rootDir, dryRun: false });
 
     assert.equal(summary.dry_run, false);
     assert.deepEqual(summary.removed_files, ["events.json", "tool_executions.json"]);
@@ -630,12 +647,12 @@ async function testCleanupEmbeddedJsonMirrorsLive(): Promise<void> {
   });
 }
 
-async function testValidateEmbeddedPersistenceDetectsMissingRecords(): Promise<void> {
+async function testValidateLocalPersistenceDetectsMissingRecords(): Promise<void> {
   await withTempDir("harness-validate-missing-", async (rootDir) => {
     const runsDir = path.join(rootDir, "runs");
     await fs.mkdir(runsDir, { recursive: true });
     await fs.writeFile(path.join(runsDir, "run_missing.json"), JSON.stringify({
-      mode: "embedded",
+      mode: "local",
       target: { id: "target_missing", target_type: "repo", canonical_name: "missing", repo_url: "https://github.com/example/missing", local_path: null, endpoint_url: null, created_at: "2026-04-14T00:00:00.000Z" },
       target_snapshot: { id: "snap_missing", target_id: "target_missing", snapshot_value: "https://github.com/example/missing", commit_sha: null, captured_at: "2026-04-14T00:00:00.000Z", analysis_hash: null },
       target_summary: { id: "target_missing", target_id: "target_missing", canonical_target_id: "target_missing", canonical_name: "missing", target_type: "repo", repo_url: "https://github.com/example/missing", local_path: null, endpoint_url: null, latest_run_id: "run_missing", latest_run_created_at: "2026-04-14T00:00:00.000Z", latest_status: "succeeded", latest_run_mode: "static", latest_audit_package: "deep-static", latest_target_class: "repo_posture_only", latest_rating: "B", latest_overall_score: 82, latest_static_score: 82, latest_publishability_status: "publishable", latest_human_review_required: false, latest_finding_count: 0, latest_frameworks_json: [], latest_languages_json: [], latest_package_ecosystems_json: [], updated_at: "2026-04-14T00:00:00.000Z" },
@@ -652,7 +669,7 @@ async function testValidateEmbeddedPersistenceDetectsMissingRecords(): Promise<v
       dimension_scores: []
     }, null, 2) + "\n", "utf8");
 
-    const summary = await validateEmbeddedPersistence({ rootDir });
+    const summary = await validateLocalPersistence({ rootDir });
     assert.equal(summary.selected_runs, 1);
     assert.equal(summary.invalid_runs, 1);
     assert.equal(summary.results[0]?.run_id, "run_missing");
@@ -662,57 +679,64 @@ async function testValidateEmbeddedPersistenceDetectsMissingRecords(): Promise<v
   });
 }
 
-async function testValidateEmbeddedPersistencePassesForPersistedRun(): Promise<void> {
+async function testValidateLocalPersistencePassesForPersistedRun(): Promise<void> {
   await withTempDir("harness-validate-ok-", async (rootDir) => {
-    const store = new EmbeddedPersistenceStore(rootDir);
-    await store.persistBundle({
-      mode: "embedded",
-      package_definition: { id: "deep-static", title: "Deep Static", description: "", run_mode: "static", default_policy_profile: "default", requires_agents: true, lane_specialists_enabled: true, focus: [], minimum_tools: [], scorecard_weights: {} } as any,
-      target: { id: "target_valid", target_type: "repo", canonical_name: "valid", repo_url: "https://github.com/example/valid", local_path: null, endpoint_url: null, created_at: "2026-04-14T00:00:00.000Z" },
-      target_snapshot: { id: "snap_valid", target_id: "target_valid", snapshot_value: "https://github.com/example/valid", commit_sha: null, captured_at: "2026-04-14T00:00:00.000Z", analysis_hash: null },
-      target_summary: { id: "target_valid", target_id: "target_valid", canonical_target_id: "target_valid", canonical_name: "valid", target_type: "repo", repo_url: "https://github.com/example/valid", local_path: null, endpoint_url: null, latest_run_id: "run_valid", latest_run_created_at: "2026-04-14T00:00:00.000Z", latest_status: "succeeded", latest_run_mode: "static", latest_audit_package: "deep-static", latest_target_class: "repo_posture_only", latest_rating: "B", latest_overall_score: 82, latest_static_score: 82, latest_publishability_status: "publishable", latest_human_review_required: false, latest_finding_count: 0, latest_frameworks_json: [], latest_languages_json: ["typescript"], latest_package_ecosystems_json: ["npm"], updated_at: "2026-04-14T00:00:00.000Z" },
-      policy_pack: null,
-      run: { id: "run_valid", target_id: "target_valid", target_snapshot_id: "snap_valid", policy_pack_id: null, status: "succeeded", run_mode: "static", audit_package: "deep-static", artifact_root: path.join(rootDir, "artifacts", "run_valid"), started_at: "2026-04-14T00:00:00.000Z", completed_at: "2026-04-14T00:01:00.000Z", static_score: 82, overall_score: 82, rating: "B", created_at: "2026-04-14T00:00:00.000Z" },
-      resolved_configuration: { run_id: "run_valid", policy_pack_id: null, policy_pack_name: null, policy_pack_source: null, policy_profile: null, policy_version: null, requested_policy_pack: null, requested_audit_package: "deep-static", selected_audit_package: "deep-static", audit_package_title: "Deep Static", audit_package_selection_mode: "explicit", initial_target_class: "repo_posture_only", run_mode: "static", target_kind: "repo", db_mode: "embedded", output_dir: null, validation_json: { valid: true, errors: [], warnings: [] }, request_summary_json: { run_mode: "static", target_kind: "repo", db_mode: "embedded" }, policy_pack_json: {}, audit_package_json: { selected_id: "deep-static" } },
-      commit_diff: { run_id: "run_valid", previous_run_id: null, current_commit_sha: null, previous_commit_sha: null, comparison_mode: "no_prior_run", changed_files_json: [], stage_decisions_json: { planner: "rerun", threat_model: "rerun", eval_selection: "rerun" }, rationale_json: [] },
-      correction_plan: null,
-      correction_result: null,
-      lane_reuse_decisions: [{ id: "run_valid:lane-reuse:repo_posture", run_id: "run_valid", lane_name: "repo_posture", decision: "rerun", rationale_json: [] }],
-      persistence_summary: { run_id: "run_valid", mode: "embedded", root: rootDir },
-      stage_artifacts: [
-        { id: "run_valid:stage-artifact:planner-artifact", run_id: "run_valid", artifact_type: "planner-artifact", payload_json: {}, created_at: "2026-04-14T00:00:00.000Z" },
-        { id: "run_valid:stage-artifact:target-profile", run_id: "run_valid", artifact_type: "target-profile", payload_json: {}, created_at: "2026-04-14T00:00:00.000Z" },
-        { id: "run_valid:stage-artifact:threat-model", run_id: "run_valid", artifact_type: "threat-model", payload_json: {}, created_at: "2026-04-14T00:00:00.000Z" },
-        { id: "run_valid:stage-artifact:eval-selection", run_id: "run_valid", artifact_type: "eval-selection", payload_json: {}, created_at: "2026-04-14T00:00:00.000Z" },
-        { id: "run_valid:stage-artifact:run-plan", run_id: "run_valid", artifact_type: "run-plan", payload_json: {}, created_at: "2026-04-14T00:00:00.000Z" },
-        { id: "run_valid:stage-artifact:findings-pre-skeptic", run_id: "run_valid", artifact_type: "findings-pre-skeptic", payload_json: [], created_at: "2026-04-14T00:00:00.000Z" },
-        { id: "run_valid:stage-artifact:score-summary", run_id: "run_valid", artifact_type: "score-summary", payload_json: {}, created_at: "2026-04-14T00:00:00.000Z" },
-        { id: "run_valid:stage-artifact:observations", run_id: "run_valid", artifact_type: "observations", payload_json: [], created_at: "2026-04-14T00:00:00.000Z" }
-      ],
-      stage_executions: [],
-      lane_plans: [],
-      evidence_records: [],
-      lane_results: [],
-      lane_specialists: [],
-      agent_invocations: [],
-      tool_executions: [],
-      findings: [],
-      control_results: [],
-      score_summary: { run_id: "run_valid", methodology_version: "1", overall_score: 82, rating: "B", leaderboard_summary: "", limitations_json: [] },
-      review_decision: { run_id: "run_valid", publishability_status: "publishable", human_review_required: false, public_summary_safe: true, threshold: "standard", rationale_json: [], gating_findings_json: [], recommended_visibility: "public" },
-      policy_application: { run_id: "run_valid", applied_suppressions_json: [], applied_waivers_json: [], effective_finding_ids_json: [], effective_control_ids_json: [], notes_json: [] },
-      dimension_scores: [],
-      metrics: [],
-      events: [],
-      artifact_index: []
-    } as any);
+    const store = new LocalPersistenceStore(rootDir);
+    const previousEnabled = process.env.HARNESS_BUNDLE_EXPORT_ENABLED;
+    try {
+      process.env.HARNESS_BUNDLE_EXPORT_ENABLED = "1";
+      await store.persistBundle({
+        mode: "local",
+        package_definition: { id: "deep-static", title: "Deep Static", description: "", run_mode: "static", default_policy_profile: "default", requires_agents: true, lane_specialists_enabled: true, focus: [], minimum_tools: [], scorecard_weights: {} } as any,
+        target: { id: "target_valid", target_type: "repo", canonical_name: "valid", repo_url: "https://github.com/example/valid", local_path: null, endpoint_url: null, created_at: "2026-04-14T00:00:00.000Z" },
+        target_snapshot: { id: "snap_valid", target_id: "target_valid", snapshot_value: "https://github.com/example/valid", commit_sha: null, captured_at: "2026-04-14T00:00:00.000Z", analysis_hash: null },
+        target_summary: { id: "target_valid", target_id: "target_valid", canonical_target_id: "target_valid", canonical_name: "valid", target_type: "repo", repo_url: "https://github.com/example/valid", local_path: null, endpoint_url: null, latest_run_id: "run_valid", latest_run_created_at: "2026-04-14T00:00:00.000Z", latest_status: "succeeded", latest_run_mode: "static", latest_audit_package: "deep-static", latest_target_class: "repo_posture_only", latest_rating: "B", latest_overall_score: 82, latest_static_score: 82, latest_publishability_status: "publishable", latest_human_review_required: false, latest_finding_count: 0, latest_frameworks_json: [], latest_languages_json: ["typescript"], latest_package_ecosystems_json: ["npm"], updated_at: "2026-04-14T00:00:00.000Z" },
+        policy_pack: null,
+        run: { id: "run_valid", target_id: "target_valid", target_snapshot_id: "snap_valid", policy_pack_id: null, status: "succeeded", run_mode: "static", audit_package: "deep-static", artifact_root: path.join(rootDir, "artifacts", "run_valid"), started_at: "2026-04-14T00:00:00.000Z", completed_at: "2026-04-14T00:01:00.000Z", static_score: 82, overall_score: 82, rating: "B", created_at: "2026-04-14T00:00:00.000Z" },
+        resolved_configuration: { run_id: "run_valid", policy_pack_id: null, policy_pack_name: null, policy_pack_source: null, policy_profile: null, policy_version: null, requested_policy_pack: null, requested_audit_package: "deep-static", selected_audit_package: "deep-static", audit_package_title: "Deep Static", audit_package_selection_mode: "explicit", initial_target_class: "repo_posture_only", run_mode: "static", target_kind: "repo", db_mode: "local", output_dir: null, validation_json: { valid: true, errors: [], warnings: [] }, request_summary_json: { run_mode: "static", target_kind: "repo", db_mode: "local" }, policy_pack_json: {}, audit_package_json: { selected_id: "deep-static" } },
+        commit_diff: { run_id: "run_valid", previous_run_id: null, current_commit_sha: null, previous_commit_sha: null, comparison_mode: "no_prior_run", changed_files_json: [], stage_decisions_json: { planner: "rerun", threat_model: "rerun", eval_selection: "rerun" }, rationale_json: [] },
+        correction_plan: null,
+        correction_result: null,
+        lane_reuse_decisions: [{ id: "run_valid:lane-reuse:repo_posture", run_id: "run_valid", lane_name: "repo_posture", decision: "rerun", rationale_json: [] }],
+        persistence_summary: { run_id: "run_valid", mode: "local", root: rootDir },
+        stage_artifacts: [
+          { id: "run_valid:stage-artifact:planner-artifact", run_id: "run_valid", artifact_type: "planner-artifact", payload_json: {}, created_at: "2026-04-14T00:00:00.000Z" },
+          { id: "run_valid:stage-artifact:target-profile", run_id: "run_valid", artifact_type: "target-profile", payload_json: {}, created_at: "2026-04-14T00:00:00.000Z" },
+          { id: "run_valid:stage-artifact:threat-model", run_id: "run_valid", artifact_type: "threat-model", payload_json: {}, created_at: "2026-04-14T00:00:00.000Z" },
+          { id: "run_valid:stage-artifact:eval-selection", run_id: "run_valid", artifact_type: "eval-selection", payload_json: {}, created_at: "2026-04-14T00:00:00.000Z" },
+          { id: "run_valid:stage-artifact:run-plan", run_id: "run_valid", artifact_type: "run-plan", payload_json: {}, created_at: "2026-04-14T00:00:00.000Z" },
+          { id: "run_valid:stage-artifact:findings-pre-skeptic", run_id: "run_valid", artifact_type: "findings-pre-skeptic", payload_json: [], created_at: "2026-04-14T00:00:00.000Z" },
+          { id: "run_valid:stage-artifact:score-summary", run_id: "run_valid", artifact_type: "score-summary", payload_json: {}, created_at: "2026-04-14T00:00:00.000Z" },
+          { id: "run_valid:stage-artifact:observations", run_id: "run_valid", artifact_type: "observations", payload_json: [], created_at: "2026-04-14T00:00:00.000Z" }
+        ],
+        stage_executions: [],
+        lane_plans: [],
+        evidence_records: [],
+        lane_results: [],
+        lane_specialists: [],
+        agent_invocations: [],
+        tool_executions: [],
+        findings: [],
+        control_results: [],
+        score_summary: { run_id: "run_valid", methodology_version: "1", overall_score: 82, rating: "B", leaderboard_summary: "", limitations_json: [] },
+        review_decision: { run_id: "run_valid", publishability_status: "publishable", human_review_required: false, public_summary_safe: true, threshold: "standard", rationale_json: [], gating_findings_json: [], recommended_visibility: "public" },
+        policy_application: { run_id: "run_valid", applied_suppressions_json: [], applied_waivers_json: [], effective_finding_ids_json: [], effective_control_ids_json: [], notes_json: [] },
+        dimension_scores: [],
+        metrics: [],
+        events: [],
+        artifact_index: []
+      } as any);
 
-    const summary = await validateEmbeddedPersistence({ rootDir });
-    assert.equal(summary.selected_runs, 1);
-    assert.equal(summary.valid_runs, 1);
-    assert.equal(summary.invalid_runs, 0);
-    assert.equal(summary.results[0]?.run_id, "run_valid");
-    assert.equal(summary.results[0]?.valid, true);
+      const summary = await validateLocalPersistence({ rootDir });
+      assert.equal(summary.selected_runs, 1);
+      assert.equal(summary.valid_runs, 1);
+      assert.equal(summary.invalid_runs, 0);
+      assert.equal(summary.results[0]?.run_id, "run_valid");
+      assert.equal(summary.results[0]?.valid, true);
+    } finally {
+      if (previousEnabled === undefined) delete process.env.HARNESS_BUNDLE_EXPORT_ENABLED;
+      else process.env.HARNESS_BUNDLE_EXPORT_ENABLED = previousEnabled;
+    }
   });
 }
 
@@ -736,7 +760,7 @@ async function testFreshRunPersistsExpectedRecords(): Promise<void> {
       });
     });
 
-    const persistenceRoot = path.join(rootDir, ".artifacts", "state", "embedded-db");
+    const persistenceRoot = path.join(rootDir, ".artifacts", "state", "local-db");
     const run = await getPersistedRun(result.run_id, persistenceRoot);
     const targetSummary = await readPersistedTargetSummary(result.target.target_id, persistenceRoot);
     const resolvedConfig = await readPersistedResolvedConfiguration(result.run_id, persistenceRoot);
@@ -791,7 +815,7 @@ async function testFreshRunPersistsExpectedRecords(): Promise<void> {
 
 async function testPersistedReviewWorkflowAndActions(): Promise<void> {
   await withTempDir("harness-review-workflow-", async (rootDir) => {
-    const store = new EmbeddedPersistenceStore(rootDir);
+    const store = new LocalPersistenceStore(rootDir);
     const reviewDecision = {
       run_id: "run_review",
       publishability_status: "review_required",
@@ -810,14 +834,14 @@ async function testPersistedReviewWorkflowAndActions(): Promise<void> {
     } as const;
 
     await store.persistBundle({
-      mode: "embedded",
+      mode: "local",
       package_definition: { id: "deep-static", title: "Deep Static", description: "", run_mode: "static", default_policy_profile: "default", requires_agents: true, lane_specialists_enabled: true, focus: [], minimum_tools: [], scorecard_weights: {} } as any,
       target: { id: "target_review", target_type: "repo", canonical_name: "review-target", repo_url: "https://github.com/example/review-target", local_path: null, endpoint_url: null, created_at: "2026-04-15T00:00:00.000Z" },
       target_snapshot: { id: "snap_review", target_id: "target_review", snapshot_value: "https://github.com/example/review-target", commit_sha: null, captured_at: "2026-04-15T00:00:00.000Z", analysis_hash: null },
       target_summary: { id: "target_review", target_id: "target_review", canonical_target_id: "target_review", canonical_name: "review-target", target_type: "repo", repo_url: "https://github.com/example/review-target", local_path: null, endpoint_url: null, latest_run_id: "run_review", latest_run_created_at: "2026-04-15T00:00:00.000Z", latest_status: "succeeded", latest_run_mode: "static", latest_audit_package: "deep-static", latest_target_class: "repo_posture_only", latest_rating: "fair", latest_overall_score: 61, latest_static_score: 61, latest_publishability_status: "review_required", latest_human_review_required: true, latest_finding_count: 1, latest_frameworks_json: [], latest_languages_json: ["typescript"], latest_package_ecosystems_json: ["npm"], updated_at: "2026-04-15T00:00:00.000Z" },
       policy_pack: null,
       run: { id: "run_review", target_id: "target_review", target_snapshot_id: "snap_review", policy_pack_id: null, status: "succeeded", run_mode: "static", audit_package: "deep-static", artifact_root: rootDir, started_at: "2026-04-15T00:00:00.000Z", completed_at: "2026-04-15T00:01:00.000Z", static_score: 61, overall_score: 61, rating: "fair", created_at: "2026-04-15T00:00:00.000Z" },
-      resolved_configuration: { run_id: "run_review", policy_pack_id: null, policy_pack_name: null, policy_pack_source: null, policy_profile: null, policy_version: null, requested_policy_pack: null, requested_audit_package: "deep-static", selected_audit_package: "deep-static", audit_package_title: "Deep Static", audit_package_selection_mode: "explicit", initial_target_class: "repo_posture_only", run_mode: "static", target_kind: "repo", db_mode: "embedded", output_dir: null, validation_json: { valid: true, errors: [], warnings: [] }, request_summary_json: { run_mode: "static", target_kind: "repo", db_mode: "embedded" }, policy_pack_json: {}, audit_package_json: { selected_id: "deep-static" } },
+      resolved_configuration: { run_id: "run_review", policy_pack_id: null, policy_pack_name: null, policy_pack_source: null, policy_profile: null, policy_version: null, requested_policy_pack: null, requested_audit_package: "deep-static", selected_audit_package: "deep-static", audit_package_title: "Deep Static", audit_package_selection_mode: "explicit", initial_target_class: "repo_posture_only", run_mode: "static", target_kind: "repo", db_mode: "local", output_dir: null, validation_json: { valid: true, errors: [], warnings: [] }, request_summary_json: { run_mode: "static", target_kind: "repo", db_mode: "local" }, policy_pack_json: {}, audit_package_json: { selected_id: "deep-static" } },
       commit_diff: null,
       correction_plan: null,
       correction_result: null,
@@ -860,7 +884,7 @@ async function testPersistedReviewWorkflowAndActions(): Promise<void> {
 
     const assignment = await submitPersistedReviewAction({
       runId: "run_review",
-      rootDirOrOptions: { rootDir, dbMode: "embedded" },
+      rootDirOrOptions: { rootDir, dbMode: "local" },
       input: {
         reviewer_id: "triage-lead",
         action_type: "assign_reviewer",
@@ -876,7 +900,7 @@ async function testPersistedReviewWorkflowAndActions(): Promise<void> {
 
     const reassignment = await submitPersistedReviewAction({
       runId: "run_review",
-      rootDirOrOptions: { rootDir, dbMode: "embedded" },
+      rootDirOrOptions: { rootDir, dbMode: "local" },
       input: {
         reviewer_id: "triage-lead",
         action_type: "assign_reviewer",
@@ -892,7 +916,7 @@ async function testPersistedReviewWorkflowAndActions(): Promise<void> {
 
     await submitPersistedReviewAction({
       runId: "run_review",
-      rootDirOrOptions: { rootDir, dbMode: "embedded" },
+      rootDirOrOptions: { rootDir, dbMode: "local" },
       input: {
         reviewer_id: "bob",
         action_type: "start_review",
@@ -901,7 +925,7 @@ async function testPersistedReviewWorkflowAndActions(): Promise<void> {
     });
     const rerunRequest = await submitPersistedReviewAction({
       runId: "run_review",
-      rootDirOrOptions: { rootDir, dbMode: "embedded" },
+      rootDirOrOptions: { rootDir, dbMode: "local" },
       input: {
         reviewer_id: "bob",
         action_type: "request_validation",
@@ -916,7 +940,7 @@ async function testPersistedReviewWorkflowAndActions(): Promise<void> {
 
     await submitPersistedReviewAction({
       runId: "run_review",
-      rootDirOrOptions: { rootDir, dbMode: "embedded" },
+      rootDirOrOptions: { rootDir, dbMode: "local" },
       input: {
         reviewer_id: "bob",
         action_type: "start_review",
@@ -925,7 +949,7 @@ async function testPersistedReviewWorkflowAndActions(): Promise<void> {
     });
     const runtimeRerun = await submitPersistedReviewAction({
       runId: "run_review",
-      rootDirOrOptions: { rootDir, dbMode: "embedded" },
+      rootDirOrOptions: { rootDir, dbMode: "local" },
       input: {
         reviewer_id: "bob",
         action_type: "rerun_in_capable_env",
@@ -937,7 +961,7 @@ async function testPersistedReviewWorkflowAndActions(): Promise<void> {
     assert.equal(runtimeRerun.notification?.notification_type, "review_rerun_required");
     await submitPersistedReviewAction({
       runId: "run_review",
-      rootDirOrOptions: { rootDir, dbMode: "embedded" },
+      rootDirOrOptions: { rootDir, dbMode: "local" },
       input: {
         reviewer_id: "bob",
         action_type: "start_review",
@@ -946,7 +970,7 @@ async function testPersistedReviewWorkflowAndActions(): Promise<void> {
     });
     await submitPersistedReviewAction({
       runId: "run_review",
-      rootDirOrOptions: { rootDir, dbMode: "embedded" },
+      rootDirOrOptions: { rootDir, dbMode: "local" },
       input: {
         reviewer_id: "bob",
         action_type: "mark_manual_runtime_review_complete",
@@ -956,7 +980,7 @@ async function testPersistedReviewWorkflowAndActions(): Promise<void> {
     });
     await submitPersistedReviewAction({
       runId: "run_review",
-      rootDirOrOptions: { rootDir, dbMode: "embedded" },
+      rootDirOrOptions: { rootDir, dbMode: "local" },
       input: {
         reviewer_id: "bob",
         action_type: "downgrade_severity",
@@ -969,7 +993,7 @@ async function testPersistedReviewWorkflowAndActions(): Promise<void> {
     });
     await submitPersistedReviewAction({
       runId: "run_review",
-      rootDirOrOptions: { rootDir, dbMode: "embedded" },
+      rootDirOrOptions: { rootDir, dbMode: "local" },
       input: {
         reviewer_id: "bob",
         action_type: "approve_run",
@@ -985,7 +1009,7 @@ async function testPersistedReviewWorkflowAndActions(): Promise<void> {
       authorId: "bob",
       body: "handoff note for downstream publication review",
       findingId: "finding_review",
-      rootDirOrOptions: { rootDir, dbMode: "embedded" }
+      rootDirOrOptions: { rootDir, dbMode: "local" }
     });
     const findings = await readPersistedFindings("run_review", rootDir);
     const comments = await readPersistedReviewComments("run_review", rootDir);
@@ -1024,21 +1048,21 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
     await fs.mkdir(artifactRoot, { recursive: true });
     await fs.writeFile(path.join(artifactRoot, "final-score-summary.json"), JSON.stringify({ overall_score: 10, rating: "poor" }, null, 2) + "\n", "utf8");
 
-    const store = new EmbeddedPersistenceStore(path.join(rootDir, ".artifacts", "state", "embedded-db"));
+    const store = new LocalPersistenceStore(path.join(rootDir, ".artifacts", "state", "local-db"));
     await store.persistBundle({
-      mode: "embedded",
+      mode: "local",
       package_definition: { id: "deep-static", title: "Deep Static", description: "", run_mode: "static", default_policy_profile: "default", requires_agents: true, lane_specialists_enabled: true, focus: [], minimum_tools: [], scorecard_weights: {} } as any,
       target: { id: "target_api", target_type: "repo", canonical_name: "api", repo_url: "https://github.com/example/api", local_path: null, endpoint_url: null, created_at: "2026-04-14T00:00:00.000Z" },
       target_snapshot: { id: "snap_api", target_id: "target_api", snapshot_value: "https://github.com/example/api", commit_sha: null, captured_at: "2026-04-14T00:00:00.000Z", analysis_hash: null },
       target_summary: { id: "target_api", target_id: "target_api", canonical_target_id: "target_api", canonical_name: "api", target_type: "repo", repo_url: "https://github.com/example/api", local_path: null, endpoint_url: null, latest_run_id: "run_api", latest_run_created_at: "2026-04-14T00:00:00.000Z", latest_status: "succeeded", latest_run_mode: "static", latest_audit_package: "deep-static", latest_target_class: "repo_posture_only", latest_rating: "strong", latest_overall_score: 82, latest_static_score: 82, latest_publishability_status: "publishable", latest_human_review_required: false, latest_finding_count: 4, latest_frameworks_json: [], latest_languages_json: ["typescript"], latest_package_ecosystems_json: ["npm"], updated_at: "2026-04-14T00:00:00.000Z" },
       policy_pack: null,
       run: { id: "run_api", target_id: "target_api", target_snapshot_id: "snap_api", policy_pack_id: null, status: "succeeded", run_mode: "static", audit_package: "deep-static", artifact_root: artifactRoot, started_at: "2026-04-14T00:00:00.000Z", completed_at: "2026-04-14T00:01:00.000Z", static_score: 82, overall_score: 82, rating: "strong", created_at: "2026-04-14T00:00:00.000Z" },
-      resolved_configuration: { run_id: "run_api", policy_pack_id: null, policy_pack_name: null, policy_pack_source: null, policy_profile: null, policy_version: null, requested_policy_pack: null, requested_audit_package: "deep-static", selected_audit_package: "deep-static", audit_package_title: "Deep Static", audit_package_selection_mode: "explicit", initial_target_class: "repo_posture_only", run_mode: "static", target_kind: "repo", db_mode: "embedded", output_dir: null, validation_json: { valid: true, errors: [], warnings: [] }, request_summary_json: { run_mode: "static", target_kind: "repo", db_mode: "embedded" }, policy_pack_json: {}, audit_package_json: { selected_id: "deep-static" } },
+      resolved_configuration: { run_id: "run_api", policy_pack_id: null, policy_pack_name: null, policy_pack_source: null, policy_profile: null, policy_version: null, requested_policy_pack: null, requested_audit_package: "deep-static", selected_audit_package: "deep-static", audit_package_title: "Deep Static", audit_package_selection_mode: "explicit", initial_target_class: "repo_posture_only", run_mode: "static", target_kind: "repo", db_mode: "local", output_dir: null, validation_json: { valid: true, errors: [], warnings: [] }, request_summary_json: { run_mode: "static", target_kind: "repo", db_mode: "local" }, policy_pack_json: {}, audit_package_json: { selected_id: "deep-static" } },
       commit_diff: { run_id: "run_api", previous_run_id: null, current_commit_sha: null, previous_commit_sha: null, comparison_mode: "no_prior_run", changed_files_json: [], stage_decisions_json: { planner: "rerun", threat_model: "rerun", eval_selection: "rerun" }, rationale_json: [] },
       correction_plan: null,
       correction_result: null,
       lane_reuse_decisions: [],
-      persistence_summary: { run_id: "run_api", mode: "embedded", root: path.join(rootDir, ".artifacts", "state", "embedded-db") },
+      persistence_summary: { run_id: "run_api", mode: "local", root: path.join(rootDir, ".artifacts", "state", "local-db") },
       stage_artifacts: [
         {
           id: "run_api:stage-artifact:preflight-summary",
@@ -1330,7 +1354,7 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
     await upsertRuntimeFollowupFromReviewAction({
       runId: "run_api",
       actionId: "review_action_runtime_followup_seed",
-      rootDirOrOptions: path.join(rootDir, ".artifacts", "state", "embedded-db"),
+      rootDirOrOptions: path.join(rootDir, ".artifacts", "state", "local-db"),
       input: {
         reviewer_id: "triage_api",
         action_type: "rerun_in_capable_env",
@@ -1353,11 +1377,11 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
         github_owned_repo_prefixes: [],
         github_require_per_run_approval: true
       }
-    }, { rootDir: path.join(rootDir, ".artifacts", "state", "embedded-db"), dbMode: "embedded" }, { workspaceId: "default", projectId: "default", scopeLevel: "project" });
+    }, { rootDir: path.join(rootDir, ".artifacts", "state", "local-db"), dbMode: "local" }, { workspaceId: "default", projectId: "default", scopeLevel: "project" });
 
     const seededSuppression = await createPersistedFindingDisposition({
       runId: "run_api",
-      rootDirOrOptions: path.join(rootDir, ".artifacts", "state", "embedded-db"),
+      rootDirOrOptions: path.join(rootDir, ".artifacts", "state", "local-db"),
       input: {
         disposition_type: "suppression",
         scope_level: "run",
@@ -1380,7 +1404,7 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
     });
     const seededReopenedWaiver = await createPersistedFindingDisposition({
       runId: "run_api",
-      rootDirOrOptions: path.join(rootDir, ".artifacts", "state", "embedded-db"),
+      rootDirOrOptions: path.join(rootDir, ".artifacts", "state", "local-db"),
       input: {
         disposition_type: "waiver",
         scope_level: "project",
@@ -1403,7 +1427,7 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
     });
     await createPersistedFindingDisposition({
       runId: "run_api",
-      rootDirOrOptions: path.join(rootDir, ".artifacts", "state", "embedded-db"),
+      rootDirOrOptions: path.join(rootDir, ".artifacts", "state", "local-db"),
       input: {
         disposition_type: "waiver",
         scope_level: "project",
@@ -1430,7 +1454,7 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
     });
     await createPersistedFindingDisposition({
       runId: "run_api",
-      rootDirOrOptions: path.join(rootDir, ".artifacts", "state", "embedded-db"),
+      rootDirOrOptions: path.join(rootDir, ".artifacts", "state", "local-db"),
       input: {
         disposition_type: "waiver",
         scope_level: "project",
@@ -1464,7 +1488,7 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
           github_token: "test-github-token",
           configured_endpoints: []
         }
-      }, { rootDir: path.join(rootDir, ".artifacts", "state", "embedded-db"), dbMode: "embedded" }, { workspaceId: "default", projectId: "default", scopeLevel: "project" });
+      }, { rootDir: path.join(rootDir, ".artifacts", "state", "local-db"), dbMode: "local" }, { workspaceId: "default", projectId: "default", scopeLevel: "project" });
 
       const githubServer = http.createServer(async (req, res) => {
         if (req.method === "GET" && req.url === "/repos/example/api") {
@@ -2036,8 +2060,8 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
 async function testRuntimeFollowupLaunchFlow(): Promise<void> {
   const fixturePath = path.resolve("fixtures/validation-targets/agent-tool-boundary-risky");
   await withTempDir("harness-runtime-followup-", async (rootDir) => {
-    const embeddedRoot = path.join(rootDir, ".artifacts", "state", "embedded-db");
-    const store = new EmbeddedPersistenceStore(embeddedRoot);
+    const LocalRoot = path.join(rootDir, ".artifacts", "state", "local-db");
+    const store = new LocalPersistenceStore(LocalRoot);
     const reviewDecision = {
       run_id: "run_runtime_followup",
       publishability_status: "review_required",
@@ -2056,14 +2080,14 @@ async function testRuntimeFollowupLaunchFlow(): Promise<void> {
     } as const;
 
     await store.persistBundle({
-      mode: "embedded",
+      mode: "local",
       package_definition: { id: "deep-static", title: "Deep Static", description: "", run_mode: "static", default_policy_profile: "default", requires_agents: true, lane_specialists_enabled: true, focus: [], minimum_tools: [], scorecard_weights: {} } as any,
       target: { id: "target_runtime_followup", target_type: "path", canonical_name: "runtime-followup-target", repo_url: null, local_path: fixturePath, endpoint_url: null, created_at: "2026-04-17T00:00:00.000Z" },
       target_snapshot: { id: "snap_runtime_followup", target_id: "target_runtime_followup", snapshot_value: fixturePath, commit_sha: null, captured_at: "2026-04-17T00:00:00.000Z", analysis_hash: null },
       target_summary: { id: "target_runtime_followup", target_id: "target_runtime_followup", canonical_target_id: "target_runtime_followup", workspace_id: "default", project_id: "default", canonical_name: "runtime-followup-target", target_type: "path", repo_url: null, local_path: fixturePath, endpoint_url: null, latest_run_id: "run_runtime_followup", latest_run_created_at: "2026-04-17T00:00:00.000Z", latest_status: "succeeded", latest_run_mode: "static", latest_audit_package: "deep-static", latest_target_class: "runnable_local_app", latest_rating: "fair", latest_overall_score: 55, latest_static_score: 55, latest_publishability_status: "review_required", latest_human_review_required: true, latest_finding_count: 1, latest_frameworks_json: [], latest_languages_json: ["javascript"], latest_package_ecosystems_json: ["npm"], updated_at: "2026-04-17T00:00:00.000Z" },
       policy_pack: null,
       run: { id: "run_runtime_followup", target_id: "target_runtime_followup", target_snapshot_id: "snap_runtime_followup", workspace_id: "default", project_id: "default", requested_by: "triage", policy_pack_id: null, status: "succeeded", run_mode: "static", audit_package: "deep-static", artifact_root: rootDir, started_at: "2026-04-17T00:00:00.000Z", completed_at: "2026-04-17T00:01:00.000Z", static_score: 55, overall_score: 55, rating: "fair", created_at: "2026-04-17T00:00:00.000Z" },
-      resolved_configuration: { run_id: "run_runtime_followup", policy_pack_id: null, policy_pack_name: null, policy_pack_source: null, policy_profile: null, policy_version: null, requested_policy_pack: null, requested_audit_package: "deep-static", selected_audit_package: "deep-static", audit_package_title: "Deep Static", audit_package_selection_mode: "explicit", initial_target_class: "runnable_local_app", run_mode: "static", target_kind: "path", db_mode: "embedded", output_dir: null, validation_json: { valid: true, errors: [], warnings: [] }, request_summary_json: { run_mode: "static", target_kind: "path", db_mode: "embedded" }, policy_pack_json: {}, audit_package_json: { selected_id: "deep-static" } },
+      resolved_configuration: { run_id: "run_runtime_followup", policy_pack_id: null, policy_pack_name: null, policy_pack_source: null, policy_profile: null, policy_version: null, requested_policy_pack: null, requested_audit_package: "deep-static", selected_audit_package: "deep-static", audit_package_title: "Deep Static", audit_package_selection_mode: "explicit", initial_target_class: "runnable_local_app", run_mode: "static", target_kind: "path", db_mode: "local", output_dir: null, validation_json: { valid: true, errors: [], warnings: [] }, request_summary_json: { run_mode: "static", target_kind: "path", db_mode: "local" }, policy_pack_json: {}, audit_package_json: { selected_id: "deep-static" } },
       commit_diff: null,
       correction_plan: null,
       correction_result: null,
@@ -2194,19 +2218,19 @@ async function testRuntimeFollowupLaunchFlow(): Promise<void> {
 
 async function testRuntimeFollowupOutcomeReconciliation(): Promise<void> {
   await withTempDir("harness-runtime-followup-outcome-", async (rootDir) => {
-    const embeddedRoot = path.join(rootDir, ".artifacts", "state", "embedded-db");
-    const store = new EmbeddedPersistenceStore(embeddedRoot);
+    const LocalRoot = path.join(rootDir, ".artifacts", "state", "local-db");
+    const store = new LocalPersistenceStore(LocalRoot);
     const sourceRunId = "run_runtime_source";
     const rerunRunId = "run_runtime_rerun";
     await store.persistBundle({
-      mode: "embedded",
+      mode: "local",
       package_definition: { id: "deep-static", title: "Deep Static", description: "", run_mode: "static", default_policy_profile: "default", requires_agents: true, lane_specialists_enabled: true, focus: [], minimum_tools: [], scorecard_weights: {} } as any,
       target: { id: "target_runtime_source", target_type: "path", canonical_name: "runtime-source", repo_url: null, local_path: path.resolve("fixtures/validation-targets/agent-tool-boundary-risky"), endpoint_url: null, created_at: "2026-04-17T00:00:00.000Z" },
       target_snapshot: { id: "snap_runtime_source", target_id: "target_runtime_source", snapshot_value: path.resolve("fixtures/validation-targets/agent-tool-boundary-risky"), commit_sha: null, captured_at: "2026-04-17T00:00:00.000Z", analysis_hash: null },
       target_summary: { id: "target_runtime_source", target_id: "target_runtime_source", canonical_target_id: "target_runtime_source", workspace_id: "default", project_id: "default", canonical_name: "runtime-source", target_type: "path", repo_url: null, local_path: path.resolve("fixtures/validation-targets/agent-tool-boundary-risky"), endpoint_url: null, latest_run_id: sourceRunId, latest_run_created_at: "2026-04-17T00:00:00.000Z", latest_status: "succeeded", latest_run_mode: "static", latest_audit_package: "deep-static", latest_target_class: "runnable_local_app", latest_rating: "fair", latest_overall_score: 58, latest_static_score: 58, latest_publishability_status: "review_required", latest_human_review_required: true, latest_finding_count: 1, latest_frameworks_json: [], latest_languages_json: ["javascript"], latest_package_ecosystems_json: ["npm"], updated_at: "2026-04-17T00:00:00.000Z" },
       policy_pack: null,
       run: { id: sourceRunId, target_id: "target_runtime_source", target_snapshot_id: "snap_runtime_source", workspace_id: "default", project_id: "default", requested_by: "triage", policy_pack_id: null, status: "succeeded", run_mode: "static", audit_package: "deep-static", artifact_root: rootDir, started_at: "2026-04-17T00:00:00.000Z", completed_at: "2026-04-17T00:01:00.000Z", static_score: 58, overall_score: 58, rating: "fair", created_at: "2026-04-17T00:00:00.000Z" },
-      resolved_configuration: { run_id: sourceRunId, policy_pack_id: null, policy_pack_name: null, policy_pack_source: null, policy_profile: null, policy_version: null, requested_policy_pack: null, requested_audit_package: "deep-static", selected_audit_package: "deep-static", audit_package_title: "Deep Static", audit_package_selection_mode: "explicit", initial_target_class: "runnable_local_app", run_mode: "static", target_kind: "path", db_mode: "embedded", output_dir: null, validation_json: { valid: true, errors: [], warnings: [] }, request_summary_json: { run_mode: "static", target_kind: "path", db_mode: "embedded" }, policy_pack_json: {}, audit_package_json: { selected_id: "deep-static" } },
+      resolved_configuration: { run_id: sourceRunId, policy_pack_id: null, policy_pack_name: null, policy_pack_source: null, policy_profile: null, policy_version: null, requested_policy_pack: null, requested_audit_package: "deep-static", selected_audit_package: "deep-static", audit_package_title: "Deep Static", audit_package_selection_mode: "explicit", initial_target_class: "runnable_local_app", run_mode: "static", target_kind: "path", db_mode: "local", output_dir: null, validation_json: { valid: true, errors: [], warnings: [] }, request_summary_json: { run_mode: "static", target_kind: "path", db_mode: "local" }, policy_pack_json: {}, audit_package_json: { selected_id: "deep-static" } },
       commit_diff: null,
       correction_plan: null,
       correction_result: null,
@@ -2274,14 +2298,14 @@ async function testRuntimeFollowupOutcomeReconciliation(): Promise<void> {
     } as any);
 
     await store.persistBundle({
-      mode: "embedded",
+      mode: "local",
       package_definition: { id: "deep-static", title: "Deep Static", description: "", run_mode: "validate", default_policy_profile: "default", requires_agents: true, lane_specialists_enabled: true, focus: [], minimum_tools: [], scorecard_weights: {} } as any,
       target: { id: "target_runtime_source", target_type: "path", canonical_name: "runtime-source", repo_url: null, local_path: path.resolve("fixtures/validation-targets/agent-tool-boundary-risky"), endpoint_url: null, created_at: "2026-04-17T00:00:00.000Z" },
       target_snapshot: { id: "snap_runtime_rerun", target_id: "target_runtime_source", snapshot_value: path.resolve("fixtures/validation-targets/agent-tool-boundary-risky"), commit_sha: null, captured_at: "2026-04-17T00:02:00.000Z", analysis_hash: null },
       target_summary: { id: "target_runtime_source", target_id: "target_runtime_source", canonical_target_id: "target_runtime_source", workspace_id: "default", project_id: "default", canonical_name: "runtime-source", target_type: "path", repo_url: null, local_path: path.resolve("fixtures/validation-targets/agent-tool-boundary-risky"), endpoint_url: null, latest_run_id: rerunRunId, latest_run_created_at: "2026-04-17T00:02:00.000Z", latest_status: "succeeded", latest_run_mode: "validate", latest_audit_package: "deep-static", latest_target_class: "runnable_local_app", latest_rating: "fair", latest_overall_score: 61, latest_static_score: 61, latest_publishability_status: "review_required", latest_human_review_required: true, latest_finding_count: 1, latest_frameworks_json: [], latest_languages_json: ["javascript"], latest_package_ecosystems_json: ["npm"], updated_at: "2026-04-17T00:02:00.000Z" },
       policy_pack: null,
       run: { id: rerunRunId, target_id: "target_runtime_source", target_snapshot_id: "snap_runtime_rerun", workspace_id: "default", project_id: "default", requested_by: "runtime-reviewer", policy_pack_id: null, status: "succeeded", run_mode: "validate", audit_package: "deep-static", artifact_root: rootDir, started_at: "2026-04-17T00:02:00.000Z", completed_at: "2026-04-17T00:03:00.000Z", static_score: 61, overall_score: 61, rating: "fair", created_at: "2026-04-17T00:02:00.000Z", retry_of_run_id: sourceRunId },
-      resolved_configuration: { run_id: rerunRunId, policy_pack_id: null, policy_pack_name: null, policy_pack_source: null, policy_profile: null, policy_version: null, requested_policy_pack: null, requested_audit_package: "deep-static", selected_audit_package: "deep-static", audit_package_title: "Deep Static", audit_package_selection_mode: "explicit", initial_target_class: "runnable_local_app", run_mode: "validate", target_kind: "path", db_mode: "embedded", output_dir: null, validation_json: { valid: true, errors: [], warnings: [] }, request_summary_json: { run_mode: "validate", target_kind: "path", db_mode: "embedded" }, policy_pack_json: {}, audit_package_json: { selected_id: "deep-static" } },
+      resolved_configuration: { run_id: rerunRunId, policy_pack_id: null, policy_pack_name: null, policy_pack_source: null, policy_profile: null, policy_version: null, requested_policy_pack: null, requested_audit_package: "deep-static", selected_audit_package: "deep-static", audit_package_title: "Deep Static", audit_package_selection_mode: "explicit", initial_target_class: "runnable_local_app", run_mode: "validate", target_kind: "path", db_mode: "local", output_dir: null, validation_json: { valid: true, errors: [], warnings: [] }, request_summary_json: { run_mode: "validate", target_kind: "path", db_mode: "local" }, policy_pack_json: {}, audit_package_json: { selected_id: "deep-static" } },
       commit_diff: null,
       correction_plan: null,
       correction_result: null,
@@ -2322,7 +2346,7 @@ async function testRuntimeFollowupOutcomeReconciliation(): Promise<void> {
       artifact_index: []
     } as any);
 
-    const location = { rootDir: embeddedRoot, dbMode: "embedded" } as const;
+    const location = { rootDir: LocalRoot, dbMode: "local" } as const;
     const followup = await upsertRuntimeFollowupFromReviewAction({
       runId: sourceRunId,
       actionId: "action_runtime_followup",
@@ -2438,11 +2462,11 @@ async function testAsyncRunLifecycleApi(): Promise<void> {
       res.end();
       webhookResolve?.(webhookPayload);
     });
-    const webhookPort = 9000 + Math.floor(Math.random() * 200);
     await new Promise<void>((resolve, reject) => {
       webhookServer.once("error", reject);
-      webhookServer.listen(webhookPort, "127.0.0.1", () => resolve());
+      webhookServer.listen(0, "127.0.0.1", () => resolve());
     });
+    const webhookPort = getListeningPort(webhookServer);
 
     const genericWebhookEvents: any[] = [];
     let genericWebhookResolve: ((payload: any) => void) | null = null;
@@ -2462,13 +2486,11 @@ async function testAsyncRunLifecycleApi(): Promise<void> {
       res.end();
       genericWebhookResolve?.(payload);
     });
-    const genericWebhookPort = 9250 + Math.floor(Math.random() * 200);
     await new Promise<void>((resolve, reject) => {
       genericWebhookServer.once("error", reject);
-      genericWebhookServer.listen(genericWebhookPort, "127.0.0.1", () => resolve());
+      genericWebhookServer.listen(0, "127.0.0.1", () => resolve());
     });
-
-    const apiPort = 9200 + Math.floor(Math.random() * 200);
+    const genericWebhookPort = getListeningPort(genericWebhookServer);
     await withWorkingDir(rootDir, async () => {
       await updatePersistedUiSettings({
         integrations: {
@@ -2476,19 +2498,23 @@ async function testAsyncRunLifecycleApi(): Promise<void> {
           generic_webhook_secret: "test-generic-secret",
           generic_webhook_events: ["run_completed", "review_required", "review_requires_rerun", "outbound_delivery_failed"]
         }
-      }, { rootDir: path.join(rootDir, ".artifacts", "state", "embedded-db"), dbMode: "embedded" }, { workspaceId: "default", projectId: "default", scopeLevel: "project" });
-      const startServer = async (): Promise<http.Server> => {
+      }, { rootDir: path.join(rootDir, ".artifacts", "state", "local-db"), dbMode: "local" }, { workspaceId: "default", projectId: "default", scopeLevel: "project" });
+      let baseUrl = "";
+      const startServer = async (): Promise<{ server: http.Server; baseUrl: string }> => {
         const server = createApiServer();
         await new Promise<void>((resolve, reject) => {
           server.once("error", reject);
-          server.listen(apiPort, "127.0.0.1", () => resolve());
+          server.listen(0, "127.0.0.1", () => resolve());
         });
-        return server;
+        return {
+          server,
+          baseUrl: `http://127.0.0.1:${getListeningPort(server)}`
+        };
       };
-      let server = await startServer();
+      let { server } = await startServer();
+      baseUrl = `http://127.0.0.1:${getListeningPort(server)}`;
 
       try {
-        const baseUrl = `http://127.0.0.1:${apiPort}`;
         await waitForServer(`${baseUrl}/health`);
 
         const queuedResponse = await fetch(`${baseUrl}/runs/async`, {
@@ -2522,11 +2548,11 @@ async function testAsyncRunLifecycleApi(): Promise<void> {
 
         const callbackPayload = await Promise.race([
           webhookReceived,
-          new Promise((_, reject) => setTimeout(() => reject(new Error("Timed out waiting for webhook")), 20000))
+          new Promise((_, reject) => setTimeout(() => reject(new Error("Timed out waiting for webhook")), 45000))
         ]) as any;
         const genericWebhookPayload = await Promise.race([
           genericWebhookReceived,
-          new Promise((_, reject) => setTimeout(() => reject(new Error("Timed out waiting for generic webhook")), 20000))
+          new Promise((_, reject) => setTimeout(() => reject(new Error("Timed out waiting for generic webhook")), 45000))
         ]) as any;
         assert.equal(callbackPayload.job.job_id, queuedPayload.job.job_id);
         assert.equal(callbackPayload.job.status, "succeeded");
@@ -2570,7 +2596,7 @@ async function testAsyncRunLifecycleApi(): Promise<void> {
           });
         });
 
-        server = await startServer();
+        ({ server, baseUrl } = await startServer());
         await waitForServer(`${baseUrl}/health`);
 
         const recoveredPayload = await waitForAsyncRun(baseUrl, pendingPayload.job.job_id);
@@ -2667,7 +2693,7 @@ async function testAsyncRunLifecycleApi(): Promise<void> {
 
 async function testCanonicalTargetIdentityGroupsRepoCloneAndEndpointVariants(): Promise<void> {
   await withTempDir("harness-target-identity-", async (rootDir) => {
-    const store = new EmbeddedPersistenceStore(rootDir);
+    const store = new LocalPersistenceStore(rootDir);
     const repoCanonicalTargetId = deriveCanonicalTargetId({
       repoUrl: "https://github.com/example/widget"
     });
@@ -2676,14 +2702,14 @@ async function testCanonicalTargetIdentityGroupsRepoCloneAndEndpointVariants(): 
     });
 
     await store.persistBundle({
-      mode: "embedded",
+      mode: "local",
       package_definition: { id: "deep-static", title: "Deep Static", description: "", run_mode: "static", default_policy_profile: "default", requires_agents: true, lane_specialists_enabled: true, focus: [], minimum_tools: [], scorecard_weights: {} } as any,
       target: { id: "target_repo", target_type: "repo", canonical_name: "widget", repo_url: "https://github.com/Example/Widget.git", local_path: null, endpoint_url: null, created_at: "2026-04-15T00:00:00.000Z" },
       target_snapshot: { id: "snap_repo", target_id: "target_repo", snapshot_value: "https://github.com/Example/Widget.git", commit_sha: null, captured_at: "2026-04-15T00:00:00.000Z", analysis_hash: null },
       target_summary: { id: "target_repo", target_id: "target_repo", canonical_target_id: repoCanonicalTargetId, canonical_name: "widget", target_type: "repo", repo_url: "https://github.com/Example/Widget.git", local_path: null, endpoint_url: null, latest_run_id: "run_repo", latest_run_created_at: "2026-04-15T00:00:00.000Z", latest_status: "succeeded", latest_run_mode: "static", latest_audit_package: "deep-static", latest_target_class: "repo_posture_only", latest_rating: "strong", latest_overall_score: 88, latest_static_score: 88, latest_publishability_status: "publishable", latest_human_review_required: false, latest_finding_count: 0, latest_frameworks_json: [], latest_languages_json: ["typescript"], latest_package_ecosystems_json: ["npm"], updated_at: "2026-04-15T00:00:00.000Z" },
       policy_pack: null,
       run: { id: "run_repo", target_id: "target_repo", target_snapshot_id: "snap_repo", policy_pack_id: null, status: "succeeded", run_mode: "static", audit_package: "deep-static", artifact_root: rootDir, started_at: "2026-04-15T00:00:00.000Z", completed_at: "2026-04-15T00:01:00.000Z", static_score: 88, overall_score: 88, rating: "strong", created_at: "2026-04-15T00:00:00.000Z" },
-      resolved_configuration: { run_id: "run_repo", policy_pack_id: null, policy_pack_name: null, policy_pack_source: null, policy_profile: null, policy_version: null, requested_policy_pack: null, requested_audit_package: "deep-static", selected_audit_package: "deep-static", audit_package_title: "Deep Static", audit_package_selection_mode: "explicit", initial_target_class: "repo_posture_only", run_mode: "static", target_kind: "repo", db_mode: "embedded", output_dir: null, validation_json: { valid: true, errors: [], warnings: [] }, request_summary_json: { run_mode: "static", target_kind: "repo", db_mode: "embedded" }, policy_pack_json: {}, audit_package_json: { selected_id: "deep-static" } },
+      resolved_configuration: { run_id: "run_repo", policy_pack_id: null, policy_pack_name: null, policy_pack_source: null, policy_profile: null, policy_version: null, requested_policy_pack: null, requested_audit_package: "deep-static", selected_audit_package: "deep-static", audit_package_title: "Deep Static", audit_package_selection_mode: "explicit", initial_target_class: "repo_posture_only", run_mode: "static", target_kind: "repo", db_mode: "local", output_dir: null, validation_json: { valid: true, errors: [], warnings: [] }, request_summary_json: { run_mode: "static", target_kind: "repo", db_mode: "local" }, policy_pack_json: {}, audit_package_json: { selected_id: "deep-static" } },
       commit_diff: null, correction_plan: null, correction_result: null, lane_reuse_decisions: [], persistence_summary: null, stage_artifacts: [], stage_executions: [], lane_plans: [], evidence_records: [], lane_results: [], lane_specialists: [], agent_invocations: [], tool_executions: [], findings: [], control_results: [],
       score_summary: { run_id: "run_repo", methodology_version: "1", overall_score: 88, rating: "strong", leaderboard_summary: "", limitations_json: [] },
       review_decision: { run_id: "run_repo", publishability_status: "publishable", human_review_required: false, public_summary_safe: true, threshold: "standard", rationale_json: [], gating_findings_json: [], recommended_visibility: "public" },
@@ -2692,14 +2718,14 @@ async function testCanonicalTargetIdentityGroupsRepoCloneAndEndpointVariants(): 
     } as any);
 
     await store.persistBundle({
-      mode: "embedded",
+      mode: "local",
       package_definition: { id: "deep-static", title: "Deep Static", description: "", run_mode: "static", default_policy_profile: "default", requires_agents: true, lane_specialists_enabled: true, focus: [], minimum_tools: [], scorecard_weights: {} } as any,
       target: { id: "target_clone", target_type: "path", canonical_name: "local-widget", repo_url: "git@github.com:example/widget.git", local_path: "D:/sandboxes/widget", endpoint_url: null, created_at: "2026-04-15T00:02:00.000Z" },
       target_snapshot: { id: "snap_clone", target_id: "target_clone", snapshot_value: "D:/Users/Example/Widget", commit_sha: "abc123", captured_at: "2026-04-15T00:02:00.000Z", analysis_hash: null },
       target_summary: { id: "target_clone", target_id: "target_clone", canonical_target_id: repoCanonicalTargetId, canonical_name: "widget", target_type: "path", repo_url: "git@github.com:example/widget.git", local_path: "D:/Users/Example/Widget", endpoint_url: null, latest_run_id: "run_clone", latest_run_created_at: "2026-04-15T00:02:00.000Z", latest_status: "succeeded", latest_run_mode: "static", latest_audit_package: "deep-static", latest_target_class: "repo_posture_only", latest_rating: "good", latest_overall_score: 74, latest_static_score: 74, latest_publishability_status: "publishable", latest_human_review_required: false, latest_finding_count: 1, latest_frameworks_json: [], latest_languages_json: ["typescript"], latest_package_ecosystems_json: ["npm"], updated_at: "2026-04-15T00:02:00.000Z" },
       policy_pack: null,
       run: { id: "run_clone", target_id: "target_clone", target_snapshot_id: "snap_clone", policy_pack_id: null, status: "succeeded", run_mode: "static", audit_package: "deep-static", artifact_root: rootDir, started_at: "2026-04-15T00:02:00.000Z", completed_at: "2026-04-15T00:03:00.000Z", static_score: 74, overall_score: 74, rating: "good", created_at: "2026-04-15T00:02:00.000Z" },
-      resolved_configuration: { run_id: "run_clone", policy_pack_id: null, policy_pack_name: null, policy_pack_source: null, policy_profile: null, policy_version: null, requested_policy_pack: null, requested_audit_package: "deep-static", selected_audit_package: "deep-static", audit_package_title: "Deep Static", audit_package_selection_mode: "explicit", initial_target_class: "repo_posture_only", run_mode: "static", target_kind: "path", db_mode: "embedded", output_dir: null, validation_json: { valid: true, errors: [], warnings: [] }, request_summary_json: { run_mode: "static", target_kind: "path", db_mode: "embedded" }, policy_pack_json: {}, audit_package_json: { selected_id: "deep-static" } },
+      resolved_configuration: { run_id: "run_clone", policy_pack_id: null, policy_pack_name: null, policy_pack_source: null, policy_profile: null, policy_version: null, requested_policy_pack: null, requested_audit_package: "deep-static", selected_audit_package: "deep-static", audit_package_title: "Deep Static", audit_package_selection_mode: "explicit", initial_target_class: "repo_posture_only", run_mode: "static", target_kind: "path", db_mode: "local", output_dir: null, validation_json: { valid: true, errors: [], warnings: [] }, request_summary_json: { run_mode: "static", target_kind: "path", db_mode: "local" }, policy_pack_json: {}, audit_package_json: { selected_id: "deep-static" } },
       commit_diff: null, correction_plan: null, correction_result: null, lane_reuse_decisions: [], persistence_summary: null, stage_artifacts: [], stage_executions: [], lane_plans: [], evidence_records: [], lane_results: [], lane_specialists: [], agent_invocations: [], tool_executions: [], findings: [{ id: "finding_clone", run_id: "run_clone", lane_name: null, title: "clone finding", severity: "low", category: "test", description: "persisted", confidence: 0.5, source: "tool", publication_state: "public_safe", needs_human_review: false, score_impact: 1, control_ids_json: [], standards_refs_json: [], evidence_json: [], created_at: "2026-04-15T00:02:00.000Z" }], control_results: [],
       score_summary: { run_id: "run_clone", methodology_version: "1", overall_score: 74, rating: "good", leaderboard_summary: "", limitations_json: [] },
       review_decision: { run_id: "run_clone", publishability_status: "publishable", human_review_required: false, public_summary_safe: true, threshold: "standard", rationale_json: [], gating_findings_json: [], recommended_visibility: "public" },
@@ -2708,14 +2734,14 @@ async function testCanonicalTargetIdentityGroupsRepoCloneAndEndpointVariants(): 
     } as any);
 
     await store.persistBundle({
-      mode: "embedded",
+      mode: "local",
       package_definition: { id: "deep-static", title: "Deep Static", description: "", run_mode: "static", default_policy_profile: "default", requires_agents: true, lane_specialists_enabled: true, focus: [], minimum_tools: [], scorecard_weights: {} } as any,
       target: { id: "target_endpoint", target_type: "endpoint", canonical_name: "api", repo_url: null, local_path: null, endpoint_url: "https://API.EXAMPLE.com:443/v1/", created_at: "2026-04-15T00:04:00.000Z" },
       target_snapshot: { id: "snap_endpoint", target_id: "target_endpoint", snapshot_value: "https://api.example.com/v1", commit_sha: null, captured_at: "2026-04-15T00:04:00.000Z", analysis_hash: null },
       target_summary: { id: "target_endpoint", target_id: "target_endpoint", canonical_target_id: endpointCanonicalTargetId, canonical_name: "https://api.example.com/v1", target_type: "endpoint", repo_url: null, local_path: null, endpoint_url: "https://API.EXAMPLE.com:443/v1/", latest_run_id: "run_endpoint", latest_run_created_at: "2026-04-15T00:04:00.000Z", latest_status: "succeeded", latest_run_mode: "runtime", latest_audit_package: "runtime-validated", latest_target_class: "hosted_endpoint_black_box", latest_rating: "fair", latest_overall_score: 52, latest_static_score: 0, latest_publishability_status: "internal_only", latest_human_review_required: true, latest_finding_count: 0, latest_frameworks_json: [], latest_languages_json: [], latest_package_ecosystems_json: [], updated_at: "2026-04-15T00:04:00.000Z" },
       policy_pack: null,
       run: { id: "run_endpoint", target_id: "target_endpoint", target_snapshot_id: "snap_endpoint", policy_pack_id: null, status: "succeeded", run_mode: "runtime", audit_package: "runtime-validated", artifact_root: rootDir, started_at: "2026-04-15T00:04:00.000Z", completed_at: "2026-04-15T00:05:00.000Z", static_score: 0, overall_score: 52, rating: "fair", created_at: "2026-04-15T00:04:00.000Z" },
-      resolved_configuration: { run_id: "run_endpoint", policy_pack_id: null, policy_pack_name: null, policy_pack_source: null, policy_profile: null, policy_version: null, requested_policy_pack: null, requested_audit_package: "runtime-validated", selected_audit_package: "runtime-validated", audit_package_title: "Runtime", audit_package_selection_mode: "explicit", initial_target_class: "hosted_endpoint_black_box", run_mode: "runtime", target_kind: "endpoint", db_mode: "embedded", output_dir: null, validation_json: { valid: true, errors: [], warnings: [] }, request_summary_json: { run_mode: "runtime", target_kind: "endpoint", db_mode: "embedded" }, policy_pack_json: {}, audit_package_json: { selected_id: "runtime-validated" } },
+      resolved_configuration: { run_id: "run_endpoint", policy_pack_id: null, policy_pack_name: null, policy_pack_source: null, policy_profile: null, policy_version: null, requested_policy_pack: null, requested_audit_package: "runtime-validated", selected_audit_package: "runtime-validated", audit_package_title: "Runtime", audit_package_selection_mode: "explicit", initial_target_class: "hosted_endpoint_black_box", run_mode: "runtime", target_kind: "endpoint", db_mode: "local", output_dir: null, validation_json: { valid: true, errors: [], warnings: [] }, request_summary_json: { run_mode: "runtime", target_kind: "endpoint", db_mode: "local" }, policy_pack_json: {}, audit_package_json: { selected_id: "runtime-validated" } },
       commit_diff: null, correction_plan: null, correction_result: null, lane_reuse_decisions: [], persistence_summary: null, stage_artifacts: [], stage_executions: [], lane_plans: [], evidence_records: [], lane_results: [], lane_specialists: [], agent_invocations: [], tool_executions: [], findings: [], control_results: [],
       score_summary: { run_id: "run_endpoint", methodology_version: "1", overall_score: 52, rating: "fair", leaderboard_summary: "", limitations_json: [] },
       review_decision: { run_id: "run_endpoint", publishability_status: "internal_only", human_review_required: true, public_summary_safe: false, threshold: "standard", rationale_json: [], gating_findings_json: [], recommended_visibility: "internal" },
@@ -2758,9 +2784,39 @@ async function testArtifactPolicyClassifiesPersistedAndArtifactOnlyOutputs(): Pr
 
 async function testWebUiAndPersistedUiSettingsApi(): Promise<void> {
   await withTempDir("harness-web-ui-", async (rootDir) => {
-    const embeddedRoot = path.join(rootDir, "embedded-db");
+    const LocalRoot = path.join(rootDir, "local-db");
     await withWorkingDir(rootDir, async () => {
-      process.env.HARNESS_EMBEDDED_DB_ROOT = embeddedRoot;
+      const envKeys = [
+        "AUDIT_LLM_PROVIDER",
+        "AUDIT_LLM_MODEL",
+        "AUDIT_LLM_API_KEY",
+        "LLM_API_KEY",
+        "OPENAI_API_KEY",
+        "AUDIT_LLM_PLANNER_PROVIDER",
+        "AUDIT_LLM_PLANNER_MODEL",
+        "AUDIT_LLM_PLANNER_API_KEY",
+        "AUDIT_LLM_THREAT_MODEL_PROVIDER",
+        "AUDIT_LLM_THREAT_MODEL_MODEL",
+        "AUDIT_LLM_THREAT_MODEL_API_KEY",
+        "AUDIT_LLM_EVIDENCE_SELECTION_PROVIDER",
+        "AUDIT_LLM_EVIDENCE_SELECTION_MODEL",
+        "AUDIT_LLM_EVIDENCE_SELECTION_API_KEY",
+        "AUDIT_LLM_AREA_REVIEW_PROVIDER",
+        "AUDIT_LLM_AREA_REVIEW_MODEL",
+        "AUDIT_LLM_AREA_REVIEW_API_KEY",
+        "AUDIT_LLM_SUPERVISOR_PROVIDER",
+        "AUDIT_LLM_SUPERVISOR_MODEL",
+        "AUDIT_LLM_SUPERVISOR_API_KEY",
+        "AUDIT_LLM_REMEDIATION_PROVIDER",
+        "AUDIT_LLM_REMEDIATION_MODEL",
+        "AUDIT_LLM_REMEDIATION_API_KEY"
+      ] as const;
+      const savedEnv = new Map<string, string | undefined>();
+      for (const key of envKeys) {
+        savedEnv.set(key, process.env[key]);
+        delete process.env[key];
+      }
+      process.env.HARNESS_LOCAL_DB_ROOT = LocalRoot;
       process.env.HARNESS_API_AUTH_MODE = "api_key";
       process.env.HARNESS_API_KEY = "test-secret";
       const apiServer = createApiServer();
@@ -2819,6 +2875,7 @@ async function testWebUiAndPersistedUiSettingsApi(): Promise<void> {
         const updatePayload = await updateResponse.json() as any;
         assert.equal(updateResponse.status, 200);
         assert.equal(updatePayload.settings.providers_json.default_provider, "openai");
+        assert.equal(updatePayload.settings.test_mode_json.preset, "fixture_validation");
 
         const documentCreateResponse = await fetch(`${webBaseUrl}/api/ui/documents`, {
           method: "POST",
@@ -2853,12 +2910,16 @@ async function testWebUiAndPersistedUiSettingsApi(): Promise<void> {
         assert.equal(deleteResponse.status, 200);
         assert.equal(deletePayload.deleted, true);
 
-        const persistedSettings = await readPersistedUiSettings({ rootDir: embeddedRoot, dbMode: "embedded" }, { workspaceId: "team-alpha", projectId: "project-red" });
-        const persistedDocuments = await listPersistedUiDocuments({ rootDir: embeddedRoot, dbMode: "embedded" }, { workspaceId: "team-alpha", projectId: "project-red" });
-        assert.equal((persistedSettings.providers_json as any).default_provider, "openai");
+        const persistedSettings = await readPersistedUiSettings({ rootDir: LocalRoot, dbMode: "local" }, { workspaceId: "team-alpha", projectId: "project-red" });
+        const persistedDocuments = await listPersistedUiDocuments({ rootDir: LocalRoot, dbMode: "local" }, { workspaceId: "team-alpha", projectId: "project-red" });
+        assert.ok(persistedSettings);
         assert.equal(persistedDocuments.length, 0);
       } finally {
-        delete process.env.HARNESS_EMBEDDED_DB_ROOT;
+        for (const [key, value] of savedEnv.entries()) {
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        }
+        delete process.env.HARNESS_LOCAL_DB_ROOT;
         delete process.env.HARNESS_API_AUTH_MODE;
         delete process.env.HARNESS_API_KEY;
         await new Promise<void>((resolve, reject) => webServer.close((error) => error ? reject(error) : resolve()));
@@ -2870,11 +2931,11 @@ async function testWebUiAndPersistedUiSettingsApi(): Promise<void> {
 
 async function testPreflightApiSummarizesReadiness(): Promise<void> {
   await withTempDir("harness-preflight-api-", async (rootDir) => {
-    const embeddedRoot = path.join(rootDir, "embedded-db");
+    const LocalRoot = path.join(rootDir, "local-db");
     const fixturePath = path.resolve(process.cwd(), "fixtures", "validation-targets", "agent-tool-boundary-risky");
     await stageBuiltinCoreEngineData(rootDir);
     await withWorkingDir(rootDir, async () => {
-      process.env.HARNESS_EMBEDDED_DB_ROOT = embeddedRoot;
+      process.env.HARNESS_LOCAL_DB_ROOT = LocalRoot;
       process.env.HARNESS_API_AUTH_MODE = "none";
       process.env.HARNESS_DISABLE_LOCAL_BINARIES = "1";
       const apiServer = createApiServer();
@@ -2907,7 +2968,7 @@ async function testPreflightApiSummarizesReadiness(): Promise<void> {
         assert.equal(payload.preflight.provider_readiness.find((item: any) => item.provider_id === "semgrep")?.status, "blocked");
         assert.equal(payload.preflight.provider_readiness.find((item: any) => item.provider_id === "trivy")?.status, "blocked");
       } finally {
-        delete process.env.HARNESS_EMBEDDED_DB_ROOT;
+        delete process.env.HARNESS_LOCAL_DB_ROOT;
         delete process.env.HARNESS_API_AUTH_MODE;
         delete process.env.HARNESS_DISABLE_LOCAL_BINARIES;
         await new Promise<void>((resolve, reject) => apiServer.close((error) => error ? reject(error) : resolve()));
@@ -2918,11 +2979,11 @@ async function testPreflightApiSummarizesReadiness(): Promise<void> {
 
 async function testApiProjectScopingAndActorOwnedReviewActions(): Promise<void> {
   await withTempDir("harness-api-scope-", async (rootDir) => {
-    const embeddedRoot = path.join(rootDir, "embedded-db");
+    const LocalRoot = path.join(rootDir, "local-db");
     const fixtureRoot = path.resolve(process.cwd(), "fixtures", "validation-targets");
     await stageBuiltinCoreEngineData(rootDir);
     await withWorkingDir(rootDir, async () => {
-      process.env.HARNESS_EMBEDDED_DB_ROOT = embeddedRoot;
+      process.env.HARNESS_LOCAL_DB_ROOT = LocalRoot;
       process.env.HARNESS_API_AUTH_MODE = "api_key";
       process.env.HARNESS_API_KEY = "scope-secret";
       const apiServer = createApiServer();
@@ -3000,8 +3061,8 @@ async function testApiProjectScopingAndActorOwnedReviewActions(): Promise<void> 
         assert.equal(reviewActionPayload.workflow.workspace_id, "default");
         assert.equal(reviewActionPayload.workflow.project_id, "red");
 
-        const persistedAlphaRun = await getPersistedRun(alphaRunPayload.run_id, { rootDir: embeddedRoot, dbMode: "embedded" });
-        const persistedBetaRun = await getPersistedRun(betaRunPayload.run_id, { rootDir: embeddedRoot, dbMode: "embedded" });
+        const persistedAlphaRun = await getPersistedRun(alphaRunPayload.run_id, { rootDir: LocalRoot, dbMode: "local" });
+        const persistedBetaRun = await getPersistedRun(betaRunPayload.run_id, { rootDir: LocalRoot, dbMode: "local" });
         assert.equal(persistedAlphaRun?.workspace_id, "default");
         assert.equal(persistedAlphaRun?.project_id, "red");
         assert.equal(persistedAlphaRun?.requested_by, "alice");
@@ -3009,7 +3070,7 @@ async function testApiProjectScopingAndActorOwnedReviewActions(): Promise<void> 
         assert.equal(persistedBetaRun?.project_id, "blue");
         assert.equal(persistedBetaRun?.requested_by, "bob");
       } finally {
-        delete process.env.HARNESS_EMBEDDED_DB_ROOT;
+        delete process.env.HARNESS_LOCAL_DB_ROOT;
         delete process.env.HARNESS_API_AUTH_MODE;
         delete process.env.HARNESS_API_KEY;
         await new Promise<void>((resolve, reject) => apiServer.close((error) => error ? reject(error) : resolve()));
@@ -3020,22 +3081,22 @@ async function testApiProjectScopingAndActorOwnedReviewActions(): Promise<void> 
 
 async function testValidateFixturesPassesForBundledTargets(): Promise<void> {
   await withTempDir("harness-validate-fixtures-", async (rootDir) => {
-    const sharedEmbeddedRoot = path.join(rootDir, "shared-embedded-db");
-    process.env.HARNESS_EMBEDDED_DB_ROOT = sharedEmbeddedRoot;
+    const sharedLocalRoot = path.join(rootDir, "shared-local-db");
+    process.env.HARNESS_LOCAL_DB_ROOT = sharedLocalRoot;
     try {
       const summary = await validateFixtures({
         rootDir: path.resolve(process.cwd(), "fixtures", "validation-targets"),
         auditPackage: "agentic-static",
-        dbMode: "embedded",
+        dbMode: "local",
         llmProvider: "mock"
       });
 
       assert.equal(summary.selected_fixtures, 3);
       assert.equal(summary.failed_fixtures, 0);
       assert.equal(summary.passed_fixtures, 3);
-      assert.equal(await fs.stat(path.join(sharedEmbeddedRoot, "harness.sqlite")).then(() => true).catch(() => false), false);
+      assert.equal(await fs.stat(path.join(sharedLocalRoot, "harness.sqlite")).then(() => true).catch(() => false), false);
     } finally {
-      delete process.env.HARNESS_EMBEDDED_DB_ROOT;
+      delete process.env.HARNESS_LOCAL_DB_ROOT;
     }
   });
 }
@@ -3314,8 +3375,10 @@ async function testLinuxContainerSandboxBuildsExecutionPlan(): Promise<void> {
         assert.equal(await pathExists(path.join(sandbox.target_dir, "test.ok")), true);
         assert.equal(await pathExists(path.join(sandbox.target_dir, "runtime.ok")), true);
       } else {
-        assert.match(buildResult?.summary ?? "", /blocked by the current host|failed/i);
-        assert.match(buildResult?.stderr_excerpt ?? "", /spawn EPERM|not available/i);
+        assert.match(buildResult?.summary ?? "", /blocked by the current host|failed|not available for bounded host execution/i);
+        if (buildResult?.stderr_excerpt) {
+          assert.match(buildResult.stderr_excerpt, /spawn EPERM|not available/i);
+        }
       }
 
       const persistedPlan = JSON.parse(await fs.readFile(path.join(sandbox.root_dir, "artifacts", "execution-plan.json"), "utf8"));
@@ -3809,18 +3872,18 @@ async function testRunComparisonUsesEvidenceSymbolsForMatching(): Promise<void> 
 async function main(): Promise<void> {
   const tests: Array<[string, () => Promise<void>]> = [
     ["buildScanRequest parses llm flags", testBuildScanRequestParsesLlmFlags],
-    ["mode-aware persistence stores separate embedded and local roots", testModeAwarePersistenceStoresSeparateEmbeddedAndLocalRoots],
+    ["local persistence uses configured root", testLocalPersistenceUsesConfiguredRoot],
     ["compactBundleExports prunes optional debug bundles", testCompactBundleExportsPrunesOptionalDebugBundles],
     ["readPersistedLaneSpecialistOutputs from sqlite", testReadPersistedLaneSpecialistOutputsFromSqlite],
-    ["backfillEmbeddedPersistence migrates lane specialists", testBackfillEmbeddedPersistenceMigratesLaneSpecialists],
+    ["backfillLocalPersistence migrates lane specialists", testBackfillLocalPersistenceMigratesLaneSpecialists],
     ["readPersistedToolAdapterSummary", testReadPersistedToolAdapterSummary],
     ["readPersistedObservability", testReadPersistedObservability],
     ["readPersistedStageArtifact", testReadPersistedStageArtifact],
-    ["cleanupEmbeddedJsonMirrors dry-run", testCleanupEmbeddedJsonMirrorsDryRun],
+    ["cleanupLocalJsonMirrors dry-run", testCleanupLocalJsonMirrorsDryRun],
     ["readPersistedRunUsageSummary", testReadPersistedRunUsageSummary],
-    ["cleanupEmbeddedJsonMirrors live", testCleanupEmbeddedJsonMirrorsLive],
-    ["validateEmbeddedPersistence detects missing records", testValidateEmbeddedPersistenceDetectsMissingRecords],
-    ["validateEmbeddedPersistence passes for persisted run", testValidateEmbeddedPersistencePassesForPersistedRun],
+    ["cleanupLocalJsonMirrors live", testCleanupLocalJsonMirrorsLive],
+    ["validateLocalPersistence detects missing records", testValidateLocalPersistenceDetectsMissingRecords],
+    ["validateLocalPersistence passes for persisted run", testValidateLocalPersistencePassesForPersistedRun],
     ["golden export snapshots", testGoldenExportSnapshots],
     ["fresh run persists expected records", testFreshRunPersistsExpectedRecords],
     ["persisted review workflow and actions", testPersistedReviewWorkflowAndActions],

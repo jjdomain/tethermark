@@ -43,12 +43,12 @@ export * from "./persistence/query.js";
 export * from "./persistence/run-details.js";
 export * from "./persistence/ui-settings.js";
 export { buildStageExecutions, persistAuditResult, persistPersistenceSummary } from "./persistence/index.js";
-export { backfillEmbeddedPersistence, cleanupEmbeddedJsonMirrors, reconstructEmbeddedRun, reconstructEmbeddedRuns, validateEmbeddedPersistence } from "./persistence/backfill.js";
+export { backfillLocalPersistence, cleanupLocalJsonMirrors, reconstructLocalRun, reconstructLocalRuns, validateLocalPersistence } from "./persistence/backfill.js";
 export { acknowledgePersistedReviewNotification, deriveInitialReviewWorkflow, listPersistedReviewNotifications, listPersistedReviewWorkflows, submitPersistedReviewAction } from "./persistence/review-workflow.js";
 export { createPersistedReviewComment, readPersistedReviewComments } from "./persistence/review-comments.js";
 export { createPersistedWebhookDelivery, listPersistedWebhookDeliveries } from "./persistence/webhook-deliveries.js";
 export { listPersistedRuntimeFollowups, readPersistedRuntimeFollowup, upsertRuntimeFollowupFromReviewAction, markRuntimeFollowupLaunched, markRuntimeFollowupJobTerminal } from "./persistence/runtime-followups.js";
 export { PersistedAsyncJobManager, listPersistedAsyncJobs, readPersistedAsyncJob, readPersistedAsyncJobAttempts } from "./persistence/async-jobs.js";
-export { readEmbeddedPersistenceMetadata, readPersistenceMetadata } from "./persistence/sqlite.js";
+export { readLocalPersistenceMetadata, readPersistenceMetadata } from "./persistence/sqlite.js";
 export { computeCommitDiffGate } from "./commit-diff.js";
 

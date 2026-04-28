@@ -2,7 +2,7 @@ import { normalizeProjectId, normalizeWorkspaceId } from "../request-scope.js";
 import type { PersistedReviewCommentRecord } from "./contracts.js";
 import { getPersistedRun } from "./query.js";
 import { resolvePersistenceLocation, type PersistenceReadOptions } from "./backend.js";
-import { hasSqliteDatabase, openSqliteDatabase, readSqliteTable, saveSqliteDatabase, upsertSqliteRecord } from "./sqlite.js";
+import { ensureSqliteSchema, hasSqliteDatabase, openSqliteDatabase, readSqliteTable, saveSqliteDatabase, upsertSqliteRecord } from "./sqlite.js";
 
 function resolveLocation(rootDirOrOptions?: string | PersistenceReadOptions) {
   return typeof rootDirOrOptions === "string" || !rootDirOrOptions
@@ -14,6 +14,7 @@ async function readTable<T>(rootDir: string, tableName: string): Promise<T[]> {
   if (!(await hasSqliteDatabase(rootDir))) return [];
   const db = await openSqliteDatabase(rootDir);
   try {
+    ensureSqliteSchema(db);
     return readSqliteTable<T>(db, tableName);
   } finally {
     db.close();

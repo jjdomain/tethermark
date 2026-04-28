@@ -33,34 +33,9 @@ function parsePositiveNumber(value: string | undefined): number | null {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
-export function resolveBundleExportPolicy(mode: DatabaseMode = "embedded"): BundleExportPolicy {
+export function resolveBundleExportPolicy(mode: DatabaseMode = "local"): BundleExportPolicy {
   const enabledOverride = parseBoolean(process.env.HARNESS_BUNDLE_EXPORT_ENABLED);
   const retentionOverride = parsePositiveNumber(process.env.HARNESS_BUNDLE_EXPORT_RETENTION_DAYS);
-
-  if (mode === "embedded") {
-    return {
-      database_mode: mode,
-      policy: "debug_optional",
-      enabled: enabledOverride ?? true,
-      retention_days: retentionOverride ?? 30,
-      notes: [
-        "Embedded mode keeps per-run bundles as optional debug and maintenance exports.",
-        "The SQLite persistence store remains the canonical query surface."
-      ]
-    };
-  }
-  if (mode === "local") {
-    return {
-      database_mode: mode,
-      policy: "debug_optional",
-      enabled: enabledOverride ?? false,
-      retention_days: retentionOverride ?? 14,
-      notes: [
-        "Local mode disables bundle exports by default to avoid duplicating normalized persistence.",
-        "Enable bundle exports only when reconstruction or migration debugging needs raw per-run snapshots."
-      ]
-    };
-  }
   return {
     database_mode: mode,
     policy: "debug_optional",
@@ -79,9 +54,10 @@ export async function compactBundleExports(args?: {
   retentionDays?: number | null;
   mode?: DatabaseMode;
 }): Promise<BundleExportCompactionSummary> {
-  const root = path.resolve(args?.rootDir ?? path.resolve(process.cwd(), ".artifacts", "state", "embedded-db"));
+  const mode = args?.mode ?? "local";
+  const root = path.resolve(args?.rootDir ?? path.resolve(process.cwd(), ".artifacts", "state", `${mode}-db`));
   const dryRun = args?.dryRun ?? false;
-  const policy = resolveBundleExportPolicy(args?.mode ?? "embedded");
+  const policy = resolveBundleExportPolicy(mode);
   const retentionDays = args?.retentionDays ?? policy.retention_days;
   const runsDir = path.join(root, "runs");
   const entries = await fs.readdir(runsDir, { withFileTypes: true }).catch(() => []);

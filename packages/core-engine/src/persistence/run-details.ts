@@ -43,11 +43,18 @@ async function readJsonTable<T>(rootDir: string, tableName: string): Promise<T[]
 
 async function readTable<T>(rootDir: string, tableName: string): Promise<T[]> {
   if (await hasSqliteDatabase(rootDir)) {
-    const db = await openSqliteDatabase(rootDir);
-    try {
-      return readSqliteTable<T>(db, tableName);
-    } finally {
-      db.close();
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const db = await openSqliteDatabase(rootDir);
+      try {
+        ensureSqliteSchema(db);
+        return readSqliteTable<T>(db, tableName);
+      } catch (error) {
+        const isRetryable = error instanceof Error && /database disk image is malformed/i.test(error.message) && attempt === 0;
+        if (!isRetryable) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      } finally {
+        db.close();
+      }
     }
   }
   return readJsonTable<T>(rootDir, tableName);

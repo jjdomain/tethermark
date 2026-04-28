@@ -87,7 +87,8 @@ const defaultAuthInfo = {
 };
 const emptyLlmRegistry = {
   providers: [],
-  presets: []
+  presets: [],
+  environment_defaults: {}
 };
 const emptyIntegrationRegistry = [];
 const auditLaneCatalog = [
@@ -100,8 +101,8 @@ const auditLaneCatalog = [
 const agentConfigCatalog = [
   { id: "planner_agent", title: "Planner Agent", env_prefix: "AUDIT_LLM_PLANNER" },
   { id: "threat_model_agent", title: "Threat Model Agent", env_prefix: "AUDIT_LLM_THREAT_MODEL" },
-  { id: "eval_selection_agent", title: "Evidence Selection Agent", env_prefix: "AUDIT_LLM_EVAL_SELECTION" },
-  { id: "lane_specialist_agent", title: "Audit Area Review Agent", env_prefix: "AUDIT_LLM_LANE_SPECIALIST" },
+  { id: "eval_selection_agent", title: "Evidence Selection Agent", env_prefix: "AUDIT_LLM_EVIDENCE_SELECTION" },
+  { id: "lane_specialist_agent", title: "Audit Area Review Agent", env_prefix: "AUDIT_LLM_AREA_REVIEW" },
   { id: "audit_supervisor_agent", title: "Supervisor Agent", env_prefix: "AUDIT_LLM_SUPERVISOR" },
   { id: "remediation_agent", title: "Remediation Agent", env_prefix: "AUDIT_LLM_REMEDIATION" }
 ];
@@ -250,18 +251,94 @@ function applyPresetDerivedFormState(form, auditPackages) {
   };
 }
 
-function normalizeRunFormUpdate(current, key, value, auditPackages) {
+function deriveAuditDefaultsForPackage(auditPackageId, auditPackages, currentDefaults = {}) {
+  const packageConfig = resolvePackageFormConfig(auditPackages, auditPackageId);
+  const runMode = packageConfig.run_mode || "static";
+  return {
+    ...currentDefaults,
+    audit_package: auditPackageId,
+    run_mode: runMode,
+    runtime_allowed: runtimeAllowedForPackageConfig(packageConfig),
+    review_severity: reviewSeverityForPackageConfig(packageConfig),
+    enabled_lanes: [...(packageConfig.enabled_lanes || defaultLanesForRunMode(runMode))],
+    max_agent_calls: packageConfig.max_agent_calls,
+    max_total_tokens: packageConfig.max_total_tokens,
+    max_rerun_rounds: packageConfig.max_rerun_rounds,
+    publishability_threshold: packageConfig.publishability_threshold
+  };
+}
+
+function stripAuditDefaultMetadata(defaults = {}) {
+  const { package_overrides, ...rest } = defaults || {};
+  return rest;
+}
+
+function buildAuditDefaultPackageOverrides(currentDefaults = {}) {
+  const packageId = currentDefaults.audit_package;
+  const currentOverrides = currentDefaults.package_overrides && typeof currentDefaults.package_overrides === "object"
+    ? currentDefaults.package_overrides
+    : {};
+  if (!packageId) return { ...currentOverrides };
+  return {
+    ...currentOverrides,
+    [packageId]: stripAuditDefaultMetadata(currentDefaults)
+  };
+}
+
+function normalizeRunFormUpdate(current, key, value, auditPackages, auditDefaults = {}) {
   let next = { ...current, [key]: value };
   if (key === "run_mode") {
     next.enabled_lanes = defaultLanesForRunMode(value || "static");
   }
   if (key === "audit_package" && current.use_audit_presets) {
     next = applyPresetDerivedFormState(next, auditPackages);
+    if (auditDefaults.audit_package === value) {
+      next = applyAuditDefaultsToRunForm(next, auditDefaults);
+    }
   }
   if (key === "use_audit_presets") {
     next = value ? applyPresetDerivedFormState(next, auditPackages) : { ...next };
+    if (value && auditDefaults.audit_package === next.audit_package) {
+      next = applyAuditDefaultsToRunForm(next, auditDefaults);
+    }
   }
   return next;
+}
+
+function applyAuditDefaultsToRunForm(form, auditDefaults) {
+  const next = { ...form };
+  if (auditDefaults.audit_package) next.audit_package = auditDefaults.audit_package;
+  if (auditDefaults.run_mode) next.run_mode = normalizeRunModeSelection(auditDefaults.run_mode) || next.run_mode;
+  if (auditDefaults.runtime_allowed) next.runtime_allowed = auditDefaults.runtime_allowed;
+  if (auditDefaults.review_severity) next.review_severity = auditDefaults.review_severity;
+  if (Array.isArray(auditDefaults.enabled_lanes) && auditDefaults.enabled_lanes.length) {
+    next.enabled_lanes = sanitizeEnabledLanes(auditDefaults.enabled_lanes, next.run_mode || "static");
+  }
+  if (auditDefaults.max_agent_calls) next.max_agent_calls = auditDefaults.max_agent_calls;
+  if (auditDefaults.max_total_tokens) next.max_total_tokens = auditDefaults.max_total_tokens;
+  if (auditDefaults.max_rerun_rounds) next.max_rerun_rounds = auditDefaults.max_rerun_rounds;
+  if (auditDefaults.publishability_threshold) next.publishability_threshold = auditDefaults.publishability_threshold;
+  return next;
+}
+
+function runDefaultsDependencyKey(currentProject, effectiveSettings, auditPackages) {
+  return JSON.stringify({
+    project_id: currentProject?.id || "",
+    target_defaults: currentProject?.target_defaults_json || {},
+    audit_defaults: effectiveSettings?.effective?.audit_defaults_json || {},
+    providers: effectiveSettings?.effective?.providers_json || {},
+    preflight: effectiveSettings?.effective?.preflight_json || {},
+    review: effectiveSettings?.effective?.review_json || {},
+    packages: (auditPackages || []).map((item) => ({
+      id: item.id,
+      run_mode: item.run_mode,
+      enabled_lanes: item.enabled_lanes,
+      max_agent_calls: item.max_agent_calls,
+      max_total_tokens: item.max_total_tokens,
+      max_rerun_rounds: item.max_rerun_rounds,
+      publishability_threshold: item.publishability_threshold
+    }))
+  });
 }
 
 class ViewErrorBoundary extends Component {
@@ -341,8 +418,8 @@ function deriveRunFormDefaults(project, effectiveSettings, auditPackages) {
   const providerDefaults = effectiveSettings?.effective?.providers_json || {};
   const preflightDefaults = effectiveSettings?.effective?.preflight_json || {};
   const reviewDefaults = effectiveSettings?.effective?.review_json || {};
-  const auditPackage = targetDefaults.audit_package || auditDefaults.audit_package || "agentic-static";
-  const runMode = normalizeRunModeSelection(targetDefaults.run_mode);
+  const auditPackage = auditDefaults.audit_package || targetDefaults.audit_package || "agentic-static";
+  const runMode = normalizeRunModeSelection(auditDefaults.run_mode || targetDefaults.run_mode);
   const normalizedModelSelection = normalizeRealAuditModelSelection(
     targetDefaults.llm_provider || providerDefaults.default_provider || "",
     targetDefaults.llm_model || providerDefaults.default_model || ""
@@ -358,8 +435,8 @@ function deriveRunFormDefaults(project, effectiveSettings, auditPackages) {
     llm_provider: normalizedModelSelection.providerId,
     llm_model: normalizedModelSelection.modelId,
     preflight_strictness: targetDefaults.preflight_strictness || preflightDefaults.strictness || "standard",
-    runtime_allowed: targetDefaults.runtime_allowed || preflightDefaults.runtime_allowed || "targeted_only",
-    review_severity: targetDefaults.review_severity || reviewDefaults.require_human_review_for_severity || "high",
+    runtime_allowed: preflightDefaults.runtime_allowed || auditDefaults.runtime_allowed || targetDefaults.runtime_allowed || "targeted_only",
+    review_severity: reviewDefaults.require_human_review_for_severity || auditDefaults.review_severity || targetDefaults.review_severity || "high",
     review_visibility: targetDefaults.review_visibility || reviewDefaults.default_visibility || "internal",
     use_audit_presets: true,
     enabled_lanes: [],
@@ -375,7 +452,7 @@ function deriveRunFormDefaults(project, effectiveSettings, auditPackages) {
     required_control_ids_text: "",
     excluded_control_ids_text: ""
   };
-  return applyPresetDerivedFormState(defaults, auditPackages);
+  return applyAuditDefaultsToRunForm(applyPresetDerivedFormState(defaults, auditPackages), auditDefaults);
 }
 
 function getReviewCadenceDefaults(effectiveSettings) {
@@ -510,6 +587,7 @@ function getProviderCredentialStatus(registry, providerId, effectiveSettings, ov
 
 function buildSettingsCredentialsPayload(settings, registry, drafts) {
   const nextCredentials = { ...(settings?.credentials_json || {}) };
+  delete nextCredentials.openai_api_key;
   const providerId = settings?.providers_json?.default_provider || "";
   for (const field of getProviderCredentialFields(registry, providerId)) {
     if (!field.secret) continue;
@@ -520,9 +598,62 @@ function buildSettingsCredentialsPayload(settings, registry, drafts) {
   return nextCredentials;
 }
 
+function buildSettingsProvidersPayload(settings, agentCredentialDrafts) {
+  const nextProviders = { ...(settings?.providers_json || {}) };
+  const nextOverrides = { ...(nextProviders.agent_overrides || {}) };
+  for (const [agentId, override] of Object.entries(nextOverrides)) {
+    if (!override || typeof override !== "object") continue;
+    const { api_key: _apiKey, ...rest } = override;
+    nextOverrides[agentId] = rest;
+  }
+  for (const [agentId, draftValue] of Object.entries(agentCredentialDrafts || {})) {
+    nextOverrides[agentId] = {
+      ...(nextOverrides[agentId] || {}),
+      api_key: draftValue || ""
+    };
+  }
+  return {
+    ...nextProviders,
+    agent_overrides: nextOverrides
+  };
+}
+
 function getProviderApiFieldId(registry, providerId) {
   const provider = getProviderDefinition(registry, providerId);
   return provider?.credential_fields?.find((field) => field.kind === "api_key")?.id || provider?.api_key_field || "";
+}
+
+function getProviderApiKeyEnvHint(providerId, fieldStatus) {
+  if (providerId === "openai") return "AUDIT_LLM_API_KEY, LLM_API_KEY, or OPENAI_API_KEY";
+  return fieldStatus?.env_var || "";
+}
+
+function applyEnvironmentDefaultsToSettings(settings, environmentDefaults) {
+  const providers = settings?.providers_json || {};
+  const envAgents = environmentDefaults?.agent_overrides || {};
+  const nextOverrides = { ...(providers.agent_overrides || {}) };
+  for (const agent of agentConfigCatalog) {
+    const envOverride = envAgents[agent.id] || {};
+    const current = nextOverrides[agent.id] || {};
+    if (envOverride.provider || envOverride.model) {
+      nextOverrides[agent.id] = {
+        ...current,
+        provider: current.provider || envOverride.provider || "",
+        model: current.model || envOverride.model || ""
+      };
+    }
+  }
+  const defaultProviderCanUseEnv = !providers.default_provider || providers.default_provider === "mock";
+  const defaultModelCanUseEnv = !providers.default_model || providers.default_model === "mock-agent-runtime";
+  return {
+    ...settings,
+    providers_json: {
+      ...providers,
+      default_provider: defaultProviderCanUseEnv ? (environmentDefaults?.default_provider || providers.default_provider || "") : providers.default_provider,
+      default_model: defaultModelCanUseEnv ? (environmentDefaults?.default_model || providers.default_model || "") : providers.default_model,
+      agent_overrides: nextOverrides
+    }
+  };
 }
 
 function getIntegrationDefinition(registry, integrationId) {
@@ -1048,6 +1179,23 @@ function SidebarIcon({ kind }) {
   return h("span", { className: "inline-block h-4 w-4" });
 }
 
+function EyeIcon({ hidden = false }) {
+  const common = {
+    viewBox: "0 0 20 20",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.7",
+    strokeLinecap: "round",
+    strokeLinejoin: "round",
+    className: "h-4 w-4"
+  };
+  return h("svg", common, [
+    h("path", { key: "a", d: "M2.5 10S5.2 5.5 10 5.5S17.5 10 17.5 10S14.8 14.5 10 14.5S2.5 10 2.5 10Z" }),
+    h("circle", { key: "b", cx: "10", cy: "10", r: "2.2" }),
+    hidden ? h("path", { key: "c", d: "M4 16L16 4" }) : null
+  ]);
+}
+
 function Button({ children, variant = "default", className = "", ...props }) {
   if (window.TethermarkUI?.Button) {
     return h(window.TethermarkUI.Button, { variant, className, ...props }, children);
@@ -1147,7 +1295,27 @@ function Input({ className = "", ...props }) {
   if (window.TethermarkUI?.Input) {
     return h(window.TethermarkUI.Input, { className, ...props });
   }
-  return h("input", { className: cn("w-full rounded-2xl border border-border bg-white px-4 py-2.5 text-sm text-slate-900 outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-200 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400 disabled:opacity-100", className), ...props });
+  return h("input", { className: cn("flex h-10 w-full min-w-0 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-slate-500 focus-visible:border-slate-400 focus-visible:ring-2 focus-visible:ring-slate-200 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500 disabled:opacity-50 aria-invalid:border-red-500 aria-invalid:ring-red-100", className), ...props });
+}
+
+function PasswordInput({ shown = false, onToggleShown, className = "", ...props }) {
+  return h("div", { className: "relative" }, [
+    h(Input, {
+      key: "input",
+      ...props,
+      type: shown ? "text" : "password",
+      className: cn("pr-10", className)
+    }),
+    h("button", {
+      key: "toggle",
+      type: "button",
+      className: "absolute inset-y-0 right-0 inline-flex w-10 items-center justify-center rounded-r-md text-slate-500 transition hover:text-slate-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-200",
+      onMouseDown: (event) => event.preventDefault(),
+      onClick: onToggleShown,
+      "aria-label": shown ? "Hide API key" : "Show API key",
+      title: shown ? "Hide API key" : "Show API key"
+    }, h(EyeIcon, { hidden: shown }))
+  ]);
 }
 
 function Select({ className = "", ...props }, children) {
@@ -2261,6 +2429,8 @@ function App() {
   const [settings, setSettings] = useState(emptySettings);
   const [effectiveSettings, setEffectiveSettings] = useState(emptyEffectiveSettings);
   const [providerCredentialDrafts, setProviderCredentialDrafts] = useState({});
+  const [agentCredentialDrafts, setAgentCredentialDrafts] = useState({});
+  const [visibleApiKeys, setVisibleApiKeys] = useState({});
   const [integrationCredentialDrafts, setIntegrationCredentialDrafts] = useState({});
   const [documents, setDocuments] = useState([]);
   const [projects, setProjects] = useState([]);
@@ -2393,6 +2563,10 @@ function App() {
     () => projects.find((project) => project.id === requestContext.projectId) || null,
     [projects, requestContext.projectId]
   );
+  const runDefaultsKey = useMemo(
+    () => runDefaultsDependencyKey(currentProject, effectiveSettings, auditPackages),
+    [currentProject, effectiveSettings, auditPackages]
+  );
   const launchReadiness = useMemo(
     () => deriveLaunchReadiness(runForm, preflightSummary, preflightAcceptedAt, preflightStale, effectiveSettings, llmRegistry),
     [runForm, preflightSummary, preflightAcceptedAt, preflightStale, effectiveSettings, llmRegistry]
@@ -2427,6 +2601,27 @@ function App() {
     () => getProviderApiFieldId(llmRegistry, settings.providers_json.default_provider || ""),
     [llmRegistry, settings.providers_json.default_provider]
   );
+  const settingsDefaultApiFieldStatus = useMemo(
+    () => getProviderCredentialFieldStatus(llmRegistry, settings.providers_json.default_provider || "", settingsDefaultApiFieldId),
+    [llmRegistry, settings.providers_json.default_provider, settingsDefaultApiFieldId]
+  );
+  const settingsDefaultApiEnvHint = useMemo(
+    () => getProviderApiKeyEnvHint(settings.providers_json.default_provider || "", settingsDefaultApiFieldStatus),
+    [settings.providers_json.default_provider, settingsDefaultApiFieldStatus]
+  );
+  const settingsDefaultEnvCredentials = llmRegistry.environment_defaults || {};
+  const maskedApiKeyValue = "************";
+  const settingsDefaultApiDraftPresent = settingsDefaultApiFieldId
+    ? Object.prototype.hasOwnProperty.call(providerCredentialDrafts, settingsDefaultApiFieldId)
+    : false;
+  const settingsDefaultApiConfigured = Boolean(settingsDefaultApiFieldId)
+    && !settingsDefaultApiDraftPresent
+    && (settingsDefaultEnvCredentials.default_api_key_configured || settingsDefaultApiFieldStatus?.configured);
+  const settingsDefaultApiDisplayValue = settingsDefaultApiFieldId
+    ? (settingsDefaultApiDraftPresent
+      ? (providerCredentialDrafts[settingsDefaultApiFieldId] || "")
+      : (settingsDefaultEnvCredentials.default_api_key_value || (settingsDefaultApiConfigured ? maskedApiKeyValue : "")))
+    : "";
   const settingsAgentOverrides = useMemo(
     () => settings.providers_json?.agent_overrides || {},
     [settings.providers_json]
@@ -2471,11 +2666,73 @@ function App() {
   function updateRunForm(key, value) {
     setPreflightStale(true);
     setPreflightAcceptedAt(null);
-    setRunForm((current) => normalizeRunFormUpdate(current, key, value, auditPackages));
+    setRunForm((current) => normalizeRunFormUpdate(
+      current,
+      key,
+      value,
+      auditPackages,
+      effectiveSettings.effective.audit_defaults_json || {}
+    ));
   }
 
   function updateSettings(section, key, value) {
     setSettings((current) => ({ ...current, [section]: { ...(current[section] || {}), [key]: value } }));
+  }
+
+  function updateAuditDefaultsForPackage(packageId) {
+    setSettings((current) => ({
+      ...(() => {
+        const packageOverrides = buildAuditDefaultPackageOverrides(current.audit_defaults_json || {});
+        const restoredDefaults = packageOverrides[packageId] && typeof packageOverrides[packageId] === "object"
+          ? packageOverrides[packageId]
+          : null;
+        const derived = {
+          ...(restoredDefaults || deriveAuditDefaultsForPackage(packageId, auditPackages, current.audit_defaults_json || {})),
+          audit_package: packageId,
+          package_overrides: packageOverrides
+        };
+        return {
+          ...current,
+          audit_defaults_json: derived,
+          preflight_json: {
+            ...(current.preflight_json || {}),
+            runtime_allowed: derived.runtime_allowed
+          },
+          review_json: {
+            ...(current.review_json || {}),
+            require_human_review_for_severity: derived.review_severity,
+            publishability_threshold: derived.publishability_threshold
+          }
+        };
+      })()
+    }));
+  }
+
+  function updateAuditDefault(key, value) {
+    setSettings((current) => ({
+      ...current,
+      audit_defaults_json: {
+        ...(current.audit_defaults_json || {}),
+        [key]: value
+      }
+    }));
+  }
+
+  function toggleSettingsAuditLane(laneId) {
+    setSettings((current) => {
+      const defaults = current.audit_defaults_json || {};
+      const currentLanes = sanitizeEnabledLanes(defaults.enabled_lanes, defaults.run_mode || "static");
+      const nextLanes = currentLanes.includes(laneId)
+        ? currentLanes.filter((item) => item !== laneId)
+        : [...currentLanes, laneId];
+      return {
+        ...current,
+        audit_defaults_json: {
+          ...defaults,
+          enabled_lanes: sanitizeEnabledLanes(nextLanes, defaults.run_mode || "static")
+        }
+      };
+    });
   }
 
   function updateSettingsAgentOverride(agentId, nextPatch) {
@@ -2496,6 +2753,14 @@ function App() {
 
   function updateProviderCredentialDraft(fieldId, value) {
     setProviderCredentialDrafts((current) => ({ ...current, [fieldId]: value }));
+  }
+
+  function updateAgentCredentialDraft(agentId, value) {
+    setAgentCredentialDrafts((current) => ({ ...current, [agentId]: value }));
+  }
+
+  function toggleVisibleApiKey(key) {
+    setVisibleApiKeys((current) => ({ ...current, [key]: !current[key] }));
   }
 
   function updateIntegrationCredentialDraft(fieldId, value) {
@@ -2539,8 +2804,9 @@ function App() {
         effective: effectiveSettingsPayload.settings || emptySettings,
         layers: effectiveSettingsPayload.layers || emptyEffectiveSettings.layers
       });
-      setSettings(settingsPayload.settings || emptySettings);
+      setSettings(applyEnvironmentDefaultsToSettings(settingsPayload.settings || emptySettings, llmProvidersPayload.environment_defaults || {}));
       setProviderCredentialDrafts({});
+      setAgentCredentialDrafts({});
       setIntegrationCredentialDrafts({});
       setDocuments(documentsPayload.documents || []);
       setProjects(projectsPayload.projects || []);
@@ -2548,7 +2814,8 @@ function App() {
       setPolicyPacks((policyPacksPayload.policy_packs || []).filter((item) => item.id === "default"));
       setLlmRegistry({
         providers: llmProvidersPayload.providers || [],
-        presets: llmProvidersPayload.presets || []
+        presets: llmProvidersPayload.presets || [],
+        environment_defaults: llmProvidersPayload.environment_defaults || {}
       });
       setIntegrationRegistry(integrationsPayload.integrations || []);
       setReviewNotifications(notificationsPayload.review_notifications || []);
@@ -2809,7 +3076,7 @@ function App() {
       review_severity: currentProject?.target_defaults_json?.review_severity || effectiveSettings.effective.review_json?.require_human_review_for_severity || "high",
       review_visibility: currentProject?.target_defaults_json?.review_visibility || effectiveSettings.effective.review_json?.default_visibility || "internal"
     });
-  }, [currentProject?.id, auditPackages, effectiveSettings.effective.audit_defaults_json, effectiveSettings.effective.providers_json, effectiveSettings.effective.preflight_json, effectiveSettings.effective.review_json]);
+  }, [runDefaultsKey]);
 
   useEffect(() => {
     window.localStorage.setItem(contextStorageKey, JSON.stringify(requestContext));
@@ -3851,6 +4118,8 @@ function App() {
     launchRun
   });
 
+  const launchModalOverlay = launchModalOpen && view !== "runs" ? runsLaunchModal : null;
+
   const runsView = window.TethermarkFeatures?.RunsWorkspace
     ? h(window.TethermarkFeatures.RunsWorkspace, {
       runs,
@@ -4085,7 +4354,7 @@ function App() {
       body: JSON.stringify((() => {
         const integrationPayload = buildSettingsIntegrationPayload(settings, integrationRegistry, integrationCredentialDrafts);
         return {
-          providers: settings.providers_json,
+          providers: buildSettingsProvidersPayload(settings, agentCredentialDrafts),
           credentials: {
             ...integrationPayload.credentials,
             ...buildSettingsCredentialsPayload(settings, llmRegistry, providerCredentialDrafts)
@@ -4100,12 +4369,28 @@ function App() {
           test_mode: settings.test_mode_json
         };
       })())
-    }, requestContext).then((payload) => {
-      setSettings(payload.settings || emptySettings);
+    }, requestContext).then((payload) => Promise.all([
+      api("/ui/settings?scope_level=effective", undefined, requestContext),
+      api("/llm-providers", undefined, requestContext)
+    ]).then(([effectivePayload, llmProvidersPayload]) => {
+      const nextEnvironmentDefaults = llmProvidersPayload.environment_defaults || {};
+      setSettings(applyEnvironmentDefaultsToSettings(payload.settings || emptySettings, nextEnvironmentDefaults));
+      setLlmRegistry({
+        providers: llmProvidersPayload.providers || [],
+        presets: llmProvidersPayload.presets || [],
+        environment_defaults: nextEnvironmentDefaults
+      });
       setProviderCredentialDrafts({});
+      setAgentCredentialDrafts({});
       setIntegrationCredentialDrafts({});
-      return api("/ui/settings?scope_level=effective", undefined, requestContext).then((effectivePayload) => setEffectiveSettings({ effective: effectivePayload.settings || emptySettings, layers: effectivePayload.layers || emptyEffectiveSettings.layers }));
-    }),
+      const nextEffectiveSettings = { effective: effectivePayload.settings || emptySettings, layers: effectivePayload.layers || emptyEffectiveSettings.layers };
+      setEffectiveSettings(nextEffectiveSettings);
+      setRunForm(deriveRunFormDefaults(currentProject, nextEffectiveSettings, auditPackages));
+      setPreflightSummary(null);
+      setPreflightStale(true);
+      setPreflightCheckedAt(null);
+      setPreflightAcceptedAt(null);
+    })),
     "Settings saved."
   );
 
@@ -4139,14 +4424,22 @@ function App() {
             .map((item) => h("option", { key: item.value, value: item.value }, item.label))))
         ])),
         h(Field, { key: "api", label: "API key" }, h("div", { className: "space-y-2" }, [
-          h(Input, {
-            type: "password",
-            value: settingsDefaultApiFieldId ? (providerCredentialDrafts[settingsDefaultApiFieldId] || "") : "",
+          h(PasswordInput, {
+            shown: Boolean(visibleApiKeys.default),
+            onToggleShown: () => toggleVisibleApiKey("default"),
+            value: settingsDefaultApiDisplayValue,
+            onFocus: (event) => settingsDefaultApiConfigured && event.target.select(),
             onChange: (event) => settingsDefaultApiFieldId && updateProviderCredentialDraft(settingsDefaultApiFieldId, event.target.value),
-            placeholder: settingsDefaultApiFieldId || "no api key required"
+            placeholder: settingsDefaultEnvCredentials.default_api_key_configured
+              ? `configured via ${settingsDefaultEnvCredentials.default_api_key_env_var}`
+              : (settingsDefaultApiEnvHint || settingsDefaultApiFieldId || "no api key required")
           }),
           h("div", { className: "text-xs text-slate-500" }, settingsDefaultApiFieldId
-            ? `Maps to ${settingsDefaultApiFieldId}. Leave blank to keep the persisted or environment-backed provider key.`
+            ? (settingsDefaultEnvCredentials.default_api_key_configured
+              ? `Environment key is configured via ${settingsDefaultEnvCredentials.default_api_key_env_var}. Leave blank to keep using it.`
+              : settingsDefaultApiFieldStatus?.source === "environment"
+              ? `${settingsDefaultApiFieldStatus.note} Leave blank to keep using the environment-backed key.`
+              : `Maps to ${settingsDefaultApiEnvHint || settingsDefaultApiFieldId}. Leave blank to keep the persisted or environment-backed provider key.`)
             : "The selected default model does not require a persisted API key.")
         ]))
       ]),
@@ -4157,6 +4450,12 @@ function App() {
         ]),
         h("div", { key: "rows", className: "space-y-3" }, agentConfigCatalog.map((agent) => {
           const override = settingsAgentOverrides[agent.id] || {};
+          const envOverride = llmRegistry.environment_defaults?.agent_overrides?.[agent.id] || {};
+          const agentDraftPresent = Object.prototype.hasOwnProperty.call(agentCredentialDrafts, agent.id);
+          const agentEnvApiConfigured = !agentDraftPresent && !override.api_key && envOverride.api_key_configured;
+          const agentApiDisplayValue = agentDraftPresent
+            ? (agentCredentialDrafts[agent.id] || "")
+            : (override.api_key || envOverride.api_key_value || (agentEnvApiConfigured ? maskedApiKeyValue : ""));
           const providerId = override.provider || "";
           const modelValue = providerId && override.model ? `${providerId}:${override.model}` : "";
           return h("div", { key: agent.id, className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4" }, [
@@ -4193,13 +4492,17 @@ function App() {
                     .map((item) => h("option", { key: `${agent.id}:${item.value}`, value: item.value }, item.label))))
               ])),
               h(Field, { key: "api", label: "API key" }, h("div", { className: "space-y-2" }, [
-                h(Input, {
-                  type: "password",
-                  value: override.api_key || "",
-                  onChange: (event) => updateSettingsAgentOverride(agent.id, { api_key: event.target.value }),
-                  placeholder: `uses ${agent.env_prefix}_API_KEY`
+                h(PasswordInput, {
+                  shown: Boolean(visibleApiKeys[agent.id]),
+                  onToggleShown: () => toggleVisibleApiKey(agent.id),
+                  value: agentApiDisplayValue,
+                  onFocus: (event) => agentEnvApiConfigured && event.target.select(),
+                  onChange: (event) => updateAgentCredentialDraft(agent.id, event.target.value),
+                  placeholder: envOverride.api_key_configured ? `configured via ${envOverride.api_key_env_var}` : `uses ${agent.env_prefix}_API_KEY`
                 }),
-                h("div", { className: "text-xs text-slate-500" }, `Maps to ${agent.env_prefix}_API_KEY. Leave blank to use the agent-specific or provider environment key.`)
+                h("div", { className: "text-xs text-slate-500" }, envOverride.api_key_configured
+                  ? `Environment key is configured via ${envOverride.api_key_env_var}. Leave blank to keep using it.`
+                  : `Maps to ${agent.env_prefix}_API_KEY. Leave blank to use the agent-specific or provider environment key.`)
               ]))
             ])
           ]);
@@ -4211,10 +4514,11 @@ function App() {
 
   const settingsAuditPanel = h("div", { className: "space-y-6" }, [
     h(Card, { key: "audit-defaults", title: "Audit Defaults", description: "Default launch posture when a run or project does not specify a narrower audit shape." }, [
+      h("div", { key: "package-note", className: "mb-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600" }, "Selecting an audit package fills in run mode, runtime validation, review thresholds, budget, and audit area coverage. Adjust the advanced defaults below when the project needs a different baseline."),
       h("div", { key: "fields", className: "grid gap-4 md:grid-cols-2" }, [
         h(Field, { key: "package", label: "Audit Package" }, Select({
           value: settings.audit_defaults_json.audit_package || "",
-          onChange: (event) => updateSettings("audit_defaults_json", "audit_package", event.target.value)
+          onChange: (event) => updateAuditDefaultsForPackage(event.target.value)
         }, [
           ...visibleAuditPackages.map((item) => h("option", { key: item.id, value: item.id }, item.title + " (" + item.id + ")")),
           settings.audit_defaults_json.audit_package && !visibleAuditPackages.some((item) => item.id === settings.audit_defaults_json.audit_package)
@@ -4224,7 +4528,82 @@ function App() {
         h(Field, { key: "mode", label: "Run Mode" }, Select({ value: normalizeRunModeSelection(settings.audit_defaults_json.run_mode) || "static", onChange: (event) => updateSettings("audit_defaults_json", "run_mode", event.target.value) }, [
           h("option", { key: "static", value: "static" }, "static"),
           h("option", { key: "runtime", value: "runtime" }, "runtime")
+        ])),
+        h(Field, { key: "runtime", label: "Runtime Validation" }, Select({ value: settings.preflight_json.runtime_allowed || settings.audit_defaults_json.runtime_allowed || "never", onChange: (event) => updateSettings("preflight_json", "runtime_allowed", event.target.value) }, [
+          h("option", { key: "never", value: "never" }, "never"),
+          h("option", { key: "targeted", value: "targeted_only" }, "targeted only"),
+          h("option", { key: "allowed", value: "allowed" }, "allowed")
+        ])),
+        h(Field, { key: "review-threshold", label: "Review Threshold" }, Select({ value: settings.review_json.require_human_review_for_severity || settings.audit_defaults_json.review_severity || "high", onChange: (event) => updateSettings("review_json", "require_human_review_for_severity", event.target.value) }, [
+          h("option", { key: "low", value: "low" }, "low"),
+          h("option", { key: "medium", value: "medium" }, "medium"),
+          h("option", { key: "high", value: "high" }, "high"),
+          h("option", { key: "critical", value: "critical" }, "critical")
+        ])),
+        h(Field, { key: "publishability", label: "Publishability Threshold" }, Select({ value: settings.review_json.publishability_threshold || settings.audit_defaults_json.publishability_threshold || "high", onChange: (event) => updateSettings("review_json", "publishability_threshold", event.target.value) }, [
+          h("option", { key: "low", value: "low" }, "low"),
+          h("option", { key: "medium", value: "medium" }, "medium"),
+          h("option", { key: "high", value: "high" }, "high")
         ]))
+      ]),
+      h("div", { key: "advanced", className: "mt-5 space-y-4 rounded-2xl border border-slate-200 bg-white px-4 py-4" }, [
+        h("div", { key: "head" }, [
+          h("div", { key: "title", className: "text-sm font-medium text-slate-900" }, "Depth and Scope"),
+          h("div", { key: "copy", className: "mt-1 text-sm text-slate-500" }, "These become the default depth and coverage values in the run modal. Per-run changes still override them for that launch only.")
+        ]),
+        h("div", { key: "budget-grid", className: "grid gap-4 md:grid-cols-2 xl:grid-cols-4" }, [
+          h(Field, { key: "agents", label: "Max agent calls" }, h(Input, {
+            type: "number",
+            min: 1,
+            value: settings.audit_defaults_json.max_agent_calls || "",
+            onChange: (event) => updateAuditDefault("max_agent_calls", Math.max(1, Number(event.target.value || 1)))
+          })),
+          h(Field, { key: "tokens", label: "Max total tokens" }, h(Input, {
+            type: "number",
+            min: 1,
+            value: settings.audit_defaults_json.max_total_tokens || "",
+            onChange: (event) => updateAuditDefault("max_total_tokens", Math.max(1, Number(event.target.value || 1)))
+          })),
+          h(Field, { key: "reruns", label: "Max rerun rounds" }, h(Input, {
+            type: "number",
+            min: 1,
+            value: settings.audit_defaults_json.max_rerun_rounds || "",
+            onChange: (event) => updateAuditDefault("max_rerun_rounds", Math.max(1, Number(event.target.value || 1)))
+          })),
+          h(Field, { key: "publishability-advanced", label: "Publishability threshold" }, Select({
+            value: settings.audit_defaults_json.publishability_threshold || settings.review_json.publishability_threshold || "high",
+            onChange: (event) => {
+              updateAuditDefault("publishability_threshold", event.target.value);
+              updateSettings("review_json", "publishability_threshold", event.target.value);
+            }
+          }, [
+            h("option", { key: "low", value: "low" }, "low"),
+            h("option", { key: "medium", value: "medium" }, "medium"),
+            h("option", { key: "high", value: "high" }, "high")
+          ]))
+        ]),
+        h("div", { key: "lane-grid", className: "grid gap-3 md:grid-cols-2" }, auditLaneCatalog.map((lane) => {
+          const enabledLanes = sanitizeEnabledLanes(settings.audit_defaults_json.enabled_lanes, settings.audit_defaults_json.run_mode || "static");
+          const enabled = enabledLanes.includes(lane.id);
+          return h("label", {
+            key: lane.id,
+            className: cn(
+              "flex items-start gap-3 rounded-2xl border px-4 py-4",
+              enabled ? "border-slate-300 bg-slate-50" : "border-slate-200 bg-white"
+            )
+          }, [
+            h("input", {
+              key: "input",
+              type: "checkbox",
+              checked: enabled,
+              onChange: () => toggleSettingsAuditLane(lane.id)
+            }),
+            h("div", { key: "copy", className: "min-w-0" }, [
+              h("div", { key: "title", className: "font-medium text-slate-900" }, lane.title),
+              h("div", { key: "summary", className: "mt-1 text-sm text-slate-500" }, lane.summary)
+            ])
+          ]);
+        }))
       ]),
       h(Button, { key: "save", className: "mt-5", onClick: saveSettings }, "Save Settings")
     ])
@@ -4549,10 +4928,7 @@ function App() {
         h("button", {
           key: "quick-create",
           type: "button",
-          onClick: () => {
-            setView("runs");
-            setLaunchModalOpen(true);
-          },
+          onClick: () => setLaunchModalOpen(true),
           className: "flex flex-1 items-center gap-2 rounded-2xl bg-slate-800 px-4 py-3 text-left text-sm font-semibold text-white hover:bg-slate-700"
         }, [
           h(SidebarIcon, { key: "icon", kind: "plus" }),
@@ -4588,6 +4964,7 @@ function App() {
       ])
     ]),
     h("main", { key: "main", className: view === "runs" ? "min-w-0 h-screen overflow-hidden" : "px-5 py-6 lg:px-8" }, [
+      launchModalOverlay,
       view !== "runs" ? h("header", { key: "header", className: "mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between" }, [
         h("div", { key: "heading" }, [
           h("h2", { key: "title", className: "text-3xl font-semibold tracking-tight text-slate-950" }, navItems.find(([item]) => item === view)?.[1] || "Dashboard"),

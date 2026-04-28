@@ -66,9 +66,8 @@ This keeps the public OSS product installation-first while preserving a migratio
 
 ## Database and storage notes
 
-Current OSS persistence modes:
+Current OSS persistence mode:
 
-- `embedded`: local SQLite under `.artifacts/state/embedded-db`
 - `local`: local SQLite under `.artifacts/state/local-db`
 
 OSS no longer exposes a `hosted` persistence mode.

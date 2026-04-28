@@ -78,8 +78,8 @@ import {
   readPersistedMetrics,
   readPersistedObservability,
   readPersistedObservabilitySummary,
-  reconstructEmbeddedRun,
-  reconstructEmbeddedRuns,
+  reconstructLocalRun,
+  reconstructLocalRuns,
   readPersistedPolicyApplication,
   PersistedAsyncJobManager,
   acknowledgePersistedReviewNotification,
@@ -498,6 +498,207 @@ type UiSettingsBody = {
   integrations?: Record<string, unknown>;
   test_mode?: Record<string, unknown>;
 };
+
+const LLM_AGENT_ENV_PREFIXES: Record<string, string[]> = {
+  planner_agent: ["AUDIT_LLM_PLANNER"],
+  threat_model_agent: ["AUDIT_LLM_THREAT_MODEL"],
+  eval_selection_agent: ["AUDIT_LLM_EVIDENCE_SELECTION"],
+  lane_specialist_agent: ["AUDIT_LLM_AREA_REVIEW"],
+  audit_supervisor_agent: ["AUDIT_LLM_SUPERVISOR"],
+  remediation_agent: ["AUDIT_LLM_REMEDIATION"]
+};
+const MASKED_SECRET_PLACEHOLDER = "************";
+
+function readEnv(name: string): string | undefined {
+  const value = process.env[name];
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length ? trimmed : undefined;
+}
+
+function stringifyEnvValue(value: string): string {
+  if (/^[A-Za-z0-9_./:@-]+$/.test(value)) return value;
+  return JSON.stringify(value);
+}
+
+async function writeEnvValues(updates: Record<string, string | null | undefined>): Promise<void> {
+  const envPath = path.resolve(process.cwd(), ".env");
+  let contents = "";
+  try {
+    contents = await fs.readFile(envPath, "utf8");
+  } catch (error: any) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  const lines = contents ? contents.split(/\r?\n/) : [];
+  const seen = new Set<string>();
+  const nextLines = lines.map((line) => {
+    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/);
+    if (!match) return line;
+    const key = match[1];
+    if (!Object.prototype.hasOwnProperty.call(updates, key)) return line;
+    seen.add(key);
+    const value = updates[key];
+    if (typeof value !== "string" || !value.length || value === MASKED_SECRET_PLACEHOLDER) return line;
+    process.env[key] = value;
+    return `${key}=${stringifyEnvValue(value)}`;
+  });
+  for (const [key, value] of Object.entries(updates)) {
+    if (seen.has(key)) continue;
+    if (typeof value !== "string" || !value.length || value === MASKED_SECRET_PLACEHOLDER) continue;
+    process.env[key] = value;
+    nextLines.push(`${key}=${stringifyEnvValue(value)}`);
+  }
+  await fs.writeFile(envPath, `${nextLines.join("\n").replace(/\n*$/, "")}\n`, "utf8");
+}
+
+function inferLlmProviderForModel(model: string | undefined): string | undefined {
+  if (!model) return undefined;
+  return listBuiltinLlmProviders().find((provider) => provider.models.some((item) => item.id === model))?.id;
+}
+
+function firstAgentEnv(agentId: string, suffix: "PROVIDER" | "MODEL" | "API_KEY"): { variable: string; value: string } | null {
+  for (const prefix of LLM_AGENT_ENV_PREFIXES[agentId] || []) {
+    const variable = `${prefix}_${suffix}`;
+    const value = readEnv(variable);
+    if (value) return { variable, value };
+  }
+  return null;
+}
+
+function primaryAgentEnvVar(agentId: string, suffix: "PROVIDER" | "MODEL" | "API_KEY"): string | null {
+  const prefix = LLM_AGENT_ENV_PREFIXES[agentId]?.[0];
+  return prefix ? `${prefix}_${suffix}` : null;
+}
+
+function applyEnvironmentLlmSettings(settings: any): any {
+  const currentProviders = settings.providers_json && typeof settings.providers_json === "object"
+    ? settings.providers_json as Record<string, any>
+    : {};
+  const envDefaultModel = readEnv("AUDIT_LLM_MODEL");
+  const envDefaultProvider = readEnv("AUDIT_LLM_PROVIDER")
+    ?? inferLlmProviderForModel(envDefaultModel)
+    ?? (readEnv("AUDIT_LLM_API_KEY") || readEnv("LLM_API_KEY") || readEnv("OPENAI_API_KEY") ? "openai" : undefined);
+  const providerCanUseEnv = !currentProviders.default_provider || currentProviders.default_provider === "mock";
+  const modelCanUseEnv = !currentProviders.default_model || currentProviders.default_model === "mock-agent-runtime";
+  const nextProviders: Record<string, any> = {
+    ...currentProviders,
+    default_provider: providerCanUseEnv ? (envDefaultProvider || currentProviders.default_provider || "") : currentProviders.default_provider,
+    default_model: modelCanUseEnv ? (envDefaultModel || currentProviders.default_model || "") : currentProviders.default_model
+  };
+  const currentOverrides = currentProviders.agent_overrides && typeof currentProviders.agent_overrides === "object"
+    ? currentProviders.agent_overrides as Record<string, any>
+    : {};
+  const nextOverrides: Record<string, any> = { ...currentOverrides };
+  for (const agentId of Object.keys(LLM_AGENT_ENV_PREFIXES)) {
+    const currentOverride = currentOverrides[agentId] && typeof currentOverrides[agentId] === "object"
+      ? currentOverrides[agentId] as Record<string, any>
+      : {};
+    const envModel = firstAgentEnv(agentId, "MODEL")?.value;
+    const envProvider = firstAgentEnv(agentId, "PROVIDER")?.value ?? inferLlmProviderForModel(envModel);
+    if (!envProvider && !envModel) continue;
+    nextOverrides[agentId] = {
+      ...currentOverride,
+      provider: currentOverride.provider || envProvider || "",
+      model: currentOverride.model || envModel || ""
+    };
+  }
+  nextProviders.agent_overrides = nextOverrides;
+  return {
+    ...settings,
+    providers_json: nextProviders
+  };
+}
+
+function describeEnvironmentLlmDefaults(): Record<string, unknown> {
+  const defaultModel = readEnv("AUDIT_LLM_MODEL");
+  const defaultProvider = readEnv("AUDIT_LLM_PROVIDER") ?? inferLlmProviderForModel(defaultModel);
+  const defaultApiKey = readEnv("AUDIT_LLM_API_KEY")
+    ? "AUDIT_LLM_API_KEY"
+    : readEnv("LLM_API_KEY")
+      ? "LLM_API_KEY"
+      : readEnv("OPENAI_API_KEY")
+        ? "OPENAI_API_KEY"
+        : null;
+  const agentOverrides: Record<string, unknown> = {};
+  for (const agentId of Object.keys(LLM_AGENT_ENV_PREFIXES)) {
+    const provider = firstAgentEnv(agentId, "PROVIDER");
+    const model = firstAgentEnv(agentId, "MODEL");
+    const apiKey = firstAgentEnv(agentId, "API_KEY");
+    if (!provider && !model && !apiKey) continue;
+    agentOverrides[agentId] = {
+      provider: provider?.value ?? inferLlmProviderForModel(model?.value),
+      provider_env_var: provider?.variable ?? null,
+      model: model?.value ?? null,
+      model_env_var: model?.variable ?? null,
+      api_key_configured: Boolean(apiKey),
+      api_key_env_var: apiKey?.variable ?? null,
+      api_key_value: apiKey?.value ?? null
+    };
+  }
+  return {
+    default_provider: defaultProvider ?? null,
+    default_provider_env_var: defaultProvider ? (readEnv("AUDIT_LLM_PROVIDER") ? "AUDIT_LLM_PROVIDER" : null) : null,
+    default_model: defaultModel ?? null,
+    default_model_env_var: defaultModel ? "AUDIT_LLM_MODEL" : null,
+    default_api_key_configured: Boolean(defaultApiKey),
+    default_api_key_env_var: defaultApiKey,
+    default_api_key_value: defaultApiKey ? readEnv(defaultApiKey) ?? null : null,
+    agent_overrides: agentOverrides
+  };
+}
+
+async function persistLlmEnvironmentSettings(input: UiSettingsBody): Promise<void> {
+  const updates: Record<string, string | null | undefined> = {};
+  const providers = input.providers && typeof input.providers === "object" ? input.providers as Record<string, any> : {};
+  const credentials = input.credentials && typeof input.credentials === "object" ? input.credentials as Record<string, any> : {};
+  if (typeof providers.default_provider === "string" && providers.default_provider) updates.AUDIT_LLM_PROVIDER = providers.default_provider;
+  if (typeof providers.default_model === "string" && providers.default_model) updates.AUDIT_LLM_MODEL = providers.default_model;
+  if (typeof credentials.openai_api_key === "string" && credentials.openai_api_key && credentials.openai_api_key !== MASKED_SECRET_PLACEHOLDER) {
+    updates.AUDIT_LLM_API_KEY = credentials.openai_api_key;
+  }
+  const overrides = providers.agent_overrides && typeof providers.agent_overrides === "object"
+    ? providers.agent_overrides as Record<string, any>
+    : {};
+  for (const [agentId, override] of Object.entries(overrides)) {
+    if (!override || typeof override !== "object") continue;
+    const providerEnvVar = primaryAgentEnvVar(agentId, "PROVIDER");
+    const modelEnvVar = primaryAgentEnvVar(agentId, "MODEL");
+    const apiKeyEnvVar = primaryAgentEnvVar(agentId, "API_KEY");
+    if (providerEnvVar && typeof override.provider === "string" && override.provider) updates[providerEnvVar] = override.provider;
+    if (modelEnvVar && typeof override.model === "string" && override.model) updates[modelEnvVar] = override.model;
+    if (apiKeyEnvVar && typeof override.api_key === "string" && override.api_key && override.api_key !== MASKED_SECRET_PLACEHOLDER) {
+      updates[apiKeyEnvVar] = override.api_key;
+    }
+  }
+  if (Object.keys(updates).length) await writeEnvValues(updates);
+}
+
+function stripLlmSecretsFromSettingsInput(input: UiSettingsBody): UiSettingsBody {
+  const credentials = input.credentials && typeof input.credentials === "object"
+    ? { ...(input.credentials as Record<string, unknown>) }
+    : input.credentials;
+  if (credentials && typeof credentials === "object") delete (credentials as Record<string, unknown>).openai_api_key;
+  const providers = input.providers && typeof input.providers === "object"
+    ? { ...(input.providers as Record<string, any>) }
+    : input.providers;
+  if (providers && typeof providers === "object" && providers.agent_overrides && typeof providers.agent_overrides === "object") {
+    const nextOverrides: Record<string, unknown> = {};
+    for (const [agentId, override] of Object.entries(providers.agent_overrides as Record<string, any>)) {
+      if (!override || typeof override !== "object") {
+        nextOverrides[agentId] = override;
+        continue;
+      }
+      const { api_key: _apiKey, ...rest } = override;
+      nextOverrides[agentId] = rest;
+    }
+    providers.agent_overrides = nextOverrides;
+  }
+  return {
+    ...input,
+    providers,
+    credentials
+  };
+}
 
 type ProjectBody = {
   id?: string;
@@ -1109,11 +1310,14 @@ export function createApiServer(): http.Server {
     }
     if (scopeLevel === "effective") {
       const resolution = await resolvePersistedUiSettings(undefined, context);
-      sendJson(res, 200, { settings: resolution.effective, layers: resolution.layers });
+      sendJson(res, 200, {
+        settings: resolution.effective,
+        layers: resolution.layers
+      });
       return;
     }
     const settings = await readPersistedUiSettingsLayer(scopeLevel, undefined, context);
-    sendJson(res, 200, { settings });
+    sendJson(res, 200, { settings: scopeLevel === "global" ? applyEnvironmentLlmSettings(settings) : settings });
     return;
   }
 
@@ -1125,7 +1329,9 @@ export function createApiServer(): http.Server {
         sendJson(res, 404, { error: "hosted_only", feature: "workspace_settings" });
         return;
       }
-      sendJson(res, 200, { settings: await updatePersistedUiSettings(body, undefined, { ...context, scopeLevel }) });
+      await persistLlmEnvironmentSettings(body);
+      const settings = await updatePersistedUiSettings(stripLlmSecretsFromSettingsInput(body), undefined, { ...context, scopeLevel });
+      sendJson(res, 200, { settings });
     } catch (error) {
       sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
     }
@@ -1480,7 +1686,7 @@ export function createApiServer(): http.Server {
 
   if (req.method === "POST" && matchRunsReconstruct(url)) {
     try {
-      const summary = await reconstructEmbeddedRuns({
+      const summary = await reconstructLocalRuns({
         dryRun: readBooleanParam(url, "dry_run") ?? false,
         targetId: url.searchParams.get("target_id") ?? undefined,
         status: url.searchParams.get("status") ?? undefined,
@@ -1506,7 +1712,7 @@ export function createApiServer(): http.Server {
   const runReconstruct = req.method === "POST" ? matchRunReconstruct(url) : null;
   if (runReconstruct) {
     try {
-      const summary = await reconstructEmbeddedRun({
+      const summary = await reconstructLocalRun({
         runId: runReconstruct.runId,
         dryRun: readBooleanParam(url, "dry_run") ?? false
       });
@@ -2189,7 +2395,8 @@ export function createApiServer(): http.Server {
             listBuiltinLlmProviders(),
             settingsResolution.effective.credentials_json as Record<string, unknown>
           ),
-          presets: listBuiltinLlmProviderPresets()
+          presets: listBuiltinLlmProviderPresets(),
+          environment_defaults: describeEnvironmentLlmDefaults()
         });
       } catch (error) {
       sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });

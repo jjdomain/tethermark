@@ -167,7 +167,13 @@ export function describeLlmProviderCredentialStatus(
   const fields = provider.credential_fields.map((field) => {
     const persistedValue = persistedCredentials?.[field.id];
     const persistedConfigured = typeof persistedValue === "string" ? persistedValue.trim().length > 0 : Boolean(persistedValue);
-    const envConfigured = field.env_var ? Boolean(environment[field.env_var]) : false;
+    const envVarCandidates = [
+      field.env_var,
+      field.kind === "api_key" && provider.id === "openai" ? "AUDIT_LLM_API_KEY" : null,
+      field.kind === "api_key" && provider.id === "openai" ? "LLM_API_KEY" : null
+    ].filter(Boolean) as string[];
+    const configuredEnvVar = envVarCandidates.find((name) => Boolean(environment[name]));
+    const envConfigured = Boolean(configuredEnvVar);
     const configured = !field.required || persistedConfigured || envConfigured;
     let source: LlmProviderCredentialSource = "missing";
     let note = `${field.label} is not configured.`;
@@ -183,7 +189,7 @@ export function describeLlmProviderCredentialStatus(
       note = `${field.label} is configured in persisted settings.`;
     } else if (envConfigured) {
       source = "environment";
-      note = `${field.label} is provided by ${field.env_var}.`;
+      note = `${field.label} is provided by ${configuredEnvVar}.`;
     }
     return {
       id: field.id,
@@ -191,7 +197,7 @@ export function describeLlmProviderCredentialStatus(
       source,
       note,
       secret: field.secret,
-      env_var: field.env_var
+      env_var: configuredEnvVar ?? field.env_var
     } satisfies LlmProviderCredentialFieldStatus;
   });
   if (!fields.length) {

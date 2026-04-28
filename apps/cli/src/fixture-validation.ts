@@ -58,9 +58,9 @@ export async function validateFixtures(args?: {
   const fixtureDirs = await listFixtureDirs(rootDir);
   const engine = createEngine();
   const results: FixtureValidationResult[] = [];
-  const dbMode = args?.dbMode ?? "embedded";
-  const envVar = dbMode === "embedded"
-    ? "HARNESS_EMBEDDED_DB_ROOT"
+  const dbMode = args?.dbMode ?? "local";
+  const envVar = dbMode === "local"
+    ? "HARNESS_LOCAL_DB_ROOT"
     : "HARNESS_LOCAL_DB_ROOT";
   const previousRoot = process.env[envVar];
   const persistenceRoot = path.resolve(args?.persistenceRoot ?? await fs.mkdtemp(path.join(os.tmpdir(), `harness-fixture-${dbMode}-`)));

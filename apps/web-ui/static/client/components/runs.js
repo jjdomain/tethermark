@@ -48,18 +48,24 @@ function getAuditLaneTitle(laneId) {
   return auditLaneCatalog.find((lane) => lane.id === laneId)?.title || laneId;
 }
 
-function getAuditPackageDetails(auditPackages, packageId) {
+function getAuditPackageDetails(auditPackages, packageId, runForm = {}) {
   const definition = (auditPackages || []).find((item) => item.id === packageId) || null;
   if (!definition && !packageId) return null;
-  const runMode = definition?.run_mode === "validate" ? "runtime" : (definition?.run_mode || "static");
+  const runMode = runForm.run_mode || (definition?.run_mode === "validate" ? "runtime" : (definition?.run_mode || "static"));
+  const enabledLanes = Array.isArray(runForm.enabled_lanes) && runForm.enabled_lanes.length
+    ? runForm.enabled_lanes
+    : (definition?.enabled_lanes || []);
+  const maxAgentCalls = Number(runForm.max_agent_calls || definition?.max_agent_calls || 0);
+  const maxTotalTokens = Number(runForm.max_total_tokens || definition?.max_total_tokens || 0);
+  const maxRerunRounds = Number(runForm.max_rerun_rounds || definition?.max_rerun_rounds || 0);
   return {
     id: packageId,
     title: definition?.title || packageId || "Custom package",
     description: auditPackageDescriptions[packageId] || "Custom audit package.",
     runMode,
-    auditAreas: (definition?.enabled_lanes || []).map(getAuditLaneTitle),
-    limits: definition
-      ? `${definition.max_agent_calls || 0} agent calls, ${Number(definition.max_total_tokens || 0).toLocaleString()} tokens, ${definition.max_rerun_rounds || 0} rerun${Number(definition.max_rerun_rounds || 0) === 1 ? "" : "s"}`
+    auditAreas: enabledLanes.map(getAuditLaneTitle),
+    limits: maxAgentCalls || maxTotalTokens || maxRerunRounds
+      ? `${maxAgentCalls} agent calls, ${maxTotalTokens.toLocaleString()} tokens, ${maxRerunRounds} rerun${maxRerunRounds === 1 ? "" : "s"}`
       : null
   };
 }
@@ -152,8 +158,8 @@ function stripRedundantControlIds(controlIds, frameworkIds) {
 const agentConfigCatalog = [
   { id: "planner_agent", title: "Planner Agent", env_prefix: "AUDIT_LLM_PLANNER", help: "Builds the initial audit scope, semantic target classification, and standards/control plan for the run." },
   { id: "threat_model_agent", title: "Threat Model Agent", env_prefix: "AUDIT_LLM_THREAT_MODEL", help: "Translates repo and target signals into attack surfaces, trust boundaries, abuse cases, and framework focus areas." },
-  { id: "eval_selection_agent", title: "Evidence Selection Agent", env_prefix: "AUDIT_LLM_EVAL_SELECTION", help: "Chooses which tools, evals, and evidence providers should be used to assess the controls selected by the planner." },
-  { id: "lane_specialist_agent", title: "Audit Area Review Agent", env_prefix: "AUDIT_LLM_LANE_SPECIALIST", help: "Runs an optional specialist pass on one audit area, such as supply chain or data exposure, to produce tighter observations and report-ready summaries." },
+  { id: "eval_selection_agent", title: "Evidence Selection Agent", env_prefix: "AUDIT_LLM_EVIDENCE_SELECTION", help: "Chooses which tools, evals, and evidence providers should be used to assess the controls selected by the planner." },
+  { id: "lane_specialist_agent", title: "Audit Area Review Agent", env_prefix: "AUDIT_LLM_AREA_REVIEW", help: "Runs an optional specialist pass on one audit area, such as supply chain or data exposure, to produce tighter observations and report-ready summaries." },
   { id: "audit_supervisor_agent", title: "Supervisor Agent", env_prefix: "AUDIT_LLM_SUPERVISOR", help: "Acts as the audit QA reviewer. It checks evidence sufficiency, finding quality, and whether reruns or downgrades are needed." },
   { id: "remediation_agent", title: "Remediation Agent", env_prefix: "AUDIT_LLM_REMEDIATION", help: "Summarizes the most important failed or partial controls into a prioritized remediation memo and checklist." }
 ];
@@ -382,7 +388,7 @@ function LaunchAuditModalComponent({
   const activeModel = runModelOptions.find((item) => item.provider_id === runForm.llm_provider && item.id === runForm.llm_model) || null;
   const selectedAuditPackage = (auditPackages || []).find((item) => item.id === runForm.audit_package) || null;
   const visibleAuditPackages = getVisibleAuditPackages(auditPackages);
-  const selectedPackageDetails = getAuditPackageDetails(auditPackages, runForm.audit_package);
+  const selectedPackageDetails = getAuditPackageDetails(auditPackages, runForm.audit_package, runForm);
   const resolvedEnabledLanes = Array.isArray(runForm.enabled_lanes) ? runForm.enabled_lanes : [];
   const agentConfigs = runForm.agent_configs || {};
   const [activeStep, setActiveStep] = useState("target");

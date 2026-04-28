@@ -10,7 +10,7 @@ The harness combines deterministic evidence collection, LLM-guided planning and 
 - Uses a staged workflow: target prep, planning, threat modeling, eval/tool selection, lane analysis, supervisor review, selective corrections, scoring, remediation, and human review workflow.
 - Supports synchronous runs plus queued async execution with polling, cancel/retry, and optional completion webhooks.
 - Persists normalized run data for querying while still exporting raw artifacts for audit debugging.
-- Supports `embedded`, `local`, and `hosted` persistence modes with mode-specific roots and metadata.
+- Supports OSS `local` persistence with SQLite-backed roots and metadata.
 - Exposes stable query APIs and separate best-effort artifact/debug APIs.
 - Includes a self-hostable OSS web UI for runs, jobs, reviews, artifacts, and persisted settings.
 
@@ -18,8 +18,8 @@ The harness combines deterministic evidence collection, LLM-guided planning and 
 
 Tethermark is in public OSS release-candidate shape for local and trusted-team self-hosting.
 
-- `embedded` is the default OSS mode.
-- `local` and `hosted` are implemented as separate mode-aware stores, but they currently share the same SQLite-file backend contract rather than a PostgreSQL implementation.
+- `local` is the OSS SQLite storage mode.
+- Hosted production storage is not an OSS database mode; the hosted product provides its own Supabase/Postgres adapter around the shared persistence contracts.
 - The default `.env.example` configuration uses the mock LLM runtime, so the repo can build and run without live model credentials.
 - OSS auth defaults to `none`, which is appropriate for solo operators and trusted internal teams. In that mode, review roles and assignments are advisory governance rather than hard identity enforcement.
 - The supported OSS path is end-to-end: preflight, run execution, findings, review workflow, runtime follow-up, exports, and guarded manual outbound GitHub actions.
@@ -152,7 +152,6 @@ Useful environment variables:
 - `HARNESS_API_AUTH_MODE`
 - `HARNESS_API_KEY`
 - `HARNESS_DB_MODE`
-- `HARNESS_EMBEDDED_DB_ROOT`
 
 The web UI is also deployable as a plain static app. It reads its backend origin from `apps/web-ui/static/config.js`, which defaults to `/api`. For Vercel or other static hosting, point `apiBaseUrl` at the hosted API origin or add a platform rewrite so `/api/*` reaches the API server.
 
@@ -197,7 +196,7 @@ Useful routes:
 ### 6. Maintenance Workflows
 
 ```bash
-npm run scan -- migrate embedded-db
+npm run scan -- migrate local-db
 npm run scan -- reconstruct runs
 npm run scan -- validate-persistence
 npm run scan -- migrate compact-bundle-exports
@@ -275,7 +274,7 @@ The repo now includes small fixture targets under `fixtures/validation-targets/`
 
 Each fixture includes a `validation-expectations.json` file describing the expected target class, likely findings, and review posture.
 
-`validate-fixtures` now uses an isolated temporary persistence root by default, so it can run safely alongside other local commands without contending on the shared embedded database. Pass `--persistence-root <dir>` only if you intentionally want fixture-validation runs persisted into a specific store.
+`validate-fixtures` now uses an isolated temporary persistence root by default, so it can run safely alongside other local commands without contending on the shared local SQLite database. Pass `--persistence-root <dir>` only if you intentionally want fixture-validation runs persisted into a specific store.
 
 ## Audit Flow
 
@@ -316,7 +315,7 @@ The OSS build has meaningful runtime validation support, but it still has practi
 - local tool execution depends on installed binaries and host child-process permission
 - Python worker-backed evidence depends on a working local Python runtime
 - runtime probing is framework-aware for common Node and Python patterns, but not every stack is covered
-- `local` and `hosted` database modes still use the SQLite backend contract today
+- OSS database mode is limited to SQLite-backed `local`; hosted production storage belongs in the hosted Supabase/Postgres adapter.
 
 ## LLM Configuration
 
@@ -331,7 +330,7 @@ Agent-specific overrides are supported for planner, threat model, eval selection
 
 ## Web UI Settings
 
-The OSS web UI persists operator settings and attached policy/reference documents through the same embedded persistence layer used by the engine.
+The OSS web UI persists operator settings and attached policy/reference documents through the same local SQLite persistence layer used by the engine.
 
 Current settings sections:
 
@@ -350,7 +349,7 @@ These records are available through the `/ui/settings` and `/ui/documents` API r
 
 ## Known Gaps
 
-- `local` and `hosted` modes are separated logically, but do not yet have a real non-SQLite backend.
+- Hosted Supabase/Postgres storage is implemented outside the OSS repo and should not be configured through OSS `HARNESS_DB_MODE`.
 - The current implementation has eval selection, runtime validation candidates, and tool/evidence selection, but not a dedicated standalone `eval-runner` package.
 - The OSS product has trusted-mode governance for review roles and assignments, but it does not yet include full built-in user login/session management for untrusted multi-user deployments.
 

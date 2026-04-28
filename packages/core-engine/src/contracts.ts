@@ -35,7 +35,7 @@ export type SkepticActionType =
   | "request_additional_evidence";
 export type HarnessEventLevel = "debug" | "info" | "warn" | "error";
 export type HarnessMetricKind = "counter" | "gauge" | "histogram";
-export type DatabaseMode = "embedded" | "local";
+export type DatabaseMode = "local";
 export type AuditPackageId = "baseline-static" | "agentic-static" | "deep-static" | "runtime-validated" | "premium-comprehensive";
 export type HumanReviewStatus = "not_required" | "review_required" | "in_review" | "approved" | "rejected" | "requires_rerun";
 export type ProviderReadinessStatus = "available" | "blocked" | "conditional" | "deferred";

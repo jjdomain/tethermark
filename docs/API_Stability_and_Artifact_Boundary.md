@@ -83,7 +83,7 @@ The intended compatibility model is:
 
 In the current refactor state:
 
-- the embedded persistence layer is the primary query source for run and target APIs
+- the local SQLite persistence layer is the primary query source for run and target APIs
 - selective rerun inputs that matter operationally are persisted as structured stage artifacts or normalized records
 - supervisor review and remediation are no longer artifact-only
 - trace-style payloads, handoffs, and similar debug objects remain archival unless promoted later

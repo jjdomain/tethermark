@@ -16,6 +16,7 @@ async function readTable<T>(rootDir: string, tableName: string): Promise<T[]> {
   if (!(await hasSqliteDatabase(rootDir))) return [];
   const db = await openSqliteDatabase(rootDir);
   try {
+    ensureSqliteSchema(db);
     return readSqliteTable<T>(db, tableName);
   } finally {
     db.close();
@@ -115,7 +116,7 @@ function deriveRerunRequest(args: {
     llm_provider: requestedProfile?.llm_provider === "openai" ? "openai" : "mock",
     llm_model: typeof requestedProfile?.llm_model === "string" ? requestedProfile.llm_model : undefined,
     audit_policy_pack: typeof requestedProfile?.audit_policy_pack === "string" ? requestedProfile.audit_policy_pack : undefined,
-    db_mode: (run?.resolved_configuration?.db_mode as AuditRequest["db_mode"]) ?? "embedded",
+    db_mode: (run?.resolved_configuration?.db_mode as AuditRequest["db_mode"]) ?? "local",
     audit_package: (requestedProfile?.audit_package ?? run?.resolved_configuration?.selected_audit_package ?? run?.audit_package) as AuditRequest["audit_package"],
     workspace_id: run?.workspace_id ?? "default",
     project_id: run?.project_id ?? "default",

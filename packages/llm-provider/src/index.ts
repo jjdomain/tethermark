@@ -84,14 +84,22 @@ export interface ResolvedProviderConfig {
 
 type MockResponseFactory = (request: StructuredGenerationRequest) => unknown;
 
-const AGENT_ENV_PREFIX: Record<string, string> = {
-  planner_agent: "AUDIT_LLM_PLANNER",
-  threat_model_agent: "AUDIT_LLM_THREAT_MODEL",
-  eval_selection_agent: "AUDIT_LLM_EVAL_SELECTION",
-  audit_supervisor_agent: "AUDIT_LLM_SUPERVISOR",
-  remediation_agent: "AUDIT_LLM_REMEDIATION",
-  lane_specialist_agent: "AUDIT_LLM_LANE_SPECIALIST"
+const AGENT_ENV_PREFIX: Record<string, string[]> = {
+  planner_agent: ["AUDIT_LLM_PLANNER"],
+  threat_model_agent: ["AUDIT_LLM_THREAT_MODEL"],
+  eval_selection_agent: ["AUDIT_LLM_EVIDENCE_SELECTION"],
+  audit_supervisor_agent: ["AUDIT_LLM_SUPERVISOR"],
+  remediation_agent: ["AUDIT_LLM_REMEDIATION"],
+  lane_specialist_agent: ["AUDIT_LLM_AREA_REVIEW"]
 };
+
+function readAgentEnv(agentName: string, suffix: "PROVIDER" | "MODEL" | "API_KEY"): string | undefined {
+  for (const prefix of AGENT_ENV_PREFIX[agentName] || []) {
+    const value = readEnv(`${prefix}_${suffix}`);
+    if (value) return value;
+  }
+  return undefined;
+}
 
 function stripCodeFences(value: string): string {
   const trimmed = value.trim();
@@ -342,11 +350,10 @@ function inferMockPayload(request: StructuredGenerationRequest): unknown {
 }
 
 export function resolveAgentProviderConfig(agentName: string, baseConfig: ProviderConfig = {}): ResolvedProviderConfig {
-  const prefix = AGENT_ENV_PREFIX[agentName];
   const agentOverride = baseConfig.agentOverrides?.[agentName];
-  const envProvider = prefix ? readEnv(`${prefix}_PROVIDER`) : undefined;
-  const envModel = prefix ? readEnv(`${prefix}_MODEL`) : undefined;
-  const agentApiKey = prefix ? readEnv(`${prefix}_API_KEY`) : undefined;
+  const envProvider = readAgentEnv(agentName, "PROVIDER");
+  const envModel = readAgentEnv(agentName, "MODEL");
+  const agentApiKey = readAgentEnv(agentName, "API_KEY");
 
   const apiKey = agentOverride?.apiKey
     ?? baseConfig.apiKey

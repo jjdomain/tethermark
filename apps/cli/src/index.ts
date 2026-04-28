@@ -1,7 +1,7 @@
 import process from "node:process";
 
 import { loadEnvironment } from "../../../packages/core-engine/src/env.js";
-import { backfillEmbeddedPersistence, cleanupEmbeddedJsonMirrors, compactBundleExports, createEngine, listPersistedReviewNotifications, listPersistedReviewWorkflows, readPersistedReviewActions, readPersistedReviewWorkflow, reconstructEmbeddedRun, reconstructEmbeddedRuns, submitPersistedReviewAction, validateEmbeddedPersistence } from "../../../packages/core-engine/src/index.js";
+import { backfillLocalPersistence, cleanupLocalJsonMirrors, compactBundleExports, createEngine, listPersistedReviewNotifications, listPersistedReviewWorkflows, readPersistedReviewActions, readPersistedReviewWorkflow, reconstructLocalRun, reconstructLocalRuns, submitPersistedReviewAction, validateLocalPersistence } from "../../../packages/core-engine/src/index.js";
 import { buildScanRequest, readBooleanFlag, readFlag, readNumberFlag } from "./args.js";
 import { validateFixtures } from "./fixture-validation.js";
 
@@ -11,20 +11,20 @@ function usage(): void {
   console.log(`Tethermark CLI
 
 Usage:
-npm run scan -- scan path <local-path> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|build|runtime|validate] [--package <id>] [--db-mode embedded|local] [--llm-provider openai|mock] [--llm-model <id>] [--llm-api-key <value>]
-npm run scan -- scan repo <repo-url> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|build|runtime|validate] [--package <id>] [--db-mode embedded|local] [--llm-provider openai|mock] [--llm-model <id>] [--llm-api-key <value>]
-npm run scan -- scan endpoint <url> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|runtime|validate] [--package <id>] [--db-mode embedded|local] [--llm-provider openai|mock] [--llm-model <id>] [--llm-api-key <value>]
-  npm run scan -- migrate embedded-db [--root <dir>] [--dry-run]
+npm run scan -- scan path <local-path> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|build|runtime|validate] [--package <id>] [--db-mode local] [--llm-provider openai|mock] [--llm-model <id>] [--llm-api-key <value>]
+npm run scan -- scan repo <repo-url> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|build|runtime|validate] [--package <id>] [--db-mode local] [--llm-provider openai|mock] [--llm-model <id>] [--llm-api-key <value>]
+npm run scan -- scan endpoint <url> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|runtime|validate] [--package <id>] [--db-mode local] [--llm-provider openai|mock] [--llm-model <id>] [--llm-api-key <value>]
+  npm run scan -- migrate local-db [--root <dir>] [--dry-run]
   npm run scan -- migrate cleanup-json-mirrors [--root <dir>] [--dry-run]
   npm run scan -- migrate compact-bundle-exports [--root <dir>] [--retention-days <n>] [--dry-run]
   npm run scan -- reconstruct run <run-id> [--root <dir>] [--dry-run]
   npm run scan -- reconstruct runs [--root <dir>] [--target-id <id>] [--status <status>] [--audit-package <id>] [--run-mode <mode>] [--target-class <class>] [--rating <rating>] [--publishability-status <status>] [--policy-pack-id <id>] [--since <iso>] [--until <iso>] [--requires-human-review true|false] [--has-findings true|false] [--limit <n>] [--dry-run]
   npm run scan -- validate-persistence [--root <dir>] [--target-id <id>] [--status <status>] [--audit-package <id>] [--run-mode <mode>] [--target-class <class>] [--rating <rating>] [--publishability-status <status>] [--policy-pack-id <id>] [--since <iso>] [--until <iso>] [--requires-human-review true|false] [--has-findings true|false] [--limit <n>]
-npm run scan -- validate-fixtures [--root <dir>] [--fixture <id>] [--package <id>] [--db-mode embedded|local] [--persistence-root <dir>] [--llm-provider openai|mock] [--llm-model <id>]
-npm run scan -- review queue [--root <dir>] [--db-mode embedded|local] [--status <review-status>] [--limit <n>]
-npm run scan -- review status <run-id> [--root <dir>] [--db-mode embedded|local]
-npm run scan -- review action <run-id> --reviewer <id> --action <type> [--assigned-reviewer <id>] [--finding-id <id>] [--previous-severity <level>] [--updated-severity <level>] [--visibility public|internal] [--notes <text>] [--root <dir>] [--db-mode embedded|local]
-npm run scan -- review notifications [--reviewer <id>] [--status unread|acknowledged] [--root <dir>] [--db-mode embedded|local]
+npm run scan -- validate-fixtures [--root <dir>] [--fixture <id>] [--package <id>] [--db-mode local] [--persistence-root <dir>] [--llm-provider openai|mock] [--llm-model <id>]
+npm run scan -- review queue [--root <dir>] [--db-mode local] [--status <review-status>] [--limit <n>]
+npm run scan -- review status <run-id> [--root <dir>] [--db-mode local]
+npm run scan -- review action <run-id> --reviewer <id> --action <type> [--assigned-reviewer <id>] [--finding-id <id>] [--previous-severity <level>] [--updated-severity <level>] [--visibility public|internal] [--notes <text>] [--root <dir>] [--db-mode local]
+npm run scan -- review notifications [--reviewer <id>] [--status unread|acknowledged] [--root <dir>] [--db-mode local]
 `);
 }
 
@@ -79,8 +79,8 @@ async function runScan(args: string[]): Promise<void> {
 }
 
 async function runMigration(args: string[]): Promise<void> {
-  if (args[1] === "embedded-db") {
-    const summary = await backfillEmbeddedPersistence({ rootDir: readFlag(args, "--root"), dryRun: args.includes("--dry-run") });
+  if (args[1] === "local-db") {
+    const summary = await backfillLocalPersistence({ rootDir: readFlag(args, "--root"), dryRun: args.includes("--dry-run") });
     console.log(`Root: ${summary.root}`);
     console.log(`Dry run: ${summary.dry_run ? "yes" : "no"}`);
     console.log(`Scanned runs: ${summary.scanned_runs}`);
@@ -94,7 +94,7 @@ async function runMigration(args: string[]): Promise<void> {
   }
 
   if (args[1] === "cleanup-json-mirrors") {
-    const summary = await cleanupEmbeddedJsonMirrors({ rootDir: readFlag(args, "--root"), dryRun: args.includes("--dry-run") });
+    const summary = await cleanupLocalJsonMirrors({ rootDir: readFlag(args, "--root"), dryRun: args.includes("--dry-run") });
     console.log(`Root: ${summary.root}`);
     console.log(`Dry run: ${summary.dry_run ? "yes" : "no"}`);
     console.log(`Removed files: ${summary.removed_files.length}`);
@@ -113,7 +113,7 @@ async function runMigration(args: string[]): Promise<void> {
       rootDir: readFlag(args, "--root"),
       dryRun: args.includes("--dry-run"),
       retentionDays: readNumberFlag(args, "--retention-days") ?? null,
-      mode: "embedded"
+      mode: "local"
     });
     console.log(`Root: ${summary.root}`);
     console.log(`Dry run: ${summary.dry_run ? "yes" : "no"}`);
@@ -138,7 +138,7 @@ async function runMigration(args: string[]): Promise<void> {
 
 async function runReconstruct(args: string[]): Promise<void> {
   if (args[1] === "run" && args[2]) {
-    const summary = await reconstructEmbeddedRun({
+    const summary = await reconstructLocalRun({
       runId: args[2],
       rootDir: readFlag(args, "--root"),
       dryRun: args.includes("--dry-run")
@@ -157,7 +157,7 @@ async function runReconstruct(args: string[]): Promise<void> {
   }
 
   if (args[1] === "runs") {
-    const summary = await reconstructEmbeddedRuns({
+    const summary = await reconstructLocalRuns({
       rootDir: readFlag(args, "--root"),
       dryRun: args.includes("--dry-run"),
       targetId: readFlag(args, "--target-id"),
@@ -198,7 +198,7 @@ async function runReconstruct(args: string[]): Promise<void> {
 }
 
 async function runValidatePersistence(args: string[]): Promise<void> {
-  const summary = await validateEmbeddedPersistence({
+  const summary = await validateLocalPersistence({
     rootDir: readFlag(args, "--root"),
     targetId: readFlag(args, "--target-id"),
     status: readFlag(args, "--status"),

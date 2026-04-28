@@ -18,7 +18,7 @@ import type {
 } from "./contracts.js";
 import type { PersistedRunQuery } from "./query.js";
 import { getPersistedRun, listPersistedRuns, readPersistedDimensionScores, readPersistedPolicyApplication, readPersistedTargetSummary } from "./query.js";
-import { EmbeddedPersistenceStore } from "./embedded-store.js";
+import { LocalPersistenceStore } from "./local-store.js";
 import {
   readPersistedAgentInvocations,
   readPersistedCommitDiff,
@@ -40,7 +40,7 @@ import {
 } from "./run-details.js";
 
 function defaultPersistenceRoot(): string {
-  return path.resolve(process.cwd(), ".artifacts", "state", "embedded-db");
+  return path.resolve(process.cwd(), ".artifacts", "state", "local-db");
 }
 
 function isTargetClass(value: unknown): value is TargetClass {
@@ -369,7 +369,7 @@ function inferLegacyResolvedConfiguration(bundle: any, runId: string, initialTar
   const packageDefinition = bundle.package_definition ?? {};
   const run = bundle.run ?? {};
   const target = bundle.target ?? {};
-  const mode = bundle.mode ?? "embedded";
+  const mode = bundle.mode ?? "local";
 
   return {
     run_id: runId,
@@ -758,11 +758,11 @@ async function reconstructBundle(bundle: PersistedAuditBundle & Record<string, u
   } : null;
   const effectivePersistenceSummary = (bundle as any).persistence_summary?.run_id ? (bundle as any).persistence_summary : artifactPersistenceSummary ? {
     run_id: runId,
-    mode: String(artifactPersistenceSummary.mode ?? "embedded"),
+    mode: String(artifactPersistenceSummary.mode ?? "local"),
     root: String(artifactPersistenceSummary.root ?? "")
   } : (bundle as any).persistence ? {
     run_id: runId,
-    mode: String((bundle as any).persistence.mode ?? "embedded"),
+    mode: String((bundle as any).persistence.mode ?? "local"),
     root: String((bundle as any).persistence.root ?? "")
   } : null;
   const effectiveSupervisorReview = (bundle as any).supervisor_review?.run_id ? (bundle as any).supervisor_review : artifactSupervisorReview ? {
@@ -843,7 +843,7 @@ async function readRunBundle(rootDir: string, runId: string): Promise<{ filePath
   };
 }
 
-export interface EmbeddedRunReconstructionSummary {
+export interface LocalRunReconstructionSummary {
   root: string;
   dry_run: boolean;
   run_id: string;
@@ -854,13 +854,13 @@ export interface EmbeddedRunReconstructionSummary {
   preview: ReconstructionDiffPreview;
 }
 
-export interface EmbeddedBatchRunPreview {
+export interface LocalBatchRunPreview {
   run_id: string;
   changed: boolean;
   preview: ReconstructionDiffPreview;
 }
 
-export interface EmbeddedBatchReconstructionSummary {
+export interface LocalBatchReconstructionSummary {
   root: string;
   dry_run: boolean;
   selected_runs: number;
@@ -868,10 +868,10 @@ export interface EmbeddedBatchReconstructionSummary {
   unchanged_runs: number;
   unresolved_runs: string[];
   run_ids: string[];
-  changed_run_previews: EmbeddedBatchRunPreview[];
+  changed_run_previews: LocalBatchRunPreview[];
 }
 
-export async function reconstructEmbeddedRun(args: { runId: string; rootDir?: string; dryRun?: boolean }): Promise<EmbeddedRunReconstructionSummary> {
+export async function reconstructLocalRun(args: { runId: string; rootDir?: string; dryRun?: boolean }): Promise<LocalRunReconstructionSummary> {
   const resolvedRoot = path.resolve(args.rootDir ?? defaultPersistenceRoot());
   const dryRun = args.dryRun ?? false;
   const { filePath, bundle } = await readRunBundle(resolvedRoot, args.runId);
@@ -886,7 +886,7 @@ export async function reconstructEmbeddedRun(args: { runId: string; rootDir?: st
   });
 
   if (!dryRun) {
-    const sqliteStore = new EmbeddedPersistenceStore(resolvedRoot);
+    const sqliteStore = new LocalPersistenceStore(resolvedRoot);
     await sqliteStore.persistBundle(nextBundle);
     await writeRunObservabilityArtifacts({
       artifactRoot: reconstructed.artifactRoot,
@@ -915,7 +915,7 @@ export async function reconstructEmbeddedRun(args: { runId: string; rootDir?: st
   };
 }
 
-export async function reconstructEmbeddedRuns(args?: PersistedRunQuery & { rootDir?: string; dryRun?: boolean }): Promise<EmbeddedBatchReconstructionSummary> {
+export async function reconstructLocalRuns(args?: PersistedRunQuery & { rootDir?: string; dryRun?: boolean }): Promise<LocalBatchReconstructionSummary> {
   const resolvedRoot = path.resolve(args?.rootDir ?? defaultPersistenceRoot());
   const dryRun = args?.dryRun ?? false;
   const selectedRuns = await listPersistedRuns({
@@ -927,8 +927,8 @@ export async function reconstructEmbeddedRuns(args?: PersistedRunQuery & { rootD
   let updatedRuns = 0;
   let unchangedRuns = 0;
   const unresolvedRuns: string[] = [];
-  const changedRunPreviews: EmbeddedBatchRunPreview[] = [];
-  const sqliteStore = dryRun ? null : new EmbeddedPersistenceStore(resolvedRoot);
+  const changedRunPreviews: LocalBatchRunPreview[] = [];
+  const sqliteStore = dryRun ? null : new LocalPersistenceStore(resolvedRoot);
 
   for (const run of selectedRuns) {
     const { filePath, bundle } = await readRunBundle(resolvedRoot, run.id);
@@ -988,7 +988,7 @@ export async function reconstructEmbeddedRuns(args?: PersistedRunQuery & { rootD
   };
 }
 
-export interface EmbeddedBackfillSummary {
+export interface LocalBackfillSummary {
   root: string;
   dry_run: boolean;
   scanned_runs: number;
@@ -997,7 +997,7 @@ export interface EmbeddedBackfillSummary {
   unresolved_runs: string[];
 }
 
-export interface EmbeddedRunValidationResult {
+export interface LocalRunValidationResult {
   run_id: string;
   valid: boolean;
   missing_sections: string[];
@@ -1008,13 +1008,13 @@ export interface EmbeddedRunValidationResult {
   }>;
 }
 
-export interface EmbeddedPersistenceValidationSummary {
+export interface LocalPersistenceValidationSummary {
   root: string;
   selected_runs: number;
   valid_runs: number;
   invalid_runs: number;
   run_ids: string[];
-  results: EmbeddedRunValidationResult[];
+  results: LocalRunValidationResult[];
 }
 
 function bundleMatchesQuery(bundle: PersistedAuditBundle & Record<string, unknown>, args?: PersistedRunQuery): boolean {
@@ -1045,7 +1045,7 @@ function countStageArtifactsByType(items: PersistedStageArtifactRecord[]): Set<s
   return new Set(items.map((item) => item.artifact_type));
 }
 
-async function validateEmbeddedRun(rootDir: string, bundle: PersistedAuditBundle & Record<string, unknown>): Promise<EmbeddedRunValidationResult> {
+async function validateLocalRun(rootDir: string, bundle: PersistedAuditBundle & Record<string, unknown>): Promise<LocalRunValidationResult> {
   const runId = String(bundle.run?.id ?? "");
   const run = await getPersistedRun(runId, rootDir);
   const targetSummary = bundle.target?.id ? await readPersistedTargetSummary(String(bundle.target.id), rootDir) : null;
@@ -1130,7 +1130,7 @@ async function validateEmbeddedRun(rootDir: string, bundle: PersistedAuditBundle
   };
 }
 
-export async function backfillEmbeddedPersistence(args?: { rootDir?: string; dryRun?: boolean }): Promise<EmbeddedBackfillSummary> {
+export async function backfillLocalPersistence(args?: { rootDir?: string; dryRun?: boolean }): Promise<LocalBackfillSummary> {
   const resolvedRoot = path.resolve(args?.rootDir ?? defaultPersistenceRoot());
   const dryRun = args?.dryRun ?? false;
   const runsDir = path.join(resolvedRoot, "runs");
@@ -1140,7 +1140,7 @@ export async function backfillEmbeddedPersistence(args?: { rootDir?: string; dry
   let updatedRuns = 0;
   let skippedRuns = 0;
   const unresolvedRuns: string[] = [];
-  const sqliteStore = dryRun ? null : new EmbeddedPersistenceStore(resolvedRoot);
+  const sqliteStore = dryRun ? null : new LocalPersistenceStore(resolvedRoot);
 
   for (const entry of entries) {
     if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
@@ -1196,7 +1196,7 @@ export async function backfillEmbeddedPersistence(args?: { rootDir?: string; dry
   };
 }
 
-export async function validateEmbeddedPersistence(args?: PersistedRunQuery & { rootDir?: string }): Promise<EmbeddedPersistenceValidationSummary> {
+export async function validateLocalPersistence(args?: PersistedRunQuery & { rootDir?: string }): Promise<LocalPersistenceValidationSummary> {
   const resolvedRoot = path.resolve(args?.rootDir ?? defaultPersistenceRoot());
   const runsDir = path.join(resolvedRoot, "runs");
   const entries = await fs.readdir(runsDir, { withFileTypes: true }).catch(() => []);
@@ -1211,9 +1211,9 @@ export async function validateEmbeddedPersistence(args?: PersistedRunQuery & { r
 
   selectedBundles.sort((left, right) => String(right.run?.created_at ?? "").localeCompare(String(left.run?.created_at ?? "")));
   const limitedBundles = selectedBundles.slice(0, args?.limit ?? selectedBundles.length);
-  const results: EmbeddedRunValidationResult[] = [];
+  const results: LocalRunValidationResult[] = [];
   for (const bundle of limitedBundles) {
-    results.push(await validateEmbeddedRun(resolvedRoot, bundle));
+    results.push(await validateLocalRun(resolvedRoot, bundle));
   }
 
   return {
@@ -1237,14 +1237,14 @@ export async function validateEmbeddedPersistence(args?: PersistedRunQuery & { r
 
 
 
-export interface EmbeddedJsonMirrorCleanupSummary {
+export interface LocalJsonMirrorCleanupSummary {
   root: string;
   dry_run: boolean;
   removed_files: string[];
   kept_files: string[];
 }
 
-export async function cleanupEmbeddedJsonMirrors(args?: { rootDir?: string; dryRun?: boolean }): Promise<EmbeddedJsonMirrorCleanupSummary> {
+export async function cleanupLocalJsonMirrors(args?: { rootDir?: string; dryRun?: boolean }): Promise<LocalJsonMirrorCleanupSummary> {
   const resolvedRoot = path.resolve(args?.rootDir ?? defaultPersistenceRoot());
   const dryRun = args?.dryRun ?? false;
   const entries = await fs.readdir(resolvedRoot, { withFileTypes: true });

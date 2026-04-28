@@ -13,6 +13,7 @@ async function readTable<T>(rootDir: string, tableName: string): Promise<T[]> {
   if (!(await hasSqliteDatabase(rootDir))) return [];
   const db = await openSqliteDatabase(rootDir);
   try {
+    ensureSqliteSchema(db);
     return readSqliteTable<T>(db, tableName);
   } finally {
     db.close();

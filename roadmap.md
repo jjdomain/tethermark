@@ -21,7 +21,7 @@ The harness now has the right core shape for a real public repository and future
 - standards-based static audit path with normalized findings, control results, scores, and observations
 - persistence-backed query APIs with explicit separation from raw artifact/debug APIs
 - selective rerun and reuse based on persisted stage artifacts and normalized records
-- backend-aware persistence modes for `embedded`, `local`, and `hosted`
+- backend-aware OSS `local` SQLite persistence
 - observability rollups, maintenance commands, and persistence validation
 - persisted human review workflow with CLI and API surfaces
 
@@ -48,7 +48,7 @@ The architecture is no longer the main blocker. The remaining gaps are mostly ab
 - human review operations: reviewer assignment, checkpointed review-gated flows, and stronger release gating
 - result evaluation quality: explicit evidence sufficiency and false-positive adjudication records plus deterministic consistency checks
 - runtime depth: stronger validation-runner behavior and real Python worker integrations for behavior-level auditing
-- real multi-backend persistence: PostgreSQL-backed `local` and `hosted` implementations instead of SQLite-file placeholders
+- hosted storage boundary: OSS stays SQLite-backed with `local`; hosted production uses a separate Supabase/Postgres adapter around the shared persistence contracts
 
 ### Audience framing
 
@@ -304,9 +304,9 @@ Those are the strongest product differentiators versus generic code scanning.
 Goal:
 Prepare the engine for shared internal use and future hosted deployment.
 
-### 1. Replace placeholder local/hosted backend implementation
+### 1. Keep OSS storage local and wire hosted storage outside OSS
 
-The current separation by mode is structurally correct, but `local` and `hosted` still need a real backend implementation and migration story.
+The OSS runtime should expose only SQLite-backed `local` mode. Hosted production should import the shared engine contracts and provide its own Supabase/Postgres persistence adapter, migration story, and tenant-aware storage extensions.
 
 ### 2. Add async service lifecycle
 
@@ -371,7 +371,7 @@ These should not be prioritized before the above phases:
 2. Result evaluation layer around supervisor outputs
 3. Human review workflow expansion: assignment, checkpointing, and richer adjudication
 4. Runtime validation depth and worker integrations
-5. Real local and hosted backend implementation
+5. Hosted Supabase/Postgres adapter outside the OSS runtime
 6. Async service lifecycle for external consumers
 
 ## Decision Notes

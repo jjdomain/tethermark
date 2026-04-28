@@ -15,7 +15,13 @@ async function readTable<T>(rootDir: string, tableName: string): Promise<T[]> {
   if (!(await hasSqliteDatabase(rootDir))) return [];
   const db = await openSqliteDatabase(rootDir);
   try {
+    ensureSqliteSchema(db);
     return readSqliteTable<T>(db, tableName);
+  } catch (error) {
+    if (error instanceof Error && /database disk image is malformed|no such table: records/i.test(error.message)) {
+      return [];
+    }
+    throw error;
   } finally {
     db.close();
   }

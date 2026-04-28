@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { cleanupEmbeddedJsonMirrors } from "./backfill.js";
+import { cleanupLocalJsonMirrors } from "./backfill.js";
 
 const createdDirs: string[] = [];
 
@@ -22,7 +22,7 @@ afterEach(async () => {
   }
 });
 
-test("cleanupEmbeddedJsonMirrors dry run reports only legacy table mirrors", async () => {
+test("cleanupLocalJsonMirrors dry run reports only legacy table mirrors", async () => {
   const rootDir = await makeTempDir("harness-cleanup-dry-");
   await fs.mkdir(path.join(rootDir, "runs"), { recursive: true });
   await fs.writeFile(path.join(rootDir, "harness.sqlite"), "sqlite");
@@ -31,7 +31,7 @@ test("cleanupEmbeddedJsonMirrors dry run reports only legacy table mirrors", asy
   await fs.writeFile(path.join(rootDir, "targets.json"), "[]\n");
   await fs.writeFile(path.join(rootDir, "metrics.json"), "[]\n");
 
-  const summary = await cleanupEmbeddedJsonMirrors({ rootDir, dryRun: true });
+  const summary = await cleanupLocalJsonMirrors({ rootDir, dryRun: true });
 
   assert.equal(summary.dry_run, true);
   assert.deepEqual(summary.removed_files, ["metrics.json", "runs.json", "targets.json"]);
@@ -41,7 +41,7 @@ test("cleanupEmbeddedJsonMirrors dry run reports only legacy table mirrors", asy
   assert.deepEqual(remaining, ["harness.sqlite", "metrics.json", "persistence-meta.json", "runs", "runs.json", "targets.json"]);
 });
 
-test("cleanupEmbeddedJsonMirrors removes only legacy table mirrors when not dry run", async () => {
+test("cleanupLocalJsonMirrors removes only legacy table mirrors when not dry run", async () => {
   const rootDir = await makeTempDir("harness-cleanup-live-");
   await fs.mkdir(path.join(rootDir, "runs"), { recursive: true });
   await fs.writeFile(path.join(rootDir, "harness.sqlite"), "sqlite");
@@ -49,7 +49,7 @@ test("cleanupEmbeddedJsonMirrors removes only legacy table mirrors when not dry 
   await fs.writeFile(path.join(rootDir, "events.json"), "[]\n");
   await fs.writeFile(path.join(rootDir, "tool_executions.json"), "[]\n");
 
-  const summary = await cleanupEmbeddedJsonMirrors({ rootDir, dryRun: false });
+  const summary = await cleanupLocalJsonMirrors({ rootDir, dryRun: false });
 
   assert.equal(summary.dry_run, false);
   assert.deepEqual(summary.removed_files, ["events.json", "tool_executions.json"]);
