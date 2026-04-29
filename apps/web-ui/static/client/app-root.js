@@ -445,7 +445,7 @@ function deriveRunFormDefaults(project, effectiveSettings, auditPackages) {
     max_rerun_rounds: 0,
     publishability_threshold: "high",
     use_global_llm_config: true,
-    agent_configs: buildAgentConfigsFromOverrides(providerDefaults.agent_overrides),
+    agent_configs: buildEmptyAgentConfigs(),
     control_selection_mode: "automatic",
     required_frameworks: [],
     excluded_frameworks: [],
@@ -656,6 +656,13 @@ function applyEnvironmentDefaultsToSettings(settings, environmentDefaults) {
   };
 }
 
+function applyEnvironmentDefaultsToEffectiveSettings(effectiveSettings, environmentDefaults) {
+  return {
+    ...effectiveSettings,
+    effective: applyEnvironmentDefaultsToSettings(effectiveSettings?.effective || emptySettings, environmentDefaults)
+  };
+}
+
 function getIntegrationDefinition(registry, integrationId) {
   return (registry || []).find((item) => item.id === integrationId) || null;
 }
@@ -733,11 +740,10 @@ function buildRunRequest(form, effectiveSettings, llmRegistry, auditPackages) {
       excluded_control_ids: excludedControlIds
     };
   }
-  const settingsAgentDefaults = buildAgentConfigsFromOverrides(effectiveSettings?.effective?.providers_json?.agent_overrides);
-  const agentConfigs = form.use_global_llm_config === false ? (form.agent_configs || {}) : settingsAgentDefaults;
+  const agentConfigs = form.use_global_llm_config === false ? (form.agent_configs || {}) : {};
   const agentOverrides = {};
   const usingGlobalLlmConfig = form.use_global_llm_config !== false && Boolean(form.llm_model);
-  if (!usingGlobalLlmConfig || Object.values(settingsAgentDefaults).some((config) => config.provider || config.model || config.api_key)) {
+  if (!usingGlobalLlmConfig) {
     for (const agent of agentConfigCatalog) {
       const config = agentConfigs[agent.id] || {};
       const model = typeof config.model === "string" && config.model.trim() ? config.model.trim() : "";
@@ -2800,10 +2806,10 @@ function App() {
       setRuns(runsPayload.runs || []);
       setJobs(jobsPayload.jobs || []);
       setStats({ runs: runStatsPayload.stats || {}, targets: targetStatsPayload.stats || {} });
-      setEffectiveSettings({
+      setEffectiveSettings(applyEnvironmentDefaultsToEffectiveSettings({
         effective: effectiveSettingsPayload.settings || emptySettings,
         layers: effectiveSettingsPayload.layers || emptyEffectiveSettings.layers
-      });
+      }, llmProvidersPayload.environment_defaults || {}));
       setSettings(applyEnvironmentDefaultsToSettings(settingsPayload.settings || emptySettings, llmProvidersPayload.environment_defaults || {}));
       setProviderCredentialDrafts({});
       setAgentCredentialDrafts({});
@@ -4383,7 +4389,10 @@ function App() {
       setProviderCredentialDrafts({});
       setAgentCredentialDrafts({});
       setIntegrationCredentialDrafts({});
-      const nextEffectiveSettings = { effective: effectivePayload.settings || emptySettings, layers: effectivePayload.layers || emptyEffectiveSettings.layers };
+      const nextEffectiveSettings = applyEnvironmentDefaultsToEffectiveSettings({
+        effective: effectivePayload.settings || emptySettings,
+        layers: effectivePayload.layers || emptyEffectiveSettings.layers
+      }, nextEnvironmentDefaults);
       setEffectiveSettings(nextEffectiveSettings);
       setRunForm(deriveRunFormDefaults(currentProject, nextEffectiveSettings, auditPackages));
       setPreflightSummary(null);

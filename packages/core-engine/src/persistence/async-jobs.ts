@@ -95,7 +95,7 @@ async function findPersistedAsyncJob(jobId: string, rootDirOrOptions?: string | 
     const job = await readPersistedAsyncJob(jobId, location);
     return job ? { location, job } : null;
   }
-  for (const dbMode of ["local", "local"] as const) {
+  for (const dbMode of ["local"] as const) {
     const location = resolveLocation({ dbMode });
     const job = await readPersistedAsyncJob(jobId, location);
     if (job) return { location, job };
@@ -285,7 +285,7 @@ export class PersistedAsyncJobManager {
 
   async listJobs(rootDirOrOptions?: string | PersistenceReadOptions, filters?: { workspaceId?: string; projectId?: string }): Promise<PersistedAsyncJobRecord[]> {
     if (rootDirOrOptions) return listPersistedAsyncJobs(rootDirOrOptions, filters);
-  const all = await Promise.all((["local", "local"] as const).map((dbMode) => listPersistedAsyncJobs({ dbMode }, filters)));
+    const all = await Promise.all((["local"] as const).map((dbMode) => listPersistedAsyncJobs({ dbMode }, filters)));
     return all.flat().sort((left, right) => right.created_at.localeCompare(left.created_at));
   }
 
@@ -422,7 +422,7 @@ export class PersistedAsyncJobManager {
   }
 
   async recoverJobs(): Promise<void> {
-  for (const dbMode of ["local", "local"] as const) {
+    for (const dbMode of ["local"] as const) {
       const location = resolveLocation({ dbMode });
       const jobs = await listPersistedAsyncJobs(location);
       for (const job of jobs.filter((item) => item.status === "queued" || item.status === "starting" || item.status === "running")) {

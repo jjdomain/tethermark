@@ -1,12 +1,7 @@
 import { spawn } from "node:child_process";
+import net from "node:net";
 import process from "node:process";
 
-const urlChecks = [
-  "http://127.0.0.1:8787/health",
-  "http://127.0.0.1:8788",
-  "http://127.0.0.1:8788/vendor/react.production.min.js",
-  "http://127.0.0.1:8788/vendor/react-dom.production.min.js"
-];
 const timeoutMs = 30000;
 const pollIntervalMs = 500;
 
@@ -23,6 +18,29 @@ function terminate(child) {
     return;
   }
   child.kill("SIGTERM");
+}
+
+function reservePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.on("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        server.close(() => reject(new Error("Failed to reserve numeric port")));
+        return;
+      }
+      const { port } = address;
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(port);
+      });
+    });
+  });
 }
 
 async function waitForUrl(url) {
@@ -44,16 +62,31 @@ async function waitForUrl(url) {
 }
 
 async function main() {
+  const apiPort = await reservePort();
+  const webPort = await reservePort();
+  const apiBaseUrl = `http://127.0.0.1:${apiPort}`;
+  const urlChecks = [
+    `${apiBaseUrl}/health`,
+    `http://127.0.0.1:${webPort}`,
+    `http://127.0.0.1:${webPort}/vendor/react.production.min.js`,
+    `http://127.0.0.1:${webPort}/vendor/react-dom.production.min.js`
+  ];
+  const childEnv = {
+    ...process.env,
+    PORT: String(apiPort),
+    WEB_UI_PORT: String(webPort),
+    WEB_UI_API_BASE_URL: apiBaseUrl
+  };
   const child =
     process.platform === "win32"
       ? spawn("cmd.exe", ["/d", "/s", "/c", "npm", "run", "oss"], {
           cwd: process.cwd(),
-          env: process.env,
+          env: childEnv,
           stdio: "inherit"
         })
       : spawn("npm", ["run", "oss"], {
           cwd: process.cwd(),
-          env: process.env,
+          env: childEnv,
           stdio: "inherit"
         });
 

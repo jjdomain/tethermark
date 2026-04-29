@@ -364,7 +364,7 @@ function LaunchAuditModalComponent({
   launchRun,
   helpers
 }) {
-  const { useEffect, useState } = React;
+  const { useEffect, useRef, useState } = React;
   const {
     Modal,
     Button,
@@ -392,6 +392,8 @@ function LaunchAuditModalComponent({
   const resolvedEnabledLanes = Array.isArray(runForm.enabled_lanes) ? runForm.enabled_lanes : [];
   const agentConfigs = runForm.agent_configs || {};
   const [activeStep, setActiveStep] = useState("target");
+  const scrollRegionRef = useRef(null);
+  const stepScrollPositionsRef = useRef({});
   const [requiredControlDraft, setRequiredControlDraft] = useState("");
   const [excludedControlDraft, setExcludedControlDraft] = useState("");
   const requiredControlIds = parseControlIdText(runForm.required_control_ids_text || "");
@@ -468,6 +470,17 @@ function LaunchAuditModalComponent({
       [key]: value
     }
   });
+  const switchStep = (stepId) => {
+    if (stepId === activeStep) return;
+    if (scrollRegionRef.current) {
+      stepScrollPositionsRef.current[activeStep] = scrollRegionRef.current.scrollTop;
+    }
+    setActiveStep(stepId);
+  };
+  useEffect(() => {
+    if (!scrollRegionRef.current) return;
+    scrollRegionRef.current.scrollTop = stepScrollPositionsRef.current[activeStep] || 0;
+  }, [activeStep]);
   const toggleFrameworkConstraint = (key, framework) => {
     const current = Array.isArray(runForm[key]) ? runForm[key] : [];
     const oppositeKey = key === "required_frameworks" ? "excluded_frameworks" : "required_frameworks";
@@ -538,19 +551,21 @@ function LaunchAuditModalComponent({
     onClose,
     size: "full",
     title: "Launch Audit",
-    description: "Choose a target, confirm the audit configuration, run the audit readiness review if needed, then launch."
+    description: "Choose a target, confirm the audit profile, run the readiness review if needed, then launch."
   }, h("div", { className: "flex h-[calc(100vh-11rem)] flex-col" }, [
     h("div", { key: "steps", className: "mb-4 border-b border-slate-200 pb-4" }, [
       h("div", { key: "step-row", className: "flex flex-wrap gap-2" }, [
         ["target", "1. Target"],
-        ["launch", "2. Launch Profile"],
-        ["advanced", "3. Advanced Config"],
-        ["preflight", "4. Audit Readiness"]
+        ["launch", "2. Audit Profile"],
+        ["agents", "3. Agent Configuration"],
+        ["depth", "4. Depth & Scope"],
+        ["controls", "5. Controls"],
+        ["preflight", "6. Readiness"]
       ].map(([id, label]) => h(Button, {
         key: id,
         type: "button",
         variant: activeStep === id ? "secondary" : "outline",
-        onClick: () => setActiveStep(id),
+        onClick: () => switchStep(id),
         className: activeStep === id ? "bg-slate-900 text-white hover:bg-slate-800" : ""
       }, label)))
     ]),
@@ -576,7 +591,7 @@ function LaunchAuditModalComponent({
         h("div", { key: "value", className: "mt-1 text-sm text-slate-900" }, value)
       ])))
     ]),
-    h("div", { key: "scroll-region", className: "min-h-0 flex-1 overflow-y-auto pr-1" }, [
+    h("div", { key: "scroll-region", ref: scrollRegionRef, className: "min-h-0 flex-1 overflow-y-auto pr-1" }, [
     h("section", { key: "setup", className: "rounded-[28px] border border-slate-200 bg-slate-50 px-5 py-4" }, [
       h("div", { key: "setup-grid", className: "mt-4" }, [
         activeStep === "target" ? h("div", { key: "target-block", className: "space-y-4" }, [
@@ -721,7 +736,73 @@ function LaunchAuditModalComponent({
             ]))
           ])
         ]) : null,
-        activeStep === "advanced" ? h("div", { key: "advanced-content", className: "space-y-5" }, [
+        activeStep === "agents" ? h("div", { key: "agents-content", className: "space-y-5" }, [
+          h("div", { key: "agent-block", className: "space-y-4 rounded-2xl border border-slate-200 bg-white px-4 py-4" }, [
+            h("div", { key: "agent-header" }, [
+              h("div", { key: "agent-title", className: "text-sm font-medium text-slate-900" }, "Agent Models"),
+              h("div", { key: "agent-copy", className: "mt-1 text-sm text-slate-500" }, "Use a single inherited LLM configuration for all agent stages, or switch to per-agent overrides below."),
+              h("label", { key: "agent-inherit-toggle", className: cn("mt-4 flex items-start gap-3 rounded-2xl border px-4 py-3", globalModelAvailable ? "border-slate-200 bg-slate-50" : "border-amber-200 bg-amber-50") }, [
+                h("input", {
+                  type: "checkbox",
+                  checked: usingGlobalLlmConfig && globalModelAvailable,
+                  disabled: !globalModelAvailable,
+                  onChange: (event) => updateRunForm("use_global_llm_config", event.target.checked)
+                }),
+                h("div", { key: "copy", className: "min-w-0" }, [
+                  h("div", { key: "label", className: "text-sm font-medium text-slate-900" }, "Use global LLM model and credential"),
+                  h("div", { key: "body", className: "mt-1 text-sm text-slate-500" }, globalModelAvailable
+                    ? `All agent stages inherit ${activeModel?.label || runForm.llm_model} and the configured provider credential from Settings.`
+                    : "No global LLM model is configured in Settings. Configure one there to enable inherited agent defaults.")
+                ])
+              ])
+            ]),
+            h("div", { key: "agent-grid", className: "space-y-4" }, agentConfigCatalog.map((agent) => {
+              const config = usingGlobalLlmConfig ? {} : (agentConfigs[agent.id] || {});
+              const agentModel = runModelOptions.find((item) => item.provider_id === config.provider && item.id === config.model)
+                || runModelOptions.find((item) => item.id === config.model)
+                || null;
+              const agentOverrideProviders = (llmRegistry.providers || []).filter((provider) => provider.id !== "mock");
+              return h("div", {
+                key: agent.id,
+                className: cn(
+                  "rounded-2xl border border-slate-200 px-4 py-4 transition",
+                  usingGlobalLlmConfig ? "bg-slate-50 opacity-60" : "bg-white"
+                )
+              }, [
+                h("div", { key: "agent-meta", className: "mb-3" }, [
+                  h("div", { key: "agent-name", className: "font-medium text-slate-900" }, helpLabel(agent.title, agent.help, `${agent.title} help`))
+                ]),
+                h("div", { key: "agent-fields", className: "grid gap-3 md:grid-cols-2" }, [
+                  h(Field, { key: "agent-model", label: helpLabel("LLM model", `Choose the model used for the ${agent.title.toLowerCase()} stage when per-agent overrides are active.`) }, Select({
+                    value: agentModel?.value || "",
+                    disabled: usingGlobalLlmConfig,
+                    onChange: (event) => {
+                      const selectedModel = runModelOptions.find((item) => item.value === event.target.value);
+                      updateAgentConfig(agent.id, "provider", selectedModel?.provider_id || "");
+                      updateAgentConfig(agent.id, "model", selectedModel?.id || "");
+                    }
+                  }, [
+                    h("option", { key: "placeholder", value: "" }, "select a model"),
+                    ...agentOverrideProviders.map((provider) => h("optgroup", { key: provider.id, label: provider.name }, runModelOptions
+                      .filter((item) => item.provider_id === provider.id)
+                      .map((item) => h("option", { key: `${agent.id}:${item.value}`, value: item.value }, item.label))))
+                  ])),
+                  h(Field, { key: "agent-api", label: helpLabel("API key", `Optional credential override for the ${agent.title.toLowerCase()} stage only.`) }, h("div", { className: "space-y-2" }, [
+                    h(Input, {
+                      type: "password",
+                      disabled: usingGlobalLlmConfig,
+                      value: config.api_key || "",
+                      onChange: (event) => updateAgentConfig(agent.id, "api_key", event.target.value),
+                      placeholder: `uses ${agent.env_prefix}_API_KEY`
+                    }),
+                    h("div", { className: "text-xs text-slate-500" }, `Maps to ${agent.env_prefix}_API_KEY. Leave blank to use the agent-specific or provider environment key.`)
+                  ]))
+                ])
+              ]);
+            }))
+          ])
+        ]) : null,
+        activeStep === "controls" ? h("div", { key: "controls-content", className: "space-y-5" }, [
           h("div", { key: "standards-block", className: "space-y-4 rounded-2xl border border-slate-200 bg-white px-4 py-4" }, [
             h("div", { key: "standards-header" }, [
               h("div", { key: "standards-title", className: "text-sm font-medium text-slate-900" }, "Standards and controls"),
@@ -857,7 +938,9 @@ function LaunchAuditModalComponent({
                 ]))
               ])
             ]) : h("div", { key: "automatic-note", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600" }, "Automatic mode lets the planner choose applicable standards and controls from the full control catalog based on target semantics, repo signals, and run mode.")
-          ]),
+          ])
+        ]) : null,
+        activeStep === "depth" ? h("div", { key: "depth-content", className: "space-y-5" }, [
           h("div", { key: "advanced-block", className: "space-y-4 rounded-2xl border border-slate-200 bg-white px-4 py-4" }, [
             h("div", { key: "advanced-header" }, [
               h("div", { key: "advanced-title", className: "text-sm font-medium text-slate-900" }, "Depth and scope"),
@@ -920,75 +1003,11 @@ function LaunchAuditModalComponent({
               ]);
             })),
             h("div", { key: "lane-note", className: "text-xs text-slate-500" }, "Run mode resets the default audit area selection. Override audit areas here only when you want a non-default audit scope.")
-          ]),
-          h("div", { key: "agent-block", className: "space-y-4 rounded-2xl border border-slate-200 bg-white px-4 py-4" }, [
-            h("div", { key: "agent-header" }, [
-              h("div", { key: "agent-title", className: "text-sm font-medium text-slate-900" }, "Agent Models"),
-              h("div", { key: "agent-copy", className: "mt-1 text-sm text-slate-500" }, "Use a single inherited LLM configuration for all agent stages, or switch to per-agent overrides below."),
-              h("label", { key: "agent-inherit-toggle", className: cn("mt-4 flex items-start gap-3 rounded-2xl border px-4 py-3", globalModelAvailable ? "border-slate-200 bg-slate-50" : "border-amber-200 bg-amber-50") }, [
-                h("input", {
-                  type: "checkbox",
-                  checked: usingGlobalLlmConfig && globalModelAvailable,
-                  disabled: !globalModelAvailable,
-                  onChange: (event) => updateRunForm("use_global_llm_config", event.target.checked)
-                }),
-                h("div", { key: "copy", className: "min-w-0" }, [
-                  h("div", { key: "label", className: "text-sm font-medium text-slate-900" }, "Use global LLM model and credential"),
-                  h("div", { key: "body", className: "mt-1 text-sm text-slate-500" }, globalModelAvailable
-                    ? `All agent stages inherit ${activeModel?.label || runForm.llm_model} and the configured provider credential from Settings.`
-                    : "No global LLM model is configured in Settings. Configure one there to enable inherited agent defaults.")
-                ])
-              ])
-            ]),
-            h("div", { key: "agent-grid", className: "space-y-4" }, agentConfigCatalog.map((agent) => {
-              const config = agentConfigs[agent.id] || {};
-              const agentModel = runModelOptions.find((item) => item.provider_id === config.provider && item.id === config.model)
-                || runModelOptions.find((item) => item.id === config.model)
-                || null;
-              const agentOverrideProviders = (llmRegistry.providers || []).filter((provider) => provider.id !== "mock");
-              return h("div", {
-                key: agent.id,
-                className: cn(
-                  "rounded-2xl border border-slate-200 px-4 py-4 transition",
-                  usingGlobalLlmConfig ? "bg-slate-50 opacity-60" : "bg-white"
-                )
-              }, [
-                h("div", { key: "agent-meta", className: "mb-3" }, [
-                  h("div", { key: "agent-name", className: "font-medium text-slate-900" }, helpLabel(agent.title, agent.help, `${agent.title} help`))
-                ]),
-                h("div", { key: "agent-fields", className: "grid gap-3 md:grid-cols-2" }, [
-                  h(Field, { key: "agent-model", label: helpLabel("LLM model", `Choose the model used for the ${agent.title.toLowerCase()} stage when per-agent overrides are active.`) }, Select({
-                    value: agentModel?.value || "",
-                    disabled: usingGlobalLlmConfig,
-                    onChange: (event) => {
-                      const selectedModel = runModelOptions.find((item) => item.value === event.target.value);
-                      updateAgentConfig(agent.id, "provider", selectedModel?.provider_id || "");
-                      updateAgentConfig(agent.id, "model", selectedModel?.id || "");
-                    }
-                  }, [
-                    h("option", { key: "placeholder", value: "" }, "select a model"),
-                    ...agentOverrideProviders.map((provider) => h("optgroup", { key: provider.id, label: provider.name }, runModelOptions
-                      .filter((item) => item.provider_id === provider.id)
-                      .map((item) => h("option", { key: `${agent.id}:${item.value}`, value: item.value }, item.label))))
-                  ])),
-                  h(Field, { key: "agent-api", label: helpLabel("API key", `Optional credential override for the ${agent.title.toLowerCase()} stage only.`) }, h("div", { className: "space-y-2" }, [
-                    h(Input, {
-                      type: "password",
-                      disabled: usingGlobalLlmConfig,
-                      value: config.api_key || "",
-                      onChange: (event) => updateAgentConfig(agent.id, "api_key", event.target.value),
-                      placeholder: `uses ${agent.env_prefix}_API_KEY`
-                    }),
-                    h("div", { className: "text-xs text-slate-500" }, `Maps to ${agent.env_prefix}_API_KEY. Leave blank to use the agent-specific or provider environment key.`)
-                  ]))
-                ])
-              ]);
-            }))
           ])
         ]) : null,
         activeStep === "preflight" ? h("div", { key: "preflight-step", className: "space-y-5" }, [
           h("div", { key: "preflight-header" }, [
-            h("div", { key: "copy", className: "text-sm text-slate-500" }, "Audit readiness reviews whether the target and selected launch profile are appropriate for a complete audit. It highlights blockers, warnings, and configuration drift, recommends a launch profile based on repo structure and semantic target analysis, and gives the operator a checkpoint to confirm the audit plan before spending runtime and model budget."),
+            h("div", { key: "copy", className: "text-sm text-slate-500" }, "Readiness reviews whether the target and selected audit profile are appropriate for a complete audit. It highlights blockers, warnings, and configuration drift, recommends an audit profile based on repo structure and semantic target analysis, and gives the operator a checkpoint to confirm the audit plan before spending runtime and model budget."),
             h("div", { key: "actions", className: "mt-4 flex flex-wrap gap-3" }, [
               h(Button, { key: "preflight", variant: "outline", onClick: runPreflight, disabled: !requiredFieldsReady }, preflightLoading ? "Running Readiness Check..." : "Run Readiness Check"),
               h(Button, {
@@ -1032,12 +1051,12 @@ function LaunchAuditModalComponent({
               preflightSummary.launch_profile
                 ? h("div", { key: "profile-compare", className: "mt-4 space-y-4 rounded-2xl border border-white/70 bg-white px-4 py-4 text-sm text-slate-500" }, [
                   h("div", { key: "title" }, [
-                    h("div", { key: "heading", className: "font-medium text-slate-900" }, "Current vs Recommended Launch Profile"),
-                    h("div", { key: "copy", className: "mt-1 text-sm text-slate-500" }, "Use this comparison to review launch-profile drift before accepting audit readiness or applying the recommended profile.")
+                    h("div", { key: "heading", className: "font-medium text-slate-900" }, "Current vs Recommended Audit Profile"),
+                    h("div", { key: "copy", className: "mt-1 text-sm text-slate-500" }, "Use this comparison to review audit-profile drift before accepting readiness or applying the recommended profile.")
                   ]),
                   h("div", { key: "columns", className: "grid gap-4 md:grid-cols-2" }, [
                     h("div", { key: "current", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
-                      h("div", { key: "title", className: "font-medium text-slate-900" }, "Current launch profile"),
+                      h("div", { key: "title", className: "font-medium text-slate-900" }, "Current audit profile"),
                       h("div", { key: "body", className: "mt-2 grid gap-2" }, [
                         h("div", { key: "pkg" }, `package: ${currentProfileSummary.packageLabel}`),
                         h("div", { key: "policy" }, `policy pack: ${currentProfileSummary.policyPackLabel}`),
@@ -1046,7 +1065,7 @@ function LaunchAuditModalComponent({
                       ])
                     ]),
                     h("div", { key: "recommended", className: "rounded-2xl border border-emerald-200 bg-emerald-50/60 px-4 py-3" }, [
-                      h("div", { key: "title", className: "font-medium text-slate-900" }, "Recommended launch profile"),
+                      h("div", { key: "title", className: "font-medium text-slate-900" }, "Recommended audit profile"),
                       h("div", { key: "body", className: "mt-2 grid gap-2" }, [
                         h("div", { key: "pkg" }, `package: ${recommendedPackageLabel}`),
                         h("div", { key: "policy" }, `policy pack: ${recommendedPolicyLabel}`),

@@ -10,14 +10,27 @@ function resolveLocation(rootDirOrOptions?: string | PersistenceReadOptions) {
 }
 
 async function readTable<T>(rootDir: string, tableName: string): Promise<T[]> {
-  if (!(await hasSqliteDatabase(rootDir))) return [];
-  const db = await openSqliteDatabase(rootDir);
   try {
-    ensureSqliteSchema(db);
-    return readSqliteTable<T>(db, tableName);
-  } finally {
-    db.close();
+    if (!(await hasSqliteDatabase(rootDir))) return [];
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return [];
+    throw error;
   }
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const db = await openSqliteDatabase(rootDir);
+    try {
+      ensureSqliteSchema(db);
+      return readSqliteTable<T>(db, tableName);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return [];
+      const isRetryable = error instanceof Error && /database disk image is malformed/i.test(error.message) && attempt === 0;
+      if (!isRetryable) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    } finally {
+      db.close();
+    }
+  }
+  return [];
 }
 
 export async function listPersistedWebhookDeliveries(args?: {
@@ -38,21 +51,29 @@ export async function listPersistedWebhookDeliveries(args?: {
 
 export async function createPersistedWebhookDelivery(record: PersistedWebhookDeliveryRecord, rootDirOrOptions?: string | PersistenceReadOptions): Promise<PersistedWebhookDeliveryRecord> {
   const location = resolveLocation(rootDirOrOptions);
-  const db = await openSqliteDatabase(location.rootDir);
-  try {
-    ensureSqliteSchema(db);
-    upsertSqliteRecord({
-      db,
-      tableName: "webhook_deliveries",
-      recordKey: record.id,
-      payload: record,
-      runId: record.run_id,
-      createdAt: record.attempted_at,
-      parentKey: record.run_id
-    });
-    await saveSqliteDatabase(location.rootDir, db, location.mode);
-    return record;
-  } finally {
-    db.close();
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const db = await openSqliteDatabase(location.rootDir);
+    try {
+      ensureSqliteSchema(db);
+      upsertSqliteRecord({
+        db,
+        tableName: "webhook_deliveries",
+        recordKey: record.id,
+        payload: record,
+        runId: record.run_id,
+        createdAt: record.attempted_at,
+        parentKey: record.run_id
+      });
+      await saveSqliteDatabase(location.rootDir, db, location.mode);
+      return record;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return record;
+      const isRetryable = error instanceof Error && /database disk image is malformed/i.test(error.message) && attempt === 0;
+      if (!isRetryable) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    } finally {
+      db.close();
+    }
   }
+  return record;
 }

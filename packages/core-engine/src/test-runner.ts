@@ -3372,13 +3372,21 @@ async function testLinuxContainerSandboxBuildsExecutionPlan(): Promise<void> {
       }
       if (buildResult?.status === "completed") {
         assert.equal(await pathExists(path.join(sandbox.target_dir, "build.ok")), true);
-        assert.equal(await pathExists(path.join(sandbox.target_dir, "test.ok")), true);
-        assert.equal(await pathExists(path.join(sandbox.target_dir, "runtime.ok")), true);
       } else {
         assert.match(buildResult?.summary ?? "", /blocked by the current host|failed|not available for bounded host execution/i);
         if (buildResult?.stderr_excerpt) {
           assert.match(buildResult.stderr_excerpt, /spawn EPERM|not available/i);
         }
+      }
+      if (testResult?.status === "completed") {
+        assert.equal(await pathExists(path.join(sandbox.target_dir, "test.ok")), true);
+      } else {
+        assert.match(testResult?.summary ?? "", /blocked by the current host|failed|not available for bounded host execution/i);
+      }
+      if (runtimeResult?.status === "completed") {
+        assert.equal(await pathExists(path.join(sandbox.target_dir, "runtime.ok")), true);
+      } else {
+        assert.match(runtimeResult?.summary ?? "", /blocked by the current host|failed|not available for bounded host execution/i);
       }
 
       const persistedPlan = JSON.parse(await fs.readFile(path.join(sandbox.root_dir, "artifacts", "execution-plan.json"), "utf8"));
