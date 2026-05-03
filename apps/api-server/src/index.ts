@@ -121,6 +121,7 @@ import {
   type OutboundSendArtifact,
   type OutboundVerificationArtifact,
   type AuditRequest,
+  type PersistedProjectRecord,
   type PersistedRunListItem,
   type PersistedTargetListItem
 } from "../../../packages/core-engine/src/index.js";
@@ -833,6 +834,43 @@ function runMatchesScope(run: Pick<PersistedRunListItem, "workspace_id" | "proje
   return !!run && normalizeWorkspaceId(run.workspace_id) === context.workspaceId && normalizeProjectId(run.project_id) === context.projectId;
 }
 
+async function attachProjectRunStats(projects: PersistedProjectRecord[], workspaceId: string): Promise<Array<PersistedProjectRecord & {
+  run_stats: {
+    runs: number;
+    open_reviews: number;
+    average_score: number | null;
+    last_run_at: string | null;
+  };
+}>> {
+  const runs = await listPersistedRuns({ workspaceId, limit: Number.MAX_SAFE_INTEGER });
+  const statsByProject = new Map<string, { runs: number; openReviews: number; scoreTotal: number; scoreCount: number; lastRunAt: string | null }>();
+  for (const run of runs) {
+    const projectId = normalizeProjectId(run.project_id);
+    const stats = statsByProject.get(projectId) ?? { runs: 0, openReviews: 0, scoreTotal: 0, scoreCount: 0, lastRunAt: null };
+    stats.runs += 1;
+    if (!stats.lastRunAt || run.created_at > stats.lastRunAt) stats.lastRunAt = run.created_at;
+    if (["review_required", "in_review", "requires_rerun"].includes(run.review_workflow?.status || "")) stats.openReviews += 1;
+    const score = Number(run.overall_score);
+    if (Number.isFinite(score)) {
+      stats.scoreTotal += score;
+      stats.scoreCount += 1;
+    }
+    statsByProject.set(projectId, stats);
+  }
+  return projects.map((project) => {
+    const stats = statsByProject.get(normalizeProjectId(project.id));
+    return {
+      ...project,
+      run_stats: {
+        runs: stats?.runs ?? 0,
+        open_reviews: stats?.openReviews ?? 0,
+        average_score: stats && stats.scoreCount ? stats.scoreTotal / stats.scoreCount : null,
+        last_run_at: stats?.lastRunAt ?? null
+      }
+    };
+  });
+}
+
 function buildScopedTargetList(runs: PersistedRunListItem[]): PersistedTargetListItem[] {
   const grouped = new Map<string, PersistedRunListItem[]>();
   for (const run of runs) {
@@ -983,6 +1021,12 @@ function matchUiDocument(url: URL): { documentId: string } | null {
 
 function matchUiProject(url: URL): { projectId: string } | null {
   const match = url.pathname.match(/^\/ui\/projects\/([^/]+)$/);
+  if (!match) return null;
+  return { projectId: decodeURIComponent(match[1] ?? "") };
+}
+
+function matchUiProjectRuns(url: URL): { projectId: string } | null {
+  const match = url.pathname.match(/^\/ui\/projects\/([^/]+)\/runs$/);
   if (!match) return null;
   return { projectId: decodeURIComponent(match[1] ?? "") };
 }
@@ -1339,7 +1383,9 @@ export function createApiServer(): http.Server {
   }
 
   if (req.method === "GET" && url.pathname === "/ui/projects") {
-    sendJson(res, 200, { projects: await listPersistedProjects(url.searchParams.get("workspace_id") ?? context.workspaceId) });
+    const workspaceId = normalizeWorkspaceId(url.searchParams.get("workspace_id") ?? context.workspaceId);
+    const projects = await listPersistedProjects(workspaceId);
+    sendJson(res, 200, { projects: await attachProjectRunStats(projects, workspaceId) });
     return;
   }
 
@@ -1351,6 +1397,21 @@ export function createApiServer(): http.Server {
         return;
       }
       sendJson(res, 201, { project: await createPersistedProject({ ...body, workspace_id: context.workspaceId }) });
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
+  const uiProjectRuns = req.method === "GET" ? matchUiProjectRuns(url) : null;
+  if (uiProjectRuns) {
+    try {
+      const runs = await listPersistedRuns({
+        workspaceId: context.workspaceId,
+        projectId: uiProjectRuns.projectId,
+        limit: readNumberParam(url, "limit") ?? 25
+      });
+      sendJson(res, 200, { runs: await attachReviewQueueDispositionCounts(runs) });
     } catch (error) {
       sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
     }

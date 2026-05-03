@@ -25,6 +25,7 @@ function h(type, props, ...children) {
 
 const navItems = [
   ["dashboard", "Dashboard"],
+  ["projects", "Projects"],
   ["runs", "Runs"],
   ["jobs", "Async Jobs"],
   ["followups", "Runtime Follow-ups"],
@@ -34,11 +35,12 @@ const navItems = [
 
 const pageDescriptions = {
   dashboard: "Overview of active work, queue health, and next actions.",
+  projects: "Manage project containers, targets, audit types, and scoped activity.",
   runs: "Launch new scans and inspect persisted run details.",
   jobs: "Track durable background work and retry or cancel jobs.",
   followups: "Manage runtime follow-up reruns and adoption decisions.",
   reviews: "Work the review inbox, assignments, and queued decisions.",
-  settings: "Configure agent models, audit defaults, governance, and project defaults."
+  settings: "Configure agent models, Audit Type, governance, and integrations."
 };
 
 const navGroups = [
@@ -46,6 +48,7 @@ const navGroups = [
     label: "General",
     items: [
       ["dashboard", "Dashboard", "grid"],
+      ["projects", "Projects", "folder"],
       ["runs", "Runs", "play"],
       ["reviews", "Reviews", "users"],
       ["jobs", "Jobs", "bars"],
@@ -297,6 +300,7 @@ function normalizeRunFormUpdate(current, key, value, auditPackages, auditDefault
     }
   }
   if (key === "use_audit_presets") {
+    if (!value) next.config_source = "custom";
     next = value ? applyPresetDerivedFormState(next, auditPackages) : { ...next };
     if (value && auditDefaults.audit_package === next.audit_package) {
       next = applyAuditDefaultsToRunForm(next, auditDefaults);
@@ -418,11 +422,15 @@ function deriveRunFormDefaults(project, effectiveSettings, auditPackages) {
   const providerDefaults = effectiveSettings?.effective?.providers_json || {};
   const preflightDefaults = effectiveSettings?.effective?.preflight_json || {};
   const reviewDefaults = effectiveSettings?.effective?.review_json || {};
-  const auditPackage = auditDefaults.audit_package || targetDefaults.audit_package || "agentic-static";
-  const runMode = normalizeRunModeSelection(auditDefaults.run_mode || targetDefaults.run_mode);
+  const projectAuditType = project ? (targetDefaults.audit_package || targetDefaults.audit_type || auditDefaults.audit_package || "baseline-static") : "";
+  const selectedAuditDefaults = projectAuditType
+    ? deriveAuditDefaultsForPackage(projectAuditType, auditPackages, auditDefaults)
+    : auditDefaults;
+  const auditPackage = selectedAuditDefaults.audit_package || "agentic-static";
+  const runMode = normalizeRunModeSelection(selectedAuditDefaults.run_mode);
   const normalizedModelSelection = normalizeRealAuditModelSelection(
-    targetDefaults.llm_provider || providerDefaults.default_provider || "",
-    targetDefaults.llm_model || providerDefaults.default_model || ""
+    providerDefaults.default_provider || "",
+    providerDefaults.default_model || ""
   );
   const defaults = {
     target_kind: inferTargetKind(targetDefaults),
@@ -434,11 +442,12 @@ function deriveRunFormDefaults(project, effectiveSettings, auditPackages) {
     audit_policy_pack: "default",
     llm_provider: normalizedModelSelection.providerId,
     llm_model: normalizedModelSelection.modelId,
-    preflight_strictness: targetDefaults.preflight_strictness || preflightDefaults.strictness || "standard",
-    runtime_allowed: preflightDefaults.runtime_allowed || auditDefaults.runtime_allowed || targetDefaults.runtime_allowed || "targeted_only",
-    review_severity: reviewDefaults.require_human_review_for_severity || auditDefaults.review_severity || targetDefaults.review_severity || "high",
-    review_visibility: targetDefaults.review_visibility || reviewDefaults.default_visibility || "internal",
+    preflight_strictness: preflightDefaults.strictness || "standard",
+    runtime_allowed: selectedAuditDefaults.runtime_allowed || preflightDefaults.runtime_allowed || "targeted_only",
+    review_severity: selectedAuditDefaults.review_severity || reviewDefaults.require_human_review_for_severity || "high",
+    review_visibility: reviewDefaults.default_visibility || "internal",
     use_audit_presets: true,
+    config_source: project ? "project" : "audit",
     enabled_lanes: [],
     max_agent_calls: 0,
     max_total_tokens: 0,
@@ -452,7 +461,18 @@ function deriveRunFormDefaults(project, effectiveSettings, auditPackages) {
     required_control_ids_text: "",
     excluded_control_ids_text: ""
   };
-  return applyAuditDefaultsToRunForm(applyPresetDerivedFormState(defaults, auditPackages), auditDefaults);
+  return applyAuditDefaultsToRunForm(applyPresetDerivedFormState(defaults, auditPackages), selectedAuditDefaults);
+}
+
+function deriveRunFormForConfigSource(source, currentForm, project, effectiveSettings, auditPackages) {
+  if (source === "project" && project) {
+    return deriveRunFormDefaults(project, effectiveSettings, auditPackages);
+  }
+  return {
+    ...currentForm,
+    config_source: "custom",
+    use_audit_presets: false
+  };
 }
 
 function getReviewCadenceDefaults(effectiveSettings) {
@@ -1156,6 +1176,10 @@ function SidebarIcon({ kind }) {
     h("circle", { key: "a", cx: "10", cy: "10", r: "7" }),
     h("path", { key: "b", d: "M8 7.5L13 10L8 12.5V7.5Z" })
   ]);
+  if (kind === "folder") return h("svg", common, [
+    h("path", { key: "a", d: "M3.5 6.5C3.5 5.4 4.4 4.5 5.5 4.5H8L9.5 6.5H14.5C15.6 6.5 16.5 7.4 16.5 8.5V14C16.5 15.1 15.6 16 14.5 16H5.5C4.4 16 3.5 15.1 3.5 14V6.5Z" }),
+    h("path", { key: "b", d: "M4 8.5H16" })
+  ]);
   if (kind === "users") return h("svg", common, [
     h("circle", { key: "a", cx: "7", cy: "7", r: "2.5" }),
     h("path", { key: "b", d: "M3.5 15C4.4 12.9 6 12 7 12C8 12 9.6 12.9 10.5 15" }),
@@ -1533,6 +1557,8 @@ function LaunchAuditModal({
   onClose,
   requestContext,
   currentProject,
+  projects,
+  onProjectChange,
   runForm,
   updateRunForm,
   auditPackages,
@@ -1558,6 +1584,8 @@ function LaunchAuditModal({
       onClose,
       requestContext,
       currentProject,
+      projects,
+      onProjectChange,
       runForm,
       updateRunForm,
       auditPackages,
@@ -1598,6 +1626,7 @@ function LaunchAuditModal({
   const configStepComplete = Boolean(runForm.run_mode && runForm.llm_provider && (!runForm.use_audit_presets || runForm.audit_package));
   const requiredFieldsReady = targetStepComplete && configStepComplete;
   const activeModel = runModelOptions.find((item) => item.provider_id === runForm.llm_provider && item.id === runForm.llm_model) || null;
+  const visibleAuditPackages = getVisibleAuditPackages(auditPackages);
   return h(Modal, {
     open,
     onClose,
@@ -1607,7 +1636,7 @@ function LaunchAuditModal({
   }, h("div", { className: "max-h-[calc(100vh-11rem)] space-y-4 overflow-y-auto pr-1" }, [
     h("div", { key: "meta-row", className: "flex flex-wrap items-center gap-x-5 gap-y-2 border-b border-slate-200 pb-3 text-xs uppercase tracking-[0.16em] text-slate-500" }, [
       h("div", { key: "scope" }, `Project: ${requestContext.projectId}`),
-      h("div", { key: "project" }, `Project defaults: ${currentProject ? currentProject.name : "none"}`),
+      h("div", { key: "project" }, `Project: ${currentProject ? currentProject.name : "none"}`),
       h("div", { key: "model" }, `Model: ${activeModel?.label || runForm.llm_model || "none"}`)
     ]),
     h("section", { key: "setup", className: "rounded-[28px] border border-slate-200 bg-slate-50 px-5 py-4" }, [
@@ -2440,6 +2469,9 @@ function App() {
   const [integrationCredentialDrafts, setIntegrationCredentialDrafts] = useState({});
   const [documents, setDocuments] = useState([]);
   const [projects, setProjects] = useState([]);
+  const [selectedProjectId, setSelectedProjectId] = useState("default");
+  const [projectDetailRuns, setProjectDetailRuns] = useState([]);
+  const [projectDetailLoading, setProjectDetailLoading] = useState(false);
   const [auditPackages, setAuditPackages] = useState([]);
   const [policyPacks, setPolicyPacks] = useState([]);
   const [llmRegistry, setLlmRegistry] = useState(emptyLlmRegistry);
@@ -2448,7 +2480,7 @@ function App() {
   const [authInfo, setAuthInfo] = useState(defaultAuthInfo);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [settingsSubpage, setSettingsSubpage] = useState("llm");
+  const [settingsSubpage, setSettingsSubpage] = useState("audit");
   const [requestContext, setRequestContext] = useState(() => {
     try {
       const persisted = JSON.parse(window.localStorage.getItem(contextStorageKey) || "{}");
@@ -2460,20 +2492,46 @@ function App() {
   const [runForm, setRunForm] = useState(deriveRunFormDefaults(null, emptyEffectiveSettings, null));
   const [launchModalOpen, setLaunchModalOpen] = useState(false);
   const [docForm, setDocForm] = useState({ title: "", document_type: "policy", notes: "", content_text: "" });
-  const [projectForm, setProjectForm] = useState({ name: "", description: "" });
-  const [projectEditor, setProjectEditor] = useState({
-    id: "",
+  const [projectCreateOpen, setProjectCreateOpen] = useState(false);
+  const [projectEditOpen, setProjectEditOpen] = useState(false);
+  const [projectForm, setProjectForm] = useState({
     name: "",
     description: "",
     target_kind: "path",
     local_path: "",
     repo_url: "",
     endpoint_url: "",
+    audit_package: ""
+  });
+  const [projectEditor, setProjectEditor] = useState({
+    id: "",
+    name: "",
+    description: "",
+    config_source: "audit",
+    target_kind: "path",
+    local_path: "",
+    repo_url: "",
+    endpoint_url: "",
     audit_policy_pack: "default",
+    audit_package: "",
+    run_mode: "static",
+    enabled_lanes: ["repo_posture", "supply_chain"],
+    max_agent_calls: 8,
+    max_total_tokens: 80000,
+    max_rerun_rounds: 1,
+    publishability_threshold: "medium",
     preflight_strictness: "standard",
-    runtime_allowed: "targeted_only",
-    review_severity: "high",
-    review_visibility: "internal"
+    runtime_allowed: "never",
+    review_severity: "medium",
+    review_visibility: "internal",
+    control_selection_mode: "automatic",
+    required_frameworks_text: "",
+    excluded_frameworks_text: "",
+    required_control_ids_text: "",
+    excluded_control_ids_text: "",
+    llm_provider: "",
+    llm_model: "",
+    use_global_llm_config: true
   });
   const [preflightSummary, setPreflightSummary] = useState(null);
   const [preflightLoading, setPreflightLoading] = useState(false);
@@ -2565,9 +2623,59 @@ function App() {
     () => buildDashboardPostureSeries(runs),
     [runs]
   );
+  const defaultProject = useMemo(() => ({
+    id: "default",
+    workspace_id: requestContext.workspaceId || "default",
+    name: "Default Project",
+    description: "Default OSS project container.",
+    target_defaults_json: {
+      target_kind: "path",
+      local_path: "fixtures/validation-targets/agent-tool-boundary-risky",
+      audit_package: effectiveSettings.effective.audit_defaults_json?.audit_package || "baseline-static"
+    }
+  }), [requestContext.workspaceId, effectiveSettings.effective.audit_defaults_json?.audit_package]);
+  const projectOptions = useMemo(
+    () => projects.some((project) => project.id === "default") ? projects : [defaultProject, ...projects],
+    [projects, defaultProject]
+  );
+  const projectRunStats = useMemo(() => {
+    const statsByProject = {};
+    runs.forEach((run) => {
+      const projectId = run.project_id || run.projectId || run.request_json?.project_id || run.hints?.project_id || "default";
+      const item = statsByProject[projectId] || {
+        runs: 0,
+        openReviews: 0,
+        scoreTotal: 0,
+        scoreCount: 0,
+        lastRunAt: ""
+      };
+      item.runs += 1;
+      if (String(run.created_at || "") > String(item.lastRunAt || "")) item.lastRunAt = run.created_at || "";
+      if (["review_required", "in_review", "requires_rerun"].includes(run.review_workflow?.status || "")) item.openReviews += 1;
+      const score = Number(run.overall_score);
+      if (Number.isFinite(score)) {
+        item.scoreTotal += score;
+        item.scoreCount += 1;
+      }
+      statsByProject[projectId] = item;
+    });
+    return statsByProject;
+  }, [runs]);
   const currentProject = useMemo(
-    () => projects.find((project) => project.id === requestContext.projectId) || null,
-    [projects, requestContext.projectId]
+    () => projectOptions.find((project) => project.id === requestContext.projectId) || defaultProject,
+    [projectOptions, requestContext.projectId, defaultProject]
+  );
+  const selectedProject = useMemo(
+    () => projectOptions.find((project) => project.id === selectedProjectId) || projectOptions[0] || defaultProject,
+    [projectOptions, selectedProjectId, defaultProject]
+  );
+  const selectedProjectRuns = useMemo(
+    () => [...projectDetailRuns].sort((left, right) => String(right.created_at || "").localeCompare(String(left.created_at || ""))),
+    [projectDetailRuns]
+  );
+  const selectedProjectReviews = useMemo(
+    () => selectedProjectRuns.filter((run) => ["review_required", "in_review", "requires_rerun"].includes(run.review_workflow?.status || "")),
+    [selectedProjectRuns]
   );
   const runDefaultsKey = useMemo(
     () => runDefaultsDependencyKey(currentProject, effectiveSettings, auditPackages),
@@ -2672,13 +2780,15 @@ function App() {
   function updateRunForm(key, value) {
     setPreflightStale(true);
     setPreflightAcceptedAt(null);
-    setRunForm((current) => normalizeRunFormUpdate(
-      current,
-      key,
-      value,
-      auditPackages,
-      effectiveSettings.effective.audit_defaults_json || {}
-    ));
+    setRunForm((current) => key === "config_source"
+      ? deriveRunFormForConfigSource(value, current, currentProject, effectiveSettings, auditPackages)
+      : normalizeRunFormUpdate(
+        current,
+        key,
+        value,
+        auditPackages,
+        effectiveSettings.effective.audit_defaults_json || {}
+      ));
   }
 
   function updateSettings(section, key, value) {
@@ -2781,7 +2891,113 @@ function App() {
     setProjectEditor((current) => ({ ...current, [key]: value }));
   }
 
-  const currentSettingsScopeLevel = settingsSubpage === "project" ? "project" : "global";
+  function updateProjectForm(key, value) {
+    setProjectForm((current) => ({ ...current, [key]: value }));
+  }
+
+  function openProjectEditor(project) {
+    const targetDefaults = project.target_defaults_json || {};
+    const auditDefaults = targetDefaults.audit_package
+      ? deriveAuditDefaultsForPackage(targetDefaults.audit_package, auditPackages, effectiveSettings.effective.audit_defaults_json || {})
+      : (effectiveSettings.effective.audit_defaults_json || {});
+    const projectRunMode = normalizeRunModeSelection(auditDefaults.run_mode) || "static";
+    const packageConfig = resolvePackageFormConfig(auditPackages, auditDefaults.audit_package || effectiveSettings.effective.audit_defaults_json?.audit_package || "baseline-static");
+    setProjectEditor({
+      id: project.id || "",
+      name: project.name || "",
+      description: project.description || "",
+      config_source: "project",
+      target_kind: inferTargetKind(targetDefaults),
+      local_path: targetDefaults.local_path || "",
+      repo_url: targetDefaults.repo_url || "",
+      endpoint_url: targetDefaults.endpoint_url || "",
+      audit_policy_pack: "default",
+      audit_package: auditDefaults.audit_package || effectiveSettings.effective.audit_defaults_json?.audit_package || "baseline-static",
+      run_mode: projectRunMode,
+      enabled_lanes: sanitizeEnabledLanes(auditDefaults.enabled_lanes || packageConfig.enabled_lanes, projectRunMode),
+      max_agent_calls: Number(auditDefaults.max_agent_calls || packageConfig.max_agent_calls || 8),
+      max_total_tokens: Number(auditDefaults.max_total_tokens || packageConfig.max_total_tokens || 80000),
+      max_rerun_rounds: Number(auditDefaults.max_rerun_rounds || packageConfig.max_rerun_rounds || 1),
+      publishability_threshold: auditDefaults.publishability_threshold || packageConfig.publishability_threshold || "medium",
+      preflight_strictness: targetDefaults.preflight_strictness || effectiveSettings.effective.preflight_json?.strictness || "standard",
+      runtime_allowed: auditDefaults.runtime_allowed || effectiveSettings.effective.preflight_json?.runtime_allowed || "never",
+      review_severity: auditDefaults.review_severity || effectiveSettings.effective.review_json?.require_human_review_for_severity || "medium",
+      review_visibility: targetDefaults.review_visibility || effectiveSettings.effective.review_json?.default_visibility || "internal",
+      control_selection_mode: targetDefaults.control_selection_mode || "automatic",
+      required_frameworks_text: Array.isArray(targetDefaults.required_frameworks) ? targetDefaults.required_frameworks.join("\n") : "",
+      excluded_frameworks_text: Array.isArray(targetDefaults.excluded_frameworks) ? targetDefaults.excluded_frameworks.join("\n") : "",
+      required_control_ids_text: Array.isArray(targetDefaults.required_control_ids) ? targetDefaults.required_control_ids.join("\n") : "",
+      excluded_control_ids_text: Array.isArray(targetDefaults.excluded_control_ids) ? targetDefaults.excluded_control_ids.join("\n") : "",
+      llm_provider: targetDefaults.llm_provider || effectiveSettings.effective.providers_json?.default_provider || "",
+      llm_model: targetDefaults.llm_model || effectiveSettings.effective.providers_json?.default_model || "",
+      use_global_llm_config: targetDefaults.use_global_llm_config !== false
+    });
+    setProjectEditOpen(true);
+  }
+
+  function buildProjectTargetDefaultsFromEditor(editor) {
+    return {
+      config_source: "project",
+      target_kind: editor.target_kind,
+      local_path: editor.target_kind === "path" ? editor.local_path : "",
+      repo_url: editor.target_kind === "repo" ? editor.repo_url : "",
+      endpoint_url: editor.target_kind === "endpoint" ? editor.endpoint_url : "",
+      audit_policy_pack: "default",
+      audit_package: editor.audit_package || effectiveSettings.effective.audit_defaults_json?.audit_package || "baseline-static"
+    };
+  }
+
+  function buildProjectTargetDefaultsFromCreateForm(form) {
+    return {
+      config_source: "project",
+      target_kind: form.target_kind,
+      local_path: form.target_kind === "path" ? form.local_path : "",
+      repo_url: form.target_kind === "repo" ? form.repo_url : "",
+      endpoint_url: form.target_kind === "endpoint" ? form.endpoint_url : "",
+      audit_policy_pack: "default",
+      audit_package: form.audit_package || effectiveSettings.effective.audit_defaults_json?.audit_package || "baseline-static"
+    };
+  }
+
+  function createProject() {
+    const payload = {
+      name: projectForm.name,
+      description: projectForm.description,
+      target_defaults: buildProjectTargetDefaultsFromCreateForm(projectForm)
+    };
+    act(
+      () => api("/ui/projects", { method: "POST", body: JSON.stringify(payload) }, requestContext).then((result) => {
+        setProjectForm({ name: "", description: "", target_kind: "path", local_path: "", repo_url: "", endpoint_url: "", audit_package: "" });
+        setProjectCreateOpen(false);
+        if (result?.project?.id) setSelectedProjectId(result.project.id);
+        return load();
+      }),
+      "Project created."
+    );
+  }
+
+  function saveProjectEditor() {
+    const projectId = projectEditor.id || currentProject?.id || "default";
+    const payload = {
+      id: projectId,
+      name: projectEditor.name,
+      description: projectEditor.description,
+      target_defaults: buildProjectTargetDefaultsFromEditor(projectEditor)
+    };
+    const defaultProjectExists = projects.some((project) => project.id === "default");
+    act(
+      () => api(projectId === "default" && !defaultProjectExists ? "/ui/projects" : "/ui/projects/" + encodeURIComponent(projectId), {
+        method: projectId === "default" && !defaultProjectExists ? "POST" : "PUT",
+        body: JSON.stringify(payload)
+      }, requestContext).then(() => {
+        setProjectEditOpen(false);
+        return Promise.all([load(), loadProjectRuns(projectId)]);
+      }),
+      "Project saved."
+    );
+  }
+
+  const currentSettingsScopeLevel = "global";
 
   function load() {
     setError("");
@@ -2827,6 +3043,26 @@ function App() {
       setReviewNotifications(notificationsPayload.review_notifications || []);
       setRuntimeFollowups(runtimeFollowupsPayload.runtime_followups || []);
     }).catch((loadError) => setError(loadError.message || String(loadError)));
+  }
+
+  function loadProjectRuns(projectId) {
+    if (!projectId) {
+      setProjectDetailRuns([]);
+      return Promise.resolve();
+    }
+    setProjectDetailLoading(true);
+    const projectScopedContext = { ...requestContext, projectId };
+    return api("/runs?limit=12", undefined, projectScopedContext)
+      .then((payload) => setProjectDetailRuns(payload.runs || []))
+      .catch((loadError) => {
+        const message = loadError.message || String(loadError);
+        if (["not_found", "run_not_found", "project_not_found"].includes(message)) {
+          setProjectDetailRuns([]);
+          return;
+        }
+        setError(message);
+      })
+      .finally(() => setProjectDetailLoading(false));
   }
 
   function loadRunDetail(runId) {
@@ -3054,15 +3290,35 @@ function App() {
   }, [selectedRuntimeFollowup?.id, selectedRuntimeFollowup?.run_id, selectedRuntimeFollowup?.linked_run_id, requestContext.workspaceId, requestContext.projectId, requestContext.actorId, requestContext.apiKey]);
 
   useEffect(() => {
-    if (!projects.length) return;
-    const matchingProject = projects.find((item) => item.id === requestContext.projectId);
-    if (!matchingProject) {
-      updateRequestContext("projectId", projects[0]?.id || "default");
+    const matchingProject = projectOptions.find((item) => item.id === requestContext.projectId);
+    if (requestContext.projectId && !matchingProject) {
+      updateRequestContext("projectId", "default");
     }
-  }, [projects, requestContext.projectId]);
+    if (!requestContext.projectId) {
+      updateRequestContext("projectId", "default");
+    }
+  }, [projectOptions, requestContext.projectId]);
+
+  useEffect(() => {
+    if (!projectOptions.length) return;
+    if (!projectOptions.some((project) => project.id === selectedProjectId)) {
+      setSelectedProjectId(projectOptions[0]?.id || "default");
+    }
+  }, [projectOptions, selectedProjectId]);
+
+  useEffect(() => {
+    if (view !== "projects") return;
+    loadProjectRuns(selectedProject?.id || "default");
+  }, [view, selectedProject?.id, requestContext.workspaceId, requestContext.actorId, requestContext.apiKey]);
 
   useEffect(() => {
     const defaults = deriveRunFormDefaults(currentProject, effectiveSettings, auditPackages);
+    const targetDefaults = currentProject?.target_defaults_json || {};
+    const projectAuditDefaults = targetDefaults.audit_package
+      ? deriveAuditDefaultsForPackage(targetDefaults.audit_package, auditPackages, effectiveSettings.effective.audit_defaults_json || {})
+      : (effectiveSettings.effective.audit_defaults_json || {});
+    const projectRunMode = normalizeRunModeSelection(projectAuditDefaults.run_mode) || "static";
+    const projectPackageConfig = resolvePackageFormConfig(auditPackages, projectAuditDefaults.audit_package || effectiveSettings.effective.audit_defaults_json?.audit_package || "baseline-static");
     setRunForm(defaults);
     setPreflightSummary(null);
     setPreflightStale(true);
@@ -3072,15 +3328,31 @@ function App() {
       id: currentProject?.id || "",
       name: currentProject?.name || "",
       description: currentProject?.description || "",
-      target_kind: inferTargetKind(currentProject?.target_defaults_json || {}),
-      local_path: currentProject?.target_defaults_json?.local_path || "",
-      repo_url: currentProject?.target_defaults_json?.repo_url || "",
-      endpoint_url: currentProject?.target_defaults_json?.endpoint_url || "",
+      config_source: "project",
+      target_kind: inferTargetKind(targetDefaults),
+      local_path: targetDefaults.local_path || "",
+      repo_url: targetDefaults.repo_url || "",
+      endpoint_url: targetDefaults.endpoint_url || "",
       audit_policy_pack: "default",
-      preflight_strictness: currentProject?.target_defaults_json?.preflight_strictness || effectiveSettings.effective.preflight_json?.strictness || "standard",
-      runtime_allowed: currentProject?.target_defaults_json?.runtime_allowed || effectiveSettings.effective.preflight_json?.runtime_allowed || "targeted_only",
-      review_severity: currentProject?.target_defaults_json?.review_severity || effectiveSettings.effective.review_json?.require_human_review_for_severity || "high",
-      review_visibility: currentProject?.target_defaults_json?.review_visibility || effectiveSettings.effective.review_json?.default_visibility || "internal"
+      audit_package: projectAuditDefaults.audit_package || effectiveSettings.effective.audit_defaults_json?.audit_package || "baseline-static",
+      run_mode: projectRunMode,
+      enabled_lanes: sanitizeEnabledLanes(projectAuditDefaults.enabled_lanes || projectPackageConfig.enabled_lanes, projectRunMode),
+      max_agent_calls: Number(projectAuditDefaults.max_agent_calls || projectPackageConfig.max_agent_calls || 8),
+      max_total_tokens: Number(projectAuditDefaults.max_total_tokens || projectPackageConfig.max_total_tokens || 80000),
+      max_rerun_rounds: Number(projectAuditDefaults.max_rerun_rounds || projectPackageConfig.max_rerun_rounds || 1),
+      publishability_threshold: projectAuditDefaults.publishability_threshold || projectPackageConfig.publishability_threshold || "medium",
+      preflight_strictness: targetDefaults.preflight_strictness || effectiveSettings.effective.preflight_json?.strictness || "standard",
+      runtime_allowed: projectAuditDefaults.runtime_allowed || effectiveSettings.effective.preflight_json?.runtime_allowed || "never",
+      review_severity: projectAuditDefaults.review_severity || effectiveSettings.effective.review_json?.require_human_review_for_severity || "medium",
+      review_visibility: targetDefaults.review_visibility || effectiveSettings.effective.review_json?.default_visibility || "internal",
+      control_selection_mode: targetDefaults.control_selection_mode || "automatic",
+      required_frameworks_text: Array.isArray(targetDefaults.required_frameworks) ? targetDefaults.required_frameworks.join("\n") : "",
+      excluded_frameworks_text: Array.isArray(targetDefaults.excluded_frameworks) ? targetDefaults.excluded_frameworks.join("\n") : "",
+      required_control_ids_text: Array.isArray(targetDefaults.required_control_ids) ? targetDefaults.required_control_ids.join("\n") : "",
+      excluded_control_ids_text: Array.isArray(targetDefaults.excluded_control_ids) ? targetDefaults.excluded_control_ids.join("\n") : "",
+      llm_provider: targetDefaults.llm_provider || effectiveSettings.effective.providers_json?.default_provider || "",
+      llm_model: targetDefaults.llm_model || effectiveSettings.effective.providers_json?.default_model || "",
+      use_global_llm_config: targetDefaults.use_global_llm_config !== false
     });
   }, [runDefaultsKey]);
 
@@ -3724,7 +3996,7 @@ function App() {
             h("div", { key: "value", className: "mt-1 text-muted" }, requestContext.projectId)
           ]),
           h("div", { key: "project", className: "rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm" }, [
-            h("div", { key: "label", className: "font-medium" }, "Project Defaults"),
+            h("div", { key: "label", className: "font-medium" }, "Project"),
             h("div", { key: "value", className: "mt-1 text-muted" }, currentProject ? `${currentProject.name} (${currentProject.id})` : "No project selected")
           ]),
           h("div", { key: "launch-state", className: cn("rounded-2xl border px-4 py-3 text-sm", launchReadiness.canLaunch ? "border-emerald-200 bg-emerald-50/80 text-emerald-800" : "border-amber-200 bg-amber-50/80 text-amber-900") }, [
@@ -3829,7 +4101,7 @@ function App() {
             h("ul", { key: "list", className: "mt-2 space-y-1" }, launchReadiness.issues.map((item, index) => h("li", { key: index }, "- " + item)))
           ])
           : null,
-        h("div", { key: "hint", className: "mt-4 text-sm text-muted" }, "Launch defaults inherit from effective settings and the current project's target defaults."),
+        h("div", { key: "hint", className: "mt-4 text-sm text-muted" }, "Launch config resolves from the selected project and its Audit Type unless this run is customized."),
         h("div", { key: "resolved-profile", className: "mt-4 rounded-2xl border border-border bg-stone-100/80 p-4 text-sm" }, [
           h("div", { key: "title", className: "font-medium" }, "Resolved Launch Profile"),
           h("div", { key: "body", className: "mt-2 grid gap-2 md:grid-cols-2 text-muted" }, [
@@ -4104,6 +4376,8 @@ function App() {
     onClose: () => setLaunchModalOpen(false),
     requestContext,
     currentProject,
+    projects: projectOptions,
+    onProjectChange: (projectId) => updateRequestContext("projectId", projectId),
     runForm,
     updateRunForm,
     auditPackages,
@@ -4345,13 +4619,12 @@ function App() {
   const defaultPolicyPublicationRules = defaultPolicyPack?.policy?.publication_rules || [];
 
   const settingsNavItems = [
+    { id: "audit", label: "Audit Type", description: "Audit methodology, scope, and run-shape defaults." },
     { id: "llm", label: "Agent Configuration", description: "Default models, credentials, and agent routing." },
-    { id: "audit", label: "Audit Defaults", description: "Default package and run-mode posture." },
     { id: "review", label: "Readiness / Review", description: "Readiness gates and review cadence defaults." },
-    { id: "integrations", label: "Integrations", description: "Outbound delivery and repository integration settings." },
-    { id: "project", label: "Project Defaults", description: "Current project metadata and default launch settings." },
     { id: "policy", label: "Policy Pack", description: "Default OSS supervision policy details." },
-    { id: "documents", label: "Documents", description: "Attached policy and reference documents." }
+    { id: "documents", label: "Documents", description: "Attached policy and reference documents." },
+    { id: "integrations", label: "Integrations", description: "Outbound delivery and repository integration settings." }
   ];
 
   const saveSettings = () => act(
@@ -4522,8 +4795,8 @@ function App() {
   ]);
 
   const settingsAuditPanel = h("div", { className: "space-y-6" }, [
-    h(Card, { key: "audit-defaults", title: "Audit Defaults", description: "Default launch posture when a run or project does not specify a narrower audit shape." }, [
-      h("div", { key: "package-note", className: "mb-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600" }, "Selecting an audit package fills in run mode, runtime validation, review thresholds, budget, and audit area coverage. Adjust the advanced defaults below when the project needs a different baseline."),
+    h(Card, { key: "audit-defaults", title: "Audit Type", description: "Audit methodology used by project runs and as the starting point for custom runs." }, [
+      h("div", { key: "package-note", className: "mb-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600" }, "Selecting an audit package fills in run mode, runtime validation, review thresholds, budget, and audit area coverage. Projects reference an Audit Type; they do not customize their own methodology."),
       h("div", { key: "fields", className: "grid gap-4 md:grid-cols-2" }, [
         h(Field, { key: "package", label: "Audit Package" }, Select({
           value: settings.audit_defaults_json.audit_package || "",
@@ -4769,96 +5042,215 @@ function App() {
   ]);
 
   const settingsProjectPanel = h("div", { className: "space-y-6" }, [
+    h(Card, { key: "projects", title: "Projects", description: "Create and manage project containers. Each project has a target and selected Audit Type." }, [
+      h("div", { key: "header", className: "flex flex-wrap items-center justify-between gap-3" }, [
+        h("div", { key: "count", className: "text-sm text-muted" }, `${projectOptions.length} project${projectOptions.length === 1 ? "" : "s"} in this OSS installation`),
+        h(Button, { key: "new", onClick: () => setProjectCreateOpen(true) }, "New Project")
+      ]),
+      projectOptions.length ? h("div", { key: "list", className: "mt-4 overflow-hidden rounded-2xl border border-slate-200" }, [
+        h("div", { key: "head", className: "hidden grid-cols-[1.15fr_1fr_1fr_0.7fr_0.9fr_auto] gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3 text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 md:grid" }, [
+          h("div", { key: "project" }, "Project"),
+          h("div", { key: "target" }, "Target"),
+          h("div", { key: "audit" }, "Audit Type"),
+          h("div", { key: "runs" }, "Runs"),
+          h("div", { key: "last-run" }, "Last Run"),
+          h("div", { key: "actions", className: "text-right" }, "Actions")
+        ]),
+        h("div", { key: "rows", className: "divide-y divide-slate-200" }, projectOptions.map((project) => {
+        const defaults = project.target_defaults_json || {};
+        const targetKind = inferTargetKind(defaults);
+        const targetValue = targetKind === "repo" ? defaults.repo_url : targetKind === "endpoint" ? defaults.endpoint_url : defaults.local_path;
+        const auditType = defaults.audit_package || effectiveSettings.effective.audit_defaults_json?.audit_package || "baseline-static";
+        const persistedRunStats = project.run_stats || null;
+        const localRunStats = projectRunStats[project.id] || { runs: 0, openReviews: 0, scoreTotal: 0, scoreCount: 0, lastRunAt: "" };
+        const selected = selectedProject?.id === project.id;
+        const runStats = persistedRunStats
+          ? {
+            runs: Number(persistedRunStats.runs || 0),
+            openReviews: Number(persistedRunStats.open_reviews || 0),
+            averageScore: Number(persistedRunStats.average_score),
+            lastRunAt: persistedRunStats.last_run_at || ""
+          }
+          : {
+            runs: localRunStats.runs,
+            openReviews: localRunStats.openReviews,
+            averageScore: localRunStats.scoreCount ? localRunStats.scoreTotal / localRunStats.scoreCount : NaN,
+            lastRunAt: localRunStats.lastRunAt
+          };
+        const averageProjectScore = Number.isFinite(runStats.averageScore) ? runStats.averageScore.toFixed(1) : "";
+        return h("div", {
+          key: project.id,
+          className: cn("grid cursor-pointer gap-3 px-4 py-4 transition hover:bg-slate-50 md:grid-cols-[1.15fr_1fr_1fr_0.7fr_0.9fr_auto]", selected ? "bg-slate-50" : "bg-white"),
+          onClick: () => setSelectedProjectId(project.id)
+        }, [
+          h("div", { key: "identity" }, [
+            h("div", { key: "mobile-label", className: "mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 md:hidden" }, "Project"),
+            h("div", { key: "name", className: "font-semibold text-slate-950" }, `${project.name} (${project.id})`),
+            h("div", { key: "description", className: "mt-1 text-sm text-muted" }, project.description || "No description")
+          ]),
+          h("div", { key: "target", className: "text-sm" }, [
+            h("div", { key: "label", className: "text-xs font-medium uppercase tracking-[0.14em] text-slate-500 md:hidden" }, "Target"),
+            h("div", { key: "kind", className: "text-xs font-medium uppercase tracking-[0.14em] text-slate-500" }, targetKind),
+            h("div", { key: "value", className: "mt-1 text-slate-900" }, targetValue || `${targetKind} target not set`)
+          ]),
+          h("div", { key: "config", className: "text-sm" }, [
+            h("div", { key: "label", className: "text-xs font-medium uppercase tracking-[0.14em] text-slate-500 md:hidden" }, "Audit Type"),
+            h("div", { key: "value", className: "mt-1 text-slate-900" }, visibleAuditPackages.find((item) => item.id === auditType)?.title || auditType)
+          ]),
+          h("div", { key: "runs", className: "text-sm" }, [
+            h("div", { key: "label", className: "text-xs font-medium uppercase tracking-[0.14em] text-slate-500 md:hidden" }, "Runs"),
+            h("div", { key: "count", className: "mt-1 font-medium text-slate-900" }, String(runStats.runs)),
+            runStats.openReviews
+              ? h("div", { key: "reviews", className: "mt-1 text-xs text-amber-700" }, `${runStats.openReviews} open review${runStats.openReviews === 1 ? "" : "s"}`)
+              : null,
+            averageProjectScore
+              ? h("div", { key: "score", className: "mt-1 text-xs text-muted" }, `avg score ${averageProjectScore}`)
+              : null
+          ]),
+          h("div", { key: "last-run", className: "text-sm" }, [
+            h("div", { key: "label", className: "text-xs font-medium uppercase tracking-[0.14em] text-slate-500 md:hidden" }, "Last Run"),
+            h("div", { key: "value", className: "mt-1 text-slate-900" }, runStats.lastRunAt ? formatDate(runStats.lastRunAt) : "No runs")
+          ]),
+          h("div", { key: "actions", className: "flex items-center justify-end gap-2" }, [
+            h(Button, {
+              key: "edit",
+              variant: "outline",
+              onClick: (event) => {
+                event.stopPropagation();
+                openProjectEditor(project);
+              }
+            }, "Edit")
+          ])
+        ]);
+      }))
+      ]) : h("div", { key: "empty", className: "mt-4 rounded-2xl border border-dashed border-slate-300 bg-slate-50 px-4 py-8 text-sm text-muted" }, "No projects yet. The built-in Default Project is available for launches."),
+      h(Modal, {
+        key: "create-modal",
+        open: projectCreateOpen,
+        title: "New Project",
+        description: "Create the project identity, target, and selected Audit Type.",
+        onClose: () => setProjectCreateOpen(false),
+        size: "lg"
+      }, h("div", { className: "space-y-4" }, [
+        h(Field, { key: "name", label: "Project Name" }, h(Input, { value: projectForm.name, onChange: (event) => updateProjectForm("name", event.target.value) })),
+        h(Field, { key: "description", label: "Description" }, h(Input, { value: projectForm.description, onChange: (event) => updateProjectForm("description", event.target.value) })),
+        h("div", { key: "target", className: "grid gap-4 md:grid-cols-2" }, [
+          h(Field, { key: "kind", label: "Target Source" }, Select({ value: projectForm.target_kind, onChange: (event) => updateProjectForm("target_kind", event.target.value) }, [
+            h("option", { key: "path", value: "path" }, "local path"),
+            h("option", { key: "repo", value: "repo" }, "repo url"),
+            h("option", { key: "endpoint", value: "endpoint" }, "endpoint url")
+          ])),
+          projectForm.target_kind === "repo"
+            ? h(Field, { key: "repo", label: "Repository URL" }, h(Input, { value: projectForm.repo_url, onChange: (event) => updateProjectForm("repo_url", event.target.value) }))
+            : projectForm.target_kind === "endpoint"
+              ? h(Field, { key: "endpoint", label: "Endpoint URL" }, h(Input, { value: projectForm.endpoint_url, onChange: (event) => updateProjectForm("endpoint_url", event.target.value) }))
+              : h(Field, { key: "path", label: "Local Path" }, h(Input, { value: projectForm.local_path, onChange: (event) => updateProjectForm("local_path", event.target.value) }))
+        ]),
+        h(Field, { key: "audit-type", label: "Audit Type" }, Select({
+          value: projectForm.audit_package || effectiveSettings.effective.audit_defaults_json?.audit_package || "baseline-static",
+          onChange: (event) => updateProjectForm("audit_package", event.target.value)
+        }, visibleAuditPackages.map((item) => h("option", { key: item.id, value: item.id }, `${item.title} (${item.id})`)))),
+        h("div", { key: "actions", className: "flex justify-end gap-3 pt-2" }, [
+          h(Button, { key: "cancel", variant: "outline", onClick: () => setProjectCreateOpen(false) }, "Cancel"),
+          h(Button, { key: "create", onClick: createProject, disabled: !projectForm.name.trim() }, "Create Project")
+        ])
+      ]))
+    ]),
     h(Card, {
-      key: "project-defaults-intro",
-      title: "Project Defaults",
-      description: "These settings apply only to the current project and override installation defaults for this project."
-    }, [
-      h("div", { key: "summary", className: "grid gap-4 md:grid-cols-2" }, [
-        h(Field, { key: "current-project", label: "Current Project" }, h(Input, { value: requestContext.projectId || "", readOnly: true })),
-        h(Field, { key: "effective-package", label: "Effective Audit Package" }, h(Input, { value: effectiveSettings.effective.audit_defaults_json.audit_package || "", readOnly: true }))
+      key: "project-activity",
+      title: selectedProject ? `${selectedProject.name} Activity` : "Project Activity",
+      description: "Scoped project context. The main Runs and Reviews pages remain the full operational views and can add their own project filters."
+    }, selectedProject ? [
+      h("div", { key: "summary", className: "grid gap-3 md:grid-cols-4" }, [
+        h("div", { key: "id", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-semibold uppercase tracking-[0.16em] text-slate-500" }, "Project"),
+          h("div", { key: "value", className: "mt-1 font-medium text-slate-950" }, selectedProject.id)
+        ]),
+        h("div", { key: "audit", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-semibold uppercase tracking-[0.16em] text-slate-500" }, "Audit Type"),
+          h("div", { key: "value", className: "mt-1 font-medium text-slate-950" }, visibleAuditPackages.find((item) => item.id === (selectedProject.target_defaults_json?.audit_package || ""))?.title || selectedProject.target_defaults_json?.audit_package || "baseline-static")
+        ]),
+        h("div", { key: "runs", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-semibold uppercase tracking-[0.16em] text-slate-500" }, "Loaded Runs"),
+          h("div", { key: "value", className: "mt-1 font-medium text-slate-950" }, projectDetailLoading ? "Loading" : String(selectedProjectRuns.length))
+        ]),
+        h("div", { key: "reviews", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-semibold uppercase tracking-[0.16em] text-slate-500" }, "Open Reviews"),
+          h("div", { key: "value", className: "mt-1 font-medium text-slate-950" }, projectDetailLoading ? "Loading" : String(selectedProjectReviews.length))
+        ])
+      ]),
+      h("div", { key: "activity-grid", className: "mt-5 grid gap-5 xl:grid-cols-[1.2fr_0.8fr]" }, [
+        h("div", { key: "runs" }, [
+          h("div", { key: "header", className: "mb-3 flex items-center justify-between gap-3" }, [
+            h("div", { key: "title", className: "font-semibold text-slate-950" }, "Recent Runs"),
+            h(Button, {
+              key: "refresh",
+              variant: "outline",
+              onClick: () => loadProjectRuns(selectedProject.id)
+            }, "Refresh")
+          ]),
+          projectDetailLoading
+            ? h("div", { key: "loading", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-8 text-center text-sm text-muted" }, "Loading project runs...")
+            : h(RunsTable, {
+              key: "table",
+              runs: selectedProjectRuns.slice(0, 8),
+              selectedRunId,
+              onSelect: (runId) => {
+                setSelectedRunId(runId);
+                setView("runs");
+              }
+            })
+        ]),
+        h("div", { key: "reviews" }, [
+          h("div", { key: "title", className: "mb-3 font-semibold text-slate-950" }, "Project Reviews"),
+          selectedProjectReviews.length
+            ? h(RunInboxList, {
+              key: "list",
+              runs: selectedProjectReviews.slice(0, 6),
+              selectedRunId,
+              onSelect: (runId) => {
+                setSelectedRunId(runId);
+                setView("reviews");
+              }
+            })
+            : h("div", { key: "empty", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-8 text-center text-sm text-muted" }, "No open reviews for this project.")
+        ])
       ])
-    ]),
-    h(Card, { key: "project-create", title: "Projects", description: "Create a project for this installation and manage its default launch settings." }, [
-      h("div", { key: "project-create-fields", className: "grid gap-4" }, [
-        h(Field, { key: "project-name", label: "New Project" }, h(Input, { value: projectForm.name, onChange: (event) => setProjectForm((current) => ({ ...current, name: event.target.value })) })),
-        h(Field, { key: "project-desc", label: "Project Description" }, h(Input, { value: projectForm.description, onChange: (event) => setProjectForm((current) => ({ ...current, description: event.target.value })) })),
-        h(Button, {
-          key: "project-create-button",
-          variant: "outline",
-          onClick: () => act(
-            () => api("/ui/projects", { method: "POST", body: JSON.stringify(projectForm) }, requestContext).then(() => setProjectForm({ name: "", description: "" })),
-            "Project created."
-          )
-        }, "Create Project")
-      ])
-    ]),
-    h(Card, { key: "project-defaults", title: "Current Project Defaults", description: "Edit current project metadata and the default launch settings used by OSS runs for this project." }, currentProject ? [
-      h("div", { key: "project-fields", className: "grid gap-4" }, [
-        h(Field, { key: "project-name-edit", label: "Project Name" }, h(Input, { value: projectEditor.name, onChange: (event) => updateProjectEditor("name", event.target.value) })),
-        h(Field, { key: "project-description-edit", label: "Description" }, h(Input, { value: projectEditor.description, onChange: (event) => updateProjectEditor("description", event.target.value) })),
-        h(Field, { key: "project-target-kind", label: "Default Target Kind" }, Select({ value: projectEditor.target_kind, onChange: (event) => updateProjectEditor("target_kind", event.target.value) }, [
+    ] : h("div", { className: "text-sm text-muted" }, "Select a project to inspect recent activity.")),
+    h(Modal, {
+      key: "edit-modal",
+      open: projectEditOpen,
+      title: "Edit Project",
+      description: "Update the project identity, target, and selected Audit Type.",
+      onClose: () => setProjectEditOpen(false),
+      size: "lg"
+    }, projectEditor.id ? h("div", { className: "space-y-4" }, [
+      h("div", { key: "details", className: "grid gap-4 md:grid-cols-2" }, [
+        h(Field, { key: "name", label: "Project Name" }, h(Input, { value: projectEditor.name, onChange: (event) => updateProjectEditor("name", event.target.value) })),
+        h(Field, { key: "description", label: "Description" }, h(Input, { value: projectEditor.description, onChange: (event) => updateProjectEditor("description", event.target.value) })),
+        h(Field, { key: "target-kind", label: "Target Source" }, Select({ value: projectEditor.target_kind, onChange: (event) => updateProjectEditor("target_kind", event.target.value) }, [
           h("option", { key: "path", value: "path" }, "local path"),
           h("option", { key: "repo", value: "repo" }, "repo url"),
           h("option", { key: "endpoint", value: "endpoint" }, "endpoint url")
         ])),
         projectEditor.target_kind === "repo"
-          ? h(Field, { key: "project-repo", label: "Default Repository URL" }, h(Input, { value: projectEditor.repo_url, onChange: (event) => updateProjectEditor("repo_url", event.target.value) }))
+          ? h(Field, { key: "repo", label: "Repository URL" }, h(Input, { value: projectEditor.repo_url, onChange: (event) => updateProjectEditor("repo_url", event.target.value) }))
           : projectEditor.target_kind === "endpoint"
-            ? h(Field, { key: "project-endpoint", label: "Default Endpoint URL" }, h(Input, { value: projectEditor.endpoint_url, onChange: (event) => updateProjectEditor("endpoint_url", event.target.value) }))
-            : h(Field, { key: "project-local-path", label: "Default Local Path" }, h(Input, { value: projectEditor.local_path, onChange: (event) => updateProjectEditor("local_path", event.target.value) })),
-        h(Field, { key: "project-policy-pack", label: "Default Policy Pack" }, h("div", { className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600" }, [
-          h("div", { key: "value", className: "font-medium text-slate-900" }, getPolicyPackDisplayLabel(policyPacks, "default")),
-          h("div", { key: "note", className: "mt-1" }, "OSS projects always use the built-in default policy pack.")
-        ])),
-        h(Field, { key: "project-preflight", label: "Preflight Strictness" }, Select({ value: projectEditor.preflight_strictness, onChange: (event) => updateProjectEditor("preflight_strictness", event.target.value) }, [
-          h("option", { key: "standard", value: "standard" }, "standard"),
-          h("option", { key: "strict", value: "strict" }, "strict"),
-          h("option", { key: "lenient", value: "lenient" }, "lenient")
-        ])),
-        h(Field, { key: "project-runtime-allowed", label: "Runtime Validation" }, Select({ value: projectEditor.runtime_allowed, onChange: (event) => updateProjectEditor("runtime_allowed", event.target.value) }, [
-          h("option", { key: "never", value: "never" }, "never"),
-          h("option", { key: "targeted_only", value: "targeted_only" }, "targeted only"),
-          h("option", { key: "allowed", value: "allowed" }, "allowed")
-        ])),
-        h(Field, { key: "project-review-severity", label: "Human Review Threshold" }, Select({ value: projectEditor.review_severity, onChange: (event) => updateProjectEditor("review_severity", event.target.value) }, [
-          h("option", { key: "critical", value: "critical" }, "critical"),
-          h("option", { key: "high", value: "high" }, "high"),
-          h("option", { key: "medium", value: "medium" }, "medium"),
-          h("option", { key: "low", value: "low" }, "low")
-        ])),
-        h(Field, { key: "project-review-visibility", label: "Default Visibility" }, Select({ value: projectEditor.review_visibility, onChange: (event) => updateProjectEditor("review_visibility", event.target.value) }, [
-          h("option", { key: "public", value: "public" }, "public"),
-          h("option", { key: "internal", value: "internal" }, "internal"),
-          h("option", { key: "internal-only", value: "internal-only" }, "internal-only")
-        ]))
+            ? h(Field, { key: "endpoint", label: "Endpoint URL" }, h(Input, { value: projectEditor.endpoint_url, onChange: (event) => updateProjectEditor("endpoint_url", event.target.value) }))
+            : h(Field, { key: "path", label: "Local Path" }, h(Input, { value: projectEditor.local_path, onChange: (event) => updateProjectEditor("local_path", event.target.value) }))
       ]),
-      h(Button, {
-        key: "project-save",
-        className: "mt-5",
-        onClick: () => act(
-          () => api("/ui/projects/" + encodeURIComponent(currentProject.id), {
-            method: "PUT",
-            body: JSON.stringify({
-              name: projectEditor.name,
-              description: projectEditor.description,
-              target_defaults: {
-                target_kind: projectEditor.target_kind,
-                local_path: projectEditor.target_kind === "path" ? projectEditor.local_path : "",
-                repo_url: projectEditor.target_kind === "repo" ? projectEditor.repo_url : "",
-                endpoint_url: projectEditor.target_kind === "endpoint" ? projectEditor.endpoint_url : "",
-                audit_policy_pack: "default",
-                preflight_strictness: projectEditor.preflight_strictness,
-                runtime_allowed: projectEditor.runtime_allowed,
-                review_severity: projectEditor.review_severity,
-                review_visibility: projectEditor.review_visibility
-              }
-            })
-          }, requestContext),
-          "Project defaults saved."
-        )
-      }, "Save Project Defaults")
-    ] : h("div", { className: "text-sm text-muted" }, "Create a project to manage project-specific defaults for repeated OSS audits."))
+      h("div", { key: "audit-type", className: "mt-6 grid gap-4 md:grid-cols-2" }, [
+        h(Field, { key: "package", label: "Audit Type" }, Select({
+          value: projectEditor.audit_package || effectiveSettings.effective.audit_defaults_json?.audit_package || "baseline-static",
+          onChange: (event) => updateProjectEditor("audit_package", event.target.value)
+        }, visibleAuditPackages.map((item) => h("option", { key: item.id, value: item.id }, `${item.title} (${item.id})`)))),
+        h("div", { key: "note", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-muted" }, "Projects select an Audit Type methodology. Edit Audit Type details in Settings -> Audit Type; agent model defaults stay in Agent Configuration.")
+      ]),
+      h("div", { key: "actions", className: "flex justify-end gap-3 pt-2" }, [
+        h(Button, { key: "cancel", variant: "outline", onClick: () => setProjectEditOpen(false) }, "Cancel"),
+        h(Button, { key: "save", onClick: saveProjectEditor, disabled: !projectEditor.name.trim() }, "Save Project")
+      ])
+    ]) : h("div", { className: "text-sm text-muted" }, "Select a project to edit."))
   ]);
 
   const settingsDocumentsPanel = h("div", { className: "space-y-6" }, [
@@ -4896,10 +5288,9 @@ function App() {
     audit: settingsAuditPanel,
     review: settingsReviewPanel,
     integrations: settingsIntegrationsPanel,
-    project: settingsProjectPanel,
     policy: settingsPolicyPanel,
     documents: settingsDocumentsPanel
-  }[settingsSubpage] || settingsLlmPanel;
+  }[settingsSubpage] || settingsAuditPanel;
 
   const settingsView = h("section", { className: "overflow-hidden rounded-3xl border border-slate-200 bg-white xl:grid xl:grid-cols-[220px_minmax(0,1fr)]" }, [
     h("aside", { key: "settings-nav", className: "border-b border-slate-200 bg-slate-50/80 px-4 py-5 xl:border-b-0 xl:border-r xl:min-h-full" }, [
@@ -4926,6 +5317,7 @@ function App() {
     h("div", { key: "panel", className: "min-w-0 bg-white px-6 py-6" }, settingsSubpageContent)
   ]);
 
+  const projectsView = settingsProjectPanel;
 
   return h("div", { className: "grid min-h-screen bg-background lg:grid-cols-[280px_1fr]" }, [
     h("aside", { key: "aside", className: "border-b border-border bg-white px-4 py-5 lg:border-b-0 lg:border-r" }, [
@@ -4993,6 +5385,8 @@ function App() {
         resetKey: `${view}:${selectedRunId || ""}:${selectedRuntimeFollowupId || ""}`
       }, h("div", { key: "view", className: view === "runs" || view === "settings" ? "" : "mt-6" }, view === "dashboard"
         ? dashboard
+        : view === "projects"
+          ? projectsView
         : view === "runs"
           ? runsView
           : view === "jobs"

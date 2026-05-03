@@ -25,6 +25,7 @@ function getPolicyPackLabel(policyPacks, policyPackId) {
 
 const auditPackageDisplayOrder = ["baseline-static", "agentic-static", "deep-static", "runtime-validated"];
 const hiddenOssAuditPackages = new Set(["premium-comprehensive"]);
+const noProjectSelectValue = "__select_project__";
 const auditPackageDescriptions = {
   "baseline-static": "Lightweight repository and supply-chain posture review.",
   "agentic-static": "Standard static audit for agentic systems and data exposure.",
@@ -344,6 +345,8 @@ function LaunchAuditModalComponent({
   onClose,
   requestContext,
   currentProject,
+  projects = [],
+  onProjectChange,
   runForm,
   updateRunForm,
   auditPackages,
@@ -380,6 +383,11 @@ function LaunchAuditModalComponent({
     ? (launchReadiness.accepted ? "accepted" : (preflightSummary.readiness?.status || "ready").replace(/_/g, " "))
     : "not run";
   const targetStepComplete = Boolean(computeTargetValue(runForm).trim()) && !launchReadiness.issues.some((issue) => issue.includes("target"));
+  const configSource = runForm.config_source === "custom" ? "custom" : "project";
+  const usingCustomRun = configSource === "custom";
+  const usingProjectProfile = configSource === "project";
+  const usingLockedLaunchMode = !usingCustomRun;
+  const usingProjectTarget = Boolean(currentProject) && !usingCustomRun;
   const usingPresets = Boolean(runForm.use_audit_presets);
   const globalModelAvailable = Boolean(runForm.llm_model);
   const usingGlobalLlmConfig = runForm.use_global_llm_config !== false && globalModelAvailable;
@@ -403,6 +411,7 @@ function LaunchAuditModalComponent({
   const availableRequiredControls = controlCatalog.filter((control) => !requiredControlIds.includes(control.id) && !requiredFrameworks.includes(control.framework));
   const availableExcludedControls = controlCatalog.filter((control) => !excludedControlIds.includes(control.id) && !excludedFrameworks.includes(control.framework));
   const currentTargetSummary = getCurrentTargetSummary(runForm);
+  const projectLabel = currentProject ? `${currentProject.name || currentProject.id} (${currentProject.id})` : "Default Project (default)";
   const currentPolicyPackId = normalizePolicyPackId(runForm.audit_policy_pack || "");
   const currentProfileSummary = {
     target: currentTargetSummary,
@@ -453,6 +462,22 @@ function LaunchAuditModalComponent({
     }
   ] : [];
   const applyAuditPackage = (packageId) => updateRunForm("audit_package", packageId);
+  const sourceOption = (source, title, copy, disabled = false) => h("button", {
+    key: source,
+    type: "button",
+    disabled,
+    onClick: () => updateRunForm("config_source", source),
+    className: cn(
+      "rounded-2xl border px-4 py-3 text-left transition",
+      configSource === source
+        ? "border-slate-900 bg-slate-900 text-white"
+        : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
+      disabled && "cursor-not-allowed opacity-50"
+    )
+  }, [
+    h("div", { key: "title", className: "font-medium" }, title),
+    h("div", { key: "copy", className: cn("mt-1 text-sm", configSource === source ? "text-slate-200" : "text-slate-500") }, copy)
+  ]);
   useEffect(() => {
     if (requiredControlDraft && !availableRequiredControls.some((control) => control.id === requiredControlDraft)) {
       setRequiredControlDraft("");
@@ -577,7 +602,8 @@ function LaunchAuditModalComponent({
         ]),
         h(Badge, { key: "readiness" }, `Readiness: ${launchReadiness.requiresReadinessReview ? (launchReadiness.accepted ? "accepted" : preflightStatus) : "optional"}`)
       ]),
-      h("div", { key: "items", className: "mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-5" }, [
+      h("div", { key: "items", className: "mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-6" }, [
+        ["Project", projectLabel],
         ["Package", currentProfileSummary.packageLabel],
         ["Policy pack", currentProfileSummary.policyPackLabel],
         ["Run mode", currentProfileSummary.runMode],
@@ -599,9 +625,31 @@ function LaunchAuditModalComponent({
             h("div", { key: "title", className: "text-xs font-mono uppercase tracking-[0.18em] text-slate-500" }, "Target"),
             h("div", { key: "copy", className: "mt-1 text-sm text-slate-500" }, "Choose the system, repository, or path you want to audit.")
           ]),
+          h("div", { key: "project-scope", className: "rounded-2xl border border-slate-200 bg-white px-4 py-4" }, [
+            h(Field, { key: "project", label: helpLabel("Project", "The selected project supplies the target and selected Audit Type for project runs.") }, projects.length
+              ? Select({
+                value: requestContext.projectId || "default",
+                onChange: (event) => onProjectChange?.(event.target.value)
+              }, [
+                ...projects.map((project) => h("option", { key: project.id, value: project.id }, `${project.name || project.id} (${project.id})`))
+              ])
+              : h(Input, { value: requestContext.projectId || "default", readOnly: true })),
+            h(Field, { key: "config-source", label: helpLabel("Launch Configuration", "Choose whether this run uses the selected project container or a one-time custom configuration.") }, h("div", { className: "grid gap-2 md:grid-cols-2" }, [
+              sourceOption("project", "Use project", "Use this project's target and selected Audit Type", !currentProject),
+              sourceOption("custom", "Custom run", "Edit a one-time launch configuration")
+            ])),
+            h("div", { key: "project-note", className: "mt-2 text-sm text-slate-500" }, currentProject
+              ? (usingProjectProfile
+                ? "Use project is active. This run uses the selected project's target and Audit Type. Choose Custom run for one-time changes."
+                : "Custom run is active. Changes apply only to this launch and do not update the project.")
+              : (usingCustomRun
+                ? "Custom run is active. Changes apply only to this launch."
+                : "The default project is active. Select Custom run to make one-time changes."))
+          ]),
           h("div", { key: "fields", className: "grid gap-4 md:grid-cols-2" }, [
-            h(Field, { key: "target-kind", label: helpLabel("Target kind", "Choose whether this run audits a local codebase, a repository URL, or a live hosted endpoint. This changes both preflight classification and what evidence can be collected.") }, Select({
+            h(Field, { key: "target-kind", label: helpLabel("Target Source", "Choose whether this run audits a local codebase, a repository URL, or a live hosted endpoint. This changes both preflight classification and what evidence can be collected.") }, Select({
               value: runForm.target_kind,
+              disabled: usingProjectTarget,
               onChange: (event) => updateRunForm("target_kind", event.target.value)
             }, [
               h("option", { key: "path", value: "path" }, "local path"),
@@ -609,22 +657,25 @@ function LaunchAuditModalComponent({
               h("option", { key: "endpoint", value: "endpoint" }, "endpoint url")
             ])),
             runForm.target_kind === "repo"
-              ? h(Field, { key: "repo", label: helpLabel("Repository URL", "Use a canonical Git repository URL when you want repository identity, history linking, and integration-safe matching across repeated runs.") }, h(Input, {
-                value: runForm.repo_url,
-                onChange: (event) => updateRunForm("repo_url", event.target.value),
-                placeholder: "https://github.com/org/repo or git@github.com:org/repo.git"
-              }))
-              : runForm.target_kind === "endpoint"
-                ? h(Field, { key: "endpoint", label: helpLabel("Endpoint URL", "Use this for hosted or black-box targets where the audit should reason from a live service rather than repository contents.") }, h(Input, {
-                  value: runForm.endpoint_url,
-                  onChange: (event) => updateRunForm("endpoint_url", event.target.value),
-                  placeholder: "https://service.example.com/v1"
+                ? h(Field, { key: "repo", label: helpLabel("Repository URL", "Use a canonical Git repository URL when you want repository identity, history linking, and integration-safe matching across repeated runs.") }, h(Input, {
+                  value: runForm.repo_url,
+                  disabled: usingProjectTarget,
+                  onChange: (event) => updateRunForm("repo_url", event.target.value),
+                  placeholder: "https://github.com/org/repo or git@github.com:org/repo.git"
                 }))
-                : h(Field, { key: "path", label: helpLabel("Local Path", "Point to a local repository or source tree on disk. This is best for self-hosted code, fixtures, or local clones.") }, h(Input, {
-                  value: runForm.local_path,
-                  onChange: (event) => updateRunForm("local_path", event.target.value),
-                  placeholder: "fixtures/validation-targets/agent-tool-boundary-risky"
-                }))
+                : runForm.target_kind === "endpoint"
+                  ? h(Field, { key: "endpoint", label: helpLabel("Endpoint URL", "Use this for hosted or black-box targets where the audit should reason from a live service rather than repository contents.") }, h(Input, {
+                    value: runForm.endpoint_url,
+                    disabled: usingProjectTarget,
+                    onChange: (event) => updateRunForm("endpoint_url", event.target.value),
+                    placeholder: "https://service.example.com/v1"
+                  }))
+                  : h(Field, { key: "path", label: helpLabel("Local Path", "Point to a local repository or source tree on disk. This is best for self-hosted code, fixtures, or local clones.") }, h(Input, {
+                    value: runForm.local_path,
+                    disabled: usingProjectTarget,
+                    onChange: (event) => updateRunForm("local_path", event.target.value),
+                    placeholder: "fixtures/validation-targets/agent-tool-boundary-risky"
+                  }))
           ]),
           h("div", { key: "hint", className: "text-sm text-slate-500" }, runForm.target_kind === "repo"
             ? "Use a repo URL when you want canonical repository identity for history, scoring, and outbound integrations."
@@ -649,14 +700,15 @@ function LaunchAuditModalComponent({
                 h("input", {
                   type: "checkbox",
                   checked: usingPresets,
+                  disabled: usingLockedLaunchMode,
                   onChange: (event) => updateRunForm("use_audit_presets", event.target.checked)
                 }),
                 h("span", { className: "font-medium text-slate-900" }, "Use audit presets")
               ])),
               h(Field, { key: "pkg", label: helpLabel("Preset package", "Audit packages are curated presets that set distinct audit shapes for OSS: lightweight static posture, standard agentic static review, deeper static review, or runtime-validated review.") }, Select({
                 value: runForm.audit_package,
-                disabled: !usingPresets,
-                className: !usingPresets ? "border-slate-200 bg-slate-100 text-slate-400" : "",
+                disabled: usingLockedLaunchMode || !usingPresets,
+                className: usingLockedLaunchMode || !usingPresets ? "border-slate-200 bg-slate-100 text-slate-400" : "",
                 onChange: (event) => applyAuditPackage(event.target.value)
               }, [
                 ...visibleAuditPackages.map((item) => h("option", { key: item.id, value: item.id }, item.title)),
@@ -701,8 +753,8 @@ function LaunchAuditModalComponent({
           h("div", { key: "run-mode-row", className: "grid gap-3" }, [
             h(Field, { key: "mode", label: helpLabel("Run mode", "Choose whether the run stays static or allows runtime-capable validation. When audit presets are enabled, the selected package resolves this for you.") }, Select({
               value: runForm.run_mode,
-              disabled: usingPresets,
-              className: usingPresets ? "border-slate-200 bg-slate-100 text-slate-400" : "",
+              disabled: usingLockedLaunchMode || usingPresets,
+              className: usingLockedLaunchMode || usingPresets ? "border-slate-200 bg-slate-100 text-slate-400" : "",
               onChange: (event) => updateRunForm("run_mode", event.target.value)
             }, [
               h("option", { key: "placeholder", value: "", disabled: true }, "select run mode"),
@@ -713,8 +765,8 @@ function LaunchAuditModalComponent({
           h("div", { key: "runtime-row", className: "grid gap-3" }, [
             h(Field, { key: "runtime-allowed", label: helpLabel("Runtime validation", "Controls whether the audit may build, execute, or probe the target beyond static analysis. Presets may lock this based on the selected package.") }, Select({
               value: runForm.runtime_allowed,
-              disabled: usingPresets,
-              className: usingPresets ? "border-slate-200 bg-slate-100 text-slate-400" : "",
+              disabled: usingLockedLaunchMode || usingPresets,
+              className: usingLockedLaunchMode || usingPresets ? "border-slate-200 bg-slate-100 text-slate-400" : "",
               onChange: (event) => updateRunForm("runtime_allowed", event.target.value)
             }, [
               h("option", { key: "never", value: "never" }, "never"),
@@ -725,8 +777,8 @@ function LaunchAuditModalComponent({
           h("div", { key: "review-row", className: "grid gap-3" }, [
             h(Field, { key: "review-severity", label: helpLabel("Review threshold", "Findings at or above this severity trigger stronger review expectations. This is a launch-time threshold, not the finding severity scale itself.") }, Select({
               value: runForm.review_severity,
-              disabled: usingPresets,
-              className: usingPresets ? "border-slate-200 bg-slate-100 text-slate-400" : "",
+              disabled: usingLockedLaunchMode || usingPresets,
+              className: usingLockedLaunchMode || usingPresets ? "border-slate-200 bg-slate-100 text-slate-400" : "",
               onChange: (event) => updateRunForm("review_severity", event.target.value)
             }, [
               h("option", { key: "critical", value: "critical" }, "critical"),
@@ -740,7 +792,7 @@ function LaunchAuditModalComponent({
           h("div", { key: "agent-block", className: "space-y-4 rounded-2xl border border-slate-200 bg-white px-4 py-4" }, [
             h("div", { key: "agent-header" }, [
               h("div", { key: "agent-title", className: "text-sm font-medium text-slate-900" }, "Agent Models"),
-              h("div", { key: "agent-copy", className: "mt-1 text-sm text-slate-500" }, "Use a single inherited LLM configuration for all agent stages, or switch to per-agent overrides below."),
+              h("div", { key: "agent-copy", className: "mt-1 text-sm text-slate-500" }, "Use a single inherited LLM configuration for all agent stages, or switch to per-agent overrides below. Agent execution settings remain editable for project launches."),
               h("label", { key: "agent-inherit-toggle", className: cn("mt-4 flex items-start gap-3 rounded-2xl border px-4 py-3", globalModelAvailable ? "border-slate-200 bg-slate-50" : "border-amber-200 bg-amber-50") }, [
                 h("input", {
                   type: "checkbox",
@@ -813,12 +865,14 @@ function LaunchAuditModalComponent({
                 h("button", {
                   key: "automatic",
                   type: "button",
+                  disabled: usingLockedLaunchMode,
                   onClick: () => updateRunForm("control_selection_mode", "automatic"),
                   className: cn(
                     "rounded-2xl border px-4 py-3 text-left transition",
                     (runForm.control_selection_mode || "automatic") === "automatic"
                       ? "border-slate-900 bg-slate-900 text-white"
-                      : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+                      : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
+                    usingLockedLaunchMode && "cursor-not-allowed opacity-60"
                   )
                 }, [
                   h("div", { key: "title", className: "font-medium" }, "Automatic"),
@@ -827,12 +881,14 @@ function LaunchAuditModalComponent({
                 h("button", {
                   key: "constrained",
                   type: "button",
+                  disabled: usingLockedLaunchMode,
                   onClick: () => updateRunForm("control_selection_mode", "constrained"),
                   className: cn(
                     "rounded-2xl border px-4 py-3 text-left transition",
                     runForm.control_selection_mode === "constrained"
                       ? "border-slate-900 bg-slate-900 text-white"
-                      : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+                      : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
+                    usingLockedLaunchMode && "cursor-not-allowed opacity-60"
                   )
                 }, [
                   h("div", { key: "title", className: "font-medium" }, "Constrained Automatic"),
@@ -850,6 +906,7 @@ function LaunchAuditModalComponent({
                     return h("button", {
                       key: framework,
                       type: "button",
+                      disabled: usingLockedLaunchMode,
                       onClick: () => toggleFrameworkConstraint("required_frameworks", framework),
                       className: cn(
                         "rounded-full border px-3 py-1.5 text-sm transition",
@@ -866,6 +923,7 @@ function LaunchAuditModalComponent({
                     return h("button", {
                       key: framework,
                       type: "button",
+                      disabled: usingLockedLaunchMode,
                       onClick: () => toggleFrameworkConstraint("excluded_frameworks", framework),
                       className: cn(
                         "rounded-full border px-3 py-1.5 text-sm transition",
@@ -880,6 +938,7 @@ function LaunchAuditModalComponent({
                   h("div", { className: "flex gap-2" }, [
                     h("div", { key: `required-select-${runForm.required_control_ids_text || ""}-${(runForm.required_frameworks || []).join("|")}`, className: "flex-1" }, Select({
                       value: requiredControlDraft,
+                      disabled: usingLockedLaunchMode,
                       onChange: (event) => setRequiredControlDraft(event.target.value)
                     }, [
                       h("option", { key: "placeholder", value: "" }, "add a required control"),
@@ -892,7 +951,7 @@ function LaunchAuditModalComponent({
                         addControlConstraint("required_control_ids_text", "excluded_control_ids_text", requiredControlDraft);
                         setRequiredControlDraft("");
                       },
-                      disabled: !requiredControlDraft
+                      disabled: usingLockedLaunchMode || !requiredControlDraft
                     }, "Add")
                   ]),
                   requiredControlIds.length ? h("div", { className: "flex flex-wrap gap-2" }, requiredControlIds.map((controlId) => {
@@ -900,6 +959,7 @@ function LaunchAuditModalComponent({
                     return h("button", {
                       key: controlId,
                       type: "button",
+                      disabled: usingLockedLaunchMode,
                       onClick: () => removeControlConstraint("required_control_ids_text", controlId),
                       className: "rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-left text-sm text-slate-700 hover:bg-slate-100"
                     }, `${control?.title || controlId} x`);
@@ -910,6 +970,7 @@ function LaunchAuditModalComponent({
                   h("div", { className: "flex gap-2" }, [
                     h("div", { key: `excluded-select-${runForm.excluded_control_ids_text || ""}-${(runForm.excluded_frameworks || []).join("|")}`, className: "flex-1" }, Select({
                       value: excludedControlDraft,
+                      disabled: usingLockedLaunchMode,
                       onChange: (event) => setExcludedControlDraft(event.target.value)
                     }, [
                       h("option", { key: "placeholder", value: "" }, "add an excluded control"),
@@ -922,7 +983,7 @@ function LaunchAuditModalComponent({
                         addControlConstraint("excluded_control_ids_text", "required_control_ids_text", excludedControlDraft);
                         setExcludedControlDraft("");
                       },
-                      disabled: !excludedControlDraft
+                      disabled: usingLockedLaunchMode || !excludedControlDraft
                     }, "Add")
                   ]),
                   excludedControlIds.length ? h("div", { className: "flex flex-wrap gap-2" }, excludedControlIds.map((controlId) => {
@@ -930,6 +991,7 @@ function LaunchAuditModalComponent({
                     return h("button", {
                       key: controlId,
                       type: "button",
+                      disabled: usingLockedLaunchMode,
                       onClick: () => removeControlConstraint("excluded_control_ids_text", controlId),
                       className: "rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-left text-sm text-slate-700 hover:bg-slate-100"
                     }, `${control?.title || controlId} x`);
@@ -952,27 +1014,27 @@ function LaunchAuditModalComponent({
               h(Field, { key: "agents", label: helpLabel("Max agent calls", "Upper bound for model-backed agent invocations during this run. Lower values reduce cost but may limit review depth.") }, h(Input, {
                 type: "number",
                 min: 1,
-                disabled: usingPresets,
+                disabled: usingLockedLaunchMode || usingPresets,
                 value: runForm.max_agent_calls || "",
                 onChange: (event) => updateRunForm("max_agent_calls", event.target.value)
               })),
               h(Field, { key: "tokens", label: helpLabel("Max total tokens", "Overall token budget across planner, specialists, supervisor, and remediation agents for this run.") }, h(Input, {
                 type: "number",
                 min: 1,
-                disabled: usingPresets,
+                disabled: usingLockedLaunchMode || usingPresets,
                 value: runForm.max_total_tokens || "",
                 onChange: (event) => updateRunForm("max_total_tokens", event.target.value)
               })),
               h(Field, { key: "reruns", label: helpLabel("Max rerun rounds", "How many correction or retry rounds the audit may use when evidence is insufficient or the supervisor requests a rerun.") }, h(Input, {
                 type: "number",
                 min: 1,
-                disabled: usingPresets,
+                disabled: usingLockedLaunchMode || usingPresets,
                 value: runForm.max_rerun_rounds || "",
                 onChange: (event) => updateRunForm("max_rerun_rounds", event.target.value)
               })),
               h(Field, { key: "publishability", label: helpLabel("Publishability threshold", "Controls how strict the audit is about evidence sufficiency before conclusions are considered safe to publish beyond internal review.") }, Select({
                 value: runForm.publishability_threshold || "high",
-                disabled: usingPresets,
+                disabled: usingLockedLaunchMode || usingPresets,
                 onChange: (event) => updateRunForm("publishability_threshold", event.target.value)
               }, [
                 h("option", { key: "low", value: "low" }, "low"),
@@ -993,7 +1055,7 @@ function LaunchAuditModalComponent({
                 h("input", {
                   type: "checkbox",
                   checked: enabled,
-                  disabled: usingPresets,
+                  disabled: usingLockedLaunchMode || usingPresets,
                   onChange: () => toggleLane(lane.id)
                 }),
                 h("div", { key: "lane-copy", className: "min-w-0" }, [
@@ -1020,7 +1082,7 @@ function LaunchAuditModalComponent({
                 key: "apply-readiness",
                 variant: "outline",
                 onClick: applyPreflightRecommendations,
-                disabled: !preflightSummary?.launch_profile || !launchReadiness.profileDrift.length
+                disabled: usingLockedLaunchMode || !preflightSummary?.launch_profile || !launchReadiness.profileDrift.length
               }, "Apply Recommended Profile")
             ])
           ]),
@@ -1144,3 +1206,4 @@ window.TethermarkFeatures = {
   RunInboxList: RunInboxListComponent,
   LaunchAuditModal: LaunchAuditModalComponent
 };
+
