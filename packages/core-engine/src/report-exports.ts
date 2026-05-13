@@ -161,6 +161,43 @@ function formatEvidenceLocation(location: Record<string, any>): string {
   return `${path}${line}${column}${suffix}`;
 }
 
+function summarizeToolExecutions(toolExecutions?: Array<Record<string, any>>): {
+  completed: string[];
+  skipped: string[];
+  failed: string[];
+  fallback: string[];
+} {
+  const rows = Array.isArray(toolExecutions) ? toolExecutions : [];
+  const format = (item: Record<string, any>) => {
+    const tool = String(item.provider_id ?? item.tool ?? "unknown");
+    const status = String(item.status ?? "unknown");
+    const fallback = item.adapter?.adapter_action === "fallback" || item.fallback_from ? ` fallback_from=${String(item.adapter?.requested_provider_id ?? item.fallback_from)}` : "";
+    const reason = item.failure_category ? ` reason=${String(item.failure_category)}` : "";
+    return `${tool}:${status}${fallback}${reason}`;
+  };
+  return {
+    completed: rows.filter((item) => item.status === "completed").map(format),
+    skipped: rows.filter((item) => item.status === "skipped").map(format),
+    failed: rows.filter((item) => item.status === "failed").map(format),
+    fallback: rows.filter((item) => item.adapter?.adapter_action === "fallback" || item.fallback_from).map(format)
+  };
+}
+
+function summarizeControlCoverage(controlResults?: Array<Record<string, any>>): {
+  applicable: number;
+  assessed: number;
+  notAssessed: string[];
+} {
+  const rows = Array.isArray(controlResults) ? controlResults : [];
+  const applicable = rows.filter((item) => item.applicability === "applicable");
+  const notAssessed = applicable.filter((item) => item.assessability === "not_assessed" || item.status === "not_assessed");
+  return {
+    applicable: applicable.length,
+    assessed: applicable.length - notAssessed.length,
+    notAssessed: notAssessed.map((item) => String(item.control_id ?? item.title ?? "unknown")).slice(0, 25)
+  };
+}
+
 export function buildExecutiveSummaryPayload(args: {
   run: ReportRunSummaryRecord;
   summary: Record<string, unknown>;
@@ -326,8 +363,12 @@ export function buildMarkdownRunReport(args: {
   reviewDecision: PersistedReviewDecisionRecord | null;
   remediation: PersistedRemediationMemoRecord | null;
   resolvedConfiguration: PersistedResolvedConfigurationRecord | null;
+  toolExecutions?: Array<Record<string, any>>;
+  controlResults?: Array<Record<string, any>>;
 }): string {
   const lines: string[] = [];
+  const toolCoverage = summarizeToolExecutions(args.toolExecutions);
+  const controlCoverage = summarizeControlCoverage(args.controlResults);
   lines.push(`# AI Security Audit Report`);
   lines.push("");
   lines.push(`- Run ID: ${args.run.id}`);
@@ -339,6 +380,16 @@ export function buildMarkdownRunReport(args: {
   lines.push(`- Publishability: ${args.reviewDecision?.publishability_status ?? "n/a"}`);
   lines.push(`- Human Review Required: ${args.reviewDecision?.human_review_required ? "yes" : "no"}`);
   lines.push(`- Target Class: ${args.resolvedConfiguration?.initial_target_class ?? "n/a"}`);
+  lines.push("");
+  lines.push(`## Static Coverage`);
+  lines.push("");
+  lines.push(`- Tools Completed: ${toolCoverage.completed.join(", ") || "none"}`);
+  lines.push(`- Tools Skipped: ${toolCoverage.skipped.join(", ") || "none"}`);
+  lines.push(`- Tools Failed: ${toolCoverage.failed.join(", ") || "none"}`);
+  lines.push(`- Fallbacks Used: ${toolCoverage.fallback.join(", ") || "none"}`);
+  lines.push(`- Controls Assessed: ${controlCoverage.assessed}/${controlCoverage.applicable}`);
+  lines.push(`- Controls Not Assessed: ${controlCoverage.notAssessed.join(", ") || "none"}`);
+  lines.push(`- Confidence Limits: Static mode does not execute target code, hosted repository settings, production services, or runtime behavior. Skipped tools and not-assessed controls reduce confidence and must not be interpreted as clean results.`);
   lines.push("");
   lines.push(`## Evaluation Summary`);
   lines.push("");

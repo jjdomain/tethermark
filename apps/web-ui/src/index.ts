@@ -3,6 +3,8 @@ import http from "node:http";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { listenWithFriendlyErrors } from "../../shared/src/listen.js";
+
 const host = "127.0.0.1";
 const port = Number(process.env.WEB_UI_PORT ?? "8788");
 const defaultApiBaseUrl = process.env.WEB_UI_API_BASE_URL ?? "http://127.0.0.1:8787";
@@ -122,7 +124,7 @@ export function createWebUiServer(options?: { apiBaseUrl?: string }): http.Serve
 const entryHref = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : null;
 if (entryHref && import.meta.url === entryHref) {
   const server = createWebUiServer();
-  server.listen(port, host, () => {
+  listenWithFriendlyErrors({ server, host, port, serviceName: "Web UI", portEnvVar: "WEB_UI_PORT", onListening: () => {
     console.log(`Web UI listening on http://${host}:${port}`);
-  });
+  } });
 }

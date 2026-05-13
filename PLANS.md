@@ -2,7 +2,7 @@
 
 ## Goal
 
-Track the remaining work needed to turn the current TypeScript/Node core plus Python worker scaffold into a practical AI security audit engine for local static audits and Hetzner-hosted deeper audits.
+Track the remaining work needed to turn the current TypeScript/Node core plus Python worker scaffold into a practical AI security audit engine for local static audits and isolated deeper AI-security runtime validation.
 
 ## Current State
 
@@ -30,7 +30,7 @@ Not completed:
 - reliable local execution of Scorecard, Trivy, and Semgrep on this machine
 - cleanup or archival policy for old historical artifact directories already present under `.artifacts`
 - real Python worker execution on this machine
-- real Linux container execution for build/runtime/validate
+- real Linux container or microVM execution for isolated build/runtime/validate flows
 - persistent queue/storage
 - hardened policy enforcement
 - richer control coverage and framework depth beyond the first static control set
@@ -48,17 +48,18 @@ Not completed:
 9. Add a simple archive or prune command for old historical artifact directories.
 10. Tune control weights and framework scoring against repeated OSS audits.
 
-## Phase 2: Linux Container Backend Execution
+## Phase 2: Isolated Runtime Backend Execution
 
 1. Implement real container launch in `linux-container` backend.
-2. Support Docker first; Podman optional second.
-3. Mount target read-only and artifact directory read-write.
+2. Support Docker first; Podman optional second; keep the design compatible with a future microVM provider.
+3. Mount target read-only where possible and artifact directory read-write.
 4. Apply per-run CPU, memory, PID, and timeout limits.
-5. Enforce container network mode based on run mode.
+5. Enforce container network mode based on run mode, defaulting runtime validation to isolated or explicitly allowlisted egress.
 6. Enforce command allowlist from `command_policy`.
-7. Add command execution logging and trace capture.
-8. Add cleanup policy for finished sandboxes and orphaned runs.
-9. Add Linux backend tests and a smoke-run harness.
+7. Add synthetic credential injection and fake-service/tool backend support for AI-agent runtime tests.
+8. Add command execution logging, transcript capture, tool-call traces, and artifact capture.
+9. Add cleanup policy for finished sandboxes and orphaned runs.
+10. Add Linux backend tests and a smoke-run harness.
 
 ## Phase 3: Python Worker Enablement
 
@@ -67,9 +68,11 @@ Not completed:
 3. Replace garak adapter scaffold with real invocation and normalized output.
 4. Replace Inspect adapter scaffold with real multi-turn eval orchestration.
 5. Replace PyRIT adapter scaffold with real adversarial evaluation flow.
-6. Add worker result schema normalization into Node artifacts and findings.
-7. Add worker timeout, retry, and failure handling.
-8. Add tests for worker dispatch and result parsing.
+6. Add AI-security eval packs for prompt injection, tool misuse, MCP boundary failures, memory leakage, cross-session isolation, unsafe delegated actions, and retrieval/data exfiltration.
+7. Map runtime eval results to OWASP LLM, MITRE ATLAS, NIST AI RMF, and Tethermark executable control IDs.
+8. Add worker result schema normalization into Node artifacts and findings.
+9. Add worker timeout, retry, and failure handling.
+10. Add tests for worker dispatch and result parsing.
 
 ## Phase 4: Audit Quality and Core Logic
 
@@ -94,9 +97,9 @@ Not completed:
 7. Add service configuration management for local vs Hetzner environments.
 8. Add health checks and readiness checks for API and workers.
 
-## Phase 6: Hetzner Deployment
+## Phase 6: Isolated Worker Deployment
 
-1. Provision Hetzner Linux VPS for non-static audits.
+1. Provision Hetzner Linux VPS or another worker host for isolated non-static audits.
 2. Install Node.js, Python, git, Docker, and scanner binaries.
 3. Set up Python worker environment and dependency installation.
 4. Configure persistent data directories for artifacts, queue state, and logs.
@@ -111,7 +114,7 @@ Not completed:
 1. Prevent host secret leakage into workers and containers.
 2. Add explicit denylist for dangerous commands and shell constructs.
 3. Add network egress restrictions for runtime/validate modes.
-4. Add per-run ephemeral credentials if future hosted endpoint testing needs auth.
+4. Add per-run synthetic credentials and fake external service fixtures for runtime validation.
 5. Add artifact redaction before publication/export.
 6. Add disclosure-sensitive finding handling rules.
 7. Add audit logs for who triggered runs and what modes were used.
@@ -154,26 +157,32 @@ Hosted policy-pack data model:
 - metadata for created_by, updated_by, approved_by, created_at, updated_at
 
 Hosted UI behavior:
+- `Governance` is a peer settings page with tabs for `Gates`, `Policy Packs`, and `Reference Documents` so launch/readiness rules, executable policy packs, and audit context are adjacent but not collapsed into one form
+- `Gates` tab shows inherited/effective launch-readiness policy, human-review thresholds, publishability defaults, visibility defaults, disposition renewal, lock state, and change history
 - `Policy Packs` list page shows status, scope, current default bindings, and last modified time
 - detail page shows metadata, rule summary, version history, and usage references
 - editor flow validates policy-pack structure before activation
+- `Reference Documents` tab shows approved policy, standard, runbook, and exception references with source, version/hash, scope, and last review metadata
 - launch-profile `Policy pack` dropdown reads from the same managed catalog and only allows packs visible to the current scope
 - audit readiness compares selected policy pack against any recommended policy pack and highlights drift
 
 Hosted API/persistence expectations:
 - add persistence-backed policy-pack records instead of relying only on built-in/static definitions
+- add governance-gate records with scope inheritance and explicit source attribution
+- add reference-document metadata/version records separate from run-level document snapshots
 - expose list/get/create/update/archive endpoints for hosted deployments
 - expose scope-filtered query endpoints used by the launch modal dropdown
 - persist default bindings separately from pack definitions so defaults can change without mutating pack content
 - keep per-run launch intent storing the resolved policy-pack id/version used at launch time
+- keep per-run launch intent storing resolved gate values and reference-document ids/versions/hashes used at launch time
 
 Hosted rollout order:
 1. Define the policy-pack persistence schema and versioning model.
 2. Add hosted API endpoints plus scope-filtered list/read queries.
-3. Add hosted settings support for default policy-pack bindings by org, workspace, and project.
-4. Add the hosted `Policy Packs` navigation page and CRUD/detail flows.
-5. Update launch-profile and audit-readiness UI to consume managed policy-pack metadata and version labels.
-6. Add audit-log and usage views so operators can understand where a pack is active before changing defaults.
+3. Add hosted settings support for governance gates and default policy-pack bindings by org, workspace, and project.
+4. Add the hosted `Governance` settings page with `Gates`, `Policy Packs`, and `Reference Documents` tabs.
+5. Update launch-profile and audit-readiness UI to consume managed policy-pack metadata, gate provenance, and document version labels.
+6. Add audit-log and usage views so operators can understand where a gate, pack, or reference is active before changing defaults.
 
 ## Recommended Next Order
 
@@ -181,14 +190,14 @@ Hosted rollout order:
 2. Run a real static OSS audit against OpenClaw.
 3. Calibrate control weights and framework scoring against repeated OSS audits.
 4. Add simple cleanup/archive tooling for historical artifact directories.
-5. Implement executable Linux container backend.
+5. Implement executable Linux container backend for isolated runtime validation.
 6. Enable real Python workers on Linux.
-7. Deploy first Hetzner instance for deeper audit modes.
+7. Deploy first isolated worker host for deeper AI-security audit modes.
 8. Add persistent queue and artifact storage.
 
 ## Deferred Until Hetzner Is Ready
 
 - real container execution in `linux-container`
-- build/runtime/validate mode execution on Linux
+- build/runtime/validate mode execution on Linux for isolated repo/local targets
 - real garak / Inspect / PyRIT worker integration
-- VPS deployment automation
+- worker host deployment automation

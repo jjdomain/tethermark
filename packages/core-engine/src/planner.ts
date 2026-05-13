@@ -70,6 +70,14 @@ export function buildHeuristicTargetProfile(analysis: AnalysisSummary, request: 
     evidence.push(`Detected MCP/plugin/skill indicators in ${analysis.mcp_indicators.length} paths.`);
     secondaryTraits.add("mcp_surface_present");
   }
+  if ((analysis.ai_frameworks ?? []).length > 0) {
+    evidence.push(`Detected AI/agent frameworks: ${analysis.ai_frameworks.join(", ")}.`);
+    secondaryTraits.add("ai_framework_present");
+  }
+  if ((analysis.agentic_capabilities ?? []).length > 0) {
+    evidence.push(`Detected agentic capabilities: ${analysis.agentic_capabilities.join(", ")}.`);
+    secondaryTraits.add("agentic_capabilities_present");
+  }
   if (analysis.agent_indicators.length > 0 || analysis.tool_execution_indicators.length > 0) {
     evidence.push(`Detected agent/tool execution indicators in ${analysis.agent_indicators.length + analysis.tool_execution_indicators.length} paths.`);
     secondaryTraits.add("agentic_surface_present");
@@ -78,19 +86,19 @@ export function buildHeuristicTargetProfile(analysis: AnalysisSummary, request: 
   if (analysis.dependency_manifests.length > 0 || analysis.lockfiles.length > 0) secondaryTraits.add("dependency_surface_present");
   if (analysis.container_files.length > 0) secondaryTraits.add("container_surface_present");
 
-  if (analysis.mcp_indicators.length > 0) {
+  if (analysis.mcp_indicators.length > 0 || (analysis.ai_frameworks ?? []).includes("mcp")) {
     return {
       primary_class: "mcp_server_plugin_skill_package",
       secondary_traits: [...secondaryTraits],
-      confidence: 0.82,
+      confidence: (analysis.ai_frameworks ?? []).includes("mcp") ? 0.88 : 0.82,
       evidence
     };
   }
-  if (analysis.agent_indicators.length > 0 || analysis.tool_execution_indicators.length > 0) {
+  if (analysis.agent_indicators.length > 0 || analysis.tool_execution_indicators.length > 0 || (analysis.ai_frameworks ?? []).length > 0 || (analysis.agentic_capabilities ?? []).length > 0) {
     return {
       primary_class: "tool_using_multi_turn_agent",
       secondary_traits: [...secondaryTraits],
-      confidence: 0.74,
+      confidence: (analysis.ai_frameworks ?? []).length > 0 ? 0.84 : 0.74,
       evidence
     };
   }
@@ -113,11 +121,22 @@ export function buildHeuristicTargetProfile(analysis: AnalysisSummary, request: 
   };
 }
 
+function selectedExternalToolIds(request: AuditRequest): Set<string> | null {
+  const raw = (request.hints as any)?.external_audit_tools?.included_tool_ids;
+  if (!Array.isArray(raw)) return null;
+  return new Set(["scorecard", ...raw.filter((item): item is string => typeof item === "string" && item.trim().length > 0)]);
+}
+
 function sanitizeTools(request: AuditRequest, tools: string[]): string[] {
   const allowed = request.run_mode === "static"
-    ? new Set(["repo_analysis", "scorecard", "scorecard_api", "semgrep", "trivy"])
-    : new Set(["repo_analysis", "scorecard", "scorecard_api", "trivy", "semgrep", "inspect", "garak", "pyrit", "internal_python_worker"]);
-  return [...new Set(tools.filter((tool) => allowed.has(tool)))];
+    ? new Set(["repo_analysis", "scorecard", "semgrep", "trivy"])
+    : new Set(["repo_analysis", "scorecard", "trivy", "semgrep", "inspect", "garak", "pyrit", "internal_python_worker"]);
+  const selected = selectedExternalToolIds(request);
+  return [...new Set(tools.filter((tool) => {
+    if (!allowed.has(tool)) return false;
+    if (tool === "repo_analysis" || tool === "internal_python_worker") return true;
+    return !selected || selected.has(tool);
+  }))];
 }
 
 function sanitizePacks(packs: string[]): string[] {

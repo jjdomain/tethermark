@@ -10,6 +10,7 @@ import { createWebUiServer } from "../../../apps/web-ui/src/index.js";
 import { buildScanRequest } from "../../../apps/cli/src/args.js";
 import { validateFixtures } from "../../../apps/cli/src/fixture-validation.js";
 import { describeArtifactType } from "./artifact-policy.js";
+import { pruneArtifacts } from "./artifact-retention.js";
 import { executeEvidenceProvider, normalizeEvidenceSummaryForTests, resetEvidenceProviderCapabilityCacheForTests } from "./evidence-providers.js";
 import { buildFindingEvaluationSummary } from "./finding-evaluation.js";
 import { createEngine } from "./orchestrator.js";
@@ -34,6 +35,8 @@ import { buildGoldenExports, readGoldenExports } from "./export-golden.js";
 import { evaluateStandardsAudit } from "./standards-audit.js";
 import { getControlCatalog } from "./standards.js";
 import { deriveCanonicalTargetId } from "./target-identity.js";
+import { listBuiltinLlmProviders, listBuiltinLlmProviderPresets } from "./llm-provider-registry.js";
+import { OpenAICodexCliProvider, resolveAgentProviderConfig } from "../../../packages/llm-provider/src/index.js";
 
 async function withTempDir<T>(prefix: string, fn: (dir: string) => Promise<T>): Promise<T> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -205,6 +208,47 @@ async function testBuildScanRequestParsesLlmFlags(): Promise<void> {
   assert.ok(parsed.request.local_path);
 }
 
+async function testOpenAICodexProviderRegistryAndStructuredExec(): Promise<void> {
+  const provider = listBuiltinLlmProviders().find((item) => item.id === "openai_codex");
+  assert.equal(provider?.mode, "agent_oauth");
+  assert.equal(provider?.requires_api_key, false);
+  assert.equal(listBuiltinLlmProviderPresets().find((item) => item.id === "openai_codex_local")?.provider_id, "openai_codex");
+
+  const resolved = resolveAgentProviderConfig("planner_agent", { provider: "openai_codex", model: "gpt-5.1-codex" });
+  assert.equal(resolved.provider, "openai_codex");
+  assert.equal(resolved.apiKeySource, "oauth-local");
+
+  await withTempDir("harness-codex-provider-", async (rootDir) => {
+    const fakeCli = path.join(rootDir, "fake-codex-cli.mjs");
+    await fs.writeFile(fakeCli, [
+      "import fs from 'node:fs';",
+      "const outIndex = process.argv.indexOf('--output-last-message');",
+      "if (outIndex < 0) process.exit(2);",
+      "fs.writeFileSync(process.argv[outIndex + 1], JSON.stringify({ ok: true, mode: 'oauth' }));"
+    ].join("\n"), "utf8");
+    const codex = new OpenAICodexCliProvider("gpt-5.1-codex", process.execPath, "read-only", 10_000, [fakeCli]);
+    const result = await codex.generateStructured<{ ok: boolean; mode: string }>({
+      agentName: "planner_agent",
+      schemaName: "fake_codex_result",
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        required: ["ok", "mode"],
+        properties: {
+          ok: { type: "boolean" },
+          mode: { type: "string" }
+        }
+      },
+      systemPrompt: "Return JSON.",
+      userPrompt: "Return ok.",
+      metadata: {},
+      temperature: 0.2
+    } as any);
+    assert.deepEqual(result.parsed, { ok: true, mode: "oauth" });
+    assert.equal(result.provider, "openai_codex");
+  });
+}
+
 async function testLocalPersistenceUsesConfiguredRoot(): Promise<void> {
   await withTempDir("harness-local-db-", async (rootDir) => {
     const configuredRoot = path.join(rootDir, "configured-local-db");
@@ -297,6 +341,57 @@ async function testCompactBundleExportsPrunesOptionalDebugBundles(): Promise<voi
       if (previousEnabled === undefined) delete process.env.HARNESS_BUNDLE_EXPORT_ENABLED;
       else process.env.HARNESS_BUNDLE_EXPORT_ENABLED = previousEnabled;
     }
+  });
+}
+
+async function testPruneArtifactsRemovesOldRunBundlesAndUpdatesIndex(): Promise<void> {
+  await withTempDir("harness-artifact-retention-", async (rootDir) => {
+    const artifactRoot = path.join(rootDir, ".artifacts");
+    const oldRunDir = path.join(artifactRoot, "runs", "run_old");
+    const freshRunDir = path.join(artifactRoot, "runs", "run_fresh");
+    const sandboxDir = path.join(artifactRoot, "sandboxes", "run_old");
+    await fs.mkdir(oldRunDir, { recursive: true });
+    await fs.mkdir(freshRunDir, { recursive: true });
+    await fs.mkdir(sandboxDir, { recursive: true });
+    await fs.writeFile(path.join(oldRunDir, "planner-artifact.json"), JSON.stringify({ old: true }));
+    await fs.writeFile(path.join(freshRunDir, "planner-artifact.json"), JSON.stringify({ fresh: true }));
+    await fs.writeFile(path.join(sandboxDir, "execution-results.json"), JSON.stringify({ old: true }));
+    await fs.writeFile(path.join(artifactRoot, "run-index.json"), `${JSON.stringify({
+      run_old: { run_id: "run_old", artifact_dir: oldRunDir },
+      run_fresh: { run_id: "run_fresh", artifact_dir: freshRunDir }
+    }, null, 2)}\n`);
+
+    const oldDate = new Date("2026-01-01T00:00:00.000Z");
+    const freshDate = new Date("2026-05-01T00:00:00.000Z");
+    await fs.utimes(oldRunDir, oldDate, oldDate);
+    await fs.utimes(sandboxDir, oldDate, oldDate);
+    await fs.utimes(freshRunDir, freshDate, freshDate);
+
+    const dryRun = await pruneArtifacts({
+      rootDir: artifactRoot,
+      kind: "runs",
+      olderThanDays: 30,
+      dryRun: true,
+      now: new Date("2026-05-05T00:00:00.000Z")
+    });
+    assert.equal(dryRun.removed_count, 1);
+    assert.equal(await pathExists(oldRunDir), true);
+
+    const live = await pruneArtifacts({
+      rootDir: artifactRoot,
+      kind: "runs",
+      olderThanDays: 30,
+      dryRun: false,
+      now: new Date("2026-05-05T00:00:00.000Z")
+    });
+    assert.equal(live.removed_count, 1);
+    assert.deepEqual(live.run_index_pruned_ids, ["run_old"]);
+    assert.equal(await pathExists(oldRunDir), false);
+    assert.equal(await pathExists(freshRunDir), true);
+    assert.equal(await pathExists(sandboxDir), true);
+    const index = JSON.parse(await fs.readFile(path.join(artifactRoot, "run-index.json"), "utf8"));
+    assert.equal(index.run_old, undefined);
+    assert.equal(index.run_fresh.run_id, "run_fresh");
   });
 }
 
@@ -2790,6 +2885,10 @@ async function testWebUiAndPersistedUiSettingsApi(): Promise<void> {
         "AUDIT_LLM_PROVIDER",
         "AUDIT_LLM_MODEL",
         "AUDIT_LLM_API_KEY",
+        "AUDIT_LLM_CODEX_COMMAND",
+        "AUDIT_LLM_CODEX_MODEL",
+        "AUDIT_LLM_CODEX_SANDBOX",
+        "AUDIT_LLM_CODEX_TIMEOUT_MS",
         "LLM_API_KEY",
         "OPENAI_API_KEY",
         "AUDIT_LLM_PLANNER_PROVIDER",
@@ -2863,18 +2962,32 @@ async function testWebUiAndPersistedUiSettingsApi(): Promise<void> {
         const initialSettingsPayload = await initialSettingsResponse.json() as any;
         assert.equal(initialSettingsResponse.status, 200);
         assert.equal(initialSettingsPayload.settings.providers_json.default_provider, "mock");
+        assert.equal(initialSettingsPayload.settings.review_json.publishability_threshold, "high");
+        assert.equal(initialSettingsPayload.settings.review_json.default_visibility, "internal");
 
         const updateResponse = await fetch(`${webBaseUrl}/api/ui/settings`, {
           method: "PUT",
           headers: { "content-type": "application/json", ...scopedHeaders },
           body: JSON.stringify({
             providers: { default_provider: "openai", default_model: "gpt-5.4", mock_mode: false, agent_overrides: { planner_agent: { model: "gpt-5.4-mini" } } },
+            review: {
+              require_human_review_for_severity: "medium",
+              default_visibility: "internal-only",
+              publishability_threshold: "medium",
+              disposition_renewal_days: 45,
+              disposition_review_window_days: 14
+            },
             test_mode: { preset: "fixture_validation", deterministic_planning: true, fixture_validation_enabled: true, reduced_cost_mode: false }
           })
         });
         const updatePayload = await updateResponse.json() as any;
         assert.equal(updateResponse.status, 200);
         assert.equal(updatePayload.settings.providers_json.default_provider, "openai");
+        assert.equal(updatePayload.settings.review_json.require_human_review_for_severity, "medium");
+        assert.equal(updatePayload.settings.review_json.default_visibility, "internal-only");
+        assert.equal(updatePayload.settings.review_json.publishability_threshold, "medium");
+        assert.equal(updatePayload.settings.review_json.disposition_renewal_days, 45);
+        assert.equal(updatePayload.settings.review_json.disposition_review_window_days, 14);
         assert.equal(updatePayload.settings.test_mode_json.preset, "fixture_validation");
 
         const documentCreateResponse = await fetch(`${webBaseUrl}/api/ui/documents`, {
@@ -3880,8 +3993,10 @@ async function testRunComparisonUsesEvidenceSymbolsForMatching(): Promise<void> 
 async function main(): Promise<void> {
   const tests: Array<[string, () => Promise<void>]> = [
     ["buildScanRequest parses llm flags", testBuildScanRequestParsesLlmFlags],
+    ["OpenAI Codex OAuth provider registry and structured exec", testOpenAICodexProviderRegistryAndStructuredExec],
     ["local persistence uses configured root", testLocalPersistenceUsesConfiguredRoot],
     ["compactBundleExports prunes optional debug bundles", testCompactBundleExportsPrunesOptionalDebugBundles],
+    ["pruneArtifacts removes old run bundles and updates index", testPruneArtifactsRemovesOldRunBundlesAndUpdatesIndex],
     ["readPersistedLaneSpecialistOutputs from sqlite", testReadPersistedLaneSpecialistOutputsFromSqlite],
     ["backfillLocalPersistence migrates lane specialists", testBackfillLocalPersistenceMigratesLaneSpecialists],
     ["readPersistedToolAdapterSummary", testReadPersistedToolAdapterSummary],

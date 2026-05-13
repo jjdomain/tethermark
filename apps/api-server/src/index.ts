@@ -1,8 +1,10 @@
 import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
+import { spawn, spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
+import { listenWithFriendlyErrors } from "../../shared/src/listen.js";
 import { describeArtifactType } from "../../../packages/core-engine/src/artifact-policy.js";
 import { loadEnvironment } from "../../../packages/core-engine/src/env.js";
 import {
@@ -23,6 +25,8 @@ import {
   attachLlmProviderCredentialStatus,
   listBuiltinIntegrations,
   attachIntegrationCredentialStatus,
+  pruneArtifacts,
+  summarizeArtifacts,
   listPersistedRuns,
   listPersistedRunsForTarget,
   listPersistedTargets,
@@ -103,6 +107,7 @@ import {
   markRuntimeFollowupLaunched,
   markRuntimeFollowupJobTerminal,
   buildPreflightSummary,
+  buildStaticToolsReadiness,
   canCommentOnReview,
   canExportReviewAudit,
   canPerformReviewAction,
@@ -121,6 +126,7 @@ import {
   type OutboundSendArtifact,
   type OutboundVerificationArtifact,
   type AuditRequest,
+  type ArtifactRetentionKind,
   type PersistedProjectRecord,
   type PersistedRunListItem,
   type PersistedTargetListItem
@@ -633,7 +639,7 @@ function describeEnvironmentLlmDefaults(): Record<string, unknown> {
       model_env_var: model?.variable ?? null,
       api_key_configured: Boolean(apiKey),
       api_key_env_var: apiKey?.variable ?? null,
-      api_key_value: apiKey?.value ?? null
+      api_key_value: null
     };
   }
   return {
@@ -643,9 +649,163 @@ function describeEnvironmentLlmDefaults(): Record<string, unknown> {
     default_model_env_var: defaultModel ? "AUDIT_LLM_MODEL" : null,
     default_api_key_configured: Boolean(defaultApiKey),
     default_api_key_env_var: defaultApiKey,
-    default_api_key_value: defaultApiKey ? readEnv(defaultApiKey) ?? null : null,
+    default_api_key_value: null,
     agent_overrides: agentOverrides
   };
+}
+
+function isLocalOAuthConnectEnabled(): boolean {
+  const mode = getAuthMode();
+  return mode === "none" || process.env.HARNESS_ENABLE_LOCAL_OAUTH_CONNECT === "1";
+}
+
+interface CodexCommandResolution {
+  command: string;
+  argsPrefix: string[];
+  displayCommand: string;
+  note?: string;
+}
+
+function resolveCodexCommand(configuredCommand: string): CodexCommandResolution {
+  const command = configuredCommand.trim() || "codex";
+  if (process.platform !== "win32" || command.toLowerCase() !== "codex") {
+    return { command, argsPrefix: [], displayCommand: command };
+  }
+  const probe = spawnSync(command, ["--version"], {
+    encoding: "utf8",
+    shell: true,
+    windowsHide: true,
+    timeout: 10000
+  });
+  const combinedOutput = `${probe.stdout ?? ""}\n${probe.stderr ?? ""}`.toLowerCase();
+  if (probe.status === 0 && !combinedOutput.includes("access is denied")) {
+    return { command, argsPrefix: [], displayCommand: command };
+  }
+  return {
+    command: "npx",
+    argsPrefix: ["-y", "@openai/codex"],
+    displayCommand: "npx -y @openai/codex",
+    note: "The Windows Store Codex command was not executable from Tethermark, so the npm Codex CLI fallback was used."
+  };
+}
+
+function buildCodexArgs(resolution: CodexCommandResolution, args: string[]): string[] {
+  return [...resolution.argsPrefix, ...args];
+}
+
+async function launchOpenAICodexLogin(context: RequestContext): Promise<Record<string, unknown>> {
+  if (!isLocalOAuthConnectEnabled()) {
+    throw new Error("Local OAuth connect is disabled. Set HARNESS_ENABLE_LOCAL_OAUTH_CONNECT=1 to allow the API server to launch local provider login commands.");
+  }
+  const settingsResolution = await resolvePersistedUiSettings(undefined, context);
+  const credentials = settingsResolution.effective.credentials_json as Record<string, unknown>;
+  const configuredCommand = typeof credentials.codex_command === "string" && credentials.codex_command.trim()
+    ? credentials.codex_command.trim()
+    : readEnv("AUDIT_LLM_CODEX_COMMAND") ?? readEnv("CODEX_COMMAND") ?? "codex";
+  const resolvedCommand = resolveCodexCommand(configuredCommand);
+  let child;
+  try {
+    if (process.platform === "win32") {
+      const visibleCommand = [resolvedCommand.command, ...buildCodexArgs(resolvedCommand, ["login"])].map((part) => part.includes(" ") ? `"${part}"` : part).join(" ");
+      child = spawn("cmd.exe", ["/d", "/s", "/c", "start", "Tethermark Codex Login", "cmd.exe", "/k", visibleCommand], {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: false
+      });
+    } else {
+      child = spawn(resolvedCommand.command, buildCodexArgs(resolvedCommand, ["login"]), {
+        detached: true,
+        stdio: "ignore"
+      });
+    }
+  } catch (error) {
+    throw new Error(`Codex could not be opened: ${error instanceof Error ? error.message : String(error)}. Install Codex, then try Connect ChatGPT account again.`);
+  }
+  child.on("error", () => {
+    // Detached login failures are surfaced by the explicit status check.
+  });
+  child.unref();
+  return {
+    provider_id: "openai_codex",
+    command: resolvedCommand.displayCommand,
+    status: "started",
+    checked_at: new Date().toISOString(),
+    note: resolvedCommand.note
+      ? `${resolvedCommand.note} Complete the browser prompt, then return here and check the connection.`
+      : "Opening ChatGPT sign-in for Codex. Complete the browser prompt, then return here and check the connection."
+  };
+}
+
+async function getOpenAICodexLoginStatus(context: RequestContext): Promise<Record<string, unknown>> {
+  const settingsResolution = await resolvePersistedUiSettings(undefined, context);
+  const credentials = settingsResolution.effective.credentials_json as Record<string, unknown>;
+  const configuredCommand = typeof credentials.codex_command === "string" && credentials.codex_command.trim()
+    ? credentials.codex_command.trim()
+    : readEnv("AUDIT_LLM_CODEX_COMMAND") ?? readEnv("CODEX_COMMAND") ?? "codex";
+  const resolvedCommand = resolveCodexCommand(configuredCommand);
+  return await new Promise((resolve) => {
+    let output = "";
+    let settled = false;
+    const finish = (payload: Record<string, unknown>) => {
+      if (settled) return;
+      settled = true;
+      resolve({
+        provider_id: "openai_codex",
+        command: resolvedCommand.displayCommand,
+        checked_at: new Date().toISOString(),
+        ...payload
+      });
+    };
+    let child;
+    try {
+      child = spawn(resolvedCommand.command, buildCodexArgs(resolvedCommand, ["login", "status"]), {
+        shell: process.platform === "win32",
+        windowsHide: true
+      });
+    } catch (error) {
+      finish({
+        connected: false,
+        status: "missing",
+        note: `Codex could not be started: ${error instanceof Error ? error.message : String(error)}`
+      });
+      return;
+    }
+    const timer = setTimeout(() => {
+      child.kill();
+      finish({
+        connected: false,
+        status: "timeout",
+        note: "Could not check Codex sign-in status before the request timed out."
+      });
+    }, 10000);
+    child.stdout?.on("data", (chunk) => {
+      output += chunk.toString();
+    });
+    child.stderr?.on("data", (chunk) => {
+      output += chunk.toString();
+    });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      finish({
+        connected: false,
+        status: "missing",
+        note: `Codex CLI could not be started: ${error.message}`
+      });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      const normalized = output.toLowerCase();
+      const connected = code === 0 && (normalized.includes("authenticated") || normalized.includes("chatgpt oauth") || normalized.includes("logged in") || normalized.includes("yes"));
+      finish({
+        connected,
+        status: connected ? "connected" : "not_connected",
+        note: connected
+          ? (resolvedCommand.note ? `Codex is signed in on this machine. ${resolvedCommand.note}` : "Codex is signed in on this machine.")
+          : (resolvedCommand.note ? `${resolvedCommand.note} Choose Connect ChatGPT account and finish the browser prompt.` : "Codex is not signed in yet. Choose Connect ChatGPT account and finish the browser prompt."),
+        detail: output.trim().slice(0, 500)
+      });
+    });
+  });
 }
 
 async function persistLlmEnvironmentSettings(input: UiSettingsBody): Promise<void> {
@@ -656,6 +816,9 @@ async function persistLlmEnvironmentSettings(input: UiSettingsBody): Promise<voi
   if (typeof providers.default_model === "string" && providers.default_model) updates.AUDIT_LLM_MODEL = providers.default_model;
   if (typeof credentials.openai_api_key === "string" && credentials.openai_api_key && credentials.openai_api_key !== MASKED_SECRET_PLACEHOLDER) {
     updates.AUDIT_LLM_API_KEY = credentials.openai_api_key;
+  }
+  if (typeof credentials.codex_command === "string" && credentials.codex_command) {
+    updates.AUDIT_LLM_CODEX_COMMAND = credentials.codex_command;
   }
   const overrides = providers.agent_overrides && typeof providers.agent_overrides === "object"
     ? providers.agent_overrides as Record<string, any>
@@ -737,6 +900,15 @@ type FindingDispositionUpdateBody = {
   owner_id?: string | null;
   reviewed_at?: string | null;
   review_due_by?: string | null;
+};
+
+type ArtifactRetentionBody = {
+  root?: string;
+  kind?: ArtifactRetentionKind;
+  older_than_days?: number | null;
+  retention_days?: number | null;
+  max_gb?: number | null;
+  max_bytes?: number | null;
 };
 
 type RequestContext = {
@@ -1084,6 +1256,30 @@ function readBooleanParam(url: URL, name: string): boolean | undefined {
   if (/^(1|true|yes)$/i.test(value)) return true;
   if (/^(0|false|no)$/i.test(value)) return false;
   return undefined;
+}
+
+function normalizeArtifactRetentionKind(value: unknown): ArtifactRetentionKind | undefined {
+  return value === "runs" || value === "sandboxes" || value === "all" ? value : undefined;
+}
+
+function resolveArtifactRetentionRequest(body: ArtifactRetentionBody) {
+  const maxGb = typeof body.max_gb === "number" && Number.isFinite(body.max_gb) && body.max_gb > 0 ? body.max_gb : null;
+  const maxBytes = typeof body.max_bytes === "number" && Number.isFinite(body.max_bytes) && body.max_bytes > 0
+    ? Math.floor(body.max_bytes)
+    : maxGb
+      ? Math.floor(maxGb * 1024 * 1024 * 1024)
+      : null;
+  const olderThanDays = typeof body.older_than_days === "number" && Number.isFinite(body.older_than_days) && body.older_than_days > 0
+    ? body.older_than_days
+    : typeof body.retention_days === "number" && Number.isFinite(body.retention_days) && body.retention_days > 0
+      ? body.retention_days
+      : null;
+  return {
+    rootDir: typeof body.root === "string" && body.root.trim() ? body.root.trim() : undefined,
+    kind: normalizeArtifactRetentionKind(body.kind),
+    olderThanDays,
+    maxBytes
+  };
 }
 
 function resolveArtifactFormat(filePath: string): ArtifactFormat {
@@ -1484,6 +1680,38 @@ export function createApiServer(): http.Server {
     return;
   }
 
+  if (req.method === "GET" && url.pathname === "/artifacts/retention/summary") {
+    try {
+      sendJson(res, 200, {
+        artifact_retention_summary: await summarizeArtifacts({
+          rootDir: url.searchParams.get("root") ?? undefined,
+          kind: normalizeArtifactRetentionKind(url.searchParams.get("kind")),
+          includeSize: readBooleanParam(url, "include_size") ?? false
+        })
+      });
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
+  if (req.method === "POST" && (url.pathname === "/artifacts/retention/preview" || url.pathname === "/artifacts/retention/prune")) {
+    try {
+      const body = await readJson<ArtifactRetentionBody>(req);
+      const request = resolveArtifactRetentionRequest(body);
+      const dryRun = url.pathname.endsWith("/preview");
+      sendJson(res, 200, {
+        artifact_retention: await pruneArtifacts({
+          ...request,
+          dryRun
+        })
+      });
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === "/runs") {
     try {
       const request = applyRequestContextToAuditRequest(await readJson(req), context);
@@ -1507,6 +1735,17 @@ export function createApiServer(): http.Server {
     } catch (error) {
       sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
     }
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/static-tools") {
+    const settingsResolution = await resolvePersistedUiSettings(undefined, context);
+    const preflightSettings = settingsResolution.effective.preflight_json as Record<string, unknown>;
+    sendJson(res, 200, {
+      static_tools: buildStaticToolsReadiness({
+        selectedToolIds: preflightSettings.external_audit_tool_ids
+      })
+    });
     return;
   }
 
@@ -2465,6 +2704,23 @@ export function createApiServer(): http.Server {
     return;
   }
 
+  if (req.method === "POST" && url.pathname === "/llm-providers/openai_codex/connect") {
+    try {
+      sendJson(res, 200, await launchOpenAICodexLogin(context));
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/llm-providers/openai_codex/status") {
+    try {
+      sendJson(res, 200, await getOpenAICodexLoginStatus(context));
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
   if (req.method === "GET" && url.pathname === "/integrations") {
     try {
       const settingsResolution = await resolvePersistedUiSettings(undefined, {
@@ -2820,7 +3076,7 @@ export function createApiServer(): http.Server {
         return;
       }
       if (runSubresource.resource === "report-markdown" || runSubresource.resource === "report-sarif" || runSubresource.resource === "report-executive") {
-        const [summary, findings, workflow, actions, comments, dispositions, supervisorReview, reviewDecision, remediation, resolvedConfiguration, sandboxExecution, evidenceRecords, runtimeFollowups] = await Promise.all([
+        const [summary, findings, workflow, actions, comments, dispositions, supervisorReview, reviewDecision, remediation, resolvedConfiguration, sandboxExecution, evidenceRecords, runtimeFollowups, toolExecutions, controlResults] = await Promise.all([
           buildRunSummary(runSubresource.runId),
           readPersistedFindings(runSubresource.runId),
           readPersistedReviewWorkflow(runSubresource.runId),
@@ -2833,7 +3089,9 @@ export function createApiServer(): http.Server {
           readPersistedResolvedConfiguration(runSubresource.runId),
           readPersistedStageArtifact(runSubresource.runId, "sandbox-execution"),
           readPersistedEvidenceRecords(runSubresource.runId),
-          listPersistedRuntimeFollowups({ runId: runSubresource.runId })
+          listPersistedRuntimeFollowups({ runId: runSubresource.runId }),
+          readPersistedToolExecutions(runSubresource.runId),
+          readPersistedControlResults(runSubresource.runId)
         ]);
         const evaluations = buildFindingEvaluationSummary({ workflow, findings, actions, comments, dispositions, supervisorReview, sandboxExecution: sandboxExecution as any, evidenceRecords, runtimeFollowups });
         if (runSubresource.resource === "report-executive") {
@@ -2892,7 +3150,9 @@ export function createApiServer(): http.Server {
               evaluations,
               reviewDecision,
               remediation,
-              resolvedConfiguration
+              resolvedConfiguration,
+              toolExecutions: toolExecutions as any,
+              controlResults: controlResults as any
             })
           });
           return;
@@ -3144,9 +3404,9 @@ export function createApiServer(): http.Server {
 const entryHref = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : null;
 if (entryHref && import.meta.url === entryHref) {
   const server = createApiServer();
-  server.listen(port, host, () => {
+  listenWithFriendlyErrors({ server, host, port, serviceName: "API", portEnvVar: "PORT", onListening: () => {
     console.log(`API listening on http://${host}:${port}`);
-  });
+  } });
 }
 
 

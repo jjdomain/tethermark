@@ -119,7 +119,7 @@ function defaultUiSettingsForScope(args: {
     review_json: args.scope === "global" ? {
       require_human_review_for_severity: "high",
       default_visibility: "internal",
-      publishability_threshold: "standard",
+      publishability_threshold: "high",
       disposition_renewal_days: 30,
       disposition_review_window_days: 30
     } : {},

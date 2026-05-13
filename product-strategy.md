@@ -28,8 +28,32 @@ The harness should remain:
 - consumable by CLI, API, MCP, CI, and future UI
 - self-hostable for internal use
 - strict about separating engine responsibilities from broader platform responsibilities
+- focused on repository and local-path AI-security audits, with runtime validation performed in isolated cloned/local environments rather than against production systems
 
 The existing architecture docs already point in this direction: the engine owns orchestration, evidence, findings, scoring, remediation, async jobs, and machine-readable review state, while broader operator UX, account systems, and business workflow should sit above a stable service contract when needed.
+
+## Target And Runtime Scope
+
+Tethermark should not compete as a generic cybersecurity scanner or autonomous production pentest platform. Its runtime story should stay AI-security specific and control-driven.
+
+Primary supported targets:
+
+- open-source AI, agent, MCP, plugin, and tool-using repositories
+- private repositories or local clones that the operator is authorized to audit
+- local filesystem paths used by internal teams, CI, or self-hosted review flows
+
+Endpoint URLs can remain part of the target model for context, source attribution, and carefully bounded reduced-confidence checks. They should not be the default runtime path or a core OSS product promise.
+
+Runtime validation should mean:
+
+- clone or mirror the target into an isolated local, container, or microVM environment
+- build and launch the target with controlled configuration
+- inject fake secrets, fake users, and simulated tool/service backends
+- run AI-security eval packs for prompt injection, tool misuse, MCP boundary failures, memory leakage, cross-session isolation, unsafe delegated actions, and retrieval/data exfiltration
+- capture transcripts, tool calls, HTTP traces, file changes, and policy violations as evidence
+- map results to established controls and Tethermark executable eval-pack controls
+
+Runtime validation should not mean broad production exploitation, destructive endpoint probing, payment/email/OAuth mutation testing, or autonomous black-box pentesting.
 
 ## Product Line Split
 
@@ -53,6 +77,7 @@ The OSS version should be strong enough for:
 - CI-based validation and recurring scans
 - internal review of findings and remediation
 - downstream integration into local workflows via API or CLI
+- public audit case studies against open-source AI/agent repositories
 
 ### Hosted / Paid Product
 
@@ -138,7 +163,7 @@ That matters especially for GitHub because the harness is meant to audit:
 - self-owned OSS repositories
 - third-party OSS repositories
 - local clones without upstream write access
-- non-GitHub targets such as endpoints or local applications
+- non-GitHub local applications and repository mirrors
 
 The core review model should therefore remain engine-native:
 
@@ -245,13 +270,13 @@ The OSS web UI should include settings pages for:
 - `Providers`: provider selection, default models, agent-specific overrides, mock versus live mode, and local API endpoint wiring
 - `Credentials`: API key entry or secret-reference configuration appropriate for self-hosted deployments
 - `Audit Defaults`: package, depth, runtime policy, timeout, budget, retry, and webhook defaults
-- `Preflight Settings`: planning strictness, isolation preferences, runtime enablement rules, and include or exclude defaults
-- `Policy Packs`: upload or attach custom policy documents, internal standards, control mappings, and exception references
+- `Governance`: a peer settings page with tabs for launch/readiness gates, executable policy packs, and reference documents
 - `Test Mode`: deterministic validation presets, fixture-validation presets, mock-planner modes, and safe local testing toggles
-- `Review Settings`: human-review thresholds, publishability defaults, internal-only defaults, and severity gating rules
 - `Integrations`: local webhook endpoints, optional OIDC settings, manual outbound connector controls, and local connector configuration where supported
 
 These settings should map to structured engine configuration objects, not ad hoc UI-only form state.
+
+In OSS mode, the Governance tabs are intentionally engine-local: `Gates` covers launch-readiness policy, human-review thresholds, publishability defaults, internal-only defaults, severity gates, and disposition renewal rules; `Policy Packs` covers executable audit/control policy packs, local defaults, custom pack attachments, and lightweight control mappings; `Reference Documents` covers attached policy documents, internal standards, runbooks, exception references, and reviewer context. In hosted or integrated deployments, the same page should expose effective values and provenance when policies, gates, or reference materials are inherited from an organization, workspace, project, or assurance control plane.
 
 ### Hosted Configuration Extensions
 
@@ -260,6 +285,9 @@ The hosted product should extend the same model with platform controls such as:
 - org-wide provider management and secret brokering
 - workspace and project policy inheritance
 - approval workflows for changing models, policies, or runtime allowances
+- managed governance gates with inheritance, lock state, source attribution, and audit history
+- managed policy-pack catalogs with versioning, approval, usage references, and exportable execution snapshots
+- reference-document governance for approved audit context, exception references, and runbook provenance
 - role-based configuration permissions
 - usage quotas, budgets, and cost controls
 - shared templates and organization defaults
@@ -288,12 +316,14 @@ Preflight should be part of the OSS engine, not a paid-only feature.
 It materially improves:
 
 - audit quality
-- runtime safety
+- runtime safety for isolated validation environments
 - cost predictability
 - explainability
 - public credibility for partial-depth audits
 
 The preflight addendum is directionally right: preflight should decide how the audit runs, what scope is included, what risks or blockers exist, and whether the path should be skip, defer, static-only, targeted runtime, or full audit.
+
+For runtime, preflight should prefer static-only or isolated runtime validation unless the operator has explicitly supplied a non-production endpoint and an allowlist for safe behavioral probes. Production endpoint testing should remain outside the default OSS flow.
 
 Recommended OSS scope for preflight:
 
@@ -302,6 +332,7 @@ Recommended OSS scope for preflight:
 - execution-surface detection
 - scope planning
 - isolation recommendation
+- synthetic credential and fake-service requirements for runtime validation
 - tool and audit-path recommendation
 - blocker and readiness detection
 - machine-readable preflight outputs

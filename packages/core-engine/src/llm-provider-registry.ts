@@ -1,4 +1,4 @@
-export type LlmProviderMode = "local_mock" | "live_api";
+export type LlmProviderMode = "local_mock" | "live_api" | "agent_oauth";
 
 export interface LlmModelDefinition {
   id: string;
@@ -6,7 +6,7 @@ export interface LlmModelDefinition {
   recommended_for: string;
 }
 
-export type LlmProviderCredentialFieldKind = "api_key" | "base_url";
+export type LlmProviderCredentialFieldKind = "api_key" | "base_url" | "local_command";
 export type LlmProviderCredentialSource = "not_required" | "persisted" | "environment" | "missing";
 
 export interface LlmProviderCredentialFieldDefinition {
@@ -111,6 +111,37 @@ const BUILTIN_LLM_PROVIDERS: LlmProviderDefinition[] = [
       { id: "gpt-4.1-mini", label: "GPT-4.1 Mini", recommended_for: "faster review passes and lower token cost" },
       { id: "gpt-4.1-nano", label: "GPT-4.1 Nano", recommended_for: "very fast lightweight checks" }
     ]
+  },
+  {
+    id: "openai_codex",
+    name: "OpenAI Codex Local (OAuth)",
+    mode: "agent_oauth",
+    requires_api_key: false,
+    api_key_field: null,
+    default_model: "gpt-5.1-codex",
+    supports_custom_model: true,
+    description: "Local Codex CLI agent backend that uses the operator's own ChatGPT/Codex OAuth session instead of Tethermark-held API keys.",
+    notes: [
+      "Requires the Codex CLI to be installed and already signed in with ChatGPT on the local machine.",
+      "Subject to the user's ChatGPT/Codex plan limits rather than predictable API token billing.",
+      "Intended for local OSS/manual runtime audits; hosted deployments should prefer explicit API-key providers unless OpenAI provides a supported hosted OAuth flow."
+    ],
+    credential_fields: [
+      {
+        id: "codex_command",
+        label: "Advanced: Codex app command",
+        kind: "local_command",
+        secret: false,
+        required: false,
+        placeholder: "codex",
+        help_text: "Optional. Leave this as codex unless Codex was installed in a custom location.",
+        env_var: "AUDIT_LLM_CODEX_COMMAND"
+      }
+    ],
+    models: [
+      { id: "gpt-5.1-codex", label: "GPT-5.1 Codex", recommended_for: "subscription-backed local audit harness runs" },
+      { id: "gpt-5.1-codex-mini", label: "GPT-5.1 Codex Mini", recommended_for: "lower-cost or lower-allowance local runs" }
+    ]
   }
 ];
 
@@ -135,6 +166,13 @@ const BUILTIN_LLM_PROVIDER_PRESETS: LlmProviderPreset[] = [
     provider_id: "openai",
     model: "gpt-5.4",
     summary: "Higher-depth preset for complex targets and reviewer-focused passes."
+  },
+  {
+    id: "openai_codex_local",
+    label: "OpenAI Codex Local (OAuth)",
+    provider_id: "openai_codex",
+    model: "gpt-5.1-codex",
+    summary: "User-owned local Codex CLI/OAuth preset for manual OSS and runtime validation runs."
   }
 ];
 
@@ -206,6 +244,8 @@ export function describeLlmProviderCredentialStatus(
       source: "not_required",
       note: provider.mode === "local_mock"
         ? "No credentials are required for this local mock provider."
+        : provider.mode === "agent_oauth"
+          ? "No API key is stored by Tethermark. Sign in through the provider's local agent CLI before running."
         : "No persisted credentials are required for this provider.",
       fields
     };
@@ -218,7 +258,9 @@ export function describeLlmProviderCredentialStatus(
   return {
     configured,
     source,
-    note: configured
+    note: provider.mode === "agent_oauth"
+      ? "Tethermark does not store a ChatGPT credential. The local Codex session status is checked by the UI."
+      : configured
       ? `Credentials are ready for ${provider.name}.`
       : `One or more required credentials are still missing for ${provider.name}.`,
     fields

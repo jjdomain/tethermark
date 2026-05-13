@@ -113,7 +113,7 @@ function deriveRerunRequest(args: {
     repo_url: run?.target_summary?.repo_url ?? undefined,
     endpoint_url: run?.target_summary?.endpoint_url ?? undefined,
     run_mode: rerunMode as AuditRequest["run_mode"],
-    llm_provider: requestedProfile?.llm_provider === "openai" ? "openai" : "mock",
+    llm_provider: requestedProfile?.llm_provider === "openai" || requestedProfile?.llm_provider === "openai_codex" ? requestedProfile.llm_provider : "mock",
     llm_model: typeof requestedProfile?.llm_model === "string" ? requestedProfile.llm_model : undefined,
     audit_policy_pack: typeof requestedProfile?.audit_policy_pack === "string" ? requestedProfile.audit_policy_pack : undefined,
     db_mode: (run?.resolved_configuration?.db_mode as AuditRequest["db_mode"]) ?? "local",

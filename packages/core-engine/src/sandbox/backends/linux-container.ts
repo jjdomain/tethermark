@@ -7,7 +7,7 @@ import { request as httpsRequest } from "node:https";
 
 import type { AuditRequest, ContainerWorkspaceContract, SandboxExecutionPlan, SandboxExecutionResult, SandboxExecutionStep, SandboxSession } from "../../contracts.js";
 import { createId } from "../../utils.js";
-import { buildSourceProvenance, cloneRepo, collectStorageUsage, inferGitRepoUrl, mirrorDirectory } from "./shared.js";
+import { buildSourceProvenance, cloneRepo, collectStorageUsage, inferGitRepoUrl, mirrorDirectory, resolvePinnedCheckoutRef } from "./shared.js";
 
 const execFileAsync = promisify(execFile);
 const EXECUTION_OUTPUT_LIMIT = 2_000;
@@ -1130,7 +1130,7 @@ export class LinuxContainerSandboxBackend {
     let commitSha: string | null = null;
     let upstreamRepoUrl: string | null = request.repo_url ?? null;
     if (request.repo_url) {
-      commitSha = await cloneRepo(request.repo_url, targetDir);
+      commitSha = await cloneRepo(request.repo_url, targetDir, resolvePinnedCheckoutRef(request.hints));
     } else if (request.local_path) {
       upstreamRepoUrl = await inferGitRepoUrl(request.local_path);
       await mirrorDirectory(path.resolve(request.local_path), targetDir, sandboxRoot);

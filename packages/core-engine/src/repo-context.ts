@@ -61,6 +61,10 @@ export async function buildRepoContext(target: TargetDescriptor, analysis: Analy
     ...(analysis.mcp_indicators.length ? ["mcp_or_plugin_surface"] : []),
     ...(analysis.agent_indicators.length ? ["agentic_code_surface"] : []),
     ...(analysis.tool_execution_indicators.length ? ["tool_execution_surface"] : []),
+    ...((analysis.ai_frameworks ?? []).map((item) => `ai_framework:${item}`)),
+    ...((analysis.agentic_capabilities ?? []).map((item) => `agentic_capability:${item}`)),
+    ...((analysis.agentic_risk_indicators ?? []).map((item) => `agentic_risk:${item}`)),
+    ...((analysis.agentic_control_indicators ?? []).map((item) => `agentic_control:${item}`)),
     ...(analysis.ci_workflows.length ? ["ci_present"] : []),
     ...(analysis.container_files.length ? ["containerization_present"] : []),
     ...(analysis.security_docs.length ? ["security_docs_present"] : [])

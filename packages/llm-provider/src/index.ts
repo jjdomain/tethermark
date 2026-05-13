@@ -1,3 +1,8 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { spawn, spawnSync } from "node:child_process";
+
 function readEnv(name: string): string | undefined {
   const value = process.env[name];
   if (typeof value !== "string") {
@@ -65,21 +70,21 @@ export interface ModelProvider {
 }
 
 export interface ProviderConfig {
-  provider?: "openai" | "mock";
+  provider?: "openai" | "openai_codex" | "mock";
   model?: string;
   apiKey?: string;
   agentOverrides?: Record<string, {
-    provider?: "openai" | "mock";
+    provider?: "openai" | "openai_codex" | "mock";
     model?: string;
     apiKey?: string;
   }>;
 }
 
 export interface ResolvedProviderConfig {
-  provider: "openai" | "mock";
+  provider: "openai" | "openai_codex" | "mock";
   model?: string;
   apiKey?: string;
-  apiKeySource: "agent-specific" | "request-level" | "global-audit-llm" | "global-generic" | "none";
+  apiKeySource: "agent-specific" | "request-level" | "global-audit-llm" | "global-generic" | "oauth-local" | "none";
 }
 
 type MockResponseFactory = (request: StructuredGenerationRequest) => unknown;
@@ -206,6 +211,156 @@ export class OpenAIModelProvider implements ModelProvider {
   }
 }
 
+type ProcessResult = {
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+};
+
+function readNumberEnv(name: string, fallback: number): number {
+  const raw = readEnv(name);
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function appendLimited(current: string, chunk: Buffer, limit = 20_000): string {
+  const next = current + chunk.toString("utf8");
+  return next.length > limit ? next.slice(next.length - limit) : next;
+}
+
+function runProcess(command: string, args: string[], stdin: string, timeoutMs: number): Promise<ProcessResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      child.kill("SIGTERM");
+      settled = true;
+      reject(new Error(`${command} timed out after ${timeoutMs}ms.`));
+    }, timeoutMs);
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout = appendLimited(stdout, chunk);
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr = appendLimited(stderr, chunk);
+    });
+    child.on("error", (error) => {
+      if (settled) return;
+      clearTimeout(timer);
+      settled = true;
+      reject(error);
+    });
+    child.on("close", (exitCode) => {
+      if (settled) return;
+      clearTimeout(timer);
+      settled = true;
+      resolve({ exitCode, stdout, stderr });
+    });
+    child.stdin.end(stdin);
+  });
+}
+
+function resolveCodexCommand(command: string, prefixArgs: string[]): { command: string; prefixArgs: string[] } {
+  if (prefixArgs.length > 0 || process.platform !== "win32" || command.toLowerCase() !== "codex") {
+    return { command, prefixArgs };
+  }
+  const probe = spawnSync(command, ["--version"], {
+    encoding: "utf8",
+    shell: true,
+    windowsHide: true,
+    timeout: 10_000
+  });
+  const output = `${probe.stdout ?? ""}\n${probe.stderr ?? ""}`.toLowerCase();
+  if (probe.status === 0 && !output.includes("access is denied")) {
+    return { command, prefixArgs };
+  }
+  return {
+    command: "npx",
+    prefixArgs: ["-y", "@openai/codex"]
+  };
+}
+
+function buildCodexPrompt(request: StructuredGenerationRequest): string {
+  return [
+    "You are running as a bounded Tethermark audit harness agent.",
+    "Return only the final structured JSON object requested by the provided schema. Do not edit files.",
+    "",
+    "System prompt:",
+    request.systemPrompt,
+    "",
+    "User prompt:",
+    request.userPrompt
+  ].join("\n");
+}
+
+export class OpenAICodexCliProvider implements ModelProvider {
+  readonly providerName = "openai_codex";
+  private readonly resolvedCommand: string;
+  private readonly resolvedPrefixArgs: string[];
+
+  constructor(
+    readonly modelName = readEnv("AUDIT_LLM_CODEX_MODEL") ?? readEnv("AUDIT_LLM_MODEL") ?? "gpt-5.1-codex",
+    private readonly command = readEnv("AUDIT_LLM_CODEX_COMMAND") ?? readEnv("CODEX_COMMAND") ?? "codex",
+    private readonly sandbox = readEnv("AUDIT_LLM_CODEX_SANDBOX") ?? "read-only",
+    private readonly timeoutMs = readNumberEnv("AUDIT_LLM_CODEX_TIMEOUT_MS", 600_000),
+    private readonly commandPrefixArgs: string[] = []
+  ) {
+    const resolved = resolveCodexCommand(this.command, this.commandPrefixArgs);
+    this.resolvedCommand = resolved.command;
+    this.resolvedPrefixArgs = resolved.prefixArgs;
+  }
+
+  async generateStructured<T>(request: StructuredGenerationRequest): Promise<StructuredGenerationResult<T>> {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "tethermark-codex-"));
+    const schemaPath = path.join(tempDir, `${request.schemaName}.schema.json`);
+    const outputPath = path.join(tempDir, `${request.schemaName}.result.json`);
+    try {
+      await fs.writeFile(schemaPath, JSON.stringify(request.schema, null, 2), "utf8");
+      const args = [
+        ...this.resolvedPrefixArgs,
+        "exec",
+        "--ephemeral",
+        "--sandbox",
+        this.sandbox,
+        "--output-schema",
+        schemaPath,
+        "--output-last-message",
+        outputPath
+      ];
+      if (this.modelName) {
+        args.push("--model", this.modelName);
+      }
+      const result = await runProcess(this.resolvedCommand, args, buildCodexPrompt(request), this.timeoutMs);
+      if (result.exitCode !== 0) {
+        throw new Error(`Codex CLI exited with code ${result.exitCode}. ${result.stderr || result.stdout}`.trim());
+      }
+      const rawText = await fs.readFile(outputPath, "utf8");
+      return {
+        provider: this.providerName,
+        model: this.modelName,
+        rawText,
+        parsed: parseStructuredJson<T>(rawText),
+        attempts: 1,
+        usage: {
+          prompt_tokens: null,
+          completion_tokens: null,
+          total_tokens: null,
+          estimated_cost_usd: null
+        }
+      };
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  }
+}
+
 export class MockModelProvider implements ModelProvider {
   readonly providerName = "mock";
 
@@ -296,14 +451,18 @@ function inferMockPayload(request: StructuredGenerationRequest): unknown {
       };
     case "eval_selection_agent": {
       const selectedControlIds = context?.plannerArtifact?.applicable_control_ids ?? applicableControlIds;
+      const selectedToolIds = Array.isArray(context?.request?.hints?.external_audit_tools?.included_tool_ids)
+        ? new Set(["scorecard", ...context.request.hints.external_audit_tools.included_tool_ids])
+        : null;
+      const keepSelectedTools = (tools: string[]) => tools.filter((tool) => !selectedToolIds || selectedToolIds.has(tool));
       const controlToolMap = selectedControlIds.map((controlId: string) => ({
         control_id: controlId,
-        tools: controlId.includes("workflow") || controlId.includes("slsa") ? ["scorecard", "semgrep"] : controlId.includes("secret") ? ["trivy", "semgrep"] : ["scorecard", "trivy", "semgrep"],
+        tools: keepSelectedTools(controlId.includes("workflow") || controlId.includes("slsa") ? ["scorecard", "semgrep"] : controlId.includes("secret") ? ["trivy", "semgrep"] : ["scorecard", "trivy", "semgrep"]),
         rationale: ((skepticFeedback?.actions ?? []).length > 0) ? "Mock selector refreshed coverage after supervisor feedback." : "Mock selector mapped controls to bounded static tools."
       }));
       return {
-        baseline_tools: ["repo_analysis", "scorecard", "trivy", "semgrep"],
-        runtime_tools: context?.request?.run_mode === "static" ? [] : ["inspect"],
+        baseline_tools: ["repo_analysis", ...keepSelectedTools(["scorecard", "trivy", "semgrep"])],
+        runtime_tools: context?.request?.run_mode === "static" ? [] : keepSelectedTools(["inspect"]),
         custom_eval_packs: ["static_core"],
         validation_candidates: [],
         control_tool_map: controlToolMap,
@@ -374,11 +533,12 @@ export function resolveAgentProviderConfig(agentName: string, baseConfig: Provid
     apiKeySource = "global-generic";
   }
 
+  const provider = (agentOverride?.provider ?? baseConfig.provider ?? envProvider ?? readEnv("AUDIT_LLM_PROVIDER") ?? (apiKey ? "openai" : "mock")) as "openai" | "openai_codex" | "mock";
   return {
-    provider: (agentOverride?.provider ?? baseConfig.provider ?? envProvider ?? readEnv("AUDIT_LLM_PROVIDER") ?? (apiKey ? "openai" : "mock")) as "openai" | "mock",
+    provider,
     model: agentOverride?.model ?? baseConfig.model ?? envModel ?? readEnv("AUDIT_LLM_MODEL") ?? undefined,
     apiKey,
-    apiKeySource
+    apiKeySource: provider === "openai_codex" ? "oauth-local" : apiKeySource
   };
 }
 
@@ -390,6 +550,10 @@ export function createModelProvider(config: ProviderConfig = {}, agentName?: str
       throw new Error("A live provider-backed run requires an API key. Set LLM_API_KEY, AUDIT_LLM_API_KEY, or an agent-specific *_API_KEY value.");
     }
     return new OpenAIModelProvider(apiKey, resolved.model ?? "gpt-4.1");
+  }
+
+  if (resolved.provider === "openai_codex") {
+    return new OpenAICodexCliProvider(resolved.model ?? undefined);
   }
 
   return new MockModelProvider(resolved.model ?? "mock-agent-runtime", inferMockPayload);

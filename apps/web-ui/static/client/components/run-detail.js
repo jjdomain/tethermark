@@ -123,6 +123,11 @@ function RunDetailPanelComponent(props) {
   const indexedExports = detail.exportsIndex?.export_index?.exports || [];
   const findingDispositions = detail.findingDispositions?.finding_dispositions || [];
   const resolvedFindingDispositions = detail.findingDispositions?.resolved_finding_dispositions || [];
+  const agentInvocations = detail.agentInvocations?.agent_invocations || [];
+  const metrics = detail.metrics?.metrics || [];
+  const observabilitySummary = detail.observabilitySummary || null;
+  const toolAdapterSummary = detail.toolAdapters || null;
+  const toolAdapterBuckets = toolAdapterSummary?.buckets || [];
   const findingEvaluations = detail.findingEvaluations?.finding_evaluations || null;
   const reviewCadence = getReviewCadenceDefaults(effectiveSettings);
   const webhookDeliveries = detail.webhookDeliveries?.webhook_deliveries || [];
@@ -211,6 +216,50 @@ function RunDetailPanelComponent(props) {
       || summaryText.includes(selectedFinding.title.toLowerCase())
       || evidenceText.includes(selectedFinding.title.toLowerCase());
   });
+  const repoContextEvidence = evidenceRecords.find((item) => item.source_type === "repo_context" || item.source_id === "repo_context") || null;
+  const repoCapabilitySignals = getEvidenceMetadata(repoContextEvidence)?.capability_signals || [];
+  const groupedAgenticSignals = repoCapabilitySignals.reduce((groups, signal) => {
+    const text = String(signal || "");
+    const splitIndex = text.indexOf(":");
+    const group = splitIndex > 0 ? text.slice(0, splitIndex) : "repo_signal";
+    const value = splitIndex > 0 ? text.slice(splitIndex + 1) : text;
+    if (!groups[group]) groups[group] = [];
+    if (value && !groups[group].includes(value)) groups[group].push(value);
+    return groups;
+  }, {});
+  const agenticControlIds = [
+    "harness_internal.agent_tool_allowlist",
+    "harness_internal.agent_permission_boundaries",
+    "harness_internal.untrusted_content_prompt_injection",
+    "harness_internal.secret_env_isolation",
+    "harness_internal.mcp_plugin_permissions",
+    "harness_internal.browser_automation_safety",
+    "harness_internal.telemetry_log_redaction"
+  ];
+  const agenticControlResults = controlResults.filter((control) => agenticControlIds.includes(control.control_id));
+  const agenticAssessedCount = agenticControlResults.filter((control) => control.assessability === "assessed").length;
+  const formatSignal = (value) => String(value || "").replace(/_/g, " ");
+  const signalList = (items, empty = "none") => (items || []).length ? items.map(formatSignal).join(", ") : empty;
+  const formatNumber = (value) => Number(value || 0).toLocaleString();
+  const metricValue = (name) => metrics.find((item) => item.name === name)?.value ?? null;
+  const usageTotals = observabilitySummary?.totals || {
+    agent_invocation_count: agentInvocations.length,
+    tool_execution_count: toolAdapterSummary?.total_executions ?? 0,
+    prompt_tokens: metricValue("llm_prompt_tokens_total") ?? 0,
+    completion_tokens: metricValue("llm_completion_tokens_total") ?? 0,
+    total_tokens: metricValue("llm_total_tokens_total") ?? 0,
+    estimated_cost_usd: metricValue("llm_estimated_cost_usd") ?? 0
+  };
+  const contextBytesTotal = metricValue("llm_context_bytes_total") ?? agentInvocations.reduce((sum, item) => sum + Number(item.context_bytes || 0), 0);
+  const userPromptBytesTotal = metricValue("llm_user_prompt_bytes_total") ?? agentInvocations.reduce((sum, item) => sum + Number(item.user_prompt_bytes || 0), 0);
+  const completedToolExecutions = toolAdapterBuckets.reduce((sum, item) => sum + Number(item.completed_count || 0), 0);
+  const skippedToolExecutions = toolAdapterBuckets.reduce((sum, item) => sum + Number(item.skipped_count || 0), 0);
+  const failedToolExecutions = toolAdapterBuckets.reduce((sum, item) => sum + Number(item.failed_count || 0), 0);
+  const stageDurationMetrics = metrics.filter((item) => item.name === "stage_duration_ms");
+  const providerMetrics = metrics.filter((item) => item.name === "provider_execution_total");
+  const stageRollups = observabilitySummary?.stage_rollups || [];
+  const providerRollups = observabilitySummary?.provider_rollups || [];
+  const recentAgentInvocations = agentInvocations.slice(0, 8);
   const overviewItems = [
     { label: "Run Id", value: summary.run_id || run.id },
     { label: "Target", value: run.target?.canonical_name || run.target_summary?.canonical_name || run.target_id || "n/a" },
@@ -239,6 +288,90 @@ function RunDetailPanelComponent(props) {
         key: "summary",
         items: overviewItems
       })
+    ]),
+    h(Card, { key: "execution-observability", title: "Execution Observability", description: "Per-run agent, LLM, tool, and stage usage persisted for auditability.", className: "border-slate-200 bg-white shadow-sm" }, [
+      h(DetailList, {
+        key: "usage",
+        items: [
+          { label: "Agent Calls", value: formatNumber(agentInvocations.length) },
+          { label: "Tool Executions", value: `${completedToolExecutions} completed, ${skippedToolExecutions} skipped, ${failedToolExecutions} failed` },
+          { label: "Prompt Tokens", value: formatNumber(usageTotals.prompt_tokens) },
+          { label: "Completion Tokens", value: formatNumber(usageTotals.completion_tokens) },
+          { label: "Total Tokens", value: formatNumber(usageTotals.total_tokens) },
+          { label: "Estimated LLM Cost", value: `$${Number(usageTotals.estimated_cost_usd || 0).toFixed(6)}` },
+          { label: "Context Bytes", value: formatNumber(contextBytesTotal) },
+          { label: "Prompt Bytes", value: formatNumber(userPromptBytesTotal) }
+        ]
+      }),
+      agentInvocations.some((item) => item.total_tokens == null)
+        ? h("div", { key: "token-note", className: "mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800" }, "Some providers did not return token counts for this run; byte counts remain available for audit sizing.")
+        : null,
+      toolAdapterBuckets.length
+        ? h("div", { key: "tools", className: "mt-4 space-y-3" }, toolAdapterBuckets.map((tool, index) => {
+          const fallback = Number(tool.fallback_count || 0) > 0;
+          return h("div", {
+            key: `${tool.requested_provider_id}:${index}`,
+            className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"
+          }, [
+            h("div", { key: "row", className: "flex items-start justify-between gap-3" }, [
+              h("div", { key: "copy" }, [
+                h("div", { key: "title", className: "font-medium text-slate-900" }, tool.requested_provider_id || "provider"),
+                h("div", { key: "summary", className: "mt-1 text-sm text-slate-500" }, `${formatNumber(tool.completed_count)} completed, ${formatNumber(tool.skipped_count)} skipped, ${formatNumber(tool.failed_count)} failed`),
+                h("div", { key: "observed", className: "mt-1 text-xs text-slate-500" }, `observed ${tool.providers_observed?.join(", ") || "none"}${tool.fallback_targets?.length ? `; fallback targets ${tool.fallback_targets.join(", ")}` : ""}`)
+              ]),
+              h("div", { key: "badges", className: "flex flex-wrap justify-end gap-2" }, [
+                h(Badge, { key: "status" }, tool.failed_count ? "failed" : tool.skipped_count ? "skipped" : "completed"),
+                fallback ? h(Badge, { key: "fallback" }, "fallback") : null
+              ].filter(Boolean))
+            ])
+          ]);
+        }))
+        : h("div", { key: "no-tools", className: "mt-4 text-sm text-slate-500" }, "No tool execution rollup is available for this run."),
+      recentAgentInvocations.length
+        ? h("div", { key: "agents", className: "mt-4 grid gap-3 md:grid-cols-2" }, recentAgentInvocations.map((call) => h("div", {
+          key: call.id || call.agent_call_id,
+          className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"
+        }, [
+          h("div", { key: "head", className: "flex items-start justify-between gap-3" }, [
+            h("div", { key: "copy" }, [
+              h("div", { key: "agent", className: "font-medium" }, call.agent_name || "agent"),
+              h("div", { key: "model", className: "mt-1 text-sm text-slate-500" }, `${call.model_provider || call.provider || "provider"} / ${call.model_name || call.model || "model"}`)
+            ]),
+            h(Badge, { key: "status" }, call.status || "unknown")
+          ]),
+          h(DetailList, {
+            key: "call-detail",
+            items: [
+              { label: "Stage", value: call.stage_name || "n/a" },
+              { label: "Tokens", value: call.total_tokens == null ? "not reported" : formatNumber(call.total_tokens) },
+              { label: "Bytes", value: `${formatNumber(call.context_bytes)} context, ${formatNumber(call.user_prompt_bytes)} prompt` },
+              { label: "Cost", value: `$${Number(call.estimated_cost_usd || 0).toFixed(6)}` }
+            ]
+          })
+        ])))
+        : null,
+      stageRollups.length || providerRollups.length || stageDurationMetrics.length || providerMetrics.length
+        ? h("div", { key: "metrics", className: "mt-4 grid gap-3 md:grid-cols-2" }, [
+          stageRollups.length || stageDurationMetrics.length
+            ? h("div", { key: "stages", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm" }, [
+              h("div", { key: "title", className: "font-medium text-slate-900" }, "Stage Durations"),
+              h("ul", { key: "list", className: "mt-2 space-y-1 text-slate-500" }, (stageRollups.length
+                ? stageRollups.map((item) => ({ key: item.stage_name, text: `${item.stage_name}: ${formatNumber(item.total_duration_ms)} ms${item.reused_count ? `, ${item.reused_count} reused` : ""}` }))
+                : stageDurationMetrics.map((item) => ({ key: item.tags_json?.stage || item.tags?.stage || "stage", text: `${item.tags_json?.stage || item.tags?.stage || "stage"} avg ${Math.round(item.avg ?? item.value ?? 0)} ms` }))
+              ).map((item, index) => h("li", { key: `${index}:${item.key}` }, item.text)))
+            ])
+            : null,
+          providerRollups.length || providerMetrics.length
+            ? h("div", { key: "providers", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm" }, [
+              h("div", { key: "title", className: "font-medium text-slate-900" }, "Provider Results"),
+              h("ul", { key: "list", className: "mt-2 space-y-1 text-slate-500" }, (providerRollups.length
+                ? providerRollups.map((item) => ({ key: item.provider_id, text: `${item.provider_id}: ${formatNumber(item.completed_count || item.invocation_count || item.tool_execution_count)} completed/invoked, ${formatNumber(item.skipped_count)} skipped, ${formatNumber(item.failed_count)} failed` }))
+                : providerMetrics.map((item) => ({ key: item.tags_json?.provider_id || item.tags?.provider_id || "provider", text: `${item.tags_json?.provider_id || item.tags?.provider_id || "provider"} ${item.tags_json?.status || item.tags?.status || "status"}: ${formatNumber(item.value)}` }))
+              ).map((item, index) => h("li", { key: `${index}:${item.key}` }, item.text)))
+            ])
+            : null
+        ].filter(Boolean))
+        : null
     ]),
     h(Card, { key: "runtime-followups", title: "Runtime Follow-up Queue", description: "Linked rerun work items created from runtime-sensitive review decisions.", className: "border-slate-200 bg-white shadow-sm" }, runtimeFollowups.length
       ? h("div", { className: "space-y-3" }, runtimeFollowups.map((followup) => h("div", {
@@ -332,6 +465,36 @@ function RunDetailPanelComponent(props) {
           ]
         })
       ])
+    ]),
+    h(Card, { key: "agentic-signals", title: "Agentic Signals", description: "Repository signals that drive agent classification and agentic static controls.", className: "border-slate-200 bg-white shadow-sm" }, [
+      h(DetailList, {
+        key: "agentic-summary",
+        items: [
+          { label: "Target Class", value: resolved.initial_target_class || preflight?.target?.target_class || "n/a" },
+          { label: "AI Frameworks", value: signalList(groupedAgenticSignals.ai_framework) },
+          { label: "Capabilities", value: signalList(groupedAgenticSignals.agentic_capability) },
+          { label: "Risk Indicators", value: signalList(groupedAgenticSignals.agentic_risk) },
+          { label: "Control Indicators", value: signalList(groupedAgenticSignals.agentic_control) },
+          { label: "Agentic Controls", value: `${agenticAssessedCount}/${agenticControlResults.length} assessed` }
+        ]
+      }),
+      agenticControlResults.length
+        ? h("div", { key: "controls", className: "mt-4 grid gap-3 md:grid-cols-2" }, agenticControlResults.map((control) => h("div", {
+          key: control.control_id,
+          className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"
+        }, [
+          h("div", { key: "row", className: "flex items-start justify-between gap-3" }, [
+            h("div", { key: "copy" }, [
+              h("div", { key: "title", className: "font-medium text-slate-900" }, control.title || control.control_id),
+              h("div", { key: "id", className: "mt-1 text-xs text-slate-500" }, control.control_id)
+            ]),
+            h(Badge, { key: "status" }, `${control.status || "unknown"} / ${control.assessability || "unknown"}`)
+          ]),
+          control.rationale_json?.length
+            ? h("div", { key: "rationale", className: "mt-2 text-sm text-slate-500" }, control.rationale_json[0])
+            : null
+        ])))
+        : h("div", { key: "empty-controls", className: "mt-4 text-sm text-slate-500" }, "No agentic static controls were selected for this run.")
     ]),
     h(Card, { key: "sandbox-execution", title: "Sandbox Execution", description: "Bounded install/build/test/runtime-probe readiness derived for runtime-capable runs.", className: "border-slate-200 bg-white shadow-sm" }, sandboxExecution
       ? h("div", { className: "space-y-4" }, [

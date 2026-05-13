@@ -8,6 +8,7 @@ import { getLocalBinaryExecutionCapability } from "./evidence-providers.js";
 import { buildHeuristicTargetProfile, resolveRequestedOrAutoRunMode } from "./planner.js";
 import { getPythonWorkerCapability } from "./python-worker.js";
 import { analyzeTarget } from "./repo.js";
+import { buildStaticToolsReadiness } from "./static-tools.js";
 
 function emptyAnalysis(rootPath: string): AnalysisSummary {
   return {
@@ -27,7 +28,12 @@ function emptyAnalysis(rootPath: string): AnalysisSummary {
     ci_workflows: [],
     security_docs: [],
     release_files: [],
-    container_files: []
+    container_files: [],
+    ai_frameworks: [],
+    agentic_capabilities: [],
+    agentic_risk_indicators: [],
+    agentic_control_indicators: [],
+    agentic_signal_files: []
   };
 }
 
@@ -231,6 +237,8 @@ export async function buildPreflightSummary(request: AuditRequest): Promise<Pref
     pythonWorkerCapability,
     analysisAvailable
   });
+  const externalToolSelection = (effectiveRequest.hints as any)?.external_audit_tools?.included_tool_ids;
+  const staticToolsReadiness = buildStaticToolsReadiness({ selectedToolIds: externalToolSelection });
 
   if ((effectiveRunMode === "runtime" || effectiveRunMode === "validate") && request.hints?.preflight && typeof request.hints.preflight === "object") {
     const runtimeAllowed = String((request.hints.preflight as any).runtime_allowed ?? "targeted_only");
@@ -242,6 +250,8 @@ export async function buildPreflightSummary(request: AuditRequest): Promise<Pref
   if (localBinaryCapability.status === "blocked") {
     warnings.push("Local binary providers are blocked in this host environment; static local-binary evidence will be skipped.");
   }
+  warnings.push(...staticToolsReadiness.warnings);
+  blockers.push(...staticToolsReadiness.blockers);
   if ((effectiveRunMode === "build" || effectiveRunMode === "runtime" || effectiveRunMode === "validate") && pythonWorkerCapability.status !== "available") {
     warnings.push("Python worker adapters are unavailable in this host environment; bounded runtime-worker evidence will be skipped.");
   }
@@ -277,6 +287,7 @@ export async function buildPreflightSummary(request: AuditRequest): Promise<Pref
       warnings
     },
     provider_readiness: providerReadiness,
+    static_tools: staticToolsReadiness,
     recommended_audit_package: {
       id: recommendedPackage?.id ?? (request.audit_package ?? "agentic-static"),
       title: recommendedPackage?.title ?? (request.audit_package ?? "Selected package"),
@@ -307,7 +318,10 @@ export async function buildPreflightSummary(request: AuditRequest): Promise<Pref
       security_docs: analysis.security_docs.length,
       entry_points: analysis.entry_points.length,
       agentic_markers: analysis.agent_indicators.length + analysis.tool_execution_indicators.length,
-      mcp_markers: analysis.mcp_indicators.length
+      mcp_markers: analysis.mcp_indicators.length,
+      ai_frameworks: (analysis.ai_frameworks ?? []).length,
+      agentic_capabilities: (analysis.agentic_capabilities ?? []).length,
+      agentic_controls: (analysis.agentic_control_indicators ?? []).length
     }
   };
 }

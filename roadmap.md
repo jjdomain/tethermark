@@ -32,7 +32,8 @@ This means the foundational refactor is complete enough to stop doing architectu
 The product remains:
 
 - an open, headless AI security audit harness
-- a reusable engine for OSS audits, CI scans, and future internal or hosted workflows
+- a reusable engine for OSS repo audits, local-path audits, CI scans, and future internal or hosted workflows
+- an isolated runtime validation harness for AI/agent behavior, not a production endpoint pentest platform
 - separate from downstream application UI and editorial flows, while still exposing machine-readable reviewer workflows
 
 That boundary should remain strict. The engine owns orchestration, evidence, findings, scoring, review-state contracts, and export. Downstream systems own operator workflow UX, publication, and broader review experience.
@@ -47,7 +48,7 @@ The architecture is no longer the main blocker. The remaining gaps are mostly ab
 - service lifecycle: queued async runs, cancel or retry semantics, completion callbacks or webhooks, and stronger deployment assumptions
 - human review operations: reviewer assignment, checkpointed review-gated flows, and stronger release gating
 - result evaluation quality: explicit evidence sufficiency and false-positive adjudication records plus deterministic consistency checks
-- runtime depth: stronger validation-runner behavior and real Python worker integrations for behavior-level auditing
+- runtime depth: stronger isolated validation-runner behavior and real Python worker integrations for AI/agent behavior-level auditing
 - hosted storage boundary: OSS stays SQLite-backed with `local`; hosted production uses a separate Supabase/Postgres adapter around the shared persistence contracts
 
 ### Audience framing
@@ -274,16 +275,19 @@ This still does not require a built-in UI, but it does require stronger engine-s
 ## Phase 4: Runtime and Validation Depth
 
 Goal:
-Deepen non-static coverage without compromising the bounded harness model.
+Deepen non-static AI-security coverage without compromising the bounded harness model.
 
 ### 1. Complete runtime validation path
 
 Build out the currently partial runtime path into a stronger subsystem with:
 
-- validation-runner behavior
-- bounded reproduction attempts
+- validation-runner behavior for cloned or local targets
+- isolated container or microVM launch paths
+- synthetic credentials and simulated external tool/service backends
+- bounded AI-security scenarios rather than broad exploitation
 - richer transcript and artifact capture
 - better runtime-specific evidence normalization
+- control mapping to OWASP LLM, MITRE ATLAS, NIST AI RMF, and Tethermark eval-pack controls
 
 ### 2. Complete Python worker integrations
 
@@ -295,7 +299,8 @@ Prioritize:
 
 - tool-using multi-turn agents
 - MCP servers and plugin/skill packages
-- hosted endpoints in reduced-confidence mode
+- runnable local/repo applications in isolated validation mode
+- hosted endpoints only in explicit, non-destructive, reduced-confidence mode
 
 Those are the strongest product differentiators versus generic code scanning.
 

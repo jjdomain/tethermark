@@ -184,6 +184,11 @@ function makeControlResult(control: StandardControlDefinition, overrides: Partia
   };
 }
 
+function hasAny(values: string[] | undefined, expected: string[]): boolean {
+  const set = new Set(values ?? []);
+  return expected.some((item) => set.has(item));
+}
+
 export async function evaluateStandardsAudit(args: {
   rootPath: string;
   analysis: AnalysisSummary;
@@ -255,7 +260,23 @@ export async function evaluateStandardsAudit(args: {
     .map((item) => item.relative);
   const securityScanningWorkflowPresent = texts.some((item) => /^\.github\/workflows\//i.test(item.relative) && /codeql|semgrep|security|sast/i.test(item.text));
   const sandboxMentions = texts.filter((item) => /sandbox|allowlist|command_policy|read_only_analysis_only|tool policy/i.test(item.text)).map((item) => item.relative);
-  const agenticTarget = args.targetClass === "tool_using_multi_turn_agent" || args.targetClass === "mcp_server_plugin_skill_package";
+  const agenticTarget = args.targetClass === "tool_using_multi_turn_agent" || args.targetClass === "mcp_server_plugin_skill_package" || (args.analysis.ai_frameworks ?? []).length > 0 || (args.analysis.agentic_capabilities ?? []).length > 0;
+  const agenticSignalEvidence = [
+    ...(args.analysis.agentic_signal_files ?? []),
+    ...(args.analysis.agent_indicators ?? []),
+    ...(args.analysis.tool_execution_indicators ?? [])
+  ].slice(0, 8);
+  const approvalGateEvidence = texts.filter((item) => /approve|approval|confirm|human.?in.?the.?loop|require.?review|permission.?prompt/i.test(item.text)).map((item) => item.relative);
+  const allowlistEvidence = texts.filter((item) => /allowlist|allowed_tools|tool.?policy|denylist|blocked_tools|capability.?policy/i.test(item.text)).map((item) => item.relative);
+  const promptInjectionEvidence = texts.filter((item) => /prompt.?injection|ignore.?previous|instruction.?hierarchy|untrusted.?content|sanitize.?prompt/i.test(item.text)).map((item) => item.relative);
+  const envAccessEvidence = texts.filter((item) => /process\.env|os\.environ|dotenv|api[_-]?key|secret|token|credential/i.test(item.text)).map((item) => item.relative);
+  const secretRedactionEvidence = texts.filter((item) => /redact|mask.?secret|scrub|sanitize.?log|pii|sensitive.?data/i.test(item.text)).map((item) => item.relative);
+  const mcpPermissionEvidence = texts.filter((item) => /@modelcontextprotocol|McpServer|FastMCP|registerTool|server\.tool|tools\/call|permission|capability|scope/i.test(item.text)).map((item) => item.relative);
+  const mcpPermissionPolicyEvidence = texts.filter((item) => /permission|policy|scope|allow|deny|capability/i.test(item.text) && /mcp|plugin|skill|tool/i.test(item.text)).map((item) => item.relative);
+  const browserSafetyEvidence = texts.filter((item) => /playwright|puppeteer|selenium|browser|download|navigation|origin|url.?allow|domain.?allow|credential/i.test(item.text)).map((item) => item.relative);
+  const browserPolicyEvidence = texts.filter((item) => /allow|deny|origin|domain|download|credential|sandbox|permission/i.test(item.text) && /browser|playwright|puppeteer|selenium|navigation|url/i.test(item.text)).map((item) => item.relative);
+  const telemetryEvidence = texts.filter((item) => /telemetry|trace|audit.?log|structured.?log|logger|console\.log|print\(/i.test(item.text)).map((item) => item.relative);
+  const telemetryRedactionEvidence = texts.filter((item) => /redact|mask|scrub|sanitize|sensitive|secret|token|privacy/i.test(item.text) && /telemetry|trace|log|logger|console\.log|print\(/i.test(item.text)).map((item) => item.relative);
 
   for (const control of args.controlCatalog) {
     if (args.nonApplicableControlIds.includes(control.control_id)) {
@@ -643,6 +664,201 @@ export async function evaluateStandardsAudit(args: {
         evidence: passed ? [...evalMarkers.slice(0, 5), ...runtimeEvidenceSummaries(runtimeValidationEvidence), ...runtimeEvidenceSummaries(failedRuntimeChecks)] : [...runtimeEvidenceSummaries(failedRuntimeChecks), "No clear eval harness markers were detected in sampled files."].filter(Boolean),
         finding_ids: runtimeFailureFindingIds,
         sources: ["repo-analysis", ...(runtimeValidationEvidence.length || failedRuntimeChecks.length ? ["runtime-validation"] : [])]
+      }));
+      continue;
+    }
+
+    if (control.control_id === "harness_internal.agent_tool_allowlist") {
+      const hasToolSurface = hasAny(args.analysis.agentic_capabilities, ["shell_tool", "file_write_tool", "network_tool", "browser_tool", "mcp_tool_surface"]) || args.analysis.tool_execution_indicators.length > 0;
+      const hasBoundary = allowlistEvidence.length > 0 || approvalGateEvidence.length > 0 || hasAny(args.analysis.agentic_control_indicators, ["tool_allowlist", "approval_gate"]);
+      const passed = hasToolSurface && hasBoundary;
+      const findingIds = passed ? [] : [addFinding(findings, {
+        title: "Agent tool surface lacks clear allowlist or approval gate evidence",
+        severity: hasToolSurface ? "high" : "medium",
+        category: "agent_tool_policy",
+        description: "Static analysis detected agent/tool capability surfaces, but did not find strong evidence of tool allowlists, deny rules, or human approval gates for sensitive actions.",
+        evidence: [...agenticSignalEvidence, ...allowlistEvidence.slice(0, 3), ...approvalGateEvidence.slice(0, 3)],
+        public_safe: true,
+        confidence: 0.78,
+        score_impact: control.weight,
+        source: "heuristic",
+        control_ids: [control.control_id, "owasp_agentic.tool_misuse_boundary"],
+        standards_refs: [control.standard_ref, "OWASP Agentic Applications / Tool misuse boundaries"]
+      })];
+      controlResults.push(makeControlResult(control, {
+        status: passed ? "pass" : hasToolSurface ? "fail" : "partial",
+        score_awarded: passed ? control.weight : hasToolSurface ? 0 : Math.round(control.weight / 2),
+        rationale: [passed ? "Tool allowlist or approval gate evidence was detected for agentic tool surfaces." : "Tool allowlist or approval gate evidence was insufficient for detected agentic surfaces."],
+        evidence: [...allowlistEvidence.slice(0, 5), ...approvalGateEvidence.slice(0, 5), ...agenticSignalEvidence],
+        finding_ids: findingIds,
+        sources: ["repo-analysis"]
+      }));
+      continue;
+    }
+
+    if (control.control_id === "harness_internal.agent_permission_boundaries") {
+      const riskyCapabilities = hasAny(args.analysis.agentic_capabilities, ["shell_tool", "file_write_tool", "network_tool", "browser_tool"]) || dangerousExecMatches.length > 0;
+      const hasBoundary = sandboxMentions.length > 0 || hasAny(args.analysis.agentic_control_indicators, ["sandbox_boundary", "tool_allowlist", "approval_gate"]);
+      const passed = !riskyCapabilities || hasBoundary;
+      const findingIds = passed ? [] : [addFinding(findings, {
+        title: "Agent shell, file, network, or browser capability lacks visible permission boundary",
+        severity: dangerousExecMatches.length > 0 ? "high" : "medium",
+        category: "agent_permission_boundary",
+        description: "Static analysis detected potentially sensitive shell, file, network, or browser capabilities without visible sandbox, read-only, no-network, or permission-policy controls.",
+        evidence: [...dangerousExecMatches.slice(0, 5), ...agenticSignalEvidence, ...sandboxMentions.slice(0, 3)],
+        public_safe: true,
+        confidence: 0.8,
+        score_impact: control.weight,
+        source: "heuristic",
+        control_ids: [control.control_id, "mitre_atlas.tool_misuse_mitigation"],
+        standards_refs: [control.standard_ref, "MITRE ATLAS / Tool misuse mitigation"]
+      })];
+      controlResults.push(makeControlResult(control, {
+        status: passed ? "pass" : "fail",
+        score_awarded: passed ? control.weight : 0,
+        rationale: [passed ? "Permission-boundary evidence was detected or no risky agentic capability was found." : "Risky agentic capability was detected without visible permission-boundary evidence."],
+        evidence: [...sandboxMentions.slice(0, 5), ...dangerousExecMatches.slice(0, 5), ...agenticSignalEvidence],
+        finding_ids: findingIds,
+        sources: ["repo-analysis"]
+      }));
+      continue;
+    }
+
+    if (control.control_id === "harness_internal.untrusted_content_prompt_injection") {
+      const untrustedContentSurface = hasAny(args.analysis.agentic_risk_indicators, ["untrusted_content_ingest"]) || texts.some((item) => /webpage|scrape|retrieval|document loader|external content|browser content/i.test(item.text));
+      const hasPromptDefense = promptInjectionEvidence.length > 0 || hasAny(args.analysis.agentic_control_indicators, ["prompt_injection_filter"]);
+      const passed = !untrustedContentSurface || hasPromptDefense;
+      const findingIds = passed ? [] : [addFinding(findings, {
+        title: "Untrusted content ingestion lacks prompt-injection handling evidence",
+        severity: "high",
+        category: "prompt_injection",
+        description: "The repository appears to ingest external or untrusted content into an AI/agent path, but static analysis did not find prompt-injection handling, instruction hierarchy, or untrusted-content isolation evidence.",
+        evidence: [...agenticSignalEvidence, ...promptInjectionEvidence.slice(0, 3)],
+        public_safe: true,
+        confidence: 0.76,
+        score_impact: control.weight,
+        source: "heuristic",
+        control_ids: [control.control_id, "owasp_llm.prompt_injection_guardrails"],
+        standards_refs: [control.standard_ref, "OWASP LLM Top 10 / Prompt Injection"]
+      })];
+      controlResults.push(makeControlResult(control, {
+        status: passed ? "pass" : "fail",
+        score_awarded: passed ? control.weight : 0,
+        rationale: [passed ? "Prompt-injection handling evidence was present or no untrusted content ingestion surface was detected." : "Untrusted content ingestion was detected without prompt-injection handling evidence."],
+        evidence: [...promptInjectionEvidence.slice(0, 5), ...agenticSignalEvidence],
+        finding_ids: findingIds,
+        sources: ["repo-analysis"]
+      }));
+      continue;
+    }
+
+    if (control.control_id === "harness_internal.secret_env_isolation") {
+      const envSurface = envAccessEvidence.length > 0 || hasAny(args.analysis.agentic_risk_indicators, ["secret_handling_surface"]);
+      const hasRedaction = secretRedactionEvidence.length > 0 || hasAny(args.analysis.agentic_control_indicators, ["secret_redaction"]);
+      const passed = !envSurface || hasRedaction;
+      const findingIds = passed ? [] : [addFinding(findings, {
+        title: "Agent environment or secret access lacks redaction/isolation evidence",
+        severity: "high",
+        category: "secret_env_isolation",
+        description: "Static analysis detected environment or credential access in an AI/agent context without visible secret redaction, masking, or environment isolation controls.",
+        evidence: [...envAccessEvidence.slice(0, 5), ...secretRedactionEvidence.slice(0, 3)],
+        public_safe: false,
+        confidence: 0.74,
+        score_impact: control.weight,
+        source: "heuristic",
+        control_ids: [control.control_id, "owasp_llm.sensitive_information_disclosure"],
+        standards_refs: [control.standard_ref, "OWASP LLM Top 10 / Sensitive Information Disclosure"]
+      })];
+      controlResults.push(makeControlResult(control, {
+        status: passed ? "pass" : "fail",
+        score_awarded: passed ? control.weight : 0,
+        rationale: [passed ? "Secret redaction/isolation evidence was present or no environment secret surface was detected." : "Environment or secret access was detected without redaction/isolation evidence."],
+        evidence: [...secretRedactionEvidence.slice(0, 5), ...envAccessEvidence.slice(0, 5)],
+        finding_ids: findingIds,
+        sources: ["repo-analysis"]
+      }));
+      continue;
+    }
+
+    if (control.control_id === "harness_internal.mcp_plugin_permissions") {
+      const hasMcpSurface = args.targetClass === "mcp_server_plugin_skill_package" || hasAny(args.analysis.ai_frameworks, ["mcp"]) || hasAny(args.analysis.agentic_capabilities, ["mcp_tool_surface"]);
+      const hasPolicy = mcpPermissionPolicyEvidence.length > 0 || allowlistEvidence.length > 0 || approvalGateEvidence.length > 0;
+      const passed = !hasMcpSurface || hasPolicy;
+      const findingIds = passed ? [] : [addFinding(findings, {
+        title: "MCP/plugin tool surface lacks explicit permission policy evidence",
+        severity: "high",
+        category: "mcp_permission_surface",
+        description: "The repository appears to expose MCP, plugin, or skill tools, but static analysis did not find clear permission, scope, allowlist, or approval policy evidence for externally callable capabilities.",
+        evidence: [...mcpPermissionEvidence.slice(0, 5), ...agenticSignalEvidence],
+        public_safe: true,
+        confidence: 0.78,
+        score_impact: control.weight,
+        source: "heuristic",
+        control_ids: [control.control_id, "owasp_agentic.tool_misuse_boundary"],
+        standards_refs: [control.standard_ref, "OWASP Agentic Applications / Tool misuse boundaries"]
+      })];
+      controlResults.push(makeControlResult(control, {
+        status: passed ? "pass" : "fail",
+        score_awarded: passed ? control.weight : 0,
+        rationale: [passed ? "MCP/plugin permission policy evidence was present or no MCP surface was detected." : "MCP/plugin surface was detected without explicit permission policy evidence."],
+        evidence: [...mcpPermissionEvidence.slice(0, 5), ...mcpPermissionPolicyEvidence.slice(0, 3), ...allowlistEvidence.slice(0, 3), ...approvalGateEvidence.slice(0, 3)],
+        finding_ids: findingIds,
+        sources: ["repo-analysis"]
+      }));
+      continue;
+    }
+
+    if (control.control_id === "harness_internal.browser_automation_safety") {
+      const hasBrowserSurface = hasAny(args.analysis.agentic_capabilities, ["browser_tool"]) || hasAny(args.analysis.ai_frameworks, ["browser_automation"]) || browserSafetyEvidence.length > 0;
+      const hasSafety = browserPolicyEvidence.length > 0 || allowlistEvidence.length > 0 || promptInjectionEvidence.length > 0;
+      const passed = !hasBrowserSurface || hasSafety;
+      const findingIds = passed ? [] : [addFinding(findings, {
+        title: "Browser automation surface lacks visible safety policy",
+        severity: "medium",
+        category: "browser_automation_safety",
+        description: "Static analysis detected browser automation capability without clear navigation, download, credential, or untrusted-page instruction safety controls.",
+        evidence: browserSafetyEvidence.slice(0, 5),
+        public_safe: true,
+        confidence: 0.72,
+        score_impact: control.weight,
+        source: "heuristic",
+        control_ids: [control.control_id],
+        standards_refs: [control.standard_ref]
+      })];
+      controlResults.push(makeControlResult(control, {
+        status: passed ? "pass" : "fail",
+        score_awarded: passed ? control.weight : 0,
+        rationale: [passed ? "Browser automation safety evidence was present or no browser automation surface was detected." : "Browser automation was detected without visible safety policy evidence."],
+        evidence: [...browserSafetyEvidence.slice(0, 5), ...browserPolicyEvidence.slice(0, 3), ...allowlistEvidence.slice(0, 3), ...promptInjectionEvidence.slice(0, 3)],
+        finding_ids: findingIds,
+        sources: ["repo-analysis"]
+      }));
+      continue;
+    }
+
+    if (control.control_id === "harness_internal.telemetry_log_redaction") {
+      const hasTelemetrySurface = telemetryEvidence.length > 0 || hasAny(args.analysis.agentic_control_indicators, ["telemetry_redaction"]);
+      const passed = !hasTelemetrySurface || telemetryRedactionEvidence.length > 0 || hasAny(args.analysis.agentic_control_indicators, ["telemetry_redaction", "secret_redaction"]);
+      const findingIds = passed ? [] : [addFinding(findings, {
+        title: "Telemetry/logging surface lacks redaction evidence",
+        severity: "medium",
+        category: "telemetry_log_redaction",
+        description: "Static analysis detected logging, trace, or telemetry surfaces without clear redaction or minimization evidence for prompts, tool arguments, secrets, or user data.",
+        evidence: telemetryEvidence.slice(0, 5),
+        public_safe: true,
+        confidence: 0.7,
+        score_impact: control.weight,
+        source: "heuristic",
+        control_ids: [control.control_id],
+        standards_refs: [control.standard_ref]
+      })];
+      controlResults.push(makeControlResult(control, {
+        status: passed ? "pass" : "partial",
+        score_awarded: passed ? control.weight : Math.round(control.weight / 2),
+        rationale: [passed ? "Telemetry/log redaction or minimization evidence was detected." : "Telemetry/logging exists, but redaction evidence was limited."],
+        evidence: [...telemetryRedactionEvidence.slice(0, 5), ...telemetryEvidence.slice(0, 5)],
+        finding_ids: findingIds,
+        sources: ["repo-analysis"]
       }));
       continue;
     }

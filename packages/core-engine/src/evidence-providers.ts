@@ -11,6 +11,7 @@ import type {
   NormalizedEvidenceSummary
 } from "./contracts.js";
 import { getPythonWorkerCapability, invokePythonWorker, resolvePythonWorkerAdapter } from "./python-worker.js";
+import { buildToolPathEnv } from "./tool-paths.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -94,9 +95,13 @@ function arrayOfStrings(value: unknown): string[] {
   return Array.isArray(value) ? value.map((item) => String(item)) : [];
 }
 
-async function runCommand(command: string, args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+async function runCommand(command: string, args: string[], options?: { timeoutMs?: number }): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   try {
-    const result = await execFileAsync(command, args, { maxBuffer: 16 * 1024 * 1024 });
+    const result = await execFileAsync(command, args, {
+      env: { ...process.env, PATH: buildToolPathEnv() },
+      maxBuffer: 16 * 1024 * 1024,
+      timeout: options?.timeoutMs ?? 10 * 60 * 1000
+    });
     return { exitCode: 0, stdout: result.stdout, stderr: result.stderr };
   } catch (error: any) {
     if (error?.code === "ENOENT") {
@@ -105,7 +110,9 @@ async function runCommand(command: string, args: string[]): Promise<{ exitCode: 
     return {
       exitCode: typeof error?.code === "number" ? error.code : 1,
       stdout: typeof error?.stdout === "string" ? error.stdout : "",
-      stderr: typeof error?.stderr === "string" ? error.stderr : String(error)
+      stderr: error?.killed && error?.signal === "SIGTERM"
+        ? `Command timed out after ${options?.timeoutMs ?? 10 * 60 * 1000}ms.`
+        : typeof error?.stderr === "string" ? error.stderr : String(error)
     };
   }
 }
@@ -160,6 +167,9 @@ function classifyCommandFailure(stdout: string, stderr: string): ProviderFailure
   }
   if (/is not recognized as the name of a cmdlet|command not found|no such file or directory|ENOENT/i.test(combined)) {
     return { category: "command_unavailable", capability: "unavailable", message };
+  }
+  if (/timed out after \d+ms/i.test(combined)) {
+    return { category: "runtime_error", capability: "available", message };
   }
   return null;
 }
@@ -490,7 +500,7 @@ function normalizeRepoUrl(rawUrl: string): string | null {
 }
 
 async function inferRepoUrl(explicitRepoUrl: string | null, rootPath: string): Promise<string | null> {
-  if (explicitRepoUrl) return explicitRepoUrl;
+  if (explicitRepoUrl) return normalizeRepoUrl(explicitRepoUrl);
   const gitDir = await readGitDir(rootPath);
   if (!gitDir) return null;
   try {
@@ -513,6 +523,16 @@ async function inferRepoUrl(explicitRepoUrl: string | null, rootPath: string): P
   return null;
 }
 
+async function directoryExists(value: string | null | undefined): Promise<boolean> {
+  if (!value) return false;
+  try {
+    const stat = await fs.stat(value);
+    return stat.isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 export const EVIDENCE_PROVIDERS: EvidenceProviderDescriptor[] = [
   {
     id: "repo_analysis",
@@ -525,7 +545,7 @@ export const EVIDENCE_PROVIDERS: EvidenceProviderDescriptor[] = [
     id: "scorecard",
     kind: "local_binary",
     title: "OpenSSF Scorecard (local)",
-    summary: "Runs the local scorecard binary against a hosted repository URL.",
+    summary: "Runs the local scorecard binary against the staged target sandbox.",
     supports_modes: ["static"]
   },
   {
@@ -647,7 +667,13 @@ export async function executeEvidenceProvider(args: {
         normalized: normalizeRepoAnalysis(args.analysisSummary)
       });
     case "scorecard": {
-      if (!effectiveRepoUrl) {
+      const localScorecardAvailable = await directoryExists(args.rootPath);
+      const command = localScorecardAvailable
+        ? ["--format", "json", "--local", args.rootPath]
+        : effectiveRepoUrl
+          ? ["--format", "json", "--repo", effectiveRepoUrl]
+          : null;
+      if (!command) {
         return completedRecord({
           provider_id: "scorecard",
           provider_kind: "local_binary",
@@ -663,7 +689,6 @@ export async function executeEvidenceProvider(args: {
           normalized: emptyNormalized("scorecard", { notes: ["Repository URL could not be inferred."] })
         });
       }
-      const command = ["--format", "json", "--repo", effectiveRepoUrl];
       if (localBinaryBlocked) {
         return skippedUnavailableRecord({
           provider_id: "scorecard",
@@ -677,25 +702,31 @@ export async function executeEvidenceProvider(args: {
         });
       }
       try {
-        const { exitCode, stdout, stderr } = await runCommand("scorecard", command);
+        const { exitCode, stdout, stderr } = await runCommand("scorecard", command, { timeoutMs: 3 * 60 * 1000 });
         const parsed = parseCommandJson(stdout, stderr);
         const failure = classifyCommandFailure(stdout, stderr);
         if (failure) {
           return skippedUnavailableRecord({ provider_id: "scorecard", provider_kind: "local_binary", tool: "scorecard", command: ["scorecard", ...command], artifact_type: "scorecard-output", failure, stderr, fallback_from: args.fallbackFrom ?? null, normalized: emptyNormalized("scorecard", { notes: [failure.message] }) });
         }
         const normalized = parsed ? normalizeScorecard(parsed) : emptyNormalized("scorecard", { error_count: 1, notes: ["Scorecard did not return parseable JSON."] });
+        const parsedChecks = Array.isArray((parsed as any)?.checks) ? (parsed as any).checks : [];
+        const emptyScorecard = Boolean(parsed) && parsedChecks.length === 0;
         return completedRecord({
           provider_id: "scorecard",
           provider_kind: "local_binary",
           tool: "scorecard",
-          status: parsed ? "completed" : "failed",
+          status: parsed && !emptyScorecard ? "completed" : "failed",
           command: ["scorecard", ...command],
           exit_code: exitCode,
-          summary: parsed ? summarizeScorecard(parsed) : "Scorecard did not return parseable JSON.",
+          summary: parsed
+            ? emptyScorecard
+              ? "Scorecard returned JSON but no checks; treating as failed/degraded evidence."
+              : summarizeScorecard(parsed)
+            : "Scorecard did not return parseable JSON.",
           artifact_type: "scorecard-output",
           parsed,
           stderr: stderr || undefined,
-          failure_category: parsed ? null : "parse_error",
+          failure_category: parsed && !emptyScorecard ? null : "parse_error",
           capability_status: "available",
           fallback_from: args.fallbackFrom ?? null,
           normalized
@@ -723,7 +754,8 @@ export async function executeEvidenceProvider(args: {
       }
       try {
         const encoded = encodeURIComponent(effectiveRepoUrl);
-        const response = await fetch(`https://api.securityscorecards.dev/projects?project=${encoded}`);
+        const signal = AbortSignal.timeout(15 * 1000);
+        const response = await fetch(`https://api.securityscorecards.dev/projects?project=${encoded}`, { signal });
         if (!response.ok) {
           const failureCategory = response.status === 404 ? "api_unavailable" : "runtime_error";
           return completedRecord({

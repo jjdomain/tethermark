@@ -1,4 +1,4 @@
-const { Component, createElement: createReactElement, isValidElement, useEffect, useMemo, useState } = window.React;
+const { Component, createElement: createReactElement, isValidElement, useEffect, useMemo, useRef, useState } = window.React;
 const { createRoot } = window.ReactDOM;
 const appConfig = window.HARNESS_WEB_UI_CONFIG || { apiBaseUrl: "/api" };
 
@@ -30,6 +30,7 @@ const navItems = [
   ["jobs", "Async Jobs"],
   ["followups", "Runtime Follow-ups"],
   ["reviews", "Reviews"],
+  ["admin", "Admin"],
   ["settings", "Settings"]
 ];
 
@@ -40,6 +41,7 @@ const pageDescriptions = {
   jobs: "Track durable background work and retry or cancel jobs.",
   followups: "Manage runtime follow-up reruns and adoption decisions.",
   reviews: "Work the review inbox, assignments, and queued decisions.",
+  admin: "Operator controls for local app state, smoke tests, benchmarks, tooling, and observability.",
   settings: "Configure agent models, Audit Type, governance, and integrations."
 };
 
@@ -53,6 +55,7 @@ const navGroups = [
       ["reviews", "Reviews", "users"],
       ["jobs", "Jobs", "bars"],
       ["followups", "Follow-ups", "spark"],
+      ["admin", "Admin", "gear"],
       ["settings", "Settings", "gear"]
     ]
   }
@@ -94,6 +97,24 @@ const emptyLlmRegistry = {
   environment_defaults: {}
 };
 const emptyIntegrationRegistry = [];
+const emptyStaticToolsReadiness = {
+  status: "ready_with_warnings",
+  gate_policy: "warn",
+  selected_tool_ids: [],
+  tool_path: { managed_dirs: [], env_var: "HARNESS_STATIC_TOOLS_PATH" },
+  tools: [],
+  warnings: [],
+  blockers: []
+};
+const defaultExternalAuditToolIds = ["scorecard", "semgrep", "trivy", "inspect", "garak", "pyrit"];
+const mandatoryExternalAuditToolIds = ["scorecard"];
+const diagnosticsPiRepoUrl = "https://github.com/earendil-works/pi.git";
+const diagnosticsPiCommit = "3d9e14d7482f4a99d5224926099bec0d17ff86fd";
+const diagnosticsOpenClawRepoUrl = "https://github.com/openclaw/openclaw.git";
+function normalizeExternalAuditToolIds(value) {
+  const raw = Array.isArray(value) ? value : defaultExternalAuditToolIds;
+  return [...new Set([...mandatoryExternalAuditToolIds, ...raw.filter((item) => defaultExternalAuditToolIds.includes(item))])];
+}
 const auditLaneCatalog = [
   { id: "repo_posture", title: "Repository posture", summary: "Repository hygiene, maintainer practices, security docs, release process, and governance signals." },
   { id: "supply_chain", title: "Supply chain", summary: "Dependency, CI/CD, provenance, build trust, and workflow integrity analysis." },
@@ -289,7 +310,7 @@ function buildAuditDefaultPackageOverrides(currentDefaults = {}) {
 }
 
 function normalizeRunFormUpdate(current, key, value, auditPackages, auditDefaults = {}) {
-  let next = { ...current, [key]: value };
+  let next = { ...current, [key]: key === "target_kind" ? (value === "repo" ? "repo" : "path") : value };
   if (key === "run_mode") {
     next.enabled_lanes = defaultLanesForRunMode(value || "static");
   }
@@ -384,9 +405,8 @@ class ViewErrorBoundary extends Component {
 }
 
 function inferTargetKind(targetDefaults) {
-  if (targetDefaults?.target_kind) return targetDefaults.target_kind;
+  if (targetDefaults?.target_kind === "repo") return "repo";
   if (targetDefaults?.repo_url) return "repo";
-  if (targetDefaults?.endpoint_url) return "endpoint";
   return "path";
 }
 
@@ -567,7 +587,9 @@ function getProviderCredentialStatus(registry, providerId, effectiveSettings, ov
     return {
       configured,
       source: configured ? "persisted" : "missing",
-      note: configured
+      note: provider.mode === "agent_oauth"
+        ? "Tethermark does not store a ChatGPT credential. The local Codex session status is checked below."
+        : configured
         ? `Credentials are ready for ${provider.name}.`
         : `One or more required credentials are still missing for ${provider.name}.`,
       fields
@@ -577,7 +599,11 @@ function getProviderCredentialStatus(registry, providerId, effectiveSettings, ov
     return {
       configured: true,
       source: "not_required",
-      note: provider?.mode === "local_mock" ? "No API key required." : "No persisted API key required.",
+      note: provider?.mode === "local_mock"
+        ? "No API key required."
+        : provider?.mode === "agent_oauth"
+          ? "Tethermark does not store a ChatGPT credential. The local Codex session status is checked below."
+          : "No persisted API key required.",
       fields: []
     };
   }
@@ -605,12 +631,32 @@ function getProviderCredentialStatus(registry, providerId, effectiveSettings, ov
   };
 }
 
+function getProviderCredentialFieldValue(field, effectiveSettings, drafts) {
+  if (!field?.id) return "";
+  if (Object.prototype.hasOwnProperty.call(drafts || {}, field.id)) return drafts[field.id] || "";
+  const persisted = effectiveSettings?.effective?.credentials_json?.[field.id];
+  return typeof persisted === "string" ? persisted : "";
+}
+
+function getProviderCredentialFieldPlaceholder(field, fieldStatus, environmentDefaults) {
+  if (!field) return "";
+  if (field.kind === "api_key") {
+    if (environmentDefaults?.default_api_key_configured) return `configured via ${environmentDefaults.default_api_key_env_var}`;
+    return fieldStatus?.env_var || field.env_var || field.placeholder || "optional";
+  }
+  if (field.kind === "local_command") {
+    return fieldStatus?.source === "environment" && fieldStatus?.env_var
+      ? `configured via ${fieldStatus.env_var}`
+      : field.placeholder || field.env_var || "codex";
+  }
+  return field.placeholder || field.env_var || "";
+}
+
 function buildSettingsCredentialsPayload(settings, registry, drafts) {
   const nextCredentials = { ...(settings?.credentials_json || {}) };
   delete nextCredentials.openai_api_key;
   const providerId = settings?.providers_json?.default_provider || "";
   for (const field of getProviderCredentialFields(registry, providerId)) {
-    if (!field.secret) continue;
     if (!Object.prototype.hasOwnProperty.call(drafts || {}, field.id)) continue;
     const nextValue = drafts[field.id];
     nextCredentials[field.id] = nextValue ? nextValue : null;
@@ -715,6 +761,7 @@ function buildSettingsIntegrationPayload(settings, registry, drafts) {
 }
 
 function buildRunRequest(form, effectiveSettings, llmRegistry, auditPackages) {
+  const targetKind = form.target_kind === "repo" ? "repo" : "path";
   const payload = {
     llm_provider: form.llm_provider
   };
@@ -726,14 +773,17 @@ function buildRunRequest(form, effectiveSettings, llmRegistry, auditPackages) {
   const apiKeyField = provider?.credential_fields?.find((field) => field.kind === "api_key")?.id || provider?.api_key_field;
   const configuredApiKey = apiKeyField ? (form[apiKeyField] || effectiveSettings?.effective?.credentials_json?.[apiKeyField]) : null;
   if (configuredApiKey) payload.llm_api_key = configuredApiKey;
-  if (form.target_kind === "repo" && form.repo_url) payload.repo_url = form.repo_url;
-  else if (form.target_kind === "endpoint" && form.endpoint_url) payload.endpoint_url = form.endpoint_url;
+  if (targetKind === "repo" && form.repo_url) payload.repo_url = form.repo_url;
   else if (form.local_path) payload.local_path = form.local_path;
   payload.hints = {
     requested_run_mode_selection: form.run_mode === "auto" ? "auto" : (form.run_mode === "runtime" ? "runtime" : "static"),
     preflight: {
       strictness: form.preflight_strictness,
-      runtime_allowed: form.runtime_allowed
+      runtime_allowed: form.runtime_allowed,
+      static_tool_gate_policy: "warn"
+    },
+    external_audit_tools: {
+      included_tool_ids: normalizeExternalAuditToolIds(effectiveSettings?.effective?.preflight_json?.external_audit_tool_ids)
     },
     review: {
       require_human_review_for_severity: form.review_severity,
@@ -781,6 +831,51 @@ function buildRunRequest(form, effectiveSettings, llmRegistry, auditPackages) {
   return payload;
 }
 
+function buildDiagnosticsRunRequest({ kind, effectiveSettings, auditPackages, target = "pi" }) {
+  const providerDefaults = effectiveSettings?.effective?.providers_json || {};
+  const packageId = kind === "plumbing" ? "agentic-static" : "agentic-static";
+  const packageConfig = resolvePackageFormConfig(auditPackages, packageId);
+  const repoUrl = target === "openclaw" ? diagnosticsOpenClawRepoUrl : diagnosticsPiRepoUrl;
+  const provider = kind === "plumbing" ? "mock" : (providerDefaults.default_provider || "");
+  const model = kind === "plumbing" ? "" : (providerDefaults.default_model || "");
+  return {
+    repo_url: repoUrl,
+    run_mode: "static",
+    audit_package: packageId,
+    llm_provider: provider,
+    ...(model ? { llm_model: model } : {}),
+    hints: {
+      requested_run_mode_selection: "static",
+      diagnostic_run: {
+        kind,
+        label: kind === "plumbing" ? "Plumbing smoke" : kind === "static_audit" ? "Static audit smoke" : "Benchmark run",
+        target,
+        pinned_reference: target === "pi" ? diagnosticsPiCommit : null,
+        audit_quality_claim: kind === "plumbing" ? "none" : "static_audit"
+      },
+      preflight: {
+        strictness: "standard",
+        runtime_allowed: "never",
+        static_tool_gate_policy: "warn"
+      },
+      external_audit_tools: {
+        included_tool_ids: normalizeExternalAuditToolIds(effectiveSettings?.effective?.preflight_json?.external_audit_tool_ids)
+      },
+      audit_package_overrides: {
+        enabled_lanes: packageConfig.enabled_lanes,
+        max_agent_calls: packageConfig.max_agent_calls,
+        max_total_tokens: packageConfig.max_total_tokens,
+        max_rerun_rounds: packageConfig.max_rerun_rounds,
+        publishability_threshold: packageConfig.publishability_threshold
+      },
+      review: {
+        require_human_review_for_severity: "medium",
+        default_visibility: "internal"
+      }
+    }
+  };
+}
+
 function buildLaunchRunRequest(form, requestContext, launchIntentState, effectiveSettings, llmRegistry, auditPackages) {
   const payload = buildRunRequest(form, effectiveSettings, llmRegistry, auditPackages);
   payload.hints = {
@@ -817,7 +912,6 @@ function getPolicyPackDisplayLabel(policyPacks, policyPackId) {
 
 function getRunTargetValue(form) {
   if (form.target_kind === "repo") return form.repo_url || "";
-  if (form.target_kind === "endpoint") return form.endpoint_url || "";
   return form.local_path || "";
 }
 
@@ -828,8 +922,6 @@ function validateRunForm(form) {
     issues.push("A target is required before launch.");
   } else if (form.target_kind === "repo" && !/^https?:\/\/|^git@/i.test(targetValue)) {
     issues.push("Repository targets should use an HTTPS or SSH Git URL.");
-  } else if (form.target_kind === "endpoint" && !/^https?:\/\//i.test(targetValue)) {
-    issues.push("Endpoint targets should use an HTTP or HTTPS URL.");
   }
   if (form.use_audit_presets && !form.audit_package) issues.push("Select an audit package.");
   if (!form.run_mode) issues.push("Select a run mode.");
@@ -902,6 +994,55 @@ function badgeTone(status) {
   return "border-stone-200 bg-stone-100 text-stone-700";
 }
 
+function isActiveAsyncJob(job) {
+  return ["queued", "starting", "running"].includes(job?.status);
+}
+
+function isTerminalAsyncJob(job) {
+  return ["succeeded", "failed", "canceled"].includes(job?.status);
+}
+
+function getAsyncJobType(job) {
+  const diagnosticKind = job?.request_json?.hints?.diagnostic_run?.kind;
+  if (diagnosticKind === "plumbing") return "system_check";
+  if (diagnosticKind === "static_audit") return "static_smoke";
+  if (diagnosticKind === "benchmark") return "benchmark";
+  if (job?.request_json?.hints?.runtime_followup) return "runtime_followup";
+  return "audit";
+}
+
+function getAsyncJobTargetName(job) {
+  const repoParts = job?.request_json?.repo_url ? job.request_json.repo_url.split("/").filter(Boolean) : [];
+  if (repoParts.length) return (repoParts[repoParts.length - 1] || "repo").replace(/\.git$/i, "");
+  return job?.request_json?.local_path || job?.request_json?.endpoint_url || "target";
+}
+
+function formatAsyncJobDuration(job) {
+  const startValue = job?.started_at || job?.created_at;
+  const endValue = job?.completed_at || (isActiveAsyncJob(job) ? new Date().toISOString() : job?.updated_at);
+  if (!startValue || !endValue) return "n/a";
+  const durationMs = new Date(endValue).getTime() - new Date(startValue).getTime();
+  if (!Number.isFinite(durationMs) || durationMs < 0) return "n/a";
+  const totalSeconds = Math.max(0, Math.round(durationMs / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) return seconds ? `${minutes}m ${seconds}s` : `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remainderMinutes = minutes % 60;
+  return remainderMinutes ? `${hours}h ${remainderMinutes}m` : `${hours}h`;
+}
+
+function asyncJobTypeLabel(type) {
+  return {
+    system_check: "System check",
+    static_smoke: "Static smoke",
+    benchmark: "Benchmark",
+    runtime_followup: "Runtime follow-up",
+    audit: "Audit"
+  }[type] || type;
+}
+
 function api(path, init, requestContext = defaultRequestContext) {
   const headers = {
     "content-type": "application/json",
@@ -917,7 +1058,11 @@ function api(path, init, requestContext = defaultRequestContext) {
   }).then(async (response) => {
     if (!response.ok) {
       const payload = await response.json().catch(() => ({ error: response.statusText }));
-      throw new Error(payload.error || response.statusText);
+      const rawError = payload.error || response.statusText;
+      if (rawError === "not_found") {
+        throw new Error(`API route not found: ${path}. Restart the Tethermark API server so it picks up the latest backend routes.`);
+      }
+      throw new Error(rawError);
     }
     return response.status === 204 ? null : response.json();
   });
@@ -925,6 +1070,20 @@ function api(path, init, requestContext = defaultRequestContext) {
 
 function formatDate(value) {
   return value ? new Date(value).toLocaleString() : "n/a";
+}
+
+function formatBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes)) return "n/a";
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let current = bytes / 1024;
+  let unit = units[0];
+  for (let index = 1; index < units.length && current >= 1024; index += 1) {
+    current /= 1024;
+    unit = units[index];
+  }
+  return `${current.toFixed(current >= 10 ? 1 : 2)} ${unit}`;
 }
 
 function formatDateInputValue(value) {
@@ -1652,12 +1811,11 @@ function LaunchAuditModal({
           ]),
           h("div", { key: "fields", className: "grid gap-4 md:grid-cols-2" }, [
             h(Field, { key: "target-kind", label: "Target kind" }, Select({
-              value: runForm.target_kind,
+              value: runForm.target_kind === "repo" ? "repo" : "path",
               onChange: (event) => updateRunForm("target_kind", event.target.value)
             }, [
               h("option", { key: "path", value: "path" }, "local path"),
-              h("option", { key: "repo", value: "repo" }, "repo url"),
-              h("option", { key: "endpoint", value: "endpoint" }, "endpoint url")
+              h("option", { key: "repo", value: "repo" }, "repo url")
             ])),
             runForm.target_kind === "repo"
               ? h(Field, { key: "repo", label: "Repository URL" }, h(Input, {
@@ -1665,13 +1823,7 @@ function LaunchAuditModal({
                 onChange: (event) => updateRunForm("repo_url", event.target.value),
                 placeholder: "https://github.com/org/repo or git@github.com:org/repo.git"
               }))
-              : runForm.target_kind === "endpoint"
-                ? h(Field, { key: "endpoint", label: "Endpoint URL" }, h(Input, {
-                  value: runForm.endpoint_url,
-                  onChange: (event) => updateRunForm("endpoint_url", event.target.value),
-                  placeholder: "https://service.example.com/v1"
-                }))
-                : h(Field, { key: "path", label: "Local Path" }, h(Input, {
+              : h(Field, { key: "path", label: "Local Path" }, h(Input, {
                   value: runForm.local_path,
                   onChange: (event) => updateRunForm("local_path", event.target.value),
                   placeholder: "fixtures/validation-targets/agent-tool-boundary-risky"
@@ -1679,9 +1831,7 @@ function LaunchAuditModal({
           ]),
           h("div", { key: "hint", className: "text-sm text-slate-500" }, runForm.target_kind === "repo"
             ? "Use a repo URL when you want canonical repository identity for history, scoring, and outbound integrations."
-            : runForm.target_kind === "endpoint"
-              ? "Endpoint targets fit hosted-service validation where runtime checks matter most."
-              : "Local paths are best for local clones, fixtures, and self-hosted repositories.")
+            : "Local paths are best for local clones, fixtures, and self-hosted repositories.")
         ]),
         h("div", { key: "config-block", className: "border-t border-slate-200 pt-5" }, [
           h("div", { key: "config-header" }, [
@@ -2460,6 +2610,9 @@ function App() {
   const [view, setView] = useState("dashboard");
   const [runs, setRuns] = useState([]);
   const [jobs, setJobs] = useState([]);
+  const [jobStatusFilter, setJobStatusFilter] = useState("all");
+  const [jobTypeFilter, setJobTypeFilter] = useState("all");
+  const [jobSearch, setJobSearch] = useState("");
   const [runtimeFollowups, setRuntimeFollowups] = useState([]);
   const [settings, setSettings] = useState(emptySettings);
   const [effectiveSettings, setEffectiveSettings] = useState(emptyEffectiveSettings);
@@ -2475,12 +2628,27 @@ function App() {
   const [auditPackages, setAuditPackages] = useState([]);
   const [policyPacks, setPolicyPacks] = useState([]);
   const [llmRegistry, setLlmRegistry] = useState(emptyLlmRegistry);
+  const [oauthConnectionState, setOauthConnectionState] = useState(null);
+  const oauthStatusRequestId = useRef(0);
+  const oauthStatusPollTimer = useRef(null);
   const [integrationRegistry, setIntegrationRegistry] = useState(emptyIntegrationRegistry);
+  const [staticToolsReadiness, setStaticToolsReadiness] = useState(emptyStaticToolsReadiness);
   const [stats, setStats] = useState({ runs: {}, targets: {} });
   const [authInfo, setAuthInfo] = useState(defaultAuthInfo);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [lastGlobalSyncAt, setLastGlobalSyncAt] = useState("");
+  const [adminSubpage, setAdminSubpage] = useState("system");
   const [settingsSubpage, setSettingsSubpage] = useState("audit");
+  const [governanceTab, setGovernanceTab] = useState("gates");
+  const [artifactRetentionForm, setArtifactRetentionForm] = useState({
+    kind: "runs",
+    older_than_days: 30,
+    max_gb: ""
+  });
+  const [artifactRetentionSummary, setArtifactRetentionSummary] = useState(null);
+  const [artifactRetentionPreview, setArtifactRetentionPreview] = useState(null);
+  const [artifactRetentionLoading, setArtifactRetentionLoading] = useState(false);
   const [requestContext, setRequestContext] = useState(() => {
     try {
       const persisted = JSON.parse(window.localStorage.getItem(contextStorageKey) || "{}");
@@ -2736,6 +2904,14 @@ function App() {
       ? (providerCredentialDrafts[settingsDefaultApiFieldId] || "")
       : (settingsDefaultEnvCredentials.default_api_key_value || (settingsDefaultApiConfigured ? maskedApiKeyValue : "")))
     : "";
+  const settingsProviderCredentialStatus = useMemo(
+    () => getProviderCredentialStatus(llmRegistry, settings.providers_json.default_provider || "", effectiveSettings, providerCredentialDrafts),
+    [llmRegistry, settings.providers_json.default_provider, effectiveSettings, providerCredentialDrafts]
+  );
+  const settingsProviderCredentialFields = useMemo(
+    () => getProviderCredentialFields(llmRegistry, settings.providers_json.default_provider || ""),
+    [llmRegistry, settings.providers_json.default_provider]
+  );
   const settingsAgentOverrides = useMemo(
     () => settings.providers_json?.agent_overrides || {},
     [settings.providers_json]
@@ -2888,11 +3064,11 @@ function App() {
   }
 
   function updateProjectEditor(key, value) {
-    setProjectEditor((current) => ({ ...current, [key]: value }));
+    setProjectEditor((current) => ({ ...current, [key]: key === "target_kind" ? (value === "repo" ? "repo" : "path") : value }));
   }
 
   function updateProjectForm(key, value) {
-    setProjectForm((current) => ({ ...current, [key]: value }));
+    setProjectForm((current) => ({ ...current, [key]: key === "target_kind" ? (value === "repo" ? "repo" : "path") : value }));
   }
 
   function openProjectEditor(project) {
@@ -2938,10 +3114,10 @@ function App() {
   function buildProjectTargetDefaultsFromEditor(editor) {
     return {
       config_source: "project",
-      target_kind: editor.target_kind,
-      local_path: editor.target_kind === "path" ? editor.local_path : "",
+      target_kind: editor.target_kind === "repo" ? "repo" : "path",
+      local_path: editor.target_kind === "repo" ? "" : editor.local_path,
       repo_url: editor.target_kind === "repo" ? editor.repo_url : "",
-      endpoint_url: editor.target_kind === "endpoint" ? editor.endpoint_url : "",
+      endpoint_url: "",
       audit_policy_pack: "default",
       audit_package: editor.audit_package || effectiveSettings.effective.audit_defaults_json?.audit_package || "baseline-static"
     };
@@ -2950,10 +3126,10 @@ function App() {
   function buildProjectTargetDefaultsFromCreateForm(form) {
     return {
       config_source: "project",
-      target_kind: form.target_kind,
-      local_path: form.target_kind === "path" ? form.local_path : "",
+      target_kind: form.target_kind === "repo" ? "repo" : "path",
+      local_path: form.target_kind === "repo" ? "" : form.local_path,
       repo_url: form.target_kind === "repo" ? form.repo_url : "",
-      endpoint_url: form.target_kind === "endpoint" ? form.endpoint_url : "",
+      endpoint_url: "",
       audit_policy_pack: "default",
       audit_package: form.audit_package || effectiveSettings.effective.audit_defaults_json?.audit_package || "baseline-static"
     };
@@ -3015,9 +3191,10 @@ function App() {
       api("/policy-packs", undefined, requestContext),
       api("/llm-providers", undefined, requestContext),
       api("/integrations", undefined, requestContext),
+      api("/static-tools", undefined, requestContext),
       api("/review-notifications?reviewer_id=" + encodeURIComponent(requestContext.actorId || "anonymous"), undefined, requestContext),
       api("/runtime-followups", undefined, requestContext)
-    ]).then(([authInfoPayload, runsPayload, jobsPayload, runStatsPayload, targetStatsPayload, effectiveSettingsPayload, settingsPayload, documentsPayload, projectsPayload, auditPackagesPayload, policyPacksPayload, llmProvidersPayload, integrationsPayload, notificationsPayload, runtimeFollowupsPayload]) => {
+    ]).then(([authInfoPayload, runsPayload, jobsPayload, runStatsPayload, targetStatsPayload, effectiveSettingsPayload, settingsPayload, documentsPayload, projectsPayload, auditPackagesPayload, policyPacksPayload, llmProvidersPayload, integrationsPayload, staticToolsPayload, notificationsPayload, runtimeFollowupsPayload]) => {
       setAuthInfo(authInfoPayload || defaultAuthInfo);
       setRuns(runsPayload.runs || []);
       setJobs(jobsPayload.jobs || []);
@@ -3040,8 +3217,10 @@ function App() {
         environment_defaults: llmProvidersPayload.environment_defaults || {}
       });
       setIntegrationRegistry(integrationsPayload.integrations || []);
+      setStaticToolsReadiness(staticToolsPayload.static_tools || emptyStaticToolsReadiness);
       setReviewNotifications(notificationsPayload.review_notifications || []);
       setRuntimeFollowups(runtimeFollowupsPayload.runtime_followups || []);
+      setLastGlobalSyncAt(new Date().toISOString());
     }).catch((loadError) => setError(loadError.message || String(loadError)));
   }
 
@@ -3063,6 +3242,74 @@ function App() {
         setError(message);
       })
       .finally(() => setProjectDetailLoading(false));
+  }
+
+  function refreshJobsQueue(message = "Queue refreshed.") {
+    setError("");
+    return api("/runs/async", undefined, requestContext)
+      .then((payload) => {
+        setJobs(payload.jobs || []);
+        if (message) setNotice(message);
+      })
+      .catch((loadError) => setError(loadError.message || String(loadError)));
+  }
+
+  function syncAllAppData() {
+    setError("");
+    setNotice("");
+    return load().then(() => setNotice("All app data synced."));
+  }
+
+  function artifactRetentionPayload() {
+    return {
+      kind: artifactRetentionForm.kind || "runs",
+      older_than_days: Math.max(1, Number(artifactRetentionForm.older_than_days || 30)),
+      max_gb: artifactRetentionForm.max_gb === "" ? null : Math.max(0.001, Number(artifactRetentionForm.max_gb || 0))
+    };
+  }
+
+  function loadArtifactRetentionSummary(includeSize = false) {
+    setArtifactRetentionLoading(true);
+    const kind = encodeURIComponent(artifactRetentionForm.kind || "runs");
+    return api(`/artifacts/retention/summary?kind=${kind}&include_size=${includeSize ? "true" : "false"}`, undefined, requestContext)
+      .then((payload) => setArtifactRetentionSummary(payload.artifact_retention_summary || null))
+      .catch((loadError) => setError(loadError.message || String(loadError)))
+      .finally(() => setArtifactRetentionLoading(false));
+  }
+
+  function previewArtifactRetention() {
+    setArtifactRetentionLoading(true);
+    return api("/artifacts/retention/preview", {
+      method: "POST",
+      body: JSON.stringify(artifactRetentionPayload())
+    }, requestContext)
+      .then((payload) => {
+        setArtifactRetentionPreview(payload.artifact_retention || null);
+        setNotice("Artifact retention preview updated.");
+      })
+      .catch((loadError) => setError(loadError.message || String(loadError)))
+      .finally(() => setArtifactRetentionLoading(false));
+  }
+
+  function pruneArtifactRetention() {
+    if (!artifactRetentionPreview || artifactRetentionPreview.removed_count <= 0) {
+      setNotice("Preview first; no artifacts are currently selected for pruning.");
+      return Promise.resolve();
+    }
+    const confirmed = window.confirm(`Prune ${artifactRetentionPreview.removed_count} artifact director${artifactRetentionPreview.removed_count === 1 ? "y" : "ies"} and remove ${formatBytes(artifactRetentionPreview.removed_bytes)} of debug artifacts? Persisted SQLite records remain.`);
+    if (!confirmed) return Promise.resolve();
+    setArtifactRetentionLoading(true);
+    return api("/artifacts/retention/prune", {
+      method: "POST",
+      body: JSON.stringify(artifactRetentionPayload())
+    }, requestContext)
+      .then((payload) => {
+        setArtifactRetentionPreview(payload.artifact_retention || null);
+        setNotice("Artifact pruning completed.");
+        return loadArtifactRetentionSummary(false);
+      })
+      .catch((loadError) => setError(loadError.message || String(loadError)))
+      .finally(() => setArtifactRetentionLoading(false));
   }
 
   function loadRunDetail(runId) {
@@ -3092,12 +3339,16 @@ function App() {
       api("/runs/" + encodeURIComponent(runId) + "/review-comments", undefined, requestContext),
       api("/runs/" + encodeURIComponent(runId) + "/runtime-followups", undefined, requestContext),
       api("/runs/" + encodeURIComponent(runId) + "/finding-dispositions", undefined, requestContext),
+      api("/runs/" + encodeURIComponent(runId) + "/agent-invocations", undefined, requestContext),
+      api("/runs/" + encodeURIComponent(runId) + "/metrics", undefined, requestContext),
+      api("/runs/" + encodeURIComponent(runId) + "/observability-summary", undefined, requestContext),
+      api("/runs/" + encodeURIComponent(runId) + "/tool-adapters", undefined, requestContext),
       api("/runs/" + encodeURIComponent(runId) + "/outbound-preview", undefined, requestContext),
       api("/runs/" + encodeURIComponent(runId) + "/outbound-approval", undefined, requestContext),
       api("/runs/" + encodeURIComponent(runId) + "/outbound-send", undefined, requestContext),
       api("/runs/" + encodeURIComponent(runId) + "/outbound-verification", undefined, requestContext),
       api("/runs/" + encodeURIComponent(runId) + "/outbound-delivery", undefined, requestContext)
-    ]).then(([runPayload, summaryPayload, exportsIndexPayload, resolvedPayload, preflightPayload, launchIntentPayload, sandboxExecutionPayload, findingsPayload, evidenceRecordsPayload, controlResultsPayload, observationsPayload, supervisorReviewPayload, remediationPayload, findingEvaluationsPayload, webhookDeliveriesPayload, reviewActionsPayload, reviewSummaryPayload, reviewCommentsPayload, runtimeFollowupsPayload, findingDispositionsPayload, outboundPreviewPayload, outboundApprovalPayload, outboundSendPayload, outboundVerificationPayload, outboundDeliveryPayload]) => {
+    ]).then(([runPayload, summaryPayload, exportsIndexPayload, resolvedPayload, preflightPayload, launchIntentPayload, sandboxExecutionPayload, findingsPayload, evidenceRecordsPayload, controlResultsPayload, observationsPayload, supervisorReviewPayload, remediationPayload, findingEvaluationsPayload, webhookDeliveriesPayload, reviewActionsPayload, reviewSummaryPayload, reviewCommentsPayload, runtimeFollowupsPayload, findingDispositionsPayload, agentInvocationsPayload, metricsPayload, observabilitySummaryPayload, toolAdaptersPayload, outboundPreviewPayload, outboundApprovalPayload, outboundSendPayload, outboundVerificationPayload, outboundDeliveryPayload]) => {
       setSelectedRunDetail({
         run: runPayload,
         summary: summaryPayload,
@@ -3119,6 +3370,10 @@ function App() {
         reviewComments: reviewCommentsPayload,
         runtimeFollowups: runtimeFollowupsPayload,
         findingDispositions: findingDispositionsPayload,
+        agentInvocations: agentInvocationsPayload,
+        metrics: metricsPayload,
+        observabilitySummary: observabilitySummaryPayload,
+        toolAdapters: toolAdaptersPayload,
         outboundPreview: outboundPreviewPayload,
         outboundApproval: outboundApprovalPayload,
         outboundSend: outboundSendPayload,
@@ -3229,9 +3484,86 @@ function App() {
     }).finally(() => setLinkedRuntimeRerunLoading(false));
   }
 
+  function clearOAuthStatusPoll() {
+    if (!oauthStatusPollTimer.current) return;
+    clearTimeout(oauthStatusPollTimer.current);
+    oauthStatusPollTimer.current = null;
+  }
+
+  function scheduleOAuthStatusPoll(requestId, remainingChecks = 30) {
+    clearOAuthStatusPoll();
+    oauthStatusPollTimer.current = setTimeout(() => {
+      api("/llm-providers/openai_codex/status", undefined, requestContext)
+        .then((payload) => {
+          if (oauthStatusRequestId.current !== requestId) return;
+          if (payload.connected) {
+            clearOAuthStatusPoll();
+            setOauthConnectionState(payload);
+            return;
+          }
+          if (remainingChecks <= 1) {
+            setOauthConnectionState({
+              ...payload,
+              connected: false,
+              status: "not_connected",
+              note: "ChatGPT sign-in was not detected. Use Connect ChatGPT account again if the browser prompt was closed or did not finish."
+            });
+            return;
+          }
+          setOauthConnectionState((current) => ({
+            ...(current || {}),
+            connected: false,
+            status: "started",
+            command: payload.command || current?.command || "codex",
+            checked_at: payload.checked_at || new Date().toISOString(),
+            note: "Waiting for ChatGPT sign-in to finish. This status updates automatically."
+          }));
+          scheduleOAuthStatusPoll(requestId, remainingChecks - 1);
+        })
+        .catch(() => {
+          if (oauthStatusRequestId.current === requestId && remainingChecks > 1) {
+            scheduleOAuthStatusPoll(requestId, remainingChecks - 1);
+          }
+        });
+    }, 2500);
+  }
+
   useEffect(() => {
     load();
   }, [requestContext.workspaceId, requestContext.projectId, requestContext.actorId, requestContext.apiKey, currentSettingsScopeLevel]);
+
+  useEffect(() => {
+    if (view !== "jobs" || !jobs.some(isActiveAsyncJob)) return undefined;
+    const timer = window.setInterval(() => {
+      refreshJobsQueue("");
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [view, jobs.map((job) => `${job.job_id}:${job.status}`).join("|"), requestContext.workspaceId, requestContext.projectId, requestContext.actorId, requestContext.apiKey]);
+
+  useEffect(() => {
+    if (view !== "settings" || settingsSubpage !== "artifacts") return;
+    loadArtifactRetentionSummary(false);
+  }, [view, settingsSubpage, artifactRetentionForm.kind, requestContext.workspaceId, requestContext.actorId, requestContext.apiKey]);
+
+  useEffect(() => {
+    if (settings.providers_json.default_provider !== "openai_codex") {
+      oauthStatusRequestId.current += 1;
+      clearOAuthStatusPoll();
+      setOauthConnectionState(null);
+      return;
+    }
+    const requestId = oauthStatusRequestId.current + 1;
+    oauthStatusRequestId.current = requestId;
+    api("/llm-providers/openai_codex/status", undefined, requestContext)
+      .then((payload) => {
+        if (oauthStatusRequestId.current === requestId) setOauthConnectionState(payload);
+      })
+      .catch(() => {
+        if (oauthStatusRequestId.current === requestId) setOauthConnectionState(null);
+      });
+  }, [settings.providers_json.default_provider, requestContext.workspaceId, requestContext.projectId, requestContext.actorId, requestContext.apiKey]);
+
+  useEffect(() => () => clearOAuthStatusPoll(), []);
 
   useEffect(() => {
     if (!runs.length) {
@@ -3462,6 +3794,54 @@ function App() {
         }
       }),
       "Run launched."
+    );
+  }
+
+  function launchDiagnosticRun(kind, target = "pi") {
+    const request = buildDiagnosticsRunRequest({ kind, target, effectiveSettings, auditPackages });
+    if (kind !== "plumbing" && !request.llm_provider) {
+      setError("Configure a real LLM provider in Settings before launching static audit smoke or benchmark diagnostics.");
+      return;
+    }
+    act(
+      () => api("/runs/async", {
+        method: "POST",
+        body: JSON.stringify({
+          request,
+          start_immediately: true
+        })
+      }, requestContext).then((payload) => {
+        if (payload?.job?.current_run_id) {
+          setSelectedRunId(payload.job.current_run_id);
+        }
+        setView("jobs");
+        return payload;
+      }),
+      kind === "plumbing"
+        ? "Plumbing smoke job queued."
+        : kind === "static_audit"
+          ? "Static audit smoke job queued."
+        : "Benchmark job queued."
+    );
+  }
+
+  function openAsyncJobRun(job) {
+    if (!job?.current_run_id) return;
+    act(
+      () => load().then(() => {
+        setSelectedRunId(job.current_run_id);
+        setView("runs");
+      }),
+      "Run opened."
+    );
+  }
+
+  function refreshDiagnosticTools() {
+    act(
+      () => api("/static-tools", undefined, requestContext).then((payload) => {
+        setStaticToolsReadiness(payload.static_tools || emptyStaticToolsReadiness);
+      }),
+      "External tool readiness refreshed."
     );
   }
 
@@ -4011,16 +4391,13 @@ function App() {
           ])
         ]),
         h("div", { key: "fields", className: "grid gap-4 md:grid-cols-2" }, [
-          h(Field, { key: "target-kind", label: "Target Kind" }, Select({ value: runForm.target_kind, onChange: (event) => updateRunForm("target_kind", event.target.value) }, [
+          h(Field, { key: "target-kind", label: "Target Kind" }, Select({ value: runForm.target_kind === "repo" ? "repo" : "path", onChange: (event) => updateRunForm("target_kind", event.target.value) }, [
             h("option", { key: "path", value: "path" }, "local path"),
-            h("option", { key: "repo", value: "repo" }, "repo url"),
-            h("option", { key: "endpoint", value: "endpoint" }, "endpoint url")
+            h("option", { key: "repo", value: "repo" }, "repo url")
           ])),
           runForm.target_kind === "repo"
             ? h(Field, { key: "repo", label: "Repository URL" }, h(Input, { value: runForm.repo_url, onChange: (event) => updateRunForm("repo_url", event.target.value), placeholder: "https://github.com/org/repo or git@github.com:org/repo.git" }))
-            : runForm.target_kind === "endpoint"
-              ? h(Field, { key: "endpoint", label: "Endpoint URL" }, h(Input, { value: runForm.endpoint_url, onChange: (event) => updateRunForm("endpoint_url", event.target.value), placeholder: "https://service.example.com/v1" }))
-              : h(Field, { key: "path", label: "Local Path" }, h(Input, { value: runForm.local_path, onChange: (event) => updateRunForm("local_path", event.target.value), placeholder: "fixtures/validation-targets/agent-tool-boundary-risky" })),
+            : h(Field, { key: "path", label: "Local Path" }, h(Input, { value: runForm.local_path, onChange: (event) => updateRunForm("local_path", event.target.value), placeholder: "fixtures/validation-targets/agent-tool-boundary-risky" })),
           h(Field, { key: "mode", label: "Run Mode" }, Select({ value: runForm.run_mode, onChange: (event) => updateRunForm("run_mode", event.target.value) }, [
             h("option", { key: "placeholder", value: "", disabled: true }, "select run mode"),
             h("option", { key: "static", value: "static" }, "static"),
@@ -4092,9 +4469,7 @@ function App() {
         ]) : null,
         h("div", { key: "target-hint", className: "mt-4 rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm text-muted" }, runForm.target_kind === "repo"
           ? "Use a repo URL when you want canonical GitHub/repository identity for scoring, outbound integrations, and repo-linked history."
-          : runForm.target_kind === "endpoint"
-            ? "Endpoint targets are best for black-box or hosted-service validation. Runtime checks matter more than repository evidence here."
-            : "Local paths are ideal for self-hosted repos, local clones, and fixture-based regression checks."),
+          : "Local paths are ideal for self-hosted repos, local clones, and fixture-based regression checks."),
         launchReadiness.issues.length
           ? h("div", { key: "validation", className: "mt-4 rounded-2xl border border-red-200 bg-red-50/80 px-4 py-3 text-sm text-red-800" }, [
             h("div", { key: "title", className: "font-medium" }, "Launch Input Issues"),
@@ -4105,7 +4480,7 @@ function App() {
         h("div", { key: "resolved-profile", className: "mt-4 rounded-2xl border border-border bg-stone-100/80 p-4 text-sm" }, [
           h("div", { key: "title", className: "font-medium" }, "Resolved Launch Profile"),
           h("div", { key: "body", className: "mt-2 grid gap-2 md:grid-cols-2 text-muted" }, [
-            h("div", { key: "target" }, "target: " + (runForm.target_kind === "repo" ? (runForm.repo_url || "unset") : runForm.target_kind === "endpoint" ? (runForm.endpoint_url || "unset") : (runForm.local_path || "unset"))),
+            h("div", { key: "target" }, "target: " + (runForm.target_kind === "repo" ? (runForm.repo_url || "unset") : (runForm.local_path || "unset"))),
             h("div", { key: "audit" }, "package: " + (runForm.audit_package || "unset")),
             h("div", { key: "policy" }, "policy pack: " + (runForm.audit_policy_pack || "default")),
             h("div", { key: "provider" }, "provider/model: " + runForm.llm_provider + (runForm.llm_model ? "/" + runForm.llm_model : "") + (selectedProvider ? ` (${selectedProvider.mode === "local_mock" ? "local mock" : "live api"})` : "")),
@@ -4305,20 +4680,308 @@ function App() {
     ])
   ]);
 
-  const jobsView = h(Card, { title: "Async Jobs", description: "Durable queued work with retry and cancel controls." }, jobs.length ? jobs.map((job) => h("div", {
-    key: job.job_id,
-    className: "mb-3 flex flex-col gap-4 rounded-2xl border border-border bg-white/70 p-4 lg:flex-row lg:items-center lg:justify-between"
-  }, [
-    h("div", { key: "copy" }, [
-      h("div", { key: "id", className: "font-medium" }, job.job_id),
-      h("div", { key: "detail", className: "text-sm text-muted" }, "Attempt " + job.latest_attempt_number + " - webhook " + (job.completion_webhook_status || "none"))
+  const jobSearchTerm = jobSearch.trim().toLowerCase();
+  const sortedJobs = [...jobs].sort((left, right) => {
+    const activeDelta = Number(isActiveAsyncJob(right)) - Number(isActiveAsyncJob(left));
+    if (activeDelta) return activeDelta;
+    const leftUpdated = new Date(left.updated_at || left.created_at || 0).getTime();
+    const rightUpdated = new Date(right.updated_at || right.created_at || 0).getTime();
+    return rightUpdated - leftUpdated;
+  });
+  const filteredJobs = sortedJobs.filter((job) => {
+    const type = getAsyncJobType(job);
+    const statusMatches = jobStatusFilter === "all"
+      || (jobStatusFilter === "active" && isActiveAsyncJob(job))
+      || (jobStatusFilter === "completed" && job.status === "succeeded")
+      || (jobStatusFilter === "failed" && job.status === "failed")
+      || (jobStatusFilter === "canceled" && job.status === "canceled");
+    const typeMatches = jobTypeFilter === "all" || type === jobTypeFilter;
+    const searchText = [
+      job.job_id,
+      job.current_run_id,
+      job.status,
+      type,
+      asyncJobTypeLabel(type),
+      getAsyncJobTargetName(job),
+      job.request_json?.repo_url,
+      job.request_json?.local_path,
+      job.request_json?.audit_package,
+      job.request_json?.run_mode
+    ].filter(Boolean).join(" ").toLowerCase();
+    const searchMatches = !jobSearchTerm || searchText.includes(jobSearchTerm);
+    return statusMatches && typeMatches && searchMatches;
+  });
+  const jobCounts = {
+    all: jobs.length,
+    active: jobs.filter(isActiveAsyncJob).length,
+    completed: jobs.filter((job) => job.status === "succeeded").length,
+    failed: jobs.filter((job) => job.status === "failed").length,
+    canceled: jobs.filter((job) => job.status === "canceled").length
+  };
+  const jobStatusFilters = [
+    { id: "all", label: "All", count: jobCounts.all },
+    { id: "active", label: "Active", count: jobCounts.active },
+    { id: "failed", label: "Failed", count: jobCounts.failed },
+    { id: "completed", label: "Completed", count: jobCounts.completed },
+    { id: "canceled", label: "Canceled", count: jobCounts.canceled }
+  ];
+  const jobTypeFilters = [
+    { id: "all", label: "All types" },
+    { id: "system_check", label: "System checks" },
+    { id: "static_smoke", label: "Static smoke" },
+    { id: "benchmark", label: "Benchmarks" },
+    { id: "audit", label: "Audits" },
+    { id: "runtime_followup", label: "Runtime follow-ups" }
+  ];
+  const jobsView = h(Card, { title: "Async Jobs", description: "Execution queue for diagnostics, audits, retries, and follow-up work." }, [
+    h("div", { key: "summary", className: "mb-4 grid gap-3 md:grid-cols-5" }, [
+      h("div", { key: "all", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+        h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-slate-500" }, "All Jobs"),
+        h("div", { key: "value", className: "mt-1 text-2xl font-semibold text-slate-950" }, String(jobCounts.all))
+      ]),
+      h("div", { key: "active", className: "rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3" }, [
+        h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-amber-700" }, "Active"),
+        h("div", { key: "value", className: "mt-1 text-2xl font-semibold text-amber-950" }, String(jobCounts.active))
+      ]),
+      h("div", { key: "failed", className: "rounded-2xl border border-red-200 bg-red-50 px-4 py-3" }, [
+        h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-red-700" }, "Failed"),
+        h("div", { key: "value", className: "mt-1 text-2xl font-semibold text-red-950" }, String(jobCounts.failed))
+      ]),
+      h("div", { key: "completed", className: "rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3" }, [
+        h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-emerald-700" }, "Succeeded"),
+        h("div", { key: "value", className: "mt-1 text-2xl font-semibold text-emerald-950" }, String(jobCounts.completed))
+      ]),
+      h("div", { key: "shown", className: "rounded-2xl border border-slate-200 bg-white px-4 py-3" }, [
+        h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-slate-500" }, "Shown"),
+        h("div", { key: "value", className: "mt-1 text-2xl font-semibold text-slate-950" }, String(filteredJobs.length))
+      ])
     ]),
-    h("div", { key: "actions", className: "flex items-center gap-3" }, [
-      h(Badge, { key: "status" }, job.status),
-      h(Button, { key: "cancel", variant: "outline", onClick: () => act(() => api("/runs/async/" + encodeURIComponent(job.job_id) + "/cancel", { method: "POST", body: "{}" }, requestContext), "Job cancel submitted.") }, "Cancel"),
-      h(Button, { key: "retry", onClick: () => act(() => api("/runs/async/" + encodeURIComponent(job.job_id) + "/retry", { method: "POST", body: "{}" }, requestContext), "Job retry submitted.") }, "Retry")
+    h("div", { key: "toolbar", className: "mb-4 grid gap-3 xl:grid-cols-[minmax(0,1fr)_220px_auto]" }, [
+      h(Input, {
+        key: "search",
+        value: jobSearch,
+        onChange: (event) => setJobSearch(event.target.value),
+        placeholder: "Search job id, run id, target, repo, status"
+      }),
+      Select({
+        key: "type",
+        value: jobTypeFilter,
+        onChange: (event) => setJobTypeFilter(event.target.value)
+      }, jobTypeFilters.map((item) => h("option", { key: item.id, value: item.id }, item.label))),
+      h(Button, { key: "refresh", variant: "outline", onClick: () => refreshJobsQueue() }, "Refresh Queue")
+    ]),
+    h("div", { key: "filters", className: "mb-5 flex flex-wrap gap-2" }, jobStatusFilters.map((item) => h("button", {
+      key: item.id,
+      type: "button",
+      onClick: () => setJobStatusFilter(item.id),
+      className: cn(
+        "rounded-xl border px-3 py-2 text-sm font-medium transition-colors",
+        jobStatusFilter === item.id
+          ? "border-slate-900 bg-slate-900 text-white"
+          : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+      )
+    }, `${item.label} ${item.count}`))),
+    h("div", { key: "refresh-note", className: "mb-4 text-sm text-muted" }, jobs.some(isActiveAsyncJob)
+      ? "Active jobs refresh automatically and remain sorted above terminal jobs."
+      : "Completed jobs link back to their produced run."),
+    filteredJobs.length ? filteredJobs.map((job) => {
+      const canCancelJob = isActiveAsyncJob(job);
+      const canRetryJob = job.status === "failed" || job.status === "canceled";
+      const canViewRun = isTerminalAsyncJob(job) && Boolean(job.current_run_id);
+      const type = getAsyncJobType(job);
+      const targetName = getAsyncJobTargetName(job);
+      const repoUrl = job.request_json?.repo_url || "";
+      return h("div", {
+        key: job.job_id,
+        className: cn(
+          "mb-3 rounded-2xl border bg-white/80 p-4",
+          isActiveAsyncJob(job) ? "border-amber-200" : job.status === "failed" ? "border-red-200" : "border-border"
+        )
+      }, [
+        h("div", { key: "row", className: "flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between" }, [
+          h("div", { key: "copy", className: "min-w-0" }, [
+            h("div", { key: "title-row", className: "flex flex-wrap items-center gap-2" }, [
+              h("div", { key: "target", className: "text-base font-semibold text-slate-950" }, targetName),
+              h(Badge, { key: "type" }, asyncJobTypeLabel(type)),
+              h(Badge, { key: "status" }, job.status)
+            ]),
+            h("div", { key: "ids", className: "mt-2 grid gap-1 text-sm text-muted" }, [
+              h("div", { key: "job", className: "break-all" }, `job: ${job.job_id}`),
+              job.current_run_id ? h("div", { key: "run", className: "break-all" }, `run: ${job.current_run_id}`) : null,
+              repoUrl ? h("div", { key: "repo", className: "break-all" }, `repo: ${repoUrl}`) : null
+            ].filter(Boolean))
+          ]),
+          h("div", { key: "actions", className: "flex flex-wrap items-center gap-3" }, [
+            h(Button, { key: "view", disabled: !canViewRun, onClick: () => openAsyncJobRun(job) }, "View Run"),
+            h(Button, { key: "retry", variant: "outline", disabled: !canRetryJob, onClick: () => act(() => api("/runs/async/" + encodeURIComponent(job.job_id) + "/retry", { method: "POST", body: "{}" }, requestContext), "Job retry submitted.") }, "Retry"),
+            h(Button, { key: "cancel", variant: "outline", disabled: !canCancelJob, onClick: () => act(() => api("/runs/async/" + encodeURIComponent(job.job_id) + "/cancel", { method: "POST", body: "{}" }, requestContext), "Job cancel submitted.") }, "Cancel")
+          ])
+        ]),
+        h("div", { key: "meta", className: "mt-4 grid gap-3 md:grid-cols-4" }, [
+          h("div", { key: "attempt", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+            h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-slate-500" }, "Attempt"),
+            h("div", { key: "value", className: "mt-1 font-semibold text-slate-950" }, String(job.latest_attempt_number || 1))
+          ]),
+          h("div", { key: "duration", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+            h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-slate-500" }, "Duration"),
+            h("div", { key: "value", className: "mt-1 font-semibold text-slate-950" }, formatAsyncJobDuration(job))
+          ]),
+          h("div", { key: "started", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+            h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-slate-500" }, "Started"),
+            h("div", { key: "value", className: "mt-1 text-sm font-semibold text-slate-950" }, formatDate(job.started_at))
+          ]),
+          h("div", { key: "updated", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+            h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-slate-500" }, "Updated"),
+            h("div", { key: "value", className: "mt-1 text-sm font-semibold text-slate-950" }, formatDate(job.updated_at))
+          ])
+        ]),
+        job.error ? h("div", { key: "error", className: "mt-3 rounded-2xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700" }, job.error) : null
+      ]);
+    }) : h("div", { key: "empty", className: "rounded-2xl border border-dashed border-slate-200 px-4 py-6 text-sm text-muted" }, jobs.length
+      ? "No jobs match the current filters."
+      : "No async jobs recorded.")
+  ]);
+
+  const diagnosticDefaultProvider = effectiveSettings.effective.providers_json?.default_provider || "";
+  const diagnosticDefaultModel = effectiveSettings.effective.providers_json?.default_model || "";
+  const diagnosticTools = staticToolsReadiness.tools || [];
+  const diagnosticMandatoryTools = diagnosticTools.filter((tool) => tool.mandatory);
+  const diagnosticDefaultTools = diagnosticTools.filter((tool) => tool.default_enabled);
+  const adminNavItems = [
+    { id: "system", label: "System" },
+    { id: "smoke", label: "Smoke Tests" },
+    { id: "benchmarks", label: "Benchmarks" },
+    { id: "tooling", label: "Tooling" },
+    { id: "observability", label: "Observability" }
+  ];
+  const adminSystemPanel = h("div", { className: "space-y-6" }, [
+    h(Card, { key: "app-state", title: "App State", description: "Admin sync and local API context for development or stale UI recovery.", className: "border-slate-200 bg-white shadow-sm" }, [
+      h("div", { key: "top", className: "flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between" }, [
+        h(DetailList, { key: "details", items: [
+          { label: "API Health", value: authInfo.trusted_mode ? "trusted_local" : authInfo.auth_mode || "authenticated" },
+          { label: "Workspace", value: requestContext.workspaceId || "default" },
+          { label: "Project", value: requestContext.projectId || "default" },
+          { label: "Last Global Sync", value: lastGlobalSyncAt ? formatDate(lastGlobalSyncAt) : "not synced" }
+        ] }),
+        h("div", { key: "actions", className: "flex flex-wrap gap-3 lg:justify-end" }, [
+          h(Button, { key: "sync", onClick: syncAllAppData }, "Sync All App Data")
+        ])
+      ]),
+      h("div", { key: "note", className: "mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600" }, "Use this when another tab, CLI command, server restart, or environment change may have made the local UI stale. Normal pages use scoped refreshes where possible.")
     ])
-  ])) : h("div", { className: "text-sm text-muted" }, "No async jobs recorded."));
+  ]);
+  const adminSmokePanel = h("div", { className: "grid gap-4 xl:grid-cols-2" }, [
+      h(Card, { key: "system", title: "System Check", description: "Mock-provider plumbing check for installation and artifact flow. This is not an audit-quality result.", className: "border-slate-200 bg-white shadow-sm" }, [
+        h(DetailList, { key: "details", items: [
+          { label: "Provider", value: "mock" },
+          { label: "Target", value: "Pi public repo" },
+          { label: "Validates", value: "clone, tools, persistence, reports, UI" },
+          { label: "Audit Quality", value: "none" }
+        ] }),
+        h("div", { key: "actions", className: "mt-4 flex flex-wrap gap-3" }, [
+          h(Button, { key: "launch", onClick: () => launchDiagnosticRun("plumbing", "pi") }, "Run System Check")
+        ])
+      ]),
+      h(Card, { key: "static-audit", title: "Static Audit Smoke", description: "Real-provider static audit check for agent, lane, token, and model orchestration.", className: "border-slate-200 bg-white shadow-sm" }, [
+        h(DetailList, { key: "details", items: [
+          { label: "Provider", value: diagnosticDefaultProvider || "not configured" },
+          { label: "Model", value: diagnosticDefaultModel || "provider default" },
+          { label: "Target", value: "Pi public repo" },
+          { label: "Validates", value: "real LLM agents and static lanes" }
+        ] }),
+        h("div", { key: "actions", className: "mt-4 flex flex-wrap gap-3" }, [
+          h(Button, { key: "launch", onClick: () => launchDiagnosticRun("static_audit", "pi"), disabled: !diagnosticDefaultProvider }, "Run Static Audit Smoke"),
+          !diagnosticDefaultProvider ? h(Button, { key: "settings", variant: "outline", onClick: () => { setView("settings"); setSettingsSubpage("llm"); } }, "Configure Provider") : null
+        ].filter(Boolean))
+      ])
+  ]);
+  const adminBenchmarksPanel = h("div", { className: "space-y-6" }, [
+      h(Card, { key: "benchmark", title: "Benchmark Runs", description: "Controlled public-repo benchmark jobs. Use after smoke checks pass.", className: "border-slate-200 bg-white shadow-sm" }, [
+        h(DetailList, { key: "details", items: [
+          { label: "Pi Reference", value: diagnosticsPiCommit },
+          { label: "OpenClaw", value: "heavier benchmark target" },
+          { label: "Provider", value: diagnosticDefaultProvider || "not configured" },
+          { label: "Purpose", value: "repeatable comparison inputs" }
+        ] }),
+        h("div", { key: "actions", className: "mt-4 flex flex-wrap gap-3" }, [
+          h(Button, { key: "pi", onClick: () => launchDiagnosticRun("benchmark", "pi"), disabled: !diagnosticDefaultProvider }, "Benchmark Pi"),
+          h(Button, { key: "openclaw", variant: "outline", onClick: () => launchDiagnosticRun("benchmark", "openclaw"), disabled: !diagnosticDefaultProvider }, "Benchmark OpenClaw")
+        ])
+      ]),
+      h(Card, { key: "pinning", title: "Smoke Target Pinning", description: "Pi should be pinned by reference for diagnostics, but not vendored into Tethermark.", className: "border-slate-200 bg-white shadow-sm" }, [
+        h("div", { key: "copy", className: "space-y-3 text-sm leading-6 text-slate-600" }, [
+          h("p", { key: "p1" }, `Use Pi as the default smoke target at commit ${diagnosticsPiCommit}.`),
+          h("p", { key: "p2" }, "Do not preinstall or vendor the Pi repository into Tethermark. A pinned remote reference keeps the install smaller, avoids redistributing third-party code, and still gives deterministic expected behavior when the target is cloned for diagnostics."),
+          h("p", { key: "p3" }, "For offline diagnostics, keep an optional local fixture separately from the public benchmark path.")
+        ])
+      ])
+  ]);
+  const adminToolingPanel = h("div", { className: "space-y-6" }, [
+    h(Card, { key: "tool-doctor", title: "External Tool Doctor", description: "Local scanner readiness for static checks and fallback planning.", className: "border-slate-200 bg-white shadow-sm" }, [
+      h("div", { key: "top", className: "mb-4 flex flex-wrap items-center justify-between gap-3" }, [
+        h("div", { key: "status", className: "flex flex-wrap gap-2" }, [
+          h(Badge, { key: "overall" }, staticToolsReadiness.status || "unknown"),
+          h(Badge, { key: "gate" }, staticToolsReadiness.gate_policy || "warn"),
+          h(Badge, { key: "path" }, staticToolsReadiness.tool_path?.env_var || "HARNESS_STATIC_TOOLS_PATH")
+        ]),
+        h(Button, { key: "refresh", variant: "outline", onClick: refreshDiagnosticTools }, "Refresh Tools")
+      ]),
+      diagnosticDefaultTools.length
+        ? h("div", { key: "tools", className: "grid gap-3 md:grid-cols-3" }, diagnosticDefaultTools.map((tool) => h("div", { key: tool.id, className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "head", className: "flex items-start justify-between gap-3" }, [
+            h("div", { key: "copy" }, [
+              h("div", { key: "label", className: "font-medium text-slate-900" }, tool.label),
+              h("div", { key: "cmd", className: "mt-1 text-xs text-slate-500" }, tool.command || "internal")
+            ]),
+            h(Badge, { key: "status" }, tool.status)
+          ]),
+          h("div", { key: "summary", className: "mt-2 text-sm text-slate-500" }, tool.summary),
+          tool.version ? h("div", { key: "version", className: "mt-2 text-xs text-slate-500" }, tool.version) : null
+        ])))
+        : h("div", { key: "empty", className: "text-sm text-slate-500" }, "No external tool readiness data is available.")
+    ])
+  ]);
+  const adminObservabilityPanel = h("div", { className: "space-y-6" }, [
+    h(Card, { key: "observability", title: "Observability Inspector", description: "Open a run to inspect agent calls, tokens, tool rollups, stage timings, reuse, and fallback status.", className: "border-slate-200 bg-white shadow-sm" }, [
+      h(DetailList, { key: "summary", items: [
+        { label: "Current Runs", value: String(runs.length) },
+        { label: "Async Jobs", value: String(jobs.length) },
+        { label: "Mandatory Tools", value: diagnosticMandatoryTools.map((tool) => `${tool.id}:${tool.status}`).join(", ") || "none" },
+        { label: "Inspect Path", value: "Runs -> selected run -> Overview -> Execution Observability" }
+      ] }),
+      h("div", { key: "actions", className: "mt-4 flex flex-wrap gap-3" }, [
+        h(Button, { key: "runs", onClick: () => setView("runs") }, "Open Runs"),
+        h(Button, { key: "jobs", variant: "outline", onClick: () => setView("jobs") }, "Open Jobs")
+      ])
+    ])
+  ]);
+  const adminSubpageContent = {
+    system: adminSystemPanel,
+    smoke: adminSmokePanel,
+    benchmarks: adminBenchmarksPanel,
+    tooling: adminToolingPanel,
+    observability: adminObservabilityPanel
+  }[adminSubpage] || adminSystemPanel;
+  const adminView = h("section", { className: "overflow-hidden rounded-3xl border border-slate-200 bg-white xl:grid xl:grid-cols-[220px_minmax(0,1fr)]" }, [
+    h("aside", { key: "admin-nav", className: "border-b border-slate-200 bg-slate-50/80 px-4 py-5 xl:border-b-0 xl:border-r" }, [
+      h("div", { key: "label", className: "px-2 text-xs font-medium text-slate-400" }, "Admin"),
+      h("nav", { key: "nav", className: "mt-3 grid gap-1.5" }, adminNavItems.map((item) => h("button", {
+        key: item.id,
+        type: "button",
+        onClick: () => setAdminSubpage(item.id),
+        className: cn(
+          "flex items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition-colors",
+          adminSubpage === item.id
+            ? "bg-slate-100 font-semibold text-slate-950"
+            : "text-slate-700 hover:bg-slate-50"
+        )
+      }, [
+        h("span", { key: "dot", className: cn("h-2.5 w-2.5 rounded-full", adminSubpage === item.id ? "bg-slate-900" : "bg-slate-300") }),
+        h("span", { key: "text" }, item.label)
+      ])))
+    ]),
+    h("div", { key: "panel", className: "min-w-0 bg-white px-6 py-6" }, adminSubpageContent)
+  ]);
 
   const runsDetailPane = h(RunDetailPanel, {
     key: "detail",
@@ -4621,10 +5284,10 @@ function App() {
   const settingsNavItems = [
     { id: "audit", label: "Audit Type", description: "Audit methodology, scope, and run-shape defaults." },
     { id: "llm", label: "Agent Configuration", description: "Default models, credentials, and agent routing." },
-    { id: "review", label: "Readiness / Review", description: "Readiness gates and review cadence defaults." },
-    { id: "policy", label: "Policy Pack", description: "Default OSS supervision policy details." },
-    { id: "documents", label: "Documents", description: "Attached policy and reference documents." },
-    { id: "integrations", label: "Integrations", description: "Outbound delivery and repository integration settings." }
+    { id: "static-tools", label: "External Tools", description: "External audit tool readiness and inclusion defaults." },
+    { id: "governance", label: "Governance", description: "Gates, policy packs, and reference documents." },
+    { id: "integrations", label: "Integrations", description: "Outbound delivery and repository integration settings." },
+    { id: "artifacts", label: "Artifacts", description: "Debug artifact retention and pruning." }
   ];
 
   const saveSettings = () => act(
@@ -4650,8 +5313,9 @@ function App() {
       })())
     }, requestContext).then((payload) => Promise.all([
       api("/ui/settings?scope_level=effective", undefined, requestContext),
-      api("/llm-providers", undefined, requestContext)
-    ]).then(([effectivePayload, llmProvidersPayload]) => {
+      api("/llm-providers", undefined, requestContext),
+      api("/static-tools", undefined, requestContext)
+    ]).then(([effectivePayload, llmProvidersPayload, staticToolsPayload]) => {
       const nextEnvironmentDefaults = llmProvidersPayload.environment_defaults || {};
       setSettings(applyEnvironmentDefaultsToSettings(payload.settings || emptySettings, nextEnvironmentDefaults));
       setLlmRegistry({
@@ -4667,6 +5331,7 @@ function App() {
         layers: effectivePayload.layers || emptyEffectiveSettings.layers
       }, nextEnvironmentDefaults);
       setEffectiveSettings(nextEffectiveSettings);
+      setStaticToolsReadiness(staticToolsPayload.static_tools || emptyStaticToolsReadiness);
       setRunForm(deriveRunFormDefaults(currentProject, nextEffectiveSettings, auditPackages));
       setPreflightSummary(null);
       setPreflightStale(true);
@@ -4681,6 +5346,124 @@ function App() {
     updateSettings("providers_json", "default_provider", selectedModel?.provider_id || "");
     updateSettings("providers_json", "default_model", selectedModel?.id || "");
   };
+
+  const connectSelectedOAuthProvider = () => {
+    if (settings.providers_json.default_provider !== "openai_codex") return;
+    const requestId = oauthStatusRequestId.current + 1;
+    oauthStatusRequestId.current = requestId;
+    clearOAuthStatusPoll();
+    act(
+      () => api("/ui/settings?scope_level=" + encodeURIComponent(currentSettingsScopeLevel), {
+        method: "PUT",
+        body: JSON.stringify({
+          providers: settings.providers_json,
+          credentials: buildSettingsCredentialsPayload(settings, llmRegistry, providerCredentialDrafts)
+        })
+      }, requestContext).then(() => api("/llm-providers/openai_codex/status", undefined, requestContext)).then((statusPayload) => {
+        if (statusPayload.connected) {
+          if (oauthStatusRequestId.current === requestId) {
+            setOauthConnectionState({
+              ...statusPayload,
+              note: "An existing ChatGPT Codex session is already signed in on this machine. No new browser sign-in was started."
+            });
+          }
+          return statusPayload;
+        }
+        return api("/llm-providers/openai_codex/connect", {
+          method: "POST",
+          body: JSON.stringify({})
+        }, requestContext);
+      }).then((payload) => {
+        if (oauthStatusRequestId.current === requestId) {
+          if (payload.connected) {
+            setOauthConnectionState(payload);
+          } else {
+            setOauthConnectionState({
+              status: "started",
+              connected: false,
+              command: payload.command || "codex",
+              checked_at: payload.checked_at || new Date().toISOString(),
+              note: payload.note || "A browser sign-in window should open. This status updates automatically after sign-in finishes."
+            });
+            scheduleOAuthStatusPoll(requestId);
+          }
+        }
+        return Promise.all([
+          api("/ui/settings?scope_level=" + encodeURIComponent(currentSettingsScopeLevel), undefined, requestContext),
+          api("/llm-providers", undefined, requestContext)
+        ]).then(([settingsPayload, llmProvidersPayload]) => {
+          const nextEnvironmentDefaults = llmProvidersPayload.environment_defaults || {};
+          setLlmRegistry({
+            providers: llmProvidersPayload.providers || [],
+            presets: llmProvidersPayload.presets || [],
+            environment_defaults: nextEnvironmentDefaults
+          });
+          setSettings(applyEnvironmentDefaultsToSettings(settingsPayload.settings || settings, nextEnvironmentDefaults));
+          return payload;
+        });
+      }),
+      "Connecting ChatGPT account."
+    );
+  };
+
+  const refreshSelectedOAuthProviderStatus = () => {
+    if (settings.providers_json.default_provider !== "openai_codex") return;
+    const requestId = oauthStatusRequestId.current + 1;
+    oauthStatusRequestId.current = requestId;
+    clearOAuthStatusPoll();
+    act(
+      () => api("/llm-providers/openai_codex/status", undefined, requestContext).then((payload) => {
+        if (oauthStatusRequestId.current === requestId) setOauthConnectionState(payload);
+        return api("/llm-providers", undefined, requestContext).then((llmProvidersPayload) => {
+          setLlmRegistry({
+            providers: llmProvidersPayload.providers || [],
+            presets: llmProvidersPayload.presets || [],
+            environment_defaults: llmProvidersPayload.environment_defaults || {}
+          });
+          return payload;
+        });
+      }),
+      "Checked Codex connection."
+    );
+  };
+
+  const saveAndCheckSelectedOAuthProvider = () => {
+    if (settings.providers_json.default_provider !== "openai_codex") return;
+    const requestId = oauthStatusRequestId.current + 1;
+    oauthStatusRequestId.current = requestId;
+    clearOAuthStatusPoll();
+    act(
+      () => api("/ui/settings?scope_level=" + encodeURIComponent(currentSettingsScopeLevel), {
+        method: "PUT",
+        body: JSON.stringify({
+          providers: settings.providers_json,
+          credentials: buildSettingsCredentialsPayload(settings, llmRegistry, providerCredentialDrafts)
+        })
+      }, requestContext).then(() => api("/llm-providers/openai_codex/status", undefined, requestContext)).then((payload) => {
+        if (oauthStatusRequestId.current === requestId) setOauthConnectionState(payload);
+        return api("/llm-providers", undefined, requestContext).then((llmProvidersPayload) => {
+          const nextEnvironmentDefaults = llmProvidersPayload.environment_defaults || {};
+          setLlmRegistry({
+            providers: llmProvidersPayload.providers || [],
+            presets: llmProvidersPayload.presets || [],
+            environment_defaults: nextEnvironmentDefaults
+          });
+          setSettings(applyEnvironmentDefaultsToSettings(settings, nextEnvironmentDefaults));
+          return payload;
+        });
+      }),
+      "Saved provider and checked connection."
+    );
+  };
+
+  const oauthConnected = Boolean(oauthConnectionState?.connected);
+  const oauthStatusBadge = oauthConnectionState
+    ? (oauthConnected ? "connected" : oauthConnectionState.status === "started" ? "sign-in started" : "needs sign-in")
+    : "not checked";
+  const oauthStatusNote = oauthConnectionState?.note
+    || (settingsProviderCredentialStatus.configured
+      ? "Codex is configured for local runs. Check the connection if this is the first time using it on this machine."
+      : "Connect your ChatGPT account once on this machine. Tethermark will use that local Codex session for manual runtime audits.");
 
   const settingsLlmPanel = h("div", { className: "space-y-6" }, [
     h(Card, { key: "llm-defaults", title: "Agent Configuration" }, [
@@ -4705,30 +5488,46 @@ function App() {
             .filter((item) => item.provider_id === provider.id && item.provider_id !== "mock")
             .map((item) => h("option", { key: item.value, value: item.value }, item.label))))
         ])),
-        h(Field, { key: "api", label: "API key" }, h("div", { className: "space-y-2" }, [
-          h(PasswordInput, {
-            shown: Boolean(visibleApiKeys.default),
-            onToggleShown: () => toggleVisibleApiKey("default"),
-            value: settingsDefaultApiDisplayValue,
-            onFocus: (event) => settingsDefaultApiConfigured && event.target.select(),
-            onChange: (event) => settingsDefaultApiFieldId && updateProviderCredentialDraft(settingsDefaultApiFieldId, event.target.value),
-            placeholder: settingsDefaultEnvCredentials.default_api_key_configured
-              ? `configured via ${settingsDefaultEnvCredentials.default_api_key_env_var}`
-              : (settingsDefaultApiEnvHint || settingsDefaultApiFieldId || "no api key required")
-          }),
-          h("div", { className: "text-xs text-slate-500" }, settingsDefaultApiFieldId
-            ? (settingsDefaultEnvCredentials.default_api_key_configured
-              ? `Environment key is configured via ${settingsDefaultEnvCredentials.default_api_key_env_var}. Leave blank to keep using it.`
-              : settingsDefaultApiFieldStatus?.source === "environment"
-              ? `${settingsDefaultApiFieldStatus.note} Leave blank to keep using the environment-backed key.`
-              : `Maps to ${settingsDefaultApiEnvHint || settingsDefaultApiFieldId}. Leave blank to keep the persisted or environment-backed provider key.`)
-            : "The selected default model does not require a persisted API key.")
-        ]))
+        settingsProvider?.mode === "agent_oauth"
+          ? h(Field, { key: "oauth", label: "Credential" }, h("div", { className: "space-y-2" }, [
+            h("div", { key: "buttons", className: "flex h-11 items-center gap-2" }, [
+              h(Button, {
+                key: "connect",
+                onClick: connectSelectedOAuthProvider,
+                disabled: settings.providers_json.default_provider !== "openai_codex" || oauthConnected
+              }, oauthConnected ? "Already connected" : "Connect ChatGPT account"),
+              h(Button, {
+                key: "refresh",
+                variant: "outline",
+                onClick: refreshSelectedOAuthProviderStatus,
+                disabled: settings.providers_json.default_provider !== "openai_codex"
+              }, "Refresh")
+            ]),
+            h("div", { key: "help", className: "text-xs text-slate-500" }, oauthConnected
+              ? "ChatGPT account is connected through the local Codex CLI."
+              : "Connect your ChatGPT account through the local Codex CLI.")
+          ]))
+          : h(Field, { key: "api", label: "API Key" }, h("div", { className: "space-y-2" }, [
+            h(PasswordInput, {
+              shown: Boolean(visibleApiKeys.default || (settingsDefaultApiFieldId && visibleApiKeys[settingsDefaultApiFieldId])),
+              onToggleShown: () => toggleVisibleApiKey(settingsDefaultApiFieldId || "default"),
+              value: settingsDefaultApiDisplayValue,
+              onFocus: (event) => settingsDefaultApiConfigured && event.target.select(),
+              onChange: (event) => settingsDefaultApiFieldId ? updateProviderCredentialDraft(settingsDefaultApiFieldId, event.target.value) : undefined,
+              placeholder: settingsDefaultApiEnvHint || "enter provider API key",
+              disabled: !settingsDefaultApiFieldId
+            }),
+            h("div", { className: "text-xs text-slate-500" }, settingsDefaultApiConfigured
+              ? `API key is configured${settingsDefaultApiEnvHint ? ` via ${settingsDefaultApiEnvHint}` : ""}. Enter a new value to replace it.`
+              : settingsDefaultApiFieldId
+                ? `Used by the global default model. Environment fallback: ${settingsDefaultApiEnvHint || "none"}.`
+                : "The selected provider does not use an API key.")
+          ]))
       ]),
-      h("div", { key: "agent-routing", className: "mt-5 space-y-4" }, [
+      h("div", { key: "agent-routing", className: "mt-8 space-y-4 border-t border-slate-200 pt-6" }, [
         h("div", { key: "title" }, [
-          h("div", { key: "heading", className: "font-medium text-slate-900" }, "Specific Agent Model"),
-          h("div", { key: "copy", className: "mt-1 text-sm text-slate-500" }, "Use this section only when one agent should use a different model than the global default above.")
+          h("div", { key: "heading", className: "font-medium text-slate-900" }, "Individual Agent Overrides"),
+          h("div", { key: "copy", className: "mt-1 text-sm text-slate-500" }, "Use these rows only when a specific agent should use a different provider, model, or API key than the global default.")
         ]),
         h("div", { key: "rows", className: "space-y-3" }, agentConfigCatalog.map((agent) => {
           const override = settingsAgentOverrides[agent.id] || {};
@@ -4739,6 +5538,7 @@ function App() {
             ? (agentCredentialDrafts[agent.id] || "")
             : (override.api_key || envOverride.api_key_value || (agentEnvApiConfigured ? maskedApiKeyValue : ""));
           const providerId = override.provider || "";
+          const agentProvider = getProviderDefinition(llmRegistry, providerId);
           const modelValue = providerId && override.model ? `${providerId}:${override.model}` : "";
           return h("div", { key: agent.id, className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4" }, [
             h("div", { key: "meta", className: "mb-3 flex flex-wrap items-center justify-between gap-3" }, [
@@ -4773,24 +5573,25 @@ function App() {
                     .filter((item) => item.provider_id === provider.id)
                     .map((item) => h("option", { key: `${agent.id}:${item.value}`, value: item.value }, item.label))))
               ])),
-              h(Field, { key: "api", label: "API key" }, h("div", { className: "space-y-2" }, [
-                h(PasswordInput, {
-                  shown: Boolean(visibleApiKeys[agent.id]),
-                  onToggleShown: () => toggleVisibleApiKey(agent.id),
-                  value: agentApiDisplayValue,
-                  onFocus: (event) => agentEnvApiConfigured && event.target.select(),
-                  onChange: (event) => updateAgentCredentialDraft(agent.id, event.target.value),
-                  placeholder: envOverride.api_key_configured ? `configured via ${envOverride.api_key_env_var}` : `uses ${agent.env_prefix}_API_KEY`
-                }),
-                h("div", { className: "text-xs text-slate-500" }, envOverride.api_key_configured
-                  ? `Environment key is configured via ${envOverride.api_key_env_var}. Leave blank to keep using it.`
-                  : `Maps to ${agent.env_prefix}_API_KEY. Leave blank to use the agent-specific or provider environment key.`)
-              ]))
+              agentProvider?.mode === "agent_oauth"
+                ? h(Field, { key: "oauth", label: "OAuth connection" }, h("div", { className: "rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-3 text-sm text-indigo-950" }, "Uses the local Codex CLI OAuth session. No agent-specific API key is stored."))
+                : h(Field, { key: "api", label: "API key" }, h("div", { className: "space-y-2" }, [
+                  h(PasswordInput, {
+                    shown: Boolean(visibleApiKeys[agent.id]),
+                    onToggleShown: () => toggleVisibleApiKey(agent.id),
+                    value: agentApiDisplayValue,
+                    onFocus: (event) => agentEnvApiConfigured && event.target.select(),
+                    onChange: (event) => updateAgentCredentialDraft(agent.id, event.target.value),
+                    placeholder: envOverride.api_key_configured ? `configured via ${envOverride.api_key_env_var}` : `uses ${agent.env_prefix}_API_KEY`
+                  }),
+                  h("div", { className: "text-xs text-slate-500" }, envOverride.api_key_configured
+                    ? `Environment key is configured via ${envOverride.api_key_env_var}. Leave blank to keep using it.`
+                    : `Maps to ${agent.env_prefix}_API_KEY. Leave blank to use the agent-specific or provider environment key.`)
+                ]))
             ])
           ]);
         }))
       ]),
-      h(Button, { key: "save", className: "mt-5", onClick: saveSettings }, "Save Settings")
     ])
   ]);
 
@@ -4887,13 +5688,37 @@ function App() {
           ]);
         }))
       ]),
-      h(Button, { key: "save", className: "mt-5", onClick: saveSettings }, "Save Settings")
     ])
   ]);
 
   const settingsReviewPanel = h("div", { className: "space-y-6" }, [
-    h(Card, { key: "readiness-review", title: "Readiness / Review", description: "Controls when readiness is required and how long review decisions remain valid." }, [
-      h("div", { key: "fields", className: "grid gap-4 md:grid-cols-2" }, [
+    h(Card, { key: "readiness-review", title: "Readiness / Review", description: "Controls launch readiness, human review gates, publishability, and disposition renewal." }, [
+      h("div", { key: "governance", className: "grid gap-4 md:grid-cols-2 xl:grid-cols-4" }, [
+        h(Field, { key: "review-threshold", label: "Human Review Threshold" }, Select({
+          value: settings.review_json.require_human_review_for_severity || settings.audit_defaults_json.review_severity || "high",
+          onChange: (event) => updateSettings("review_json", "require_human_review_for_severity", event.target.value)
+        }, [
+          h("option", { key: "low", value: "low" }, "low"),
+          h("option", { key: "medium", value: "medium" }, "medium"),
+          h("option", { key: "high", value: "high" }, "high"),
+          h("option", { key: "critical", value: "critical" }, "critical")
+        ])),
+        h(Field, { key: "publishability", label: "Publishability Threshold" }, Select({
+          value: settings.review_json.publishability_threshold || settings.audit_defaults_json.publishability_threshold || "high",
+          onChange: (event) => updateSettings("review_json", "publishability_threshold", event.target.value)
+        }, [
+          h("option", { key: "low", value: "low" }, "low"),
+          h("option", { key: "medium", value: "medium" }, "medium"),
+          h("option", { key: "high", value: "high" }, "high")
+        ])),
+        h(Field, { key: "default-visibility", label: "Default Visibility" }, Select({
+          value: settings.review_json.default_visibility || "internal",
+          onChange: (event) => updateSettings("review_json", "default_visibility", event.target.value)
+        }, [
+          h("option", { key: "public", value: "public" }, "public"),
+          h("option", { key: "internal", value: "internal" }, "internal"),
+          h("option", { key: "internal-only", value: "internal-only" }, "internal-only")
+        ])),
         h(Field, { key: "readiness-gate", label: "Audit Readiness Gate" }, Select({
           value: settings.preflight_json.readiness_gate_policy || "risk_or_drift",
           onChange: (event) => updateSettings("preflight_json", "readiness_gate_policy", event.target.value)
@@ -4901,7 +5726,9 @@ function App() {
           h("option", { key: "risk", value: "risk_or_drift" }, "require for runtime or drift"),
           h("option", { key: "always", value: "always" }, "always require readiness review"),
           h("option", { key: "never", value: "never" }, "never require readiness review")
-        ])),
+        ]))
+      ]),
+      h("div", { key: "cadence", className: "mt-5 grid gap-4 md:grid-cols-2" }, [
         h(Field, { key: "review-renewal", label: "Disposition Renewal Days" }, h(Input, {
           type: "number",
           min: 1,
@@ -4914,8 +5741,84 @@ function App() {
           value: settings.review_json.disposition_review_window_days || 30,
           onChange: (event) => updateSettings("review_json", "disposition_review_window_days", Math.max(1, Number(event.target.value || 30)))
         }))
+      ])
+    ])
+  ]);
+
+  const selectedExternalToolIds = normalizeExternalAuditToolIds(settings.preflight_json.external_audit_tool_ids);
+  const updateExternalToolSelection = (toolId, enabled) => {
+    if (mandatoryExternalAuditToolIds.includes(toolId) && !enabled) return;
+    const current = new Set(selectedExternalToolIds);
+    if (enabled) current.add(toolId);
+    else current.delete(toolId);
+    updateSettings("preflight_json", "external_audit_tool_ids", normalizeExternalAuditToolIds([...current]));
+  };
+  const refreshStaticTools = () => act(
+    () => api("/static-tools", undefined, requestContext)
+      .then((payload) => setStaticToolsReadiness(payload.static_tools || emptyStaticToolsReadiness)),
+    "External audit tool readiness refreshed."
+  );
+  const staticToolRows = staticToolsReadiness.tools || [];
+  const settingsStaticToolsPanel = h("div", { className: "space-y-6" }, [
+    h(Card, { key: "policy", title: "External Audit Tools", description: "Choose which default tools Tethermark should plan around. OpenSSF Scorecard is always included as the baseline repo posture check." }, [
+      h("div", { key: "grid", className: "grid gap-4 md:grid-cols-2" }, [
+        h(Field, { key: "path", label: "Trusted Tools Path" }, h(Input, {
+          value: (staticToolsReadiness.tool_path?.managed_dirs || []).join("; ") || "system PATH only",
+          readOnly: true,
+          placeholder: "Set HARNESS_STATIC_TOOLS_PATH in the server environment"
+        }))
       ]),
-      h(Button, { key: "save", className: "mt-5", onClick: saveSettings }, "Save Settings")
+      h("div", { key: "note", className: "mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600" }, "The server reads tools from system PATH and optional HARNESS_STATIC_TOOLS_PATH. Tethermark does not download executables from the web UI. Missing included tools warn during readiness; accepting readiness is the operator override.")
+    ]),
+    h(Card, { key: "readiness" }, [
+      h("div", { key: "readiness-header", className: "flex flex-wrap items-start justify-between gap-3" }, [
+        h("div", { key: "copy" }, [
+          h("h3", { key: "title", className: "text-xl font-semibold tracking-tight text-slate-900" }, "Tool Readiness And Inclusion"),
+          h("p", { key: "description", className: "mt-2 text-sm leading-6 text-muted" }, `Current status: ${staticToolsReadiness.status || "unknown"}`)
+        ]),
+        h(Button, { key: "refresh", variant: "outline", onClick: refreshStaticTools }, "Refresh Readiness")
+      ]),
+      h("div", { key: "summary", className: "mt-5 grid gap-3 md:grid-cols-3" }, [
+        h("div", { key: "status", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-slate-500" }, "Included"),
+          h("div", { key: "value", className: "mt-1 font-medium text-slate-950" }, String(selectedExternalToolIds.length))
+        ]),
+        h("div", { key: "warnings", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-slate-500" }, "Warnings"),
+          h("div", { key: "value", className: "mt-1 font-medium text-slate-950" }, String((staticToolsReadiness.warnings || []).length))
+        ]),
+        h("div", { key: "blockers", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-slate-500" }, "Blockers"),
+          h("div", { key: "value", className: "mt-1 font-medium text-slate-950" }, "0")
+        ])
+      ]),
+      h("div", { key: "tools", className: "mt-4 grid gap-3" }, staticToolRows.length ? staticToolRows.map((tool) => h("div", {
+        key: tool.id,
+        className: cn("rounded-2xl border px-4 py-3", selectedExternalToolIds.includes(tool.id) ? (tool.installed ? "border-emerald-200 bg-emerald-50/60" : "border-amber-200 bg-amber-50/60") : "border-slate-200 bg-slate-50")
+      }, [
+        h("div", { key: "head", className: "flex flex-wrap items-center justify-between gap-3" }, [
+          h("label", { key: "name", className: "flex items-center gap-3 font-medium text-slate-950" }, [
+            h("input", {
+              key: "checkbox",
+              type: "checkbox",
+              checked: selectedExternalToolIds.includes(tool.id),
+              disabled: tool.mandatory || mandatoryExternalAuditToolIds.includes(tool.id),
+              onChange: (event) => updateExternalToolSelection(tool.id, event.target.checked)
+            }),
+            h("span", { key: "label" }, tool.label)
+          ]),
+          h("div", { key: "badges", className: "flex flex-wrap gap-2" }, [
+            h(Badge, { key: "status" }, tool.status),
+            h(Badge, { key: "category" }, tool.category || "tool"),
+            tool.mandatory || mandatoryExternalAuditToolIds.includes(tool.id) ? h(Badge, { key: "mandatory" }, "required") : null
+          ])
+        ]),
+        h("div", { key: "summary", className: "mt-1 text-sm text-slate-600" }, tool.summary),
+        h("div", { key: "modes", className: "mt-1 text-xs text-slate-500" }, `modes: ${(tool.run_modes || []).join(", ") || "n/a"}`),
+        tool.version ? h("div", { key: "version", className: "mt-1 text-xs text-slate-500" }, tool.version) : null,
+        tool.fallback ? h("div", { key: "fallback", className: "mt-1 text-xs text-slate-500" }, `Fallback: ${tool.fallback}`) : null,
+        selectedExternalToolIds.includes(tool.id) && !tool.installed ? h("div", { key: "fix", className: "mt-2 text-sm text-slate-700" }, tool.fix) : null
+      ])) : h("div", { className: "text-sm text-muted" }, "No external tool readiness data loaded."))
     ])
   ]);
 
@@ -5009,7 +5912,104 @@ function App() {
         ])),
         h(Field, { key: "endpoints", label: "Configured Endpoints" }, h(Textarea, { value: (settings.credentials_json.configured_endpoints || []).join("\n"), onChange: (event) => updateSettings("credentials_json", "configured_endpoints", event.target.value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean)) }))
       ]),
-      h(Button, { key: "save", className: "mt-5", onClick: saveSettings }, "Save Settings")
+    ])
+  ]);
+
+  const artifactPreviewRows = artifactRetentionPreview?.removed || [];
+  const artifactRetentionCanPrune = Boolean(artifactRetentionPreview && artifactRetentionPreview.removed_count > 0);
+  const artifactRetentionActionNote = artifactRetentionPreview
+    ? artifactRetentionCanPrune
+      ? "Preview selected artifacts. Prune Now will permanently delete those local artifact directories."
+      : `Nothing is old enough for the current ${artifactRetentionForm.older_than_days}-day policy. Lower Older Than Days or set a Max GB cap to select artifacts.`
+    : "Run Preview Prune before deleting artifacts.";
+  const settingsArtifactsPanel = h("div", { className: "space-y-6" }, [
+    h(Card, { key: "retention", title: "Artifact Retention", description: "Preview and prune local debug artifact directories. Persisted run records remain in SQLite." }, [
+      h("div", { key: "summary", className: "grid gap-3 md:grid-cols-4" }, [
+        h("div", { key: "count", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-slate-500" }, "Entries"),
+          h("div", { key: "value", className: "mt-1 text-xl font-semibold text-slate-950" }, String(artifactRetentionSummary?.scanned_count ?? 0))
+        ]),
+        h("div", { key: "size", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-slate-500" }, "Size"),
+          h("div", { key: "value", className: "mt-1 text-xl font-semibold text-slate-950" }, artifactRetentionSummary?.scanned_bytes == null ? "not measured" : formatBytes(artifactRetentionSummary.scanned_bytes))
+        ]),
+        h("div", { key: "oldest", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-slate-500" }, "Oldest"),
+          h("div", { key: "value", className: "mt-1 text-sm font-semibold text-slate-950" }, formatDate(artifactRetentionSummary?.oldest_updated_at))
+        ]),
+        h("div", { key: "root", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-slate-500" }, "Root"),
+          h("div", { key: "value", className: "mt-1 truncate text-sm font-semibold text-slate-950" }, artifactRetentionSummary?.root || ".artifacts")
+        ])
+      ]),
+      h("div", { key: "controls", className: "mt-5 grid gap-4 md:grid-cols-3" }, [
+        h(Field, { key: "kind", label: "Artifact Type" }, Select({
+          value: artifactRetentionForm.kind,
+          onChange: (event) => {
+            setArtifactRetentionForm((current) => ({ ...current, kind: event.target.value }));
+            setArtifactRetentionPreview(null);
+          }
+        }, [
+          h("option", { key: "runs", value: "runs" }, "runs"),
+          h("option", { key: "sandboxes", value: "sandboxes" }, "sandboxes"),
+          h("option", { key: "all", value: "all" }, "all")
+        ])),
+        h(Field, { key: "days", label: "Older Than Days" }, h(Input, {
+          type: "number",
+          min: 1,
+          value: artifactRetentionForm.older_than_days,
+          onChange: (event) => {
+            setArtifactRetentionForm((current) => ({ ...current, older_than_days: Math.max(1, Number(event.target.value || 1)) }));
+            setArtifactRetentionPreview(null);
+          }
+        })),
+        h(Field, { key: "max", label: "Max GB" }, h(Input, {
+          type: "number",
+          min: 0,
+          step: "0.1",
+          value: artifactRetentionForm.max_gb,
+          placeholder: "optional",
+          onChange: (event) => {
+            setArtifactRetentionForm((current) => ({ ...current, max_gb: event.target.value }));
+            setArtifactRetentionPreview(null);
+          }
+        }))
+      ]),
+      h("div", { key: "actions", className: "mt-5 flex flex-wrap items-center gap-3" }, [
+        h(Button, { key: "summary", variant: "outline", onClick: () => loadArtifactRetentionSummary(true), disabled: artifactRetentionLoading }, "Measure Size"),
+        h(Button, { key: "preview", onClick: previewArtifactRetention, disabled: artifactRetentionLoading }, "Preview Prune"),
+        h(Button, {
+          key: "prune",
+          variant: "secondary",
+          onClick: pruneArtifactRetention,
+          disabled: artifactRetentionLoading || !artifactRetentionCanPrune
+        }, "Prune Now")
+      ]),
+      h("div", {
+        key: "action-note",
+        className: cn("mt-2 text-sm", artifactRetentionCanPrune ? "text-slate-600" : "text-slate-500")
+      }, artifactRetentionActionNote),
+      artifactRetentionPreview
+        ? h("div", { key: "preview", className: "mt-5 rounded-2xl border border-slate-200 bg-white px-4 py-4" }, [
+          h("div", { key: "summary", className: "flex flex-wrap items-center justify-between gap-3" }, [
+            h("div", { key: "copy" }, [
+              h("div", { key: "title", className: "font-medium text-slate-950" }, `${artifactRetentionPreview.removed_count} selected for pruning`),
+              h("div", { key: "meta", className: "mt-1 text-sm text-slate-500" }, `${formatBytes(artifactRetentionPreview.removed_bytes)} removable; ${artifactRetentionPreview.kept_count} kept`)
+            ]),
+            h(Badge, { key: "mode" }, artifactRetentionPreview.dry_run ? "preview" : "completed")
+          ]),
+          artifactPreviewRows.length
+            ? h("div", { key: "rows", className: "mt-4 max-h-72 overflow-auto rounded-xl border border-slate-200" }, artifactPreviewRows.slice(0, 50).map((item) => h("div", { key: `${item.kind}:${item.id}`, className: "grid gap-2 border-b border-slate-100 px-3 py-2 text-sm last:border-b-0 md:grid-cols-[1fr_120px_160px]" }, [
+              h("div", { key: "id", className: "min-w-0" }, [
+                h("div", { key: "name", className: "truncate font-medium text-slate-900" }, `${item.kind}:${item.id}`),
+                h("div", { key: "path", className: "truncate text-xs text-slate-500" }, item.path)
+              ]),
+              h("div", { key: "size", className: "text-slate-700" }, formatBytes(item.size_bytes)),
+              h("div", { key: "reason", className: "text-xs text-slate-500" }, (item.prune_reasons || []).join(", "))
+            ])))
+            : h("div", { key: "empty", className: "mt-4 text-sm text-slate-500" }, "No artifacts match the current retention policy.")
+        ])
+        : null
     ])
   ]);
 
@@ -5059,7 +6059,7 @@ function App() {
         h("div", { key: "rows", className: "divide-y divide-slate-200" }, projectOptions.map((project) => {
         const defaults = project.target_defaults_json || {};
         const targetKind = inferTargetKind(defaults);
-        const targetValue = targetKind === "repo" ? defaults.repo_url : targetKind === "endpoint" ? defaults.endpoint_url : defaults.local_path;
+        const targetValue = targetKind === "repo" ? defaults.repo_url : defaults.local_path;
         const auditType = defaults.audit_package || effectiveSettings.effective.audit_defaults_json?.audit_package || "baseline-static";
         const persistedRunStats = project.run_stats || null;
         const localRunStats = projectRunStats[project.id] || { runs: 0, openReviews: 0, scoreTotal: 0, scoreCount: 0, lastRunAt: "" };
@@ -5135,16 +6135,13 @@ function App() {
         h(Field, { key: "name", label: "Project Name" }, h(Input, { value: projectForm.name, onChange: (event) => updateProjectForm("name", event.target.value) })),
         h(Field, { key: "description", label: "Description" }, h(Input, { value: projectForm.description, onChange: (event) => updateProjectForm("description", event.target.value) })),
         h("div", { key: "target", className: "grid gap-4 md:grid-cols-2" }, [
-          h(Field, { key: "kind", label: "Target Source" }, Select({ value: projectForm.target_kind, onChange: (event) => updateProjectForm("target_kind", event.target.value) }, [
+          h(Field, { key: "kind", label: "Target Source" }, Select({ value: projectForm.target_kind === "repo" ? "repo" : "path", onChange: (event) => updateProjectForm("target_kind", event.target.value) }, [
             h("option", { key: "path", value: "path" }, "local path"),
-            h("option", { key: "repo", value: "repo" }, "repo url"),
-            h("option", { key: "endpoint", value: "endpoint" }, "endpoint url")
+            h("option", { key: "repo", value: "repo" }, "repo url")
           ])),
           projectForm.target_kind === "repo"
             ? h(Field, { key: "repo", label: "Repository URL" }, h(Input, { value: projectForm.repo_url, onChange: (event) => updateProjectForm("repo_url", event.target.value) }))
-            : projectForm.target_kind === "endpoint"
-              ? h(Field, { key: "endpoint", label: "Endpoint URL" }, h(Input, { value: projectForm.endpoint_url, onChange: (event) => updateProjectForm("endpoint_url", event.target.value) }))
-              : h(Field, { key: "path", label: "Local Path" }, h(Input, { value: projectForm.local_path, onChange: (event) => updateProjectForm("local_path", event.target.value) }))
+            : h(Field, { key: "path", label: "Local Path" }, h(Input, { value: projectForm.local_path, onChange: (event) => updateProjectForm("local_path", event.target.value) }))
         ]),
         h(Field, { key: "audit-type", label: "Audit Type" }, Select({
           value: projectForm.audit_package || effectiveSettings.effective.audit_defaults_json?.audit_package || "baseline-static",
@@ -5228,16 +6225,13 @@ function App() {
       h("div", { key: "details", className: "grid gap-4 md:grid-cols-2" }, [
         h(Field, { key: "name", label: "Project Name" }, h(Input, { value: projectEditor.name, onChange: (event) => updateProjectEditor("name", event.target.value) })),
         h(Field, { key: "description", label: "Description" }, h(Input, { value: projectEditor.description, onChange: (event) => updateProjectEditor("description", event.target.value) })),
-        h(Field, { key: "target-kind", label: "Target Source" }, Select({ value: projectEditor.target_kind, onChange: (event) => updateProjectEditor("target_kind", event.target.value) }, [
+        h(Field, { key: "target-kind", label: "Target Source" }, Select({ value: projectEditor.target_kind === "repo" ? "repo" : "path", onChange: (event) => updateProjectEditor("target_kind", event.target.value) }, [
           h("option", { key: "path", value: "path" }, "local path"),
-          h("option", { key: "repo", value: "repo" }, "repo url"),
-          h("option", { key: "endpoint", value: "endpoint" }, "endpoint url")
+          h("option", { key: "repo", value: "repo" }, "repo url")
         ])),
         projectEditor.target_kind === "repo"
           ? h(Field, { key: "repo", label: "Repository URL" }, h(Input, { value: projectEditor.repo_url, onChange: (event) => updateProjectEditor("repo_url", event.target.value) }))
-          : projectEditor.target_kind === "endpoint"
-            ? h(Field, { key: "endpoint", label: "Endpoint URL" }, h(Input, { value: projectEditor.endpoint_url, onChange: (event) => updateProjectEditor("endpoint_url", event.target.value) }))
-            : h(Field, { key: "path", label: "Local Path" }, h(Input, { value: projectEditor.local_path, onChange: (event) => updateProjectEditor("local_path", event.target.value) }))
+          : h(Field, { key: "path", label: "Local Path" }, h(Input, { value: projectEditor.local_path, onChange: (event) => updateProjectEditor("local_path", event.target.value) }))
       ]),
       h("div", { key: "audit-type", className: "mt-6 grid gap-4 md:grid-cols-2" }, [
         h(Field, { key: "package", label: "Audit Type" }, Select({
@@ -5283,38 +6277,82 @@ function App() {
     ])) : h("div", { className: "text-sm text-muted" }, "No persisted documents yet."))
   ]);
 
-  const settingsSubpageContent = {
-    llm: settingsLlmPanel,
-    audit: settingsAuditPanel,
-    review: settingsReviewPanel,
-    integrations: settingsIntegrationsPanel,
+  const governanceTabs = [
+    { id: "gates", label: "Gates" },
+    { id: "policy", label: "Policy Packs" },
+    { id: "documents", label: "Reference Documents" }
+  ];
+  const governanceTabContent = {
+    gates: settingsReviewPanel,
     policy: settingsPolicyPanel,
     documents: settingsDocumentsPanel
+  }[governanceTab] || settingsReviewPanel;
+  const settingsGovernancePanel = h("div", { className: "space-y-6" }, [
+    h("div", { key: "content" }, governanceTabContent)
+  ]);
+
+  const activeSettingsNavItem = settingsNavItems.find((item) => item.id === settingsSubpage) || settingsNavItems[0];
+  const settingsHeaderTabs = settingsSubpage === "governance"
+    ? h("div", { key: "tabs", className: "flex flex-wrap gap-2" }, governanceTabs.map((tab) => h("button", {
+      key: tab.id,
+      type: "button",
+      onClick: () => setGovernanceTab(tab.id),
+      className: cn(
+        "rounded-xl border px-3 py-2 text-sm font-medium transition-colors",
+        governanceTab === tab.id
+          ? "border-slate-900 bg-slate-900 text-white"
+          : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+      )
+    }, tab.label)))
+    : h("div", { key: "spacer" });
+  const settingsPageHeader = h("div", { key: "settings-header", className: "sticky top-0 z-30 -mx-6 bg-white px-6 pt-6" }, [
+    h("div", { key: "head", className: "pb-7" }, [
+      h("div", { key: "copy" }, [
+        h("h2", { key: "title", className: "text-lg font-semibold text-slate-950" }, activeSettingsNavItem.label),
+        h("p", { key: "description", className: "mt-1 text-sm text-slate-500" }, activeSettingsNavItem.description)
+      ])
+    ]),
+    h("div", { key: "action-row", className: "flex flex-col gap-3 border-b border-slate-200 pb-4 shadow-[0_10px_18px_-18px_rgba(15,23,42,0.45)] md:flex-row md:items-center md:justify-between" }, [
+      settingsHeaderTabs,
+      h(Button, { key: "save", onClick: saveSettings }, "Save Settings")
+    ])
+  ]);
+
+  const settingsSubpageContent = {
+    llm: settingsLlmPanel,
+    "static-tools": settingsStaticToolsPanel,
+    audit: settingsAuditPanel,
+    governance: settingsGovernancePanel,
+    integrations: settingsIntegrationsPanel,
+    artifacts: settingsArtifactsPanel
   }[settingsSubpage] || settingsAuditPanel;
 
-  const settingsView = h("section", { className: "overflow-hidden rounded-3xl border border-slate-200 bg-white xl:grid xl:grid-cols-[220px_minmax(0,1fr)]" }, [
-    h("aside", { key: "settings-nav", className: "border-b border-slate-200 bg-slate-50/80 px-4 py-5 xl:border-b-0 xl:border-r xl:min-h-full" }, [
+  const settingsView = h("section", { className: "h-[calc(100vh-11rem)] min-h-0 overflow-hidden rounded-3xl border border-slate-200 bg-white xl:grid xl:grid-cols-[220px_minmax(0,1fr)]" }, [
+    h("aside", { key: "settings-nav", className: "min-h-0 overflow-y-auto border-b border-slate-200 bg-slate-50/80 px-4 py-5 xl:border-b-0 xl:border-r" }, [
       h("div", { key: "groups", className: "space-y-6" }, [
         h("div", { key: "group" }, [
           h("div", { key: "label", className: "px-2 text-xs font-medium text-slate-400" }, "Settings"),
           h("nav", { key: "nav", className: "mt-3 grid gap-1.5" }, settingsNavItems.map((item) => h("button", {
-        key: item.id,
-        type: "button",
-        onClick: () => setSettingsSubpage(item.id),
-        className: cn(
-          "flex items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition-colors",
-          settingsSubpage === item.id
-            ? "bg-slate-100 font-semibold text-slate-950"
-            : "text-slate-700 hover:bg-slate-50"
-        )
-      }, [
-        h("span", { key: "dot", className: cn("h-2.5 w-2.5 rounded-full", settingsSubpage === item.id ? "bg-slate-900" : "bg-slate-300") }),
-        h("span", { key: "text" }, item.label)
-      ])))
+              key: item.id,
+              type: "button",
+              onClick: () => setSettingsSubpage(item.id),
+              className: cn(
+                "flex items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition-colors",
+                settingsSubpage === item.id
+                  ? "bg-slate-100 font-semibold text-slate-950"
+                  : "text-slate-700 hover:bg-slate-50"
+              )
+            }, [
+              h("span", { key: "dot", className: cn("h-2.5 w-2.5 rounded-full", settingsSubpage === item.id ? "bg-slate-900" : "bg-slate-300") }),
+              h("span", { key: "text" }, item.label)
+            ])))
         ])
       ])
     ]),
-    h("div", { key: "panel", className: "min-w-0 bg-white px-6 py-6" }, settingsSubpageContent)
+    h("div", { key: "panel", className: "min-h-0 min-w-0 overflow-y-auto bg-white px-6 pb-6" }, [
+      settingsPageHeader,
+      h("div", { key: "content", className: "mt-6" }, settingsSubpageContent)
+    ])
   ]);
 
   const projectsView = settingsProjectPanel;
@@ -5374,8 +6412,7 @@ function App() {
         h("div", { key: "actions", className: "flex items-center gap-3" }, [
           h("div", { key: "status", className: "hidden flex-wrap gap-2 md:flex" }, [
             h(Badge, { key: "auth" }, authInfo.trusted_mode ? "trusted_local" : authInfo.auth_mode || "authenticated")
-          ]),
-          h(Button, { key: "refresh", variant: "outline", onClick: load }, "Refresh")
+          ])
         ])
       ]) : null,
       error ? h("div", { key: "error", className: cn(view === "runs" ? "m-4" : "mt-6", "rounded-2xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700") }, error) : null,
@@ -5395,7 +6432,9 @@ function App() {
               ? runtimeFollowupsView
               : view === "reviews"
                 ? reviewsView
-                : settingsView))
+                : view === "admin"
+                  ? adminView
+                  : settingsView))
     ])
   ]);
 }

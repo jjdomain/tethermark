@@ -1,9 +1,11 @@
 import process from "node:process";
 
 import { loadEnvironment } from "../../../packages/core-engine/src/env.js";
-import { backfillLocalPersistence, cleanupLocalJsonMirrors, compactBundleExports, createEngine, listPersistedReviewNotifications, listPersistedReviewWorkflows, readPersistedReviewActions, readPersistedReviewWorkflow, reconstructLocalRun, reconstructLocalRuns, submitPersistedReviewAction, validateLocalPersistence } from "../../../packages/core-engine/src/index.js";
+import { backfillLocalPersistence, cleanupLocalJsonMirrors, compactBundleExports, createEngine, listPersistedReviewNotifications, listPersistedReviewWorkflows, pruneArtifacts, readPersistedReviewActions, readPersistedReviewWorkflow, reconstructLocalRun, reconstructLocalRuns, submitPersistedReviewAction, validateLocalPersistence, type ArtifactRetentionKind } from "../../../packages/core-engine/src/index.js";
 import { buildScanRequest, readBooleanFlag, readFlag, readNumberFlag } from "./args.js";
+import { buildDoctorReport, printDoctorReport, runOnboarding } from "./doctor.js";
 import { validateFixtures } from "./fixture-validation.js";
+import { runSetupTools } from "./setup-tools.js";
 
 loadEnvironment();
 
@@ -14,18 +16,80 @@ Usage:
 npm run scan -- scan path <local-path> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|build|runtime|validate] [--package <id>] [--db-mode local] [--llm-provider openai|mock] [--llm-model <id>] [--llm-api-key <value>]
 npm run scan -- scan repo <repo-url> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|build|runtime|validate] [--package <id>] [--db-mode local] [--llm-provider openai|mock] [--llm-model <id>] [--llm-api-key <value>]
 npm run scan -- scan endpoint <url> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|runtime|validate] [--package <id>] [--db-mode local] [--llm-provider openai|mock] [--llm-model <id>] [--llm-api-key <value>]
+npm run scan -- doctor [--json]
+npm run scan -- onboard [--dry-run] [--skip-doctor] [--skip-fixtures]
+npm run scan -- setup-tools [--dry-run] [--yes] [--tool scorecard,semgrep,trivy]
   npm run scan -- migrate local-db [--root <dir>] [--dry-run]
   npm run scan -- migrate cleanup-json-mirrors [--root <dir>] [--dry-run]
   npm run scan -- migrate compact-bundle-exports [--root <dir>] [--retention-days <n>] [--dry-run]
   npm run scan -- reconstruct run <run-id> [--root <dir>] [--dry-run]
   npm run scan -- reconstruct runs [--root <dir>] [--target-id <id>] [--status <status>] [--audit-package <id>] [--run-mode <mode>] [--target-class <class>] [--rating <rating>] [--publishability-status <status>] [--policy-pack-id <id>] [--since <iso>] [--until <iso>] [--requires-human-review true|false] [--has-findings true|false] [--limit <n>] [--dry-run]
   npm run scan -- validate-persistence [--root <dir>] [--target-id <id>] [--status <status>] [--audit-package <id>] [--run-mode <mode>] [--target-class <class>] [--rating <rating>] [--publishability-status <status>] [--policy-pack-id <id>] [--since <iso>] [--until <iso>] [--requires-human-review true|false] [--has-findings true|false] [--limit <n>]
+npm run scan -- artifacts prune [--root <dir>] [--kind runs|sandboxes|all] [--older-than <days|30d>] [--retention-days <n>] [--max-gb <n>] [--dry-run]
 npm run scan -- validate-fixtures [--root <dir>] [--fixture <id>] [--package <id>] [--db-mode local] [--persistence-root <dir>] [--llm-provider openai|mock] [--llm-model <id>]
 npm run scan -- review queue [--root <dir>] [--db-mode local] [--status <review-status>] [--limit <n>]
 npm run scan -- review status <run-id> [--root <dir>] [--db-mode local]
 npm run scan -- review action <run-id> --reviewer <id> --action <type> [--assigned-reviewer <id>] [--finding-id <id>] [--previous-severity <level>] [--updated-severity <level>] [--visibility public|internal] [--notes <text>] [--root <dir>] [--db-mode local]
 npm run scan -- review notifications [--reviewer <id>] [--status unread|acknowledged] [--root <dir>] [--db-mode local]
 `);
+}
+
+function parseDaysFlag(args: string[]): number | null {
+  const retentionDays = readNumberFlag(args, "--retention-days");
+  if (retentionDays != null) return retentionDays;
+  const raw = readFlag(args, "--older-than");
+  if (!raw) return null;
+  const match = raw.trim().match(/^(\d+(?:\.\d+)?)(d|day|days)?$/i);
+  if (!match) return null;
+  const parsed = Number(match[1]);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function parseArtifactKind(value: string | undefined): ArtifactRetentionKind | undefined {
+  return value === "runs" || value === "sandboxes" || value === "all" ? value : undefined;
+}
+
+function uniqueStrings(values: Array<string | null | undefined>): string[] {
+  return [...new Set(values.map((item) => String(item ?? "").trim()).filter(Boolean))];
+}
+
+function formatToolExecution(item: any): string {
+  const fallback = item.adapter?.adapter_action === "fallback" ? ` fallback_from=${item.adapter.requested_provider_id}` : "";
+  const capability = item.capability_status && item.capability_status !== "unknown" ? ` capability=${item.capability_status}` : "";
+  const failure = item.failure_category ? ` reason=${item.failure_category}` : "";
+  return `${item.provider_id}:${item.status}${fallback}${capability}${failure}`;
+}
+
+function printStaticReadinessSummary(result: any): void {
+  const selected = uniqueStrings([...(result.run_plan?.baseline_tools ?? []), ...(result.run_plan?.runtime_tools ?? [])]);
+  const executions = Array.isArray(result.evidence_executions) ? result.evidence_executions : [];
+  const completed = executions.filter((item: any) => item.status === "completed");
+  const skipped = executions.filter((item: any) => item.status === "skipped");
+  const failed = executions.filter((item: any) => item.status === "failed");
+  const fallbacks = executions.filter((item: any) => item.adapter?.adapter_action === "fallback");
+  const applicableControls = (result.control_results ?? []).filter((item: any) => item.applicability === "applicable");
+  const notAssessedControls = applicableControls.filter((item: any) => item.assessability === "not_assessed" || item.status === "not_assessed");
+  const staticTools = ["scorecard", "scorecard_api", "semgrep", "trivy"];
+  const staticToolExecutions = executions.filter((item: any) => staticTools.includes(item.provider_id) || staticTools.includes(item.tool));
+
+  console.log(`Static readiness: ${completed.length} completed, ${skipped.length} skipped, ${failed.length} failed evidence providers`);
+  console.log(`Static tool coverage: ${staticToolExecutions.map(formatToolExecution).join(", ") || "none"}`);
+  if (fallbacks.length) {
+    console.log(`Fallbacks used: ${fallbacks.map(formatToolExecution).join(", ")}`);
+  }
+  if (skipped.length || failed.length) {
+    console.log(`Evidence gaps: ${[...skipped, ...failed].map(formatToolExecution).join(", ")}`);
+  }
+  console.log(`Control assessability: ${applicableControls.length - notAssessedControls.length}/${applicableControls.length} applicable controls assessed, ${notAssessedControls.length} not assessed`);
+  if (notAssessedControls.length) {
+    console.log(`Controls not assessed: ${notAssessedControls.map((item: any) => item.control_id || item.title || "unknown").slice(0, 20).join(", ")}`);
+  }
+  const internallySatisfied = new Set(["repo_analysis"]);
+  const missingSelected = selected.filter((tool) => !internallySatisfied.has(tool) && !executions.some((item: any) => item.provider_id === tool || item.tool === tool || item.adapter?.requested_provider_id === tool));
+  if (missingSelected.length) {
+    console.log(`Selected tools without execution records: ${missingSelected.join(", ")}`);
+  }
+  console.log("Confidence limits: static mode does not execute target behavior; skipped tools and not-assessed controls reduce confidence and are not clean passes.");
 }
 
 async function runScan(args: string[]): Promise<void> {
@@ -61,6 +125,7 @@ async function runScan(args: string[]): Promise<void> {
   console.log(`Sandbox size: ${result.sandbox.storage_usage.target_file_count} files, ${result.sandbox.storage_usage.target_bytes} bytes`);
   console.log(`Tools selected: ${[...result.run_plan.baseline_tools, ...result.run_plan.runtime_tools].join(", ") || "none"}`);
   console.log(`Evidence execution: ${result.evidence_executions.map((item) => `${item.provider_id}:${item.status}`).join(", ") || "none"}`);
+  printStaticReadinessSummary(result);
   console.log(`Dimension scores:`);
   for (const dimension of result.dimension_scores) {
     console.log(`- ${dimension.dimension}: ${dimension.percentage}% (${dimension.score}/${dimension.max_score})`);
@@ -128,6 +193,40 @@ async function runMigration(args: string[]): Promise<void> {
     console.log(`Kept files: ${summary.kept_files.length}`);
     for (const fileName of summary.kept_files) {
       console.log(`- keep: ${fileName}`);
+    }
+    return;
+  }
+
+  usage();
+  process.exitCode = 1;
+}
+
+async function runArtifacts(args: string[]): Promise<void> {
+  if (args[1] === "prune") {
+    const maxGb = readNumberFlag(args, "--max-gb");
+    const summary = await pruneArtifacts({
+      rootDir: readFlag(args, "--root"),
+      dryRun: args.includes("--dry-run"),
+      kind: parseArtifactKind(readFlag(args, "--kind")),
+      olderThanDays: parseDaysFlag(args),
+      maxBytes: maxGb != null ? Math.floor(maxGb * 1024 * 1024 * 1024) : null
+    });
+    console.log(`Root: ${summary.root}`);
+    console.log(`Dry run: ${summary.dry_run ? "yes" : "no"}`);
+    console.log(`Kind: ${summary.kind}`);
+    console.log(`Older than days: ${summary.older_than_days ?? "none"}`);
+    console.log(`Max bytes: ${summary.max_bytes ?? "none"}`);
+    console.log(`Scanned: ${summary.scanned_count} entries, ${summary.scanned_bytes} bytes`);
+    console.log(`Removed: ${summary.removed_count} entries, ${summary.removed_bytes} bytes`);
+    for (const item of summary.removed) {
+      console.log(`- remove ${item.kind}:${item.id} ${item.size_bytes} bytes reasons=${item.prune_reasons.join(",")}`);
+    }
+    console.log(`Kept: ${summary.kept_count} entries, ${summary.kept_bytes} bytes`);
+    if (summary.run_index_pruned_ids.length) {
+      console.log(`Run index pruned: ${summary.run_index_pruned_ids.join(", ")}`);
+    }
+    for (const missingRoot of summary.missing_roots) {
+      console.log(`Missing root: ${missingRoot}`);
     }
     return;
   }
@@ -376,6 +475,33 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (args[0] === "doctor") {
+    const report = buildDoctorReport();
+    printDoctorReport(report, args.includes("--json"));
+    if (report.summary.fail > 0) {
+      process.exitCode = 1;
+    }
+    return;
+  }
+
+  if (args[0] === "onboard") {
+    runOnboarding({
+      dryRun: args.includes("--dry-run"),
+      skipDoctor: args.includes("--skip-doctor"),
+      skipFixtures: args.includes("--skip-fixtures")
+    });
+    return;
+  }
+
+  if (args[0] === "setup-tools") {
+    runSetupTools({
+      dryRun: args.includes("--dry-run"),
+      yes: args.includes("--yes"),
+      tools: readFlag(args, "--tool")
+    });
+    return;
+  }
+
   if (args[0] === "migrate") {
     await runMigration(args);
     return;
@@ -388,6 +514,11 @@ async function main(): Promise<void> {
 
   if (args[0] === "validate-persistence") {
     await runValidatePersistence(args);
+    return;
+  }
+
+  if (args[0] === "artifacts") {
+    await runArtifacts(args);
     return;
   }
 

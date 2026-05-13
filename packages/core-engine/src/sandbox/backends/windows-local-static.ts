@@ -3,7 +3,7 @@ import path from "node:path";
 
 import type { AuditRequest, SandboxSession } from "../../contracts.js";
 import { createId } from "../../utils.js";
-import { buildSourceProvenance, cloneRepo, collectStorageUsage, inferGitCommitSha, inferGitRepoUrl, mirrorDirectory } from "./shared.js";
+import { buildSourceProvenance, cloneRepo, collectStorageUsage, inferGitCommitSha, inferGitRepoUrl, mirrorDirectory, resolvePinnedCheckoutRef } from "./shared.js";
 
 export class WindowsLocalStaticSandboxBackend {
   constructor(private readonly rootDir: string) {}
@@ -24,7 +24,7 @@ export class WindowsLocalStaticSandboxBackend {
     let commitSha: string | null = null;
     let upstreamRepoUrl: string | null = request.repo_url ?? null;
     if (request.repo_url) {
-      commitSha = await cloneRepo(request.repo_url, targetDir);
+      commitSha = await cloneRepo(request.repo_url, targetDir, resolvePinnedCheckoutRef(request.hints));
     } else if (request.local_path) {
       upstreamRepoUrl = await inferGitRepoUrl(request.local_path);
       commitSha = await inferGitCommitSha(request.local_path);

@@ -67,7 +67,7 @@ export interface AuditRequest {
   endpoint_url?: string;
   output_dir?: string;
   run_mode?: "static" | "build" | "runtime" | "validate";
-  llm_provider?: "openai" | "mock";
+  llm_provider?: "openai" | "openai_codex" | "mock";
   llm_model?: string;
   llm_api_key?: string;
   audit_policy_pack?: string;
@@ -206,6 +206,11 @@ export interface AnalysisSummary {
   security_docs: string[];
   release_files: string[];
   container_files: string[];
+  ai_frameworks: string[];
+  agentic_capabilities: string[];
+  agentic_risk_indicators: string[];
+  agentic_control_indicators: string[];
+  agentic_signal_files: string[];
 }
 
 export interface RepoContextDocument {
@@ -244,6 +249,35 @@ export interface PreflightSummary {
     status: ProviderReadinessStatus;
     summary: string;
   }>;
+  static_tools?: {
+    generated_at: string;
+    status: PreflightReadinessStatus;
+    gate_policy: string;
+    selected_tool_ids: string[];
+    tool_path: {
+      managed_dirs: string[];
+      env_var: string;
+    };
+    tools: Array<{
+      id: string;
+      label: string;
+      command: string;
+      required_for_full_static: boolean;
+      category: string;
+      run_modes: string[];
+      default_enabled: boolean;
+      mandatory?: boolean;
+      selected: boolean;
+      fallback: string | null;
+      installed: boolean;
+      status: "available" | "missing" | "blocked";
+      version: string | null;
+      summary: string;
+      fix: string;
+    }>;
+    warnings: string[];
+    blockers: string[];
+  };
   recommended_audit_package: {
     id: string;
     title: string;
@@ -273,6 +307,9 @@ export interface PreflightSummary {
     entry_points: number;
     agentic_markers: number;
     mcp_markers: number;
+    ai_frameworks?: number;
+    agentic_capabilities?: number;
+    agentic_controls?: number;
   };
 }
 
@@ -680,7 +717,7 @@ export interface AgentConfigSummary {
   agent_name: string;
   provider: string;
   model: string;
-  api_key_source: "agent-specific" | "request-level" | "global-audit-llm" | "global-generic" | "none";
+  api_key_source: "agent-specific" | "request-level" | "global-audit-llm" | "global-generic" | "oauth-local" | "none";
 }
 
 export interface StandardControlDefinition {

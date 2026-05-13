@@ -1,13 +1,14 @@
 # Tethermark
 
-An open, headless AI security audit harness for repositories, local codebases, and hosted endpoints.
+An open, headless AI security audit harness for repositories and local AI/agent codebases.
 
 The harness combines deterministic evidence collection, LLM-guided planning and review, standards-based scoring, normalized persistence, and artifact export so runs are both queryable and debuggable.
 
 ## What It Does
 
-- Audits `path`, `repo`, and `endpoint` targets from a single CLI or API surface.
+- Audits `path` and `repo` targets as the primary supported surfaces, with endpoint metadata reserved for reduced-confidence follow-up context.
 - Uses a staged workflow: target prep, planning, threat modeling, eval/tool selection, lane analysis, supervisor review, selective corrections, scoring, remediation, and human review workflow.
+- Treats runtime validation as isolated AI/agent behavior testing against established controls, not broad production endpoint pentesting.
 - Supports synchronous runs plus queued async execution with polling, cancel/retry, and optional completion webhooks.
 - Persists normalized run data for querying while still exporting raw artifacts for audit debugging.
 - Supports OSS `local` persistence with SQLite-backed roots and metadata.
@@ -22,8 +23,23 @@ Tethermark is in public OSS release-candidate shape for local and trusted-team s
 - Hosted production storage is not an OSS database mode; the hosted product provides its own Supabase/Postgres adapter around the shared persistence contracts.
 - The default `.env.example` configuration uses the mock LLM runtime, so the repo can build and run without live model credentials.
 - OSS auth defaults to `none`, which is appropriate for solo operators and trusted internal teams. In that mode, review roles and assignments are advisory governance rather than hard identity enforcement.
-- The supported OSS path is end-to-end: preflight, run execution, findings, review workflow, runtime follow-up, exports, and guarded manual outbound GitHub actions.
+- The supported OSS path is end-to-end for repository and local-path audits: preflight, run execution, findings, review workflow, runtime follow-up, exports, and guarded manual outbound GitHub actions.
+- Runtime validation is intended for cloned or local targets that can be built and run in an isolated local/container/microVM environment with synthetic credentials and controlled tool backends.
 - The main remaining non-goals for OSS are enterprise identity, hosted notification infrastructure, and non-SQLite persistence backends.
+
+## Target Scope
+
+Tethermark is AI-security focused. It is not a general-purpose production pentest platform.
+
+Primary targets:
+
+- open-source AI, agent, MCP, plugin, and tool-using repositories
+- private repositories or local clones that the operator is authorized to audit
+- local filesystem paths used for CI, internal review, or self-hosted assessment
+
+Runtime validation should run against isolated copies of those targets. The preferred path is to clone or mirror the target, build it inside a controlled container or microVM, inject fake secrets and simulated external services, execute AI-security eval packs, capture transcripts and tool-call evidence, and tear the environment down.
+
+Hosted or production endpoints are not a primary OSS claim. When an endpoint URL is supplied, it should be treated as scope/context or used only for explicitly allowed, non-destructive, reduced-confidence behavioral checks.
 
 ## Architecture
 
@@ -85,7 +101,26 @@ flowchart LR
 
 ```bash
 npm install
-cp .env.example .env
+```
+
+For a guided installation and readiness workflow, see [`docs/installation.md`](docs/installation.md).
+
+Local checkout onboarding:
+
+```bash
+npm run scan -- onboard
+```
+
+Onboarding creates/checks `.env`, runs `doctor`, explains external tool readiness, and prints the next `setup-tools`, fixture validation, and UI commands.
+
+Future public one-line installers:
+
+```bash
+curl -fsSL https://tethermark.dev/install.sh | bash
+```
+
+```powershell
+irm https://tethermark.dev/install.ps1 | iex
 ```
 
 ### 2. Build and Test
@@ -115,11 +150,10 @@ npm run release:check
 npm run scan -- scan path . --mode static --package agentic-static
 ```
 
-You can also scan a repo URL or endpoint:
+You can also scan a repo URL:
 
 ```bash
 npm run scan -- scan repo https://github.com/example/project --mode static --package deep-static
-npm run scan -- scan endpoint https://example.com --mode runtime --package runtime-validated
 ```
 
 ### 4. Start the API
@@ -200,6 +234,8 @@ npm run scan -- migrate local-db
 npm run scan -- reconstruct runs
 npm run scan -- validate-persistence
 npm run scan -- migrate compact-bundle-exports
+npm run scan -- artifacts prune --older-than 30d --dry-run
+npm run scan -- artifacts prune --older-than 30d
 ```
 
 ### 7. Human Review Workflows
@@ -295,7 +331,7 @@ The current runtime follows this high-level sequence:
 - `baseline-static`: cheapest recurring static audit
 - `agentic-static`: static audit with explicit AI and agentic controls
 - `deep-static`: deeper multi-lane static audit
-- `runtime-validated`: bounded runtime validation path
+- `runtime-validated`: bounded AI/agent runtime validation for isolated repo or local-path targets
 - `premium-comprehensive`: most expansive package, with stricter review posture
 
 ## Persistence and Artifacts
@@ -306,15 +342,19 @@ The harness now has an explicit boundary between queryable state and archival de
 - Artifact APIs under `/artifacts/runs/...` are best-effort archival/debug access.
 - Reusable orchestration inputs such as planner output, threat model, eval selection, run plan, findings-pre-skeptic, score summary, and observations are persisted as normalized stage artifacts.
 - Per-run bundle exports are optional debug exports rather than canonical persistence.
+- Local artifact and sandbox directories can be pruned explicitly with `npm run scan -- artifacts prune`. The command defaults to run artifact bundles and supports `--kind runs|sandboxes|all`, `--older-than <days|30d>`, `--max-gb <n>`, and `--dry-run`; it can read defaults from `HARNESS_ARTIFACT_RETENTION_DAYS`, `HARNESS_ARTIFACT_RETENTION_MAX_GB`, and `HARNESS_ARTIFACT_RETENTION_KIND`.
 
 ## Runtime Limitations
 
-The OSS build has meaningful runtime validation support, but it still has practical limits:
+The OSS build has meaningful runtime validation support, but it is intentionally constrained:
 
 - bounded host execution is opt-in via `HARNESS_ENABLE_HOST_SANDBOX_EXECUTION=1`
 - local tool execution depends on installed binaries and host child-process permission
 - Python worker-backed evidence depends on a working local Python runtime
 - runtime probing is framework-aware for common Node and Python patterns, but not every stack is covered
+- runtime checks should use isolated cloned/local targets, fake credentials, and simulated service/tool backends where possible
+- production endpoint testing is out of scope except for explicitly authorized, non-destructive, reduced-confidence probes
+- runtime evidence should map back to AI-security controls such as OWASP LLM, MITRE ATLAS, NIST AI RMF, and Tethermark eval-pack controls
 - OSS database mode is limited to SQLite-backed `local`; hosted production storage belongs in the hosted Supabase/Postgres adapter.
 
 ## LLM Configuration
@@ -325,6 +365,25 @@ The default environment is mock-backed:
 AUDIT_LLM_PROVIDER=mock
 AUDIT_LLM_MODEL=mock-agent-runtime
 ```
+
+Live API-key mode is available with:
+
+```bash
+AUDIT_LLM_PROVIDER=openai
+AUDIT_LLM_MODEL=gpt-5.4-mini
+AUDIT_LLM_API_KEY=sk-...
+```
+
+Local Codex OAuth mode is available for operator-owned runs after the Codex CLI is installed and signed in with ChatGPT/Codex:
+
+```bash
+AUDIT_LLM_PROVIDER=openai_codex
+AUDIT_LLM_MODEL=gpt-5.1-codex
+AUDIT_LLM_CODEX_COMMAND=codex
+AUDIT_LLM_CODEX_SANDBOX=read-only
+```
+
+Codex OAuth mode delegates structured agent steps through `codex exec` and uses the user's local Codex entitlement subject to provider plan limits. Tethermark does not store OpenAI OAuth tokens in this mode. See [`docs/LLM_PROVIDER_AND_AGENT_BACKEND_MODES.md`](docs/LLM_PROVIDER_AND_AGENT_BACKEND_MODES.md) for the provider/backend boundary.
 
 Agent-specific overrides are supported for planner, threat model, eval selection, skeptic, and remediation agents.
 
@@ -337,11 +396,11 @@ Current settings sections:
 - providers and model defaults
 - credentials and endpoint references
 - audit defaults
-- preflight settings
-- review settings
+- governance, with tabs for gates, policy packs, and reference documents
 - integrations
 - test-mode presets
-- attached policy/reference/runbook documents
+
+The OSS audit engine treats governance settings as local execution policy. The `Gates` tab decides when an audit launch, finding, disposition, or output requires human control. The `Policy Packs` tab manages the portable rule/control contract used by audit runs. The `Reference Documents` tab attaches contextual policy, standard, runbook, and exception material for audits and reviewers. In integrated deployments, an external assurance control plane can become the authoritative system for policy lifecycle, evidence retention, accepted risk, recertification, and audit packets while the OSS engine continues to persist the resolved policy and document snapshots used by each run.
 
 The integrations section now supports safe outbound preview settings for GitHub-style workflows. External posting remains disabled unless explicitly configured, and the current OSS surface prepares preview payloads through `/runs/:runId/outbound-preview`, records explicit per-run approval through `/runs/:runId/outbound-approval`, verifies repository write access through `/runs/:runId/outbound-verification`, stores a manual-send handoff through `/runs/:runId/outbound-send`, and records actual delivery attempts through `/runs/:runId/outbound-delivery`. GitHub execution requires an API token and base URL in persisted credentials, and it remains operator-triggered rather than automatic.
 

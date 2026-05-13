@@ -8,8 +8,24 @@ import type { SandboxSourceProvenance, SandboxStorageUsage } from "../../contrac
 const execFileAsync = promisify(execFile);
 const SKIP_NAMES = new Set([".git", "node_modules", ".artifacts", ".npm-cache", ".legacy-js-archive", "dist", "build", "__pycache__", ".venv"]);
 
-export async function cloneRepo(repoUrl: string, destination: string): Promise<string | null> {
-  await execFileAsync("git", ["clone", "--depth", "1", repoUrl, destination], { maxBuffer: 8 * 1024 * 1024 });
+function getPinnedCheckoutRef(requestHints: unknown): string | null {
+  const value = (requestHints as any)?.diagnostic_run?.pinned_reference ?? (requestHints as any)?.repo_checkout_ref ?? null;
+  const text = typeof value === "string" ? value.trim() : "";
+  return /^[A-Za-z0-9._/-]{6,80}$/.test(text) ? text : null;
+}
+
+export function resolvePinnedCheckoutRef(requestHints: unknown): string | null {
+  return getPinnedCheckoutRef(requestHints);
+}
+
+export async function cloneRepo(repoUrl: string, destination: string, checkoutRef?: string | null): Promise<string | null> {
+  const ref = checkoutRef?.trim() || null;
+  if (ref) {
+    await execFileAsync("git", ["clone", "--no-checkout", repoUrl, destination], { maxBuffer: 8 * 1024 * 1024 });
+    await execFileAsync("git", ["-C", destination, "checkout", "--detach", ref], { maxBuffer: 8 * 1024 * 1024 });
+  } else {
+    await execFileAsync("git", ["clone", "--depth", "1", repoUrl, destination], { maxBuffer: 8 * 1024 * 1024 });
+  }
   try {
     const { stdout } = await execFileAsync("git", ["-C", destination, "rev-parse", "HEAD"], { maxBuffer: 1024 * 1024 });
     return stdout.trim() || null;

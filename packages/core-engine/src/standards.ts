@@ -269,6 +269,90 @@ const HARNESS_INTERNAL_CONTROL_CATALOG: StandardControlDefinition[] = [
     baseline_dimension: "evidence_readiness",
     catalog: "harness_internal",
     applicability: ["all", "repo", "agentic"]
+  },
+  {
+    control_id: "harness_internal.agent_tool_allowlist",
+    framework: "Harness Internal Controls",
+    standard_ref: "Harness Internal / Agent tool allowlists",
+    title: "Define agent tool allowlists and approval gates",
+    description: "Agentic systems expose explicit tool allowlists, denied capabilities, or human approval gates before sensitive actions.",
+    weight: 8,
+    static_assessable: true,
+    baseline_dimension: "agentic_guardrails",
+    catalog: "harness_internal",
+    applicability: ["agentic", "mcp"]
+  },
+  {
+    control_id: "harness_internal.agent_permission_boundaries",
+    framework: "Harness Internal Controls",
+    standard_ref: "Harness Internal / Agent permission boundaries",
+    title: "Constrain shell, file, and network permissions",
+    description: "Agentic systems constrain dangerous shell, filesystem mutation, browser, and network capabilities with sandbox or policy boundaries.",
+    weight: 8,
+    static_assessable: true,
+    baseline_dimension: "agentic_guardrails",
+    catalog: "harness_internal",
+    applicability: ["agentic", "mcp"]
+  },
+  {
+    control_id: "harness_internal.untrusted_content_prompt_injection",
+    framework: "Harness Internal Controls",
+    standard_ref: "Harness Internal / Untrusted content prompt-injection handling",
+    title: "Handle prompt injection from untrusted content",
+    description: "Agentic systems that ingest external content include prompt-injection handling, instruction hierarchy, or untrusted-content isolation.",
+    weight: 8,
+    static_assessable: true,
+    baseline_dimension: "agentic_guardrails",
+    catalog: "harness_internal",
+    applicability: ["agentic", "mcp"]
+  },
+  {
+    control_id: "harness_internal.secret_env_isolation",
+    framework: "Harness Internal Controls",
+    standard_ref: "Harness Internal / Secret redaction and env isolation",
+    title: "Redact secrets and isolate environment access",
+    description: "Agentic systems avoid leaking process environment data and include secret redaction or safe environment access boundaries.",
+    weight: 8,
+    static_assessable: true,
+    baseline_dimension: "ai_data_exposure",
+    catalog: "harness_internal",
+    applicability: ["agentic", "mcp"]
+  },
+  {
+    control_id: "harness_internal.mcp_plugin_permissions",
+    framework: "Harness Internal Controls",
+    standard_ref: "Harness Internal / MCP and plugin permission surfaces",
+    title: "Document MCP and plugin permission surfaces",
+    description: "MCP servers, plugins, or skills document exposed tools and apply permission policy for externally callable capabilities.",
+    weight: 8,
+    static_assessable: true,
+    baseline_dimension: "agentic_guardrails",
+    catalog: "harness_internal",
+    applicability: ["mcp"]
+  },
+  {
+    control_id: "harness_internal.browser_automation_safety",
+    framework: "Harness Internal Controls",
+    standard_ref: "Harness Internal / Browser automation safety",
+    title: "Constrain browser automation safety",
+    description: "Browser automation agents constrain navigation, downloads, credential handling, and external page instruction trust.",
+    weight: 6,
+    static_assessable: true,
+    baseline_dimension: "agentic_guardrails",
+    catalog: "harness_internal",
+    applicability: ["agentic", "mcp"]
+  },
+  {
+    control_id: "harness_internal.telemetry_log_redaction",
+    framework: "Harness Internal Controls",
+    standard_ref: "Harness Internal / Telemetry and log redaction",
+    title: "Redact telemetry and logs",
+    description: "Agentic systems avoid logging prompts, tool arguments, secrets, or user data without redaction or minimization.",
+    weight: 6,
+    static_assessable: true,
+    baseline_dimension: "observability_auditability",
+    catalog: "harness_internal",
+    applicability: ["agentic", "mcp"]
   }
 ];
 

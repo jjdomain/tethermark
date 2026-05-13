@@ -31,7 +31,7 @@ This harness is **not** the same thing as:
 
 The project should be positioned as:
 
-**an open, headless, agentic AI security audit harness for repositories, hosted agent systems, MCP/tool boundaries, and target-specific security evaluations**
+**an open, headless, agentic AI security audit harness for repositories, local AI/agent systems, MCP/tool boundaries, and isolated target-specific security evaluations**
 
 More specifically:
 - it is a **policy-bounded agentic harness**, not an unconstrained autonomous auditor
@@ -44,6 +44,7 @@ It should **not** be positioned as:
 - a vulnerability oracle
 - a package trust registry
 - a GRC/control-plane product
+- a production endpoint pentest platform
 
 ### 2.1 Why this exists even after Codex Security
 
@@ -52,7 +53,8 @@ Codex Security covers important repo-security workflows such as threat modeling,
 This project remains justified because it focuses on areas that are still under-served or differently served:
 - open/self-hosted/headless execution
 - multi-tool orchestration across deterministic scanners and agent-specific eval tools
-- target classes beyond connected GitHub repos
+- local-path and repository targets beyond connected GitHub repos
+- isolated runtime validation for AI/agent behavior
 - agent/tool/MCP boundary mapping
 - custom eval packs and methodology
 - reusable outputs for downstream publishing systems and AI Assurance Control Plane
@@ -82,7 +84,7 @@ This wording matters for both product clarity and hiring/portfolio value.
 
 The harness owns:
 - target intake and classification
-- repo/endpoint inspection
+- repo/local target inspection
 - architecture and threat-model extraction
 - planner/subagent orchestration
 - bounded tool orchestration
@@ -182,7 +184,8 @@ The harness should be visibly model-centered from the first public release.
 How the target system is wrapped for analysis/testing:
 - repo snapshot
 - local runtime sandbox
-- hosted endpoint wrapper
+- isolated container or microVM runtime wrapper
+- reduced-confidence endpoint context wrapper
 - MCP/plugin wrapper
 - capability map
 - environment/profile setup
@@ -359,11 +362,12 @@ Typical outputs:
 
 ### Class 3 — Hosted endpoint / black-box
 Use when:
-- public demo/API exists
+- explicitly authorized non-production demo/API exists
 - repo unavailable or incomplete
+- production endpoint testing is out of scope
 
 Typical outputs:
-- runtime/behavioral findings
+- reduced-confidence runtime/behavioral findings
 - endpoint-specific threat notes
 - reduced architecture confidence
 - limited static posture assumptions
@@ -724,6 +728,7 @@ Inputs:
 - user-provided classification hints
 
 Decision rules:
+Endpoint-only classification is allowed only for explicitly authorized non-production targets and should produce reduced-confidence results.
 - If no runnable app and mostly library/framework markers → Class 1
 - If docker-compose/package scripts/server entry points present → Class 2
 - If only endpoint provided → Class 3
@@ -967,7 +972,7 @@ Success criteria:
 ### Phase 2 — Broader runtime coverage
 
 Goal:
-Expand target coverage and deepen runtime testing/validation while keeping the same harness architecture.
+Expand target coverage and deepen isolated AI-security runtime testing/validation while keeping the same harness architecture.
 
 Adds:
 - validation-runner package
@@ -976,7 +981,9 @@ Adds:
 - optional PyRIT integration for selected targets
 - Inspect integration for multi-turn/tool targets
 - target profiles
-- hosted endpoint / reduced-confidence mode
+- isolated container or microVM runtime validation for repo/local targets
+- synthetic credentials and simulated tool/service backends
+- hosted endpoint / reduced-confidence mode only for explicitly authorized non-production targets
 - better evidence bundle
 - validation trace bundle
 - remediation memo per finding
@@ -991,7 +998,7 @@ Supported target classes:
 
 Success criteria:
 - can validate a subset of top findings in sandbox
-- can audit a hosted endpoint/demo in reduced-confidence mode
+- can audit an explicitly authorized non-production endpoint/demo in reduced-confidence mode
 - can run multi-turn agent/security evals
 - produces publication-grade evidence bundles
 
@@ -1053,12 +1060,13 @@ Success criteria:
 - promptfoo/garak integration
 - target profiles
 - runtime eval mode
+- isolated container or microVM validation path
 - evidence/artifact bundling
 - validation-runner MVP
 
 ### Weeks 9–12
 - Inspect integration
-- hosted endpoint mode
+- reduced-confidence non-production endpoint mode
 - GitHub Action
 - MCP server
 - remediation memos

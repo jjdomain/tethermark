@@ -82,15 +82,15 @@ function resolveArtifactStore(_request: AuditRequest): ArtifactStore {
 }
 
 function parseRuntimeProviderOverrides(request: AuditRequest): {
-  agentOverrides: Record<string, { provider?: "openai" | "mock"; model?: string; apiKey?: string }>;
+  agentOverrides: Record<string, { provider?: "openai" | "openai_codex" | "mock"; model?: string; apiKey?: string }>;
 } {
   const hints = request.hints as Record<string, any> | undefined;
   const parseBucket = (value: unknown) => {
-    const result: Record<string, { provider?: "openai" | "mock"; model?: string; apiKey?: string }> = {};
+    const result: Record<string, { provider?: "openai" | "openai_codex" | "mock"; model?: string; apiKey?: string }> = {};
     if (!value || typeof value !== "object") return result;
     for (const [key, raw] of Object.entries(value as Record<string, any>)) {
       if (!raw || typeof raw !== "object") continue;
-      const provider = raw.provider === "openai" || raw.provider === "mock" ? raw.provider : undefined;
+      const provider = raw.provider === "openai" || raw.provider === "openai_codex" || raw.provider === "mock" ? raw.provider : undefined;
       const model = typeof raw.model === "string" && raw.model.trim() ? raw.model.trim() : undefined;
       const apiKey = typeof raw.api_key === "string" && raw.api_key.trim() ? raw.api_key.trim() : undefined;
       if (provider || model || apiKey) result[key] = { provider, model, apiKey };
@@ -521,6 +521,29 @@ async function loadReusedAssessmentCycle(previousRunId: string): Promise<Assessm
     })))
   };
 }
+
+const REUSE_CRITICAL_STATIC_TOOLS = new Set(["scorecard", "scorecard_api", "semgrep", "trivy"]);
+
+function providerMatchesRequestedTool(record: any, tool: string): boolean {
+  const adapter = record?.adapter_json ?? record?.adapter ?? null;
+  return record?.provider_id === tool
+    || record?.tool === tool
+    || adapter?.requested_provider_id === tool
+    || adapter?.requested_tool === tool;
+}
+
+function findIncompleteReusableStaticTools(selectedTools: string[], previousExecutions: any[]): string[] {
+  const incomplete: string[] = [];
+  for (const tool of selectedTools) {
+    if (!REUSE_CRITICAL_STATIC_TOOLS.has(tool)) continue;
+    const matching = previousExecutions.filter((record) => providerMatchesRequestedTool(record, tool));
+    if (!matching.some((record) => record.status === "completed")) {
+      incomplete.push(tool);
+    }
+  }
+  return incomplete;
+}
+
 export class AuditEngine {
   private readonly queue = new InMemoryJobQueue();
   private readonly cancelRequested = new Set<string>();
@@ -767,7 +790,7 @@ export class AuditEngine {
     this.ensureRunNotCanceled(runId);
 
     const enabledLanes = auditPackage.enabled_lanes;
-    const laneReuseDecisions = computeLaneReuseDecisions({ commitDiff, enabledLanes: enabledLanes as any });
+    let laneReuseDecisions = computeLaneReuseDecisions({ commitDiff, enabledLanes: enabledLanes as any });
     const lanePlans = await observer.observeStage({
       stage: "allocate_audit_lanes",
       actor: "stage_allocate_audit_lanes",
@@ -782,6 +805,26 @@ export class AuditEngine {
     });
     trace.steps.push({ step: 5, actor: "stage_allocate_audit_lanes", action: "allocate_audit_lanes", summary: `Allocated ${lanePlans.length} active audit lanes.`, artifacts: ["lane-plans.json"], timestamp: nowIso() });
     await artifactStore.writeJson(runId, "lane-plans", lanePlans);
+    if (commitDiff.previous_run_id) {
+      const previousToolExecutions = await readPersistedToolExecutions(commitDiff.previous_run_id).catch(() => []);
+      const incompleteStaticTools = findIncompleteReusableStaticTools(evalSelection.baseline_tools, previousToolExecutions);
+      if (incompleteStaticTools.length > 0) {
+        const rationale = `Previous evidence for ${incompleteStaticTools.join(", ")} was incomplete; rerunning static assessment evidence.`;
+        laneReuseDecisions = laneReuseDecisions.map((decision) => ({
+          ...decision,
+          decision: "rerun",
+          rationale: [...decision.rationale, rationale]
+        }));
+        observer.emit({
+          level: "info",
+          stage: "assess_controls",
+          actor: "orchestrator",
+          eventType: "reuse_invalidated",
+          status: "rerun",
+          details: { source_run_id: commitDiff.previous_run_id, incomplete_static_tools: incompleteStaticTools }
+        });
+      }
+    }
     await artifactStore.writeJson(runId, "lane-reuse-decisions", laneReuseDecisions);
     this.ensureRunNotCanceled(runId);
 

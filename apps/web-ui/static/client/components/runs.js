@@ -3,13 +3,11 @@ const h = React.createElement;
 
 function computeTargetValue(runForm) {
   if (runForm.target_kind === "repo") return runForm.repo_url || "";
-  if (runForm.target_kind === "endpoint") return runForm.endpoint_url || "";
   return runForm.local_path || "";
 }
 
 function getCurrentTargetSummary(runForm) {
   if (runForm.target_kind === "repo") return runForm.repo_url || "No repository URL selected";
-  if (runForm.target_kind === "endpoint") return runForm.endpoint_url || "No endpoint URL selected";
   return runForm.local_path || "No local path selected";
 }
 
@@ -259,7 +257,7 @@ function RunDetailShellComponent({ loading, hasDetail, panels, helpers }) {
     ["exports", "Exports / Integrations"]
   ];
   const panelGroups = {
-    overview: ["overview", "compare", "intent"],
+    overview: ["overview", "execution-observability", "compare", "intent", "providers"],
     findings: ["findings", "findings-rollup"],
     review: ["assignment", "review-decisions", "handoff", "review-activity"],
     runtime: ["runtime-followups", "sandbox-execution"],
@@ -647,14 +645,13 @@ function LaunchAuditModalComponent({
                 : "The default project is active. Select Custom run to make one-time changes."))
           ]),
           h("div", { key: "fields", className: "grid gap-4 md:grid-cols-2" }, [
-            h(Field, { key: "target-kind", label: helpLabel("Target Source", "Choose whether this run audits a local codebase, a repository URL, or a live hosted endpoint. This changes both preflight classification and what evidence can be collected.") }, Select({
-              value: runForm.target_kind,
+            h(Field, { key: "target-kind", label: helpLabel("Target Source", "Choose whether this run audits a local codebase or a repository URL. This changes both preflight classification and what evidence can be collected.") }, Select({
+              value: runForm.target_kind === "repo" ? "repo" : "path",
               disabled: usingProjectTarget,
               onChange: (event) => updateRunForm("target_kind", event.target.value)
             }, [
               h("option", { key: "path", value: "path" }, "local path"),
-              h("option", { key: "repo", value: "repo" }, "repo url"),
-              h("option", { key: "endpoint", value: "endpoint" }, "endpoint url")
+              h("option", { key: "repo", value: "repo" }, "repo url")
             ])),
             runForm.target_kind === "repo"
                 ? h(Field, { key: "repo", label: helpLabel("Repository URL", "Use a canonical Git repository URL when you want repository identity, history linking, and integration-safe matching across repeated runs.") }, h(Input, {
@@ -663,14 +660,7 @@ function LaunchAuditModalComponent({
                   onChange: (event) => updateRunForm("repo_url", event.target.value),
                   placeholder: "https://github.com/org/repo or git@github.com:org/repo.git"
                 }))
-                : runForm.target_kind === "endpoint"
-                  ? h(Field, { key: "endpoint", label: helpLabel("Endpoint URL", "Use this for hosted or black-box targets where the audit should reason from a live service rather than repository contents.") }, h(Input, {
-                    value: runForm.endpoint_url,
-                    disabled: usingProjectTarget,
-                    onChange: (event) => updateRunForm("endpoint_url", event.target.value),
-                    placeholder: "https://service.example.com/v1"
-                  }))
-                  : h(Field, { key: "path", label: helpLabel("Local Path", "Point to a local repository or source tree on disk. This is best for self-hosted code, fixtures, or local clones.") }, h(Input, {
+                : h(Field, { key: "path", label: helpLabel("Local Path", "Point to a local repository or source tree on disk. This is best for self-hosted code, fixtures, or local clones.") }, h(Input, {
                     value: runForm.local_path,
                     disabled: usingProjectTarget,
                     onChange: (event) => updateRunForm("local_path", event.target.value),
@@ -679,9 +669,7 @@ function LaunchAuditModalComponent({
           ]),
           h("div", { key: "hint", className: "text-sm text-slate-500" }, runForm.target_kind === "repo"
             ? "Use a repo URL when you want canonical repository identity for history, scoring, and outbound integrations."
-            : runForm.target_kind === "endpoint"
-              ? "Endpoint targets fit hosted-service validation where runtime checks matter most."
-              : "Local paths are best for local clones, fixtures, and self-hosted repositories.")
+            : "Local paths are best for local clones, fixtures, and self-hosted repositories.")
         ]) : null,
         activeStep === "launch" ? h("div", { key: "config-block", className: "space-y-5" }, [
           h("div", { key: "config-header" }, [
@@ -1110,6 +1098,23 @@ function LaunchAuditModalComponent({
                 preflightStale ? h(Badge, { key: "stale" }, "stale") : null,
                 launchReadiness.accepted ? h(Badge, { key: "accepted" }, "accepted") : null
               ].filter(Boolean)),
+              preflightSummary.static_tools
+                ? h("div", { key: "static-tools", className: "mt-4 rounded-2xl border border-white/70 bg-white px-4 py-4 text-sm text-slate-600" }, [
+                  h("div", { key: "head", className: "flex flex-wrap items-center justify-between gap-3" }, [
+                    h("div", { key: "title", className: "font-medium text-slate-900" }, "External Tool Coverage"),
+                    h(Badge, { key: "status" }, preflightSummary.static_tools.status || "unknown")
+                  ]),
+                  h("div", { key: "policy", className: "mt-1 text-slate-500" }, "Missing included tools are readiness warnings. Accepting readiness acknowledges reduced tool coverage."),
+                  h("div", { key: "rows", className: "mt-3 grid gap-2 md:grid-cols-3" }, (preflightSummary.static_tools.tools || []).map((tool) => h("div", {
+                    key: tool.id,
+                    className: cn("rounded-2xl border px-3 py-3", tool.selected ? (tool.installed ? "border-emerald-200 bg-emerald-50/70" : "border-amber-200 bg-amber-50/70") : "border-slate-200 bg-slate-50")
+                  }, [
+                    h("div", { key: "name", className: "font-medium text-slate-900" }, tool.label || tool.id),
+                    h("div", { key: "status", className: "mt-1 text-xs text-slate-500" }, `${tool.selected ? "included" : "excluded"} / ${tool.installed ? "available" : (tool.status || "missing")}`),
+                    tool.fallback ? h("div", { key: "fallback", className: "mt-1 text-xs text-slate-500" }, `fallback: ${tool.fallback}`) : null
+                  ])))
+                ])
+                : null,
               preflightSummary.launch_profile
                 ? h("div", { key: "profile-compare", className: "mt-4 space-y-4 rounded-2xl border border-white/70 bg-white px-4 py-4 text-sm text-slate-500" }, [
                   h("div", { key: "title" }, [
