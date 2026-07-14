@@ -759,8 +759,8 @@ function RunDetailPanelComponent(props) {
     { label: "Follow-ups", value: String(runtimeFollowupCount(run)) }
   ];
   const findingsRollupItems = [
-    { label: "QA Verdict", value: findingQuality?.overall_verdict || "n/a" },
-    { label: "QA Blockers", value: String(findingQuality?.blocking_count || 0) },
+    { label: "Integrity Verdict", value: findingQuality?.overall_verdict || "n/a" },
+    { label: "Integrity Blockers", value: String(findingQuality?.blocking_count || 0) },
     { label: "Unsupported", value: String(findingQuality?.unsupported_count || 0) },
     { label: "Control Mismatch", value: String((findingQuality?.wrong_control_count || 0) + (findingQuality?.missing_control_count || 0)) },
     { label: "Needs Validation", value: String(findingEvaluations?.findings_needing_validation_count || 0) },
@@ -1352,7 +1352,7 @@ function RunDetailPanelComponent(props) {
           : null
       ])
       : h("div", { className: "text-sm text-slate-500" }, "No persisted launch intent is available for this run.")),
-    h(Card, { key: "outbound", title: "Outbound Preview", description: "Prepared GitHub-facing payloads only. OSS does not post anything externally.", className: "border-slate-200 bg-white shadow-sm" }, outboundPreview
+    h(Card, { key: "outbound", title: "Outbound Preview", description: "Prepared GitHub-facing payloads only. Community Edition does not post anything externally.", className: "border-slate-200 bg-white shadow-sm" }, outboundPreview
       ? h("div", { className: "space-y-4" }, [
         h("div", { key: "status-row", className: "flex flex-wrap gap-3" }, [
           h(Badge, { key: "mode" }, outboundPreview.policy?.mode || "disabled"),
@@ -1360,7 +1360,7 @@ function RunDetailPanelComponent(props) {
           h(Badge, { key: "approval" }, outboundPreview.readiness?.approved ? "approved" : "approval_pending"),
           h(Badge, { key: "verification" }, outboundPreview.readiness?.verified ? "verified" : "verification_pending")
         ]),
-        h("div", { key: "copy", className: "text-sm text-slate-500" }, (outboundPreview.readiness?.reasons || []).length ? outboundPreview.readiness.reasons.join(" ") : "Preview is available. Copy the payload manually in OSS. Hosted performs GitHub verification, delivery, and webhook sync."),
+        h("div", { key: "copy", className: "text-sm text-slate-500" }, (outboundPreview.readiness?.reasons || []).length ? outboundPreview.readiness.reasons.join(" ") : "Preview is available. Copy the payload manually. Tethermark Cloud performs GitHub verification, delivery, and webhook sync."),
         outboundApproval
           ? h("div", { key: "approved-meta", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-500" }, `Approved by ${outboundApproval.approved_by} at ${formatDate(outboundApproval.approved_at)}`)
           : null,
@@ -1388,9 +1388,9 @@ function RunDetailPanelComponent(props) {
         ]),
         h("div", { key: "controls", className: "flex flex-wrap gap-3" }, [
           h(Button, { key: "approve", variant: "outline", onClick: () => onApproveOutbound?.(), disabled: !detail }, outboundApproval ? "Refresh Approval" : "Approve Outbound Sharing"),
-          h(Button, { key: "verify", variant: "outline", onClick: () => onVerifyOutbound?.(), disabled: true, title: "GitHub access verification is hosted-only." }, "Hosted Verify"),
+          h(Button, { key: "verify", variant: "outline", onClick: () => onVerifyOutbound?.(), disabled: true, title: "Automatic GitHub access verification is available in Tethermark Cloud." }, "Cloud Verify"),
           h(Button, { key: "send", variant: "secondary", onClick: () => onPrepareOutboundSend?.(), disabled: !outboundPreview.readiness?.send_allowed }, "Prepare Manual Send"),
-          h(Button, { key: "deliver", onClick: () => onExecuteOutboundDelivery?.(), disabled: true, title: "GitHub delivery is hosted-only." }, "Hosted Delivery")
+          h(Button, { key: "deliver", onClick: () => onExecuteOutboundDelivery?.(), disabled: true, title: "Automatic GitHub delivery is available in Tethermark Cloud." }, "Cloud Delivery")
         ]),
         outboundSend
           ? h("div", { key: "send-meta", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-500" }, `${outboundSend.status} by ${outboundSend.attempted_by} at ${formatDate(outboundSend.attempted_at)}: ${outboundSend.reason}`)
@@ -1400,7 +1400,7 @@ function RunDetailPanelComponent(props) {
           : null
       ])
       : h("div", { className: "text-sm text-slate-500" }, "No outbound preview is available for this run.")),
-    h(Card, { key: "webhook-deliveries", title: "Automation Webhooks", description: "Generic OSS automation hook deliveries for this run.", className: "border-slate-200 bg-white shadow-sm" }, webhookDeliveries.length
+    h(Card, { key: "webhook-deliveries", title: "Automation Webhooks", description: "Generic Community Edition automation hook deliveries for this run.", className: "border-slate-200 bg-white shadow-sm" }, webhookDeliveries.length
       ? h("div", { className: "space-y-3" }, webhookDeliveries.map((item) => h("div", {
         key: item.id,
         className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"
@@ -2037,7 +2037,7 @@ function RunDetailPanelComponent(props) {
                   "data-testid": "remediation-issue-url-input",
                   value: selectedRemediationDraft.external_issue_url || "",
                   onChange: (event) => updateRemediationDraft("external_issue_url", event.target.value),
-                  placeholder: "manual GitHub/Jira link for OSS"
+                  placeholder: "manual GitHub/Jira link"
                 })),
                 h(Field, { key: "pr", label: "Fix PR URL" }, h(Input, {
                   "data-testid": "remediation-pr-url-input",
@@ -2085,8 +2085,8 @@ function RunDetailPanelComponent(props) {
                   ? h(Button, { key: "reopen", variant: "outline", onClick: () => saveSelectedRemediation("reopened") }, "Reopen")
                   : null
               ].filter(Boolean)),
-              h("div", { key: "oss-note", className: "mt-4 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm leading-6 text-slate-600" },
-                "OSS stores manual external issue and PR links but does not create GitHub issues or listen for GitHub webhooks. Hosted automates connector creation, webhook sync, merge detection, and validation scheduling."
+              h("div", { key: "community-note", className: "mt-4 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm leading-6 text-slate-600" },
+                "Community Edition stores manual external issue and PR links but does not create GitHub issues or listen for GitHub webhooks. Tethermark Cloud automates connector creation, webhook sync, merge detection, and validation scheduling."
               ),
               remediation
                 ? h("div", { key: "remediation-copy", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
@@ -2146,8 +2146,8 @@ function RunDetailPanelComponent(props) {
           key: "evaluation-summary",
           items: [
             { label: "Overall Evidence Sufficiency", value: findingEvaluations.overall_evidence_sufficiency },
-            { label: "Finding QA Verdict", value: findingQuality?.overall_verdict || "n/a" },
-            { label: "Finding QA Blockers", value: String(findingQuality?.blocking_count || 0) },
+            { label: "Integrity Verdict", value: findingQuality?.overall_verdict || "n/a" },
+            { label: "Integrity Blockers", value: String(findingQuality?.blocking_count || 0) },
             { label: "Unsupported Findings", value: String(findingQuality?.unsupported_count || 0) },
             { label: "Control Mapping Issues", value: String((findingQuality?.wrong_control_count || 0) + (findingQuality?.missing_control_count || 0)) },
             { label: "Overall False Positive Risk", value: findingEvaluations.overall_false_positive_risk },

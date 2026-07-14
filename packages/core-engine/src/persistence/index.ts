@@ -18,6 +18,7 @@ import type {
 } from "./contracts.js";
 import { createPersistenceStore, defaultPersistenceRoot, resolvePersistenceMode } from "./backend.js";
 import { deriveInitialReviewWorkflow } from "./review-workflow.js";
+import { persistRuntimeValidationRecords } from "./runtime-validation.js";
 import { openSqliteDatabase, saveSqliteDatabase, upsertSqliteRecord } from "./sqlite.js";
 
 function deriveResultCanonicalTargetName(result: AuditResult): string {
@@ -132,7 +133,9 @@ async function deriveStageArtifacts(result: AuditResult): Promise<PersistedStage
     "eval-selection",
     "run-plan",
     "findings-pre-skeptic",
+    "finding-integrity-pre-supervisor",
     "finding-quality-pre-skeptic",
+    "post-supervisor-integrity",
     "finding-quality",
     "handoffs",
     "score-summary",
@@ -533,5 +536,13 @@ export async function persistAuditResult(args: {
     artifact_index: indexArtifacts(args.result.artifacts)
   };
 
-  return store.persistBundle(bundle).then((persisted) => ({ mode, root: persisted.root }));
+  const persisted = await store.persistBundle(bundle);
+  await persistRuntimeValidationRecords({
+    runId: args.result.run_id,
+    workspaceId: scope.workspace_id,
+    projectId: scope.project_id,
+    sandboxExecution: stageArtifacts.find((item) => item.artifact_type === "sandbox-execution")?.payload_json as any ?? null,
+    rootDirOrOptions: { rootDir: persisted.root, dbMode: mode }
+  });
+  return { mode, root: persisted.root };
 }

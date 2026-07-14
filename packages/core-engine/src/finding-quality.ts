@@ -14,6 +14,7 @@ import type {
 } from "./contracts.js";
 
 type AnyRecord = Record<string, any>;
+type FindingQualityMode = "legacy_quality" | "pre_supervisor_evidence_packet" | "post_supervisor_integrity";
 
 function asStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.map((item) => String(item)).filter(Boolean) : [];
@@ -261,6 +262,7 @@ function evaluateControlMappings(args: {
   matchedEvidence: EvidenceRecord[];
   controlResults: ControlResult[];
   controlCatalog: StandardControlDefinition[];
+  strictSemanticMapping?: boolean;
 }): { verdict: FindingControlMappingVerdict; mappings: FindingControlMappingQuality[]; recommended: string[]; reasons: string[] } {
   const reasons: string[] = [];
   if (!args.finding.control_ids.length) {
@@ -290,6 +292,9 @@ function evaluateControlMappings(args: {
     const topicMatch = controlMatchesTopic(effectiveControl, topics);
     const textOverlap = tokenOverlapCount(findingText(args.finding), controlCatalogText(effectiveControl));
     if (topics.length > 0 && !topicMatch && textOverlap < 2) {
+      if (args.strictSemanticMapping === false) {
+        return { control_id: controlId, verdict: "weak", reason: "Finding topic does not strongly correspond to this control. Treated as a post-supervisor semantic hint rather than a hard integrity failure." };
+      }
       return { control_id: controlId, verdict: "wrong_control", reason: "Finding topic does not correspond to this control; self-referential backlinks or evidence control IDs are insufficient." };
     }
     if (findingBacklink && (topicMatch || textOverlap >= 2)) {
@@ -300,6 +305,9 @@ function evaluateControlMappings(args: {
     }
     if (topicMatch || textOverlap >= 2 || findingBacklink) {
       return { control_id: controlId, verdict: "weak", reason: "Control appears related, but supporting evidence or bidirectional linkage is incomplete." };
+    }
+    if (args.strictSemanticMapping === false) {
+      return { control_id: controlId, verdict: "weak", reason: "Finding topic and evidence do not strongly correspond to this control. Treated as a post-supervisor semantic hint rather than a hard integrity failure." };
     }
     return { control_id: controlId, verdict: "wrong_control", reason: "Finding topic and evidence do not correspond to this control." };
   });
@@ -357,6 +365,7 @@ function validateOneFinding(args: {
   controlResults: ControlResult[];
   controlCatalog: StandardControlDefinition[];
   toolExecutions: ToolExecutionRecord[] | AnyRecord[];
+  mode: FindingQualityMode;
 }): FindingQualityRecord {
   const relatedEvidence = findRelatedEvidence(args.finding, args.evidenceRecords);
   const evidenceSupport = deriveEvidenceSupport({
@@ -371,9 +380,17 @@ function validateOneFinding(args: {
     finding: args.finding,
     matchedEvidence: relatedEvidence.matched,
     controlResults: args.controlResults,
-    controlCatalog: args.controlCatalog
+    controlCatalog: args.controlCatalog,
+    strictSemanticMapping: args.mode !== "post_supervisor_integrity"
   });
-  const qaBlocking = evidenceSupport.verdict === "unsupported"
+  const hardIntegrityBlocking = evidenceSupport.verdict === "unsupported"
+    || controlMapping.verdict === "missing_control"
+    || controlMapping.mappings.some((item) => item.verdict === "wrong_control" && /not present in the control catalog|normalized control results/i.test(item.reason))
+    || unsupportedClaims.length > 0;
+  const semanticBlocking = controlMapping.verdict === "wrong_control";
+  const qaBlocking = args.mode === "post_supervisor_integrity"
+    ? hardIntegrityBlocking
+    : evidenceSupport.verdict === "unsupported"
     || controlMapping.verdict === "wrong_control"
     || controlMapping.verdict === "missing_control"
     || unsupportedClaims.length > 0;
@@ -389,6 +406,8 @@ function validateOneFinding(args: {
     evidence_support_verdict: evidenceSupport.verdict,
     control_mapping_verdict: controlMapping.verdict,
     qa_blocking: qaBlocking,
+    integrity_blocking: hardIntegrityBlocking,
+    semantic_review_hint: semanticBlocking || controlMapping.verdict === "weak" || controlMapping.verdict === "plausible",
     quality_score: score,
     matched_evidence_ids: relatedEvidence.matched.map((record) => record.evidence_id).filter(Boolean),
     missing_evidence_refs: relatedEvidence.missingRefs,
@@ -414,8 +433,10 @@ export function buildFindingQualitySummary(args: {
   controlCatalog?: StandardControlDefinition[];
   toolExecutions?: Array<ToolExecutionRecord | AnyRecord>;
   generatedAt?: string;
+  mode?: FindingQualityMode;
 }): FindingQualitySummary {
   const request = args.request ?? { run_mode: "static" };
+  const mode = args.mode ?? "legacy_quality";
   const findings = args.findings.map(normalizeFinding).filter((finding) => finding.finding_id);
   const evidenceRecords = (args.evidenceRecords ?? []).map(normalizeEvidence);
   const controlResults = (args.controlResults ?? []).map(normalizeControl);
@@ -437,7 +458,8 @@ export function buildFindingQualitySummary(args: {
     evidenceRecords,
     controlResults,
     controlCatalog,
-    toolExecutions: args.toolExecutions ?? []
+    toolExecutions: args.toolExecutions ?? [],
+    mode
   }));
   const unsupportedCount = qualityFindings.filter((item) => item.evidence_support_verdict === "unsupported").length;
   const wrongControlCount = qualityFindings.filter((item) => item.control_mapping_verdict === "wrong_control").length;
@@ -453,6 +475,8 @@ export function buildFindingQualitySummary(args: {
   return {
     run_id: args.runId,
     generated_at: args.generatedAt ?? new Date().toISOString(),
+    artifact_role: mode,
+    authority: mode === "post_supervisor_integrity" ? "deterministic_integrity_gate" : "deterministic_facts_and_hints",
     overall_verdict: overallVerdict,
     validated_count: qualityFindings.filter((item) => item.evidence_support_verdict === "supported" && item.control_mapping_verdict === "correct").length,
     plausible_count: qualityFindings.filter((item) => item.control_mapping_verdict === "plausible").length,
@@ -463,4 +487,12 @@ export function buildFindingQualitySummary(args: {
     blocking_count: blockingCount,
     findings: qualityFindings
   };
+}
+
+export function buildPreSupervisorEvidencePacket(args: Omit<Parameters<typeof buildFindingQualitySummary>[0], "mode">): FindingQualitySummary {
+  return buildFindingQualitySummary({ ...args, mode: "pre_supervisor_evidence_packet" });
+}
+
+export function buildPostSupervisorIntegritySummary(args: Omit<Parameters<typeof buildFindingQualitySummary>[0], "mode">): FindingQualitySummary {
+  return buildFindingQualitySummary({ ...args, mode: "post_supervisor_integrity" });
 }

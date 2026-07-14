@@ -272,7 +272,7 @@ Your job:
 
 Rules:
 - distinguish direct provider evidence, deterministic repository/source evidence, and higher-level inference
-- use supplied deterministic findingQuality facts as hard review inputs; do not override an unsupported/wrong-control signal unless the supplied context shows why it is a false alarm
+- use supplied preSupervisorEvidencePacket facts as zero-trust deterministic inputs: hard integrity failures must be corrected or routed to review; heuristic mapping hints should inform but not replace your semantic judgment
 - do not fabricate missing evidence or unstated company policy
 - do not claim runtime proof, exploitability, or external impact from static-only evidence
 - do not prefer downgrades by default; choose the action that best matches the evidence and audit policy

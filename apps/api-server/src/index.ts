@@ -5,6 +5,8 @@ import { spawn, spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
 import { listenWithFriendlyErrors } from "../../shared/src/listen.js";
+import { compareBenchmarkReports, loadBenchmarkSuite, runBenchmarkSuite, selectBenchmarkCases } from "../../cli/src/benchmark-suite.js";
+import { buildRuntimeSetupPlan, executeRuntimeSetupPlan, runtimeSetupCommandLine } from "../../cli/src/setup-runtime.js";
 import { describeArtifactType } from "../../../packages/core-engine/src/artifact-policy.js";
 import { loadEnvironment } from "../../../packages/core-engine/src/env.js";
 import {
@@ -131,6 +133,10 @@ import {
   syncLearningEventsForRun,
   buildPreflightSummary,
   buildStaticToolsReadiness,
+  buildRuntimeExecutionPolicy,
+  buildRuntimeSandboxReadiness,
+  getRuntimeSandboxProviders,
+  normalizeRuntimeSandboxSettings,
   canCommentOnReview,
   canExportReviewAudit,
   canPerformReviewAction,
@@ -147,6 +153,7 @@ import {
   normalizeActorId,
   normalizeProjectId,
   normalizeWorkspaceId,
+  type PersistenceReadOptions,
   type ReviewActorRole,
   type GenericWebhookEventType,
   type OutboundApprovalArtifact,
@@ -245,6 +252,8 @@ type RunSubresource =
   | "exports"
   | "finding-dispositions"
   | "finding-evaluations"
+  | "finding-integrity-pre-supervisor"
+  | "post-supervisor-integrity"
   | "finding-quality"
   | "webhook-deliveries"
   | "report-markdown"
@@ -252,6 +261,7 @@ type RunSubresource =
   | "report-executive"
   | "report-compare"
   | "sandbox-execution"
+  | "runtime-validation"
   | "review-audit"
   | "outbound-preview"
   | "outbound-verification"
@@ -652,6 +662,7 @@ const LLM_AGENT_ENV_PREFIXES: Record<string, string[]> = {
 };
 const ASSISTANT_LLM_ENV_PREFIX = "AUDIT_LLM_ASSISTANT";
 const MASKED_SECRET_PLACEHOLDER = "************";
+const STATIC_TOOLS_PATH_ENV = "HARNESS_STATIC_TOOLS_PATH";
 
 function readEnv(name: string): string | undefined {
   const value = process.env[name];
@@ -670,6 +681,86 @@ function readNumberEnv(name: string, fallback: number): number {
 function stringifyEnvValue(value: string): string {
   if (/^[A-Za-z0-9_./:@-]+$/.test(value)) return value;
   return JSON.stringify(value);
+}
+
+function parseEnvFileValue(contents: string, key: string): { exists: boolean; value: string } {
+  for (const line of contents.split(/\r?\n/)) {
+    if (line.trim().startsWith("#")) continue;
+    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/);
+    if (!match || match[1] !== key) continue;
+    let value = match[2].trim();
+    if ((value.startsWith("\"") && value.endsWith("\"")) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    return { exists: true, value };
+  }
+  return { exists: false, value: "" };
+}
+
+async function readEnvFileValue(key: string): Promise<{ env_path: string; env_file_exists: boolean; file_value: string; effective_value: string; delimiter: string }> {
+  const envPath = path.resolve(process.cwd(), ".env");
+  let contents = "";
+  let envFileExists = true;
+  try {
+    contents = await fs.readFile(envPath, "utf8");
+  } catch (error: any) {
+    if (error?.code !== "ENOENT") throw error;
+    envFileExists = false;
+  }
+  const parsed = parseEnvFileValue(contents, key);
+  return {
+    env_path: envPath,
+    env_file_exists: envFileExists,
+    file_value: parsed.value,
+    effective_value: process.env[key] ?? parsed.value,
+    delimiter: path.delimiter
+  };
+}
+
+async function writeEnvFileValue(key: string, value: string): Promise<{ env_path: string; env_file_exists: boolean; file_value: string; effective_value: string; delimiter: string }> {
+  if (/[\r\n]/.test(value)) {
+    throw new Error("env_value_must_be_single_line");
+  }
+  const envPath = path.resolve(process.cwd(), ".env");
+  let contents = "";
+  let envFileExists = true;
+  try {
+    contents = await fs.readFile(envPath, "utf8");
+  } catch (error: any) {
+    if (error?.code !== "ENOENT") throw error;
+    envFileExists = false;
+  }
+  const trimmedValue = value.trim();
+  const lines = contents ? contents.split(/\r?\n/) : [];
+  let wrote = false;
+  const nextLines: string[] = [];
+  for (const line of lines) {
+    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/);
+    if (!match || match[1] !== key) {
+      nextLines.push(line);
+      continue;
+    }
+    if (!trimmedValue) {
+      wrote = true;
+      continue;
+    }
+    if (!wrote) {
+      nextLines.push(`${key}=${trimmedValue}`);
+      wrote = true;
+    }
+  }
+  if (!wrote && trimmedValue) nextLines.push(`${key}=${trimmedValue}`);
+  const nextContents = `${nextLines.join("\n").replace(/\n*$/, "")}${nextLines.length ? "\n" : ""}`;
+  await fs.writeFile(envPath, nextContents, "utf8");
+  if (trimmedValue) process.env[key] = trimmedValue;
+  else delete process.env[key];
+  return {
+    env_path: envPath,
+    env_file_exists: envFileExists || true,
+    file_value: trimmedValue,
+    effective_value: process.env[key] ?? "",
+    delimiter: path.delimiter
+  };
 }
 
 async function writeEnvValues(updates: Record<string, string | null | undefined>): Promise<void> {
@@ -1210,6 +1301,26 @@ type ArtifactRetentionBody = {
   max_bytes?: number | null;
 };
 
+type BenchmarkRunBody = {
+  case_id?: string;
+  case_ids?: string[];
+  include_extended?: boolean;
+  include_runtime_pending?: boolean;
+  execute?: boolean;
+  strict?: boolean;
+  db_mode?: string;
+  llm_provider?: AuditRequest["llm_provider"];
+  llm_model?: string;
+  use_settings_provider?: boolean;
+};
+
+type BenchmarkCompareBody = {
+  baseline?: string;
+  current?: string;
+  baseline_path?: string;
+  current_path?: string;
+};
+
 type RequestContext = {
   workspaceId: string;
   projectId: string;
@@ -1232,6 +1343,69 @@ function readHeader(req: http.IncomingMessage, name: string): string | undefined
   const value = req.headers[name.toLowerCase()];
   if (Array.isArray(value)) return value[0];
   return typeof value === "string" ? value : undefined;
+}
+
+function benchmarkReportRoot(): string {
+  return path.resolve(process.env.HARNESS_BENCHMARK_REPORT_ROOT ?? path.join(process.cwd(), ".artifacts", "benchmarks"));
+}
+
+function safeBenchmarkReportPath(input: string): string {
+  const root = benchmarkReportRoot();
+  const fileName = path.basename(input);
+  const resolved = path.resolve(root, fileName);
+  const relative = path.relative(root, resolved);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error("invalid_benchmark_report_path");
+  }
+  return resolved;
+}
+
+async function listBenchmarkReports(): Promise<Array<{
+  file_name: string;
+  path: string;
+  suite_id: string | null;
+  suite_version: string | null;
+  generated_at: string | null;
+  executed: boolean | null;
+  selected_cases: number | null;
+  passed_cases: number | null;
+  failed_cases: number | null;
+  dry_run_cases: number | null;
+  skipped_cases: number | null;
+  size_bytes: number;
+  modified_at: string;
+}>> {
+  const root = benchmarkReportRoot();
+  await fs.mkdir(root, { recursive: true });
+  const entries = await fs.readdir(root, { withFileTypes: true });
+  const reports = await Promise.all(entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+    .map(async (entry) => {
+      const reportPath = path.join(root, entry.name);
+      const stat = await fs.stat(reportPath);
+      let parsed: any = {};
+      try {
+        parsed = JSON.parse(await fs.readFile(reportPath, "utf8"));
+      } catch {
+        parsed = {};
+      }
+      return {
+        file_name: entry.name,
+        path: reportPath,
+        suite_id: typeof parsed.suite_id === "string" ? parsed.suite_id : null,
+        suite_version: typeof parsed.suite_version === "string" ? parsed.suite_version : null,
+        generated_at: typeof parsed.generated_at === "string" ? parsed.generated_at : null,
+        executed: typeof parsed.executed === "boolean" ? parsed.executed : null,
+        selected_cases: typeof parsed.selected_cases === "number" ? parsed.selected_cases : null,
+        passed_cases: typeof parsed.passed_cases === "number" ? parsed.passed_cases : null,
+        failed_cases: typeof parsed.failed_cases === "number" ? parsed.failed_cases : null,
+        dry_run_cases: typeof parsed.dry_run_cases === "number" ? parsed.dry_run_cases : null,
+        skipped_cases: typeof parsed.skipped_cases === "number" ? parsed.skipped_cases : null,
+        size_bytes: stat.size,
+        modified_at: stat.mtime.toISOString()
+      };
+    }));
+  return reports.sort((left, right) => String(right.generated_at ?? right.modified_at).localeCompare(String(left.generated_at ?? left.modified_at)));
 }
 
 function getAuthMode(): string {
@@ -1301,6 +1475,22 @@ function applyRequestContextToAuditRequest(request: AuditRequest, context: Reque
   };
 }
 
+async function applySettingsToAuditRequest(request: AuditRequest, context: RequestContext): Promise<AuditRequest> {
+  const scoped = applyRequestContextToAuditRequest(request, context);
+  const settingsResolution = await resolvePersistedUiSettings(undefined, context);
+  const preflightSettings = settingsResolution.effective.preflight_json && typeof settingsResolution.effective.preflight_json === "object"
+    ? settingsResolution.effective.preflight_json as Record<string, unknown>
+    : {};
+  const hints = scoped.hints && typeof scoped.hints === "object" ? scoped.hints as Record<string, unknown> : {};
+  return {
+    ...scoped,
+    hints: {
+      ...hints,
+      runtime_sandbox: hints.runtime_sandbox ?? preflightSettings.runtime_sandbox
+    }
+  };
+}
+
 function runMatchesScope(run: Pick<PersistedRunListItem, "workspace_id" | "project_id"> | null | undefined, context: RequestContext): boolean {
   return !!run && normalizeWorkspaceId(run.workspace_id) === context.workspaceId && normalizeProjectId(run.project_id) === context.projectId;
 }
@@ -1344,7 +1534,7 @@ async function attachProjectRunStats(projects: PersistedProjectRecord[], workspa
 
 function assistantUnavailable(res: http.ServerResponse): boolean {
   if (assistantEnabled()) return false;
-  sendJson(res, 403, { error: "assistant_disabled", guidance: "Set HARNESS_ENABLE_ASSISTANT=1 to enable the OSS assistant endpoints." });
+  sendJson(res, 403, { error: "assistant_disabled", guidance: "The Community Edition assistant is disabled by environment override. Remove HARNESS_DISABLE_ASSISTANT or set HARNESS_ENABLE_ASSISTANT=true to enable assistant endpoints." });
   return true;
 }
 
@@ -1460,7 +1650,7 @@ async function executeAssistantAction(args: {
   if (args.proposal.action_type === "external_outbound_preview") {
     return {
       status: "draft_only",
-      note: "OSS assistant mode can draft external payloads, but connector execution is hosted-only or manual."
+      note: "Community Edition assistant mode can draft external payloads, but automatic connector execution requires Tethermark Cloud or manual operator action."
     };
   }
   throw new Error("assistant_action_not_supported");
@@ -1568,7 +1758,7 @@ function buildScopedTargetStats(targets: PersistedTargetListItem[]) {
 }
 
 function matchRunSubresource(url: URL): { runId: string; resource: RunSubresource } | null {
-  const match = url.pathname.match(/^\/runs\/([^/]+)\/(observability|observations|events|metrics|observability-summary|maintenance|lane-plans|lane-results|lane-specialists|lane-reuse-decisions|evidence-records|findings|control-results|tool-executions|tool-adapters|agent-invocations|agent-trace|artifact-index|score-summary|dimension-scores|usage-summary|review-decision|review-workflow|review-actions|review-comments|review-summary|runtime-followups|remediation-items|learning|exports|finding-dispositions|finding-evaluations|finding-quality|webhook-deliveries|report-markdown|report-sarif|report-executive|report-compare|sandbox-execution|review-audit|outbound-preview|outbound-approval|outbound-send|outbound-verification|outbound-delivery|supervisor-review|remediation|summary|preflight|launch-intent|commit-diff|persistence|stage-executions|publishability|policy-application|resolved-config|correction-plan|correction-result)$/);
+  const match = url.pathname.match(/^\/runs\/([^/]+)\/(observability|observations|events|metrics|observability-summary|maintenance|lane-plans|lane-results|lane-specialists|lane-reuse-decisions|evidence-records|findings|control-results|tool-executions|tool-adapters|agent-invocations|agent-trace|artifact-index|score-summary|dimension-scores|usage-summary|review-decision|review-workflow|review-actions|review-comments|review-summary|runtime-followups|remediation-items|learning|exports|finding-dispositions|finding-evaluations|finding-integrity-pre-supervisor|post-supervisor-integrity|finding-quality|webhook-deliveries|report-markdown|report-sarif|report-executive|report-compare|sandbox-execution|runtime-validation|review-audit|outbound-preview|outbound-approval|outbound-send|outbound-verification|outbound-delivery|supervisor-review|remediation|summary|preflight|launch-intent|commit-diff|persistence|stage-executions|publishability|policy-application|resolved-config|correction-plan|correction-result)$/);
   if (!match) return null;
   return { runId: match[1] ?? "", resource: match[2] as RunSubresource };
 }
@@ -1669,6 +1859,24 @@ function matchAsyncRunAction(url: URL): { runId: string; action: "cancel" | "ret
     runId: decodeURIComponent(match[1] ?? ""),
     action: (match[2] ?? "") as "cancel" | "retry"
   };
+}
+
+function matchBenchmarkSuite(url: URL): { suiteId: string } | null {
+  const match = url.pathname.match(/^\/benchmarks\/suites\/([^/]+)$/);
+  if (!match) return null;
+  return { suiteId: decodeURIComponent(match[1] ?? "") };
+}
+
+function matchBenchmarkSuiteRun(url: URL): { suiteId: string } | null {
+  const match = url.pathname.match(/^\/benchmarks\/suites\/([^/]+)\/run$/);
+  if (!match) return null;
+  return { suiteId: decodeURIComponent(match[1] ?? "") };
+}
+
+function matchBenchmarkReport(url: URL): { fileName: string } | null {
+  const match = url.pathname.match(/^\/benchmarks\/reports\/([^/]+)$/);
+  if (!match) return null;
+  return { fileName: decodeURIComponent(match[1] ?? "") };
 }
 
 function matchRuntimeFollowupAction(url: URL): { followupId: string; action: "launch" } | null {
@@ -1846,21 +2054,21 @@ async function readArtifactPayload(filePath: string): Promise<{ format: Artifact
   return { format, payload: raw };
 }
 
-async function buildRunSummary(runId: string): Promise<Record<string, unknown>> {
+async function buildRunSummary(runId: string, rootDirOrOptions?: string | PersistenceReadOptions): Promise<Record<string, unknown>> {
   const [run, scoreSummary, reviewDecision, reviewWorkflow, findings, controlResults, evidenceRecords, toolExecutions, stageExecutions, laneSpecialists, sandboxExecution, findingDispositions, runtimeFollowups] = await Promise.all([
-    getPersistedRun(runId),
-    readPersistedScoreSummary(runId),
-    readPersistedReviewDecision(runId),
-    readPersistedReviewWorkflow(runId),
-    readPersistedFindings(runId),
-    readPersistedControlResults(runId),
-    readPersistedEvidenceRecords(runId),
-    readPersistedToolExecutions(runId),
-    readPersistedStageExecutions(runId),
-    readPersistedLaneSpecialistOutputs(runId),
-    readPersistedStageArtifact(runId, "sandbox-execution"),
-    readPersistedFindingDispositions(runId),
-    listPersistedRuntimeFollowups({ runId })
+    getPersistedRun(runId, rootDirOrOptions),
+    readPersistedScoreSummary(runId, rootDirOrOptions),
+    readPersistedReviewDecision(runId, rootDirOrOptions),
+    readPersistedReviewWorkflow(runId, rootDirOrOptions),
+    readPersistedFindings(runId, rootDirOrOptions),
+    readPersistedControlResults(runId, rootDirOrOptions),
+    readPersistedEvidenceRecords(runId, rootDirOrOptions),
+    readPersistedToolExecutions(runId, rootDirOrOptions),
+    readPersistedStageExecutions(runId, rootDirOrOptions),
+    readPersistedLaneSpecialistOutputs(runId, rootDirOrOptions),
+    readPersistedStageArtifact(runId, "sandbox-execution", rootDirOrOptions),
+    readPersistedFindingDispositions(runId, rootDirOrOptions),
+    listPersistedRuntimeFollowups({ runId, rootDirOrOptions })
   ]);
   if (!run) {
     throw new Error("run_not_found");
@@ -2011,15 +2219,15 @@ async function emitConfiguredWebhookForRun(
   eventType: GenericWebhookEventType,
   triggeredBy: string | null,
   data: Record<string, unknown>,
-  rootDirOrOptions?: unknown
+  rootDirOrOptions?: string | PersistenceReadOptions
 ): Promise<void> {
-  const run = await getPersistedRun(runId);
+  const run = await getPersistedRun(runId, rootDirOrOptions);
   if (!run) return;
   const [summary, settingsResolution, reviewWorkflow, reviewDecision] = await Promise.all([
-    buildRunSummary(runId),
-    resolvePersistedUiSettings(rootDirOrOptions as any, { workspaceId: run.workspace_id, projectId: run.project_id }),
-    readPersistedReviewWorkflow(runId, rootDirOrOptions as any),
-    readPersistedReviewDecision(runId, rootDirOrOptions as any)
+    buildRunSummary(runId, rootDirOrOptions),
+    resolvePersistedUiSettings(rootDirOrOptions, { workspaceId: run.workspace_id, projectId: run.project_id }),
+    readPersistedReviewWorkflow(runId, rootDirOrOptions),
+    readPersistedReviewDecision(runId, rootDirOrOptions)
   ]);
   const config = normalizeGenericWebhookConfig(settingsResolution.effective.integrations_json as Record<string, unknown>);
   await emitGenericWebhookEvent({
@@ -2028,7 +2236,7 @@ async function emitConfiguredWebhookForRun(
     eventType,
     summary,
     triggeredBy,
-    rootDirOrOptions: rootDirOrOptions as any,
+    rootDirOrOptions,
     data: {
       review_workflow_status: reviewWorkflow?.status ?? null,
       publishability_status: reviewDecision?.publishability_status ?? null,
@@ -2042,7 +2250,7 @@ async function emitConfiguredWebhookForRun(
       eventType: "review_required",
       summary,
       triggeredBy,
-      rootDirOrOptions: rootDirOrOptions as any,
+      rootDirOrOptions,
       data: {
         review_workflow_status: reviewWorkflow.status,
         publishability_status: reviewDecision?.publishability_status ?? null,
@@ -2118,10 +2326,12 @@ function scheduledLearningDue(args: {
 
 function createSelfLearningScheduler(): { start(): void; stop(): void } {
   let timer: NodeJS.Timeout | null = null;
+  let startupTimer: NodeJS.Timeout | null = null;
   let running = false;
+  let stopped = true;
 
   const tick = async () => {
-    if (running || learningSchedulerDisabled()) return;
+    if (stopped || running || learningSchedulerDisabled()) return;
     running = true;
     try {
       const workspaceId = "default";
@@ -2152,13 +2362,21 @@ function createSelfLearningScheduler(): { start(): void; stop(): void } {
   return {
     start() {
       if (timer || learningSchedulerDisabled()) return;
+      stopped = false;
       timer = setInterval(() => { void tick(); }, learningSchedulerPollMs());
       timer.unref?.();
-      setTimeout(() => { void tick(); }, 2_000).unref?.();
+      startupTimer = setTimeout(() => {
+        startupTimer = null;
+        void tick();
+      }, 2_000);
+      startupTimer.unref?.();
     },
     stop() {
+      stopped = true;
       if (timer) clearInterval(timer);
+      if (startupTimer) clearTimeout(startupTimer);
       timer = null;
+      startupTimer = null;
     }
   };
 }
@@ -2670,7 +2888,7 @@ export function createApiServer(): http.Server {
 
   if (req.method === "POST" && url.pathname === "/runs") {
     try {
-      const request = applyRequestContextToAuditRequest(await readJson(req), context);
+      const request = await applySettingsToAuditRequest(await readJson(req), context);
       const result = await engine.run(request);
       await emitConfiguredWebhookForRun(result.run_id, "run_completed", context.actorId, {
         trigger: "sync_run"
@@ -2685,12 +2903,111 @@ export function createApiServer(): http.Server {
   if (req.method === "POST" && url.pathname === "/preflight") {
     try {
       const body = await readJson<{ request?: AuditRequest } & AuditRequest>(req);
-      const request = (body.request && typeof body.request === "object" ? body.request : body) as AuditRequest;
+      const request = await applySettingsToAuditRequest((body.request && typeof body.request === "object" ? body.request : body) as AuditRequest, context);
       const summary = await buildPreflightSummary(request);
       sendJson(res, 200, { preflight: summary });
     } catch (error) {
       sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
     }
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/runtime-sandbox/providers") {
+    sendJson(res, 200, {
+      providers: getRuntimeSandboxProviders()
+    });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/runtime-sandbox/setup-plan") {
+    const plan = buildRuntimeSetupPlan();
+    sendJson(res, 200, {
+      runtime_sandbox_setup: {
+        plan: plan.map((item) => ({
+          ...item,
+          command_line: runtimeSetupCommandLine(item)
+        })),
+        can_auto_install: plan.some((item) => item.auto_run),
+        guidance: "Auto install commands are executed only after explicit operator action. Manual steps remain visible when no supported package manager is detected."
+      }
+    });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/runtime-sandbox/setup") {
+    try {
+      const body = await readJson<{ confirm?: boolean }>(req);
+      if (!body.confirm) {
+        sendJson(res, 400, { error: "confirmation_required", guidance: "Set confirm=true to execute auto-supported runtime setup commands." });
+        return;
+      }
+      const before = buildRuntimeSandboxReadiness();
+      const summary = executeRuntimeSetupPlan();
+      const after = buildRuntimeSandboxReadiness();
+      sendJson(res, 200, {
+        runtime_sandbox_setup: {
+          ...summary,
+          plan: summary.plan.map((item) => ({ ...item, command_line: runtimeSetupCommandLine(item) })),
+          skipped: summary.skipped.map((item) => ({ ...item, command_line: runtimeSetupCommandLine(item) })),
+          readiness_before: before,
+          readiness_after: after
+        }
+      });
+    } catch (error) {
+      const setupSummary = error && typeof error === "object" && "setup_summary" in error
+        ? (error as { setup_summary?: unknown }).setup_summary
+        : null;
+      sendJson(res, 500, {
+        error: error instanceof Error ? error.message : String(error),
+        runtime_sandbox_setup: setupSummary
+      });
+    }
+    return;
+  }
+
+  if ((req.method === "GET" || req.method === "POST") && url.pathname === "/runtime-sandbox/readiness") {
+    try {
+      const body = req.method === "POST" ? await readJson<{ request?: AuditRequest; settings?: Record<string, unknown>; provider_id?: string }>(req) : {};
+      const providerId = body.provider_id ?? url.searchParams.get("provider_id") ?? "local_runtime";
+      if (providerId !== "local_runtime") {
+        sendJson(res, 403, { error: "hosted_only", provider_id: providerId });
+        return;
+      }
+      const settingsResolution = await resolvePersistedUiSettings(undefined, context);
+      const settings = body.settings ?? ((settingsResolution.effective.preflight_json as Record<string, unknown>)?.runtime_sandbox as Record<string, unknown> | undefined);
+      const request = body.request ? await applySettingsToAuditRequest(body.request, context) : null;
+      const readiness = buildRuntimeSandboxReadiness({
+        settings,
+        target: request
+          ? {
+              source_type: request.repo_url ? "repo" : request.local_path ? "path" : request.endpoint_url ? "endpoint" : null,
+              trusted: Boolean(request.local_path)
+            }
+          : null
+      });
+      sendJson(res, 200, { runtime_sandbox: readiness });
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/runtime-sandbox/policy/defaults") {
+    const providerId = url.searchParams.get("provider_id") ?? "local_runtime";
+    if (providerId !== "local_runtime") {
+      sendJson(res, 403, { error: "hosted_only", provider_id: providerId });
+      return;
+    }
+    const settingsResolution = await resolvePersistedUiSettings(undefined, context);
+    const settings = normalizeRuntimeSandboxSettings((settingsResolution.effective.preflight_json as Record<string, unknown>)?.runtime_sandbox);
+    const readiness = buildRuntimeSandboxReadiness({ settings });
+    sendJson(res, 200, {
+      runtime_sandbox_settings: settings,
+      runtime_execution_policy: buildRuntimeExecutionPolicy({
+        settings,
+        selectedBackend: readiness.resolution.selected_backend
+      })
+    });
     return;
   }
 
@@ -2705,6 +3022,35 @@ export function createApiServer(): http.Server {
     return;
   }
 
+  if (req.method === "GET" && url.pathname === "/static-tools/path") {
+    try {
+      sendJson(res, 200, {
+        static_tools_path: await readEnvFileValue(STATIC_TOOLS_PATH_ENV)
+      });
+    } catch (error) {
+      sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
+  if (req.method === "PUT" && url.pathname === "/static-tools/path") {
+    try {
+      const body = await readJson<{ value?: string }>(req);
+      const nextPath = await writeEnvFileValue(STATIC_TOOLS_PATH_ENV, String(body.value ?? ""));
+      const settingsResolution = await resolvePersistedUiSettings(undefined, context);
+      const preflightSettings = settingsResolution.effective.preflight_json as Record<string, unknown>;
+      sendJson(res, 200, {
+        static_tools_path: nextPath,
+        static_tools: buildStaticToolsReadiness({
+          selectedToolIds: preflightSettings.external_audit_tool_ids
+        })
+      });
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === "/runs/async") {
     try {
       const body = await readJson<AsyncRunRequestBody>(req);
@@ -2713,7 +3059,7 @@ export function createApiServer(): http.Server {
         return;
       }
       const job = await asyncJobs.createJob({
-        request: applyRequestContextToAuditRequest(body.request, context),
+        request: await applySettingsToAuditRequest(body.request, context),
         startImmediately: body.start_immediately,
         completionWebhookUrl: body.completion_webhook_url ?? null
       });
@@ -3131,7 +3477,7 @@ export function createApiServer(): http.Server {
         sendJson(res, 400, { error: "runtime_followup_not_launchable", followup_id: runtimeFollowupAction.followupId });
         return;
       }
-      const request = applyRequestContextToAuditRequest({
+      const request = await applySettingsToAuditRequest({
         ...followup.rerun_request_json,
         requested_by: context.actorId,
         hints: {
@@ -3854,7 +4200,7 @@ export function createApiServer(): http.Server {
     sendJson(res, 403, {
       error: "hosted_only",
       capability: "github_outbound_verification",
-      message: "GitHub token-backed repository verification is hosted-only. OSS can generate outbound preview payloads for manual use."
+      message: "Automatic GitHub repository verification is available in Tethermark Cloud. Community Edition can generate outbound preview payloads for manual use."
     });
     return;
   }
@@ -3897,7 +4243,7 @@ export function createApiServer(): http.Server {
         attempted_at: new Date().toISOString(),
         executed: false,
         status: "manual_only",
-        reason: "External connector execution is not enabled in the OSS harness. Use the preview payload manually or add a future connector adapter.",
+        reason: "Automatic external connector execution is not enabled in Community Edition. Use the preview payload manually or configure a Cloud connector.",
         payload_preview: (selectedAction?.["payload_preview"] as Record<string, unknown> | null | undefined) ?? null
       };
       await upsertPersistedStageArtifact({
@@ -3922,7 +4268,7 @@ export function createApiServer(): http.Server {
     sendJson(res, 403, {
       error: "hosted_only",
       capability: "github_outbound_delivery",
-      message: "GitHub issue, comment, label, and check delivery is hosted-only. OSS can prepare the payload for manual posting."
+      message: "Automatic GitHub issue, comment, label, and check delivery is available in Tethermark Cloud. Community Edition can prepare the payload for manual posting."
     });
     return;
   }
@@ -3962,6 +4308,120 @@ export function createApiServer(): http.Server {
   if (req.method === "GET" && url.pathname === "/policy-packs") {
     try {
       sendJson(res, 200, { policy_packs: listBuiltinAuditPolicyPacks() });
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/benchmarks/suites") {
+    try {
+      const suite = await loadBenchmarkSuite("ai-agent-static-v1");
+      sendJson(res, 200, {
+        suites: [{
+          suite_id: suite.suite_id,
+          suite_version: suite.suite_version,
+          title: suite.title,
+          summary: suite.summary,
+          default_run_mode: suite.default_run_mode,
+          default_audit_package: suite.default_audit_package,
+          case_count: suite.cases.length,
+          default_case_count: selectBenchmarkCases(suite, {}).length,
+          extended_case_count: selectBenchmarkCases(suite, { includeExtended: true }).length,
+          runtime_pending_case_count: suite.cases.filter((item) => item.tier === "runtime_pending").length
+        }]
+      });
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
+  const benchmarkSuite = req.method === "GET" ? matchBenchmarkSuite(url) : null;
+  if (benchmarkSuite) {
+    try {
+      const suite = await loadBenchmarkSuite(benchmarkSuite.suiteId);
+      sendJson(res, 200, {
+        suite,
+        selected_default_cases: selectBenchmarkCases(suite, {}).map((item) => item.id),
+        selected_extended_cases: selectBenchmarkCases(suite, { includeExtended: true }).map((item) => item.id),
+        reports: await listBenchmarkReports()
+      });
+    } catch (error) {
+      sendJson(res, 404, { error: error instanceof Error ? error.message : String(error), suite_id: benchmarkSuite.suiteId });
+    }
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/benchmarks/reports") {
+    try {
+      sendJson(res, 200, { reports: await listBenchmarkReports(), report_root: benchmarkReportRoot() });
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
+  const benchmarkReport = req.method === "GET" ? matchBenchmarkReport(url) : null;
+  if (benchmarkReport) {
+    try {
+      const reportPath = safeBenchmarkReportPath(benchmarkReport.fileName);
+      const report = JSON.parse(await fs.readFile(reportPath, "utf8"));
+      sendJson(res, 200, { report, file_name: path.basename(reportPath), path: reportPath });
+    } catch (error) {
+      sendJson(res, 404, { error: error instanceof Error ? error.message : String(error), report: benchmarkReport.fileName });
+    }
+    return;
+  }
+
+  const benchmarkSuiteRun = req.method === "POST" ? matchBenchmarkSuiteRun(url) : null;
+  if (benchmarkSuiteRun) {
+    try {
+      const body = await readJson<BenchmarkRunBody>(req);
+      const settingsResolution = body.use_settings_provider
+        ? await resolvePersistedUiSettings(undefined, {
+          workspaceId: context.workspaceId,
+          projectId: context.projectId
+        })
+        : null;
+      const providers = (settingsResolution?.effective.providers_json ?? {}) as Record<string, unknown>;
+      const summary = await runBenchmarkSuite({
+        suitePath: benchmarkSuiteRun.suiteId,
+        caseId: body.case_id,
+        caseIds: Array.isArray(body.case_ids) ? body.case_ids.map((item) => String(item)).filter(Boolean) : undefined,
+        includeExtended: Boolean(body.include_extended),
+        includeRuntimePending: Boolean(body.include_runtime_pending),
+        execute: Boolean(body.execute),
+        strict: Boolean(body.strict),
+        outputDir: benchmarkReportRoot(),
+        dbMode: body.db_mode as any,
+        llmProvider: body.llm_provider ?? (typeof providers.default_provider === "string" ? providers.default_provider as AuditRequest["llm_provider"] : undefined),
+        llmModel: body.llm_model ?? (typeof providers.default_model === "string" ? providers.default_model : undefined)
+      });
+      sendJson(res, 200, {
+        benchmark_summary: summary,
+        reports: await listBenchmarkReports()
+      });
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error), suite_id: benchmarkSuiteRun.suiteId });
+    }
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/benchmarks/compare") {
+    try {
+      const body = await readJson<BenchmarkCompareBody>(req);
+      const baseline = body.baseline_path ?? body.baseline;
+      const current = body.current_path ?? body.current;
+      if (!baseline || !current) {
+        sendJson(res, 400, { error: "benchmark_compare_reports_required" });
+        return;
+      }
+      const comparison = await compareBenchmarkReports({
+        baselinePath: safeBenchmarkReportPath(baseline),
+        currentPath: safeBenchmarkReportPath(current)
+      });
+      sendJson(res, 200, { comparison });
     } catch (error) {
       sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
     }
@@ -4284,7 +4744,8 @@ export function createApiServer(): http.Server {
           evidenceRecords,
           controlResults: await readPersistedControlResults(runSubresource.runId),
           controlCatalog: getControlCatalog(),
-          toolExecutions
+          toolExecutions,
+          mode: "post_supervisor_integrity"
         });
         const handoffItems = Array.isArray(handoffs) ? handoffs : Array.isArray((handoffs as any)?.handoffs) ? (handoffs as any).handoffs : [];
         const timeline = [
@@ -4345,7 +4806,9 @@ export function createApiServer(): http.Server {
             "eval-selection",
             "run-plan",
             "findings-pre-skeptic",
+            "finding-integrity-pre-supervisor",
             "finding-quality-pre-skeptic",
+            "post-supervisor-integrity",
             "finding-quality",
             "handoffs",
             "score-summary",
@@ -4372,6 +4835,8 @@ export function createApiServer(): http.Server {
             metric_count: metrics.length,
             finding_quality_verdict: findingQuality.overall_verdict,
             finding_quality_blocking_count: findingQuality.blocking_count,
+            post_supervisor_integrity_verdict: findingQuality.overall_verdict,
+            post_supervisor_integrity_blocking_count: findingQuality.blocking_count,
             supervisor_action_count: Array.isArray(supervisorReview?.actions_json) ? supervisorReview.actions_json.length : 0,
             correction_triggered: Boolean(correctionPlan?.triggered || correctionResult?.triggered)
           },
@@ -4527,6 +4992,23 @@ export function createApiServer(): http.Server {
         });
         return;
       }
+      if (runSubresource.resource === "finding-integrity-pre-supervisor") {
+        sendJson(res, 200, {
+          run_id: runSubresource.runId,
+          finding_integrity_pre_supervisor: await readPersistedStageArtifact(runSubresource.runId, "finding-integrity-pre-supervisor")
+            ?? await readPersistedStageArtifact(runSubresource.runId, "finding-quality-pre-skeptic")
+        });
+        return;
+      }
+      if (runSubresource.resource === "post-supervisor-integrity") {
+        const persistedQuality = await readPersistedFindingQuality(runSubresource.runId);
+        const postSupervisorIntegrity = await readPersistedStageArtifact(runSubresource.runId, "post-supervisor-integrity") ?? persistedQuality;
+        sendJson(res, 200, {
+          run_id: runSubresource.runId,
+          post_supervisor_integrity: postSupervisorIntegrity
+        });
+        return;
+      }
       if (runSubresource.resource === "finding-quality") {
         const persistedQuality = await readPersistedFindingQuality(runSubresource.runId);
         const findingQuality = persistedQuality ?? buildFindingQualitySummary({
@@ -4536,7 +5018,8 @@ export function createApiServer(): http.Server {
           evidenceRecords: await readPersistedEvidenceRecords(runSubresource.runId),
           controlResults: await readPersistedControlResults(runSubresource.runId),
           controlCatalog: getControlCatalog(),
-          toolExecutions: await readPersistedToolExecutions(runSubresource.runId)
+          toolExecutions: await readPersistedToolExecutions(runSubresource.runId),
+          mode: "post_supervisor_integrity"
         });
         sendJson(res, 200, {
           run_id: runSubresource.runId,
@@ -4850,6 +5333,22 @@ export function createApiServer(): http.Server {
       }
       if (runSubresource.resource === "sandbox-execution") {
         sendJson(res, 200, { run_id: runSubresource.runId, sandbox_execution: await readPersistedStageArtifact(runSubresource.runId, "sandbox-execution") });
+        return;
+      }
+      if (runSubresource.resource === "runtime-validation") {
+        const sandboxExecution = await readPersistedStageArtifact<any>(runSubresource.runId, "sandbox-execution");
+        sendJson(res, 200, {
+          run_id: runSubresource.runId,
+          runtime_validation: {
+            provider_id: sandboxExecution?.runtime_sandbox?.provider_id ?? "local_runtime",
+            selected_backend: sandboxExecution?.runtime_sandbox?.selected_backend ?? sandboxExecution?.runtime_sandbox?.readiness?.resolution?.selected_backend ?? "unavailable",
+            readiness: sandboxExecution?.runtime_sandbox?.readiness ?? null,
+            policy: sandboxExecution?.runtime_sandbox?.policy ?? null,
+            plan: sandboxExecution?.plan ?? null,
+            results: sandboxExecution?.results ?? [],
+            artifact: sandboxExecution ?? null
+          }
+        });
         return;
       }
       if (runSubresource.resource === "commit-diff") {

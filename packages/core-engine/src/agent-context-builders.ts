@@ -206,7 +206,9 @@ export function buildSupervisorContext(args: {
       finding_ids: control.finding_ids,
       evidence: control.evidence.slice(0, 4)
     })),
-    findingQuality: args.findingQuality ? {
+    preSupervisorEvidencePacket: args.findingQuality ? {
+      artifact_role: args.findingQuality.artifact_role,
+      authority: args.findingQuality.authority,
       overall_verdict: args.findingQuality.overall_verdict,
       blocking_count: args.findingQuality.blocking_count,
       unsupported_count: args.findingQuality.unsupported_count,
@@ -218,6 +220,8 @@ export function buildSupervisorContext(args: {
         evidence_support_verdict: item.evidence_support_verdict,
         control_mapping_verdict: item.control_mapping_verdict,
         qa_blocking: item.qa_blocking,
+        integrity_blocking: item.integrity_blocking ?? item.qa_blocking,
+        semantic_review_hint: item.semantic_review_hint ?? false,
         quality_score: item.quality_score,
         matched_evidence_ids: item.matched_evidence_ids.slice(0, 8),
         missing_evidence_refs: item.missing_evidence_refs.slice(0, 5),
@@ -225,6 +229,21 @@ export function buildSupervisorContext(args: {
         claimed_control_ids: item.claimed_control_ids,
         recommended_control_ids: item.recommended_control_ids,
         reasons: item.reasons.slice(0, 5),
+        next_action: item.next_action
+      }))
+    } : null,
+    findingQuality: args.findingQuality ? {
+      compatibility_note: "Deprecated supervisor context alias. Use preSupervisorEvidencePacket for deterministic facts and hints.",
+      overall_verdict: args.findingQuality.overall_verdict,
+      blocking_count: args.findingQuality.blocking_count,
+      findings: args.findingQuality.findings.map((item) => ({
+        finding_id: item.finding_id,
+        evidence_support_verdict: item.evidence_support_verdict,
+        control_mapping_verdict: item.control_mapping_verdict,
+        integrity_blocking: item.integrity_blocking ?? item.qa_blocking,
+        semantic_review_hint: item.semantic_review_hint ?? false,
+        unsupported_claims: item.unsupported_claims,
+        recommended_control_ids: item.recommended_control_ids,
         next_action: item.next_action
       }))
     } : null,

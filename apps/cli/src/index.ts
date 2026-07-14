@@ -3,8 +3,10 @@ import process from "node:process";
 import { loadEnvironment } from "../../../packages/core-engine/src/env.js";
 import { backfillLocalPersistence, cleanupLocalJsonMirrors, compactBundleExports, createEngine, getPersistedRun, listPersistedReviewNotifications, listPersistedReviewWorkflows, normalizeLearningSettings, normalizeProjectId, normalizeWorkspaceId, pruneArtifacts, readPersistedReviewActions, readPersistedReviewWorkflow, reconstructLocalRun, reconstructLocalRuns, resolvePersistedUiSettings, runLearningPipeline, runPostgresMigration, submitPersistedReviewAction, validateLocalPersistence, type ArtifactRetentionKind } from "../../../packages/core-engine/src/index.js";
 import { buildScanRequest, readBooleanFlag, readFlag, readNumberFlag } from "./args.js";
+import { compareBenchmarkReports, formatBenchmarkCaseLine, loadBenchmarkSuite, printBenchmarkCompare, printBenchmarkSummary, runBenchmarkSuite, selectBenchmarkCases } from "./benchmark-suite.js";
 import { buildDoctorReport, printDoctorReport, runOnboarding } from "./doctor.js";
 import { validateFixtures } from "./fixture-validation.js";
+import { printRuntimeDoctor, runSetupRuntime, validateRuntimeFixtures } from "./setup-runtime.js";
 import { runSetupTools } from "./setup-tools.js";
 
 loadEnvironment();
@@ -19,6 +21,12 @@ npm run scan -- scan endpoint <url> [--output <dir> (export copy)] [--policy <fi
 npm run scan -- doctor [--json]
 npm run scan -- onboard [--dry-run] [--skip-doctor] [--skip-fixtures]
 npm run scan -- setup-tools [--dry-run] [--yes] [--tool scorecard,semgrep,trivy]
+npm run scan -- setup-runtime [--dry-run] [--yes]
+npm run scan -- runtime-doctor [--json]
+npm run scan -- validate-runtime-fixtures
+npm run scan -- benchmark list [--suite <id|file.json>] [--case <id>] [--include-extended] [--include-runtime-pending] [--json]
+npm run scan -- benchmark run [--suite <id|file.json>] [--case <id>] [--include-extended] [--include-runtime-pending] [--execute] [--strict] [--output <dir>] [--persistence-root <dir>] [--db-mode local|postgres|supabase] [--llm-provider openai|mock] [--llm-model <id>]
+npm run scan -- benchmark compare --baseline <report.json> --current <report.json>
   npm run scan -- migrate local-db [--root <dir>] [--dry-run]
   npm run scan -- migrate postgres [--database-url <url>] [--output <file.sql>] [--psql-command <path>] [--dry-run]
   npm run scan -- migrate supabase [--database-url <url>] [--output <file.sql>] [--psql-command <path>] [--dry-run]
@@ -418,6 +426,64 @@ async function runValidateFixtures(args: string[]): Promise<void> {
   }
 }
 
+async function runBenchmark(args: string[]): Promise<void> {
+  const command = args[1];
+
+  if (command === "list") {
+    const suite = await loadBenchmarkSuite(readFlag(args, "--suite"));
+    const cases = selectBenchmarkCases(suite, {
+      caseId: readFlag(args, "--case"),
+      includeExtended: args.includes("--include-extended"),
+      includeRuntimePending: args.includes("--include-runtime-pending")
+    });
+    if (args.includes("--json")) {
+      console.log(JSON.stringify({ suite_id: suite.suite_id, suite_version: suite.suite_version, title: suite.title, selected_cases: cases.length, cases }, null, 2));
+      return;
+    }
+    console.log(`${suite.title} (${suite.suite_id}@${suite.suite_version})`);
+    console.log(suite.summary);
+    console.log(`Cases: ${cases.length}`);
+    for (const item of cases) console.log(`- ${formatBenchmarkCaseLine(item)}`);
+    return;
+  }
+
+  if (command === "run") {
+    const summary = await runBenchmarkSuite({
+      suitePath: readFlag(args, "--suite"),
+      caseId: readFlag(args, "--case"),
+      includeExtended: args.includes("--include-extended"),
+      includeRuntimePending: args.includes("--include-runtime-pending"),
+      execute: args.includes("--execute"),
+      strict: args.includes("--strict"),
+      outputDir: readFlag(args, "--output"),
+      persistenceRoot: readFlag(args, "--persistence-root"),
+      dbMode: readFlag(args, "--db-mode") as any,
+      llmProvider: readFlag(args, "--llm-provider") as any,
+      llmModel: readFlag(args, "--llm-model") ?? undefined
+    });
+    printBenchmarkSummary(summary);
+    if (summary.failed_cases > 0) process.exitCode = 1;
+    return;
+  }
+
+  if (command === "compare") {
+    const baselinePath = readFlag(args, "--baseline");
+    const currentPath = readFlag(args, "--current");
+    if (!baselinePath || !currentPath) {
+      usage();
+      process.exitCode = 1;
+      return;
+    }
+    const result = await compareBenchmarkReports({ baselinePath, currentPath });
+    printBenchmarkCompare(result);
+    if (!result.passed) process.exitCode = 1;
+    return;
+  }
+
+  usage();
+  process.exitCode = 1;
+}
+
 async function runReview(args: string[]): Promise<void> {
   const rootDir = readFlag(args, "--root");
   const dbMode = readFlag(args, "--db-mode") as any;
@@ -566,6 +632,30 @@ async function main(): Promise<void> {
       yes: args.includes("--yes"),
       tools: readFlag(args, "--tool")
     });
+    return;
+  }
+
+  if (args[0] === "setup-runtime") {
+    runSetupRuntime({
+      dryRun: args.includes("--dry-run"),
+      yes: args.includes("--yes")
+    });
+    return;
+  }
+
+  if (args[0] === "runtime-doctor") {
+    printRuntimeDoctor(args.includes("--json"));
+    return;
+  }
+
+  if (args[0] === "validate-runtime-fixtures") {
+    const result = validateRuntimeFixtures();
+    if (!result.passed) process.exitCode = 1;
+    return;
+  }
+
+  if (args[0] === "benchmark") {
+    await runBenchmark(args);
     return;
   }
 

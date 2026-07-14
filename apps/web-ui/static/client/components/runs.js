@@ -301,7 +301,7 @@ function RunsWorkspaceComponent({
         h("div", { key: "queue-header", className: "border-b border-slate-200 px-3 py-3" }, [
           h("div", { key: "top", className: "flex items-start justify-between gap-3" }, [
             h("div", { key: "copy" }, [
-              h("h2", { key: "title", className: "text-xl font-semibold tracking-tight text-slate-950" }, "Runs"),
+              h("h2", { key: "title", className: "text-xl font-semibold tracking-tight text-slate-950" }, "Audits"),
               h("p", { key: "desc", className: "mt-1 text-sm text-slate-500" }, "Audit run queue")
             ]),
             selectedRunId
@@ -316,7 +316,7 @@ function RunsWorkspaceComponent({
               : null
           ]),
           h("div", { key: "queue-meta", className: "mt-3 flex items-center justify-between gap-3 text-xs text-slate-500" }, [
-            h("div", { key: "count" }, `${visibleRuns.length} of ${runs.length} run${runs.length === 1 ? "" : "s"}`),
+            h("div", { key: "count" }, `${visibleRuns.length} of ${runs.length} audit${runs.length === 1 ? "" : "s"}`),
             h("div", { key: "latest" }, runs[0]?.created_at ? `Latest ${formatDate(runs[0].created_at)}` : "No recent activity")
           ]),
           h("div", { key: "queue-tools", className: "mt-3 grid gap-2" }, [
@@ -950,7 +950,7 @@ function LaunchAuditModalComponent({
                 }),
                 h("span", { className: "font-medium text-slate-900" }, "Use audit presets")
               ])),
-              h(Field, { key: "pkg", label: helpLabel("Preset package", "Audit packages are curated presets that set distinct audit shapes for OSS: lightweight static posture, standard agentic static review, deeper static review, or runtime-validated review.") }, Select({
+              h(Field, { key: "pkg", label: helpLabel("Preset package", "Audit packages are curated presets that set distinct audit shapes for Community Edition: lightweight static posture, standard agentic static review, deeper static review, or runtime-validated review.") }, Select({
                 value: runForm.audit_package,
                 disabled: usingLockedLaunchMode || !usingPresets,
                 className: usingLockedLaunchMode || !usingPresets ? "border-slate-200 bg-slate-100 text-slate-400" : "",
@@ -992,7 +992,7 @@ function LaunchAuditModalComponent({
               label: helpLabel("Policy pack", "Policy packs control audit supervision rules such as publication logic, waiver behavior, and review-oriented governance. Use the default built-in pack unless your workspace or project has a specific governance policy.")
             }, h("div", { className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600" }, [
               h("div", { key: "value", className: "font-medium text-slate-900" }, getPolicyPackLabel(policyPacks, "default")),
-              h("div", { key: "note", className: "mt-1" }, "OSS uses the built-in default policy pack only.")
+              h("div", { key: "note", className: "mt-1" }, "Community Edition uses the built-in default policy pack only.")
             ]))
           ]),
           h("div", { key: "run-mode-row", className: "grid gap-3" }, [

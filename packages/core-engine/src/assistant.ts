@@ -245,7 +245,11 @@ export interface AssistantStorage {
 }
 
 export function assistantEnabled(): boolean {
-  return process.env.HARNESS_ENABLE_ASSISTANT === "1" || process.env.HARNESS_ENABLE_ASSISTANT === "true";
+  const explicitEnable = process.env.HARNESS_ENABLE_ASSISTANT?.trim().toLowerCase();
+  const explicitDisable = process.env.HARNESS_DISABLE_ASSISTANT?.trim().toLowerCase();
+  if (explicitDisable === "1" || explicitDisable === "true") return false;
+  if (explicitEnable === "0" || explicitEnable === "false") return false;
+  return true;
 }
 
 export function resolveAssistantProductMode(): AssistantProductMode {
@@ -708,7 +712,7 @@ export class EvidenceGroundedAssistantProvider implements AssistantProvider {
         top.length ? `Priority remediation targets:\n${top.map((finding) => `- ${finding.id}: ${finding.title}. ${finding.description}`).join("\n")}` : "No findings are available for remediation guidance.",
         relatedItems.length
           ? `Current remediation records:\n${relatedItems.map((item) => `- ${item.finding_id}: ${item.status}${item.owner_id ? `, owner ${item.owner_id}` : ""}${item.external_issue_url ? `, issue ${item.external_issue_url}` : ""}${item.validation_run_id ? `, validation ${item.validation_run_id}` : ""}`).join("\n")}`
-          : "No remediation item is open in Tethermark yet. In OSS, create the local remediation item and paste any manual GitHub issue or PR links into the Remediation tab."
+          : "No remediation item is open in Tethermark yet. In Community Edition, create the local remediation item and paste any manual GitHub issue or PR links into the Remediation tab."
       ].join("\n\n");
       confidence = args.context.remediation_memo || relatedItems.length ? "high" : findings.length ? "medium" : "insufficient_evidence";
     } else {
@@ -742,12 +746,12 @@ export class EvidenceGroundedAssistantProvider implements AssistantProvider {
         action_type: "external_outbound_preview",
         capability: "draft",
         title: "Draft outbound payload",
-        summary: "OSS can draft external payloads, but connector execution is reserved for hosted or manual operator action.",
+        summary: "Community Edition can draft external payloads, but automatic connector execution requires Tethermark Cloud or manual operator action.",
         requires_confirmation: false,
         hosted_only: false,
         payload_json: { run_id: args.session.run_id, requested_from: prompt }
       });
-      limitations.push("External connector execution is not available in OSS assistant mode.");
+      limitations.push("Automatic external connector execution is not available in Community Edition assistant mode.");
     }
 
     return {

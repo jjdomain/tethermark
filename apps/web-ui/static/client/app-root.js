@@ -1,4 +1,4 @@
-const { Component, createElement: createReactElement, isValidElement, useEffect, useMemo, useRef, useState } = window.React;
+const { Component, createElement: createReactElement, isValidElement, useEffect, useLayoutEffect, useMemo, useRef, useState } = window.React;
 const { createRoot } = window.ReactDOM;
 const appConfig = window.HARNESS_WEB_UI_CONFIG || { apiBaseUrl: "/api" };
 const publisherModeEnabled = Boolean(appConfig.publisher?.enabled || appConfig.publisherMode);
@@ -28,22 +28,28 @@ function h(type, props, ...children) {
 const navItems = [
   ["dashboard", "Dashboard"],
   ["projects", "Projects"],
-  ["runs", "Runs"],
-  ["jobs", "Async Jobs"],
-  ["followups", "Runtime Follow-ups"],
+  ["runs", "Audits"],
+  ["findings", "Findings"],
+  ["remediation", "Remediation"],
   ["learning", "Learning"],
-  ["reviews", "Reviews"],
-  ["admin", "Admin"],
-  ["settings", "Settings"]
+  ["system", "System"],
+  ["reviews", "Findings"],
+  ["followups", "Remediation"],
+  ["jobs", "Jobs"],
+  ["admin", "System"],
+  ["settings", "System"]
 ];
 
 const pageDescriptions = {
   dashboard: "Overview of active work, queue health, and next actions.",
   projects: "Manage project containers, targets, audit types, and scoped activity.",
-  runs: "Launch new scans and inspect persisted run details.",
+  runs: "Launch audits and inspect detailed audit run records.",
+  findings: "Work the cross-audit finding triage and review queue.",
+  remediation: "Track confirmed finding remediation, validation, reruns, and closure evidence.",
+  learning: "Review governed self-learning candidates, dry-run experiments, promotions, and rollback history.",
+  system: "Configure Tethermark, inspect readiness, run benchmarks, and monitor operational traces.",
   jobs: "Track durable background work and retry or cancel jobs.",
   followups: "Manage runtime follow-up reruns and adoption decisions.",
-  learning: "Review governed self-learning candidates, dry-run experiments, promotions, and rollback history.",
   reviews: "Work the review inbox, assignments, and queued decisions.",
   admin: "Operator controls for local app state, smoke tests, benchmarks, tooling, and observability.",
   settings: "Configure agent models, Audit Type, governance, and integrations."
@@ -55,13 +61,11 @@ const navGroups = [
     items: [
       ["dashboard", "Dashboard", "grid"],
       ["projects", "Projects", "folder"],
-      ["runs", "Runs", "play"],
-      ["reviews", "Reviews", "users"],
-      ["jobs", "Jobs", "bars"],
-      ["followups", "Follow-ups", "spark"],
+      ["runs", "Audits", "play"],
+      ["findings", "Findings", "users"],
+      ["remediation", "Remediation", "bars"],
       ["learning", "Learning", "spark"],
-      ["admin", "Admin", "gear"],
-      ["settings", "Settings", "gear"]
+      ["system", "System", "gear"]
     ]
   }
 ];
@@ -111,6 +115,50 @@ const emptyStaticToolsReadiness = {
   tools: [],
   warnings: [],
   blockers: []
+};
+const runtimeSandboxBackendIds = [
+  "gvisor_container",
+  "rootless_podman",
+  "podman",
+  "docker",
+  "docker_desktop",
+  "landlock_process"
+];
+const defaultRuntimeSandboxSettings = {
+  enabled: true,
+  resolution_mode: "auto",
+  preferred_backend: "auto",
+  allowed_backends: ["gvisor_container", "rootless_podman", "podman", "docker", "docker_desktop"],
+  allow_warning_backends: true,
+  require_hardened_for_untrusted_repo: false,
+  network_policy: "none",
+  dependency_install_network: "explicit_only",
+  max_duration_ms: 300000,
+  step_timeout_ms: 60000,
+  memory_limit_mb: 2048,
+  pids_limit: 512,
+  max_stdout_bytes: 2000,
+  max_stderr_bytes: 2000
+};
+const emptyRuntimeSandboxReadiness = {
+  provider_id: "local_runtime",
+  status: "blocked",
+  resolution: {
+    selected_backend: "unavailable",
+    candidates: [],
+    readiness_status: "blocked",
+    warnings: [],
+    blockers: ["Runtime sandbox readiness has not been checked."]
+  },
+  policy_summary: {
+    network_policy: "none",
+    max_duration_ms: 300000,
+    step_timeout_ms: 60000,
+    memory_limit_mb: 2048,
+    pids_limit: 512
+  },
+  setup_commands: [],
+  checked_at: ""
 };
 const emptyMethodology = {
   methodology: null,
@@ -188,6 +236,27 @@ const builtinPackageConfig = {
 };
 const auditPackageDisplayOrder = ["baseline-static", "agentic-static", "deep-static", "runtime-validated"];
 const hiddenOssAuditPackages = new Set(["premium-comprehensive"]);
+const builtinAuditPackages = auditPackageDisplayOrder.map((id) => ({
+  id,
+  title: {
+    "baseline-static": "Baseline Static",
+    "agentic-static": "Agentic Static",
+    "deep-static": "Deep Static",
+    "runtime-validated": "Runtime Validated"
+  }[id] || id,
+  description: {
+    "baseline-static": "Fast repository posture and supply-chain baseline.",
+    "agentic-static": "Standard evidence-grounded static review for AI and agent repositories.",
+    "deep-static": "Deeper static audit with expanded agent and evidence review budget.",
+    "runtime-validated": "Runtime-oriented validation using the Local Runtime Sandbox when ready."
+  }[id] || "Audit package preset.",
+  run_mode: builtinPackageConfig[id]?.run_mode || "static",
+  enabled_lanes: builtinPackageConfig[id]?.enabled_lanes || [],
+  max_agent_calls: builtinPackageConfig[id]?.max_agent_calls || 0,
+  max_total_tokens: builtinPackageConfig[id]?.max_total_tokens || 0,
+  max_rerun_rounds: builtinPackageConfig[id]?.max_rerun_rounds || 0,
+  publishability_threshold: builtinPackageConfig[id]?.publishability_threshold || "high"
+}));
 
 const learningCandidateTypeLabels = {
   scoped_suppression_suggestion: "Disposition review",
@@ -1555,7 +1624,7 @@ function api(path, init, requestContext = defaultRequestContext) {
 function formatUiError(error) {
   const message = error?.message || String(error || "Unknown error");
   if (/^API route not found: \/assistant\//i.test(message)) {
-    return "Assistant API routes are not available from the running backend. Rebuild and restart the Tethermark API server with HARNESS_ENABLE_ASSISTANT=1.";
+    return "Assistant API routes are not available from the running backend. Rebuild and restart the Tethermark API server so it picks up the current assistant routes.";
   }
   if (isNetworkFetchFailure({ message })) {
     return "API request failed. Check that the Tethermark API is running and reachable, then retry.";
@@ -1565,13 +1634,21 @@ function formatUiError(error) {
     const endpoint = requestFailure[1] || "unknown endpoint";
     const reason = requestFailure[2] || "request failed";
     if (endpoint.startsWith("/assistant/") && reason === "assistant_disabled") {
-      return "Assistant is disabled on the API server. Restart it with HARNESS_ENABLE_ASSISTANT=1 to enable OSS assistant routes.";
+      return "Assistant is disabled by an API environment override. Remove HARNESS_DISABLE_ASSISTANT or set HARNESS_ENABLE_ASSISTANT=true, then restart the API.";
     }
     if (isNetworkFetchFailure({ message: reason })) {
       return `API request failed for ${endpoint}. Check that the Tethermark API and web UI proxy are reachable, then retry.`;
     }
   }
   return message;
+}
+
+function withUiTimeout(promise, timeoutMs, message) {
+  let timer = 0;
+  const timeout = new Promise((_, reject) => {
+    timer = window.setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => window.clearTimeout(timer));
 }
 
 function formatDate(value) {
@@ -2045,6 +2122,13 @@ function Select({ className = "", children: propChildren, ...props }, children) 
     return h(window.TethermarkUI.Select, { className, ...props }, selectChildren);
   }
   return h("select", { className: cn("flex h-10 w-full rounded-md border border-border bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-200 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-500 disabled:opacity-100", className), ...props }, selectChildren);
+}
+
+function ReadOnlySetting({ value, note = "Package controlled" }) {
+  return h("div", { className: "min-h-10 rounded-md border border-border bg-muted/20 px-3 py-2 text-sm" }, [
+    h("div", { key: "value", className: "font-medium text-foreground" }, value || "not set"),
+    note ? h("div", { key: "note", className: "mt-1 text-xs leading-4 text-muted" }, note) : null
+  ]);
 }
 
 function Textarea({ className = "", ...props }) {
@@ -2823,7 +2907,7 @@ function RuntimeFollowupWorkspace({
             ])
             : null,
           h("div", { key: "actions", className: "mt-4 flex flex-wrap gap-3" }, [
-            h(Button, { key: "open-source", variant: "outline", onClick: () => onOpenSourceRun?.(selectedFollowup) }, "Open Source Run"),
+            h(Button, { key: "open-source", variant: "outline", onClick: () => onOpenSourceRun?.(selectedFollowup) }, "Open Original Run"),
             h(Button, { key: "export-followup", variant: "outline", onClick: () => onExportFollowupReport?.(selectedFollowup.id) }, "Export Follow-up Bundle"),
             selectedFollowup.rerun_request_json && (selectedFollowup.status === "pending" || selectedFollowup.status === "completed")
               ? h(Button, { key: "launch", onClick: () => onLaunchRuntimeFollowup?.(selectedFollowup.id) }, "Launch Linked Rerun")
@@ -3230,7 +3314,7 @@ function App() {
   const [selectedProjectId, setSelectedProjectId] = useState("default");
   const [projectDetailRuns, setProjectDetailRuns] = useState([]);
   const [projectDetailLoading, setProjectDetailLoading] = useState(false);
-  const [auditPackages, setAuditPackages] = useState([]);
+  const [auditPackages, setAuditPackages] = useState(builtinAuditPackages);
   const [methodologyCatalog, setMethodologyCatalog] = useState(emptyMethodology);
   const [policyPacks, setPolicyPacks] = useState([]);
   const [llmRegistry, setLlmRegistry] = useState(emptyLlmRegistry);
@@ -3238,8 +3322,26 @@ function App() {
   const oauthStatusRequestId = useRef(0);
   const oauthStatusPollTimer = useRef(null);
   const runDetailRequestId = useRef(0);
+  const systemPanelScrollRef = useRef(null);
+  const systemScrollPositionsRef = useRef({});
+  const systemScrollKeyRef = useRef("");
+  const systemScrollSaveSuspendedRef = useRef(false);
+  const runtimeSandboxReadinessLoadKeyRef = useRef("");
+  const runtimeSandboxReadinessInFlightKeyRef = useRef("");
   const [integrationRegistry, setIntegrationRegistry] = useState(emptyIntegrationRegistry);
+  const [integrationRegistryLoading, setIntegrationRegistryLoading] = useState(true);
   const [staticToolsReadiness, setStaticToolsReadiness] = useState(emptyStaticToolsReadiness);
+  const [staticToolsLoading, setStaticToolsLoading] = useState(false);
+  const [staticToolsPathDraft, setStaticToolsPathDraft] = useState("");
+  const [staticToolsPathMeta, setStaticToolsPathMeta] = useState(null);
+  const [staticToolsPathSaving, setStaticToolsPathSaving] = useState(false);
+  const [runtimeSandboxReadiness, setRuntimeSandboxReadiness] = useState(emptyRuntimeSandboxReadiness);
+  const [runtimeSandboxReadinessLoading, setRuntimeSandboxReadinessLoading] = useState(false);
+  const [runtimeSandboxReadinessChecked, setRuntimeSandboxReadinessChecked] = useState(false);
+  const [runtimeSandboxSetupPlan, setRuntimeSandboxSetupPlan] = useState(null);
+  const [runtimeSandboxSetupResult, setRuntimeSandboxSetupResult] = useState(null);
+  const [runtimeSandboxSetupRunning, setRuntimeSandboxSetupRunning] = useState(false);
+  const [runtimeSandboxAdvancedOpen, setRuntimeSandboxAdvancedOpen] = useState(false);
   const [stats, setStats] = useState({ runs: {}, targets: {} });
   const [observabilityHistory, setObservabilityHistory] = useState(null);
   const [observabilityTraceRunId, setObservabilityTraceRunId] = useState("");
@@ -3253,8 +3355,22 @@ function App() {
   const [lastGlobalSyncAt, setLastGlobalSyncAt] = useState("");
   const [globalSyncLoading, setGlobalSyncLoading] = useState(false);
   const [adminSubpage, setAdminSubpage] = useState("system");
+  const [systemSubpage, setSystemSubpage] = useState("runtime-sandbox");
   const [validationScenarioIds, setValidationScenarioIds] = useState(["system_check"]);
   const [validationLaunching, setValidationLaunching] = useState(false);
+  const [benchmarkSuites, setBenchmarkSuites] = useState([]);
+  const [benchmarkSuiteDetail, setBenchmarkSuiteDetail] = useState(null);
+  const [benchmarkReports, setBenchmarkReports] = useState([]);
+  const [benchmarkCaseIds, setBenchmarkCaseIds] = useState([]);
+  const [benchmarkIncludeExtended, setBenchmarkIncludeExtended] = useState(false);
+  const [benchmarkIncludeRuntimePending, setBenchmarkIncludeRuntimePending] = useState(false);
+  const [benchmarkExecute, setBenchmarkExecute] = useState(false);
+  const [benchmarkStrict, setBenchmarkStrict] = useState(false);
+  const [benchmarkRunning, setBenchmarkRunning] = useState(false);
+  const [benchmarkLastSummary, setBenchmarkLastSummary] = useState(null);
+  const [benchmarkCompareBaseline, setBenchmarkCompareBaseline] = useState("");
+  const [benchmarkCompareCurrent, setBenchmarkCompareCurrent] = useState("");
+  const [benchmarkComparison, setBenchmarkComparison] = useState(null);
   const [settingsSubpage, setSettingsSubpage] = useState("audit");
   const [governanceTab, setGovernanceTab] = useState("gates");
   const [artifactRetentionForm, setArtifactRetentionForm] = useState({
@@ -3351,6 +3467,10 @@ function App() {
   const [selectedRuntimeFollowupIds, setSelectedRuntimeFollowupIds] = useState([]);
   const [linkedRuntimeRerunDetail, setLinkedRuntimeRerunDetail] = useState(null);
   const [linkedRuntimeRerunLoading, setLinkedRuntimeRerunLoading] = useState(false);
+  const systemScrollKey = useMemo(() => {
+    if (view !== "system") return "";
+    return systemSubpage === "policy" ? `page:${systemSubpage}:policy:${governanceTab}` : `page:${systemSubpage}`;
+  }, [view, systemSubpage, governanceTab]);
 
   const pendingReviews = useMemo(
     () => runs
@@ -3417,7 +3537,7 @@ function App() {
     id: "default",
     workspace_id: requestContext.workspaceId || "default",
     name: "Default Project",
-    description: "Default OSS project container.",
+    description: "Default Community Edition project container.",
     target_defaults_json: {
       target_kind: "path",
       local_path: "fixtures/validation-targets/agent-tool-boundary-risky",
@@ -3600,6 +3720,50 @@ function App() {
     setSettings((current) => ({ ...current, [section]: { ...(current[section] || {}), [key]: value } }));
   }
 
+  function updateRuntimeSandboxSetting(key, value) {
+    setSettings((current) => {
+      const currentRuntime = {
+        ...defaultRuntimeSandboxSettings,
+        ...((current.preflight_json || {}).runtime_sandbox || {})
+      };
+      return {
+        ...current,
+        preflight_json: {
+          ...(current.preflight_json || {}),
+          runtime_sandbox: {
+            ...currentRuntime,
+            [key]: value
+          }
+        }
+      };
+    });
+  }
+
+  function toggleRuntimeSandboxAllowedBackend(backendId, enabled) {
+    setSettings((current) => {
+      const currentRuntime = {
+        ...defaultRuntimeSandboxSettings,
+        ...((current.preflight_json || {}).runtime_sandbox || {})
+      };
+      const currentBackends = Array.isArray(currentRuntime.allowed_backends)
+        ? currentRuntime.allowed_backends
+        : defaultRuntimeSandboxSettings.allowed_backends;
+      const nextBackends = enabled
+        ? [...new Set([...currentBackends, backendId])]
+        : currentBackends.filter((item) => item !== backendId);
+      return {
+        ...current,
+        preflight_json: {
+          ...(current.preflight_json || {}),
+          runtime_sandbox: {
+            ...currentRuntime,
+            allowed_backends: nextBackends.length ? nextBackends : currentBackends
+          }
+        }
+      };
+    });
+  }
+
   function updateAuditDefaultsForPackage(packageId) {
     setSettings((current) => ({
       ...(() => {
@@ -3627,33 +3791,6 @@ function App() {
         };
       })()
     }));
-  }
-
-  function updateAuditDefault(key, value) {
-    setSettings((current) => ({
-      ...current,
-      audit_defaults_json: {
-        ...(current.audit_defaults_json || {}),
-        [key]: value
-      }
-    }));
-  }
-
-  function toggleSettingsAuditLane(laneId) {
-    setSettings((current) => {
-      const defaults = current.audit_defaults_json || {};
-      const currentLanes = sanitizeEnabledLanes(defaults.enabled_lanes, defaults.run_mode || "static");
-      const nextLanes = currentLanes.includes(laneId)
-        ? currentLanes.filter((item) => item !== laneId)
-        : [...currentLanes, laneId];
-      return {
-        ...current,
-        audit_defaults_json: {
-          ...defaults,
-          enabled_lanes: sanitizeEnabledLanes(nextLanes, defaults.run_mode || "static")
-        }
-      };
-    });
   }
 
   function updateSettingsAgentOverride(agentId, nextPatch) {
@@ -3834,8 +3971,11 @@ function triageDecisionFromReviewSummary(summary) {
       api("/learning/events?limit=50", undefined, requestContext),
       api("/learning/candidates?limit=50&trigger=page_load", undefined, requestContext),
       api("/learning/promotions?limit=50", undefined, requestContext),
-      api("/learning/jobs?limit=25", undefined, requestContext)
-    ]).then(([authInfoPayload, runsPayload, jobsPayload, effectiveSettingsPayload, settingsPayload, documentsPayload, projectsPayload, auditPackagesPayload, methodologyPayload, policyPacksPayload, llmProvidersPayload, notificationsPayload, runtimeFollowupsPayload, learningEventsPayload, learningCandidatesPayload, learningPromotionsPayload, learningJobsPayload]) => {
+      api("/learning/jobs?limit=25", undefined, requestContext),
+      api("/benchmarks/suites", undefined, requestContext),
+      api("/benchmarks/suites/ai-agent-static-v1", undefined, requestContext),
+      api("/benchmarks/reports", undefined, requestContext)
+    ]).then(([authInfoPayload, runsPayload, jobsPayload, effectiveSettingsPayload, settingsPayload, documentsPayload, projectsPayload, auditPackagesPayload, methodologyPayload, policyPacksPayload, llmProvidersPayload, notificationsPayload, runtimeFollowupsPayload, learningEventsPayload, learningCandidatesPayload, learningPromotionsPayload, learningJobsPayload, benchmarkSuitesPayload, benchmarkSuitePayload, benchmarkReportsPayload]) => {
       setAuthInfo(authInfoPayload || defaultAuthInfo);
       setRuns(runsPayload.runs || []);
       setJobs(jobsPayload.jobs || []);
@@ -3849,7 +3989,7 @@ function triageDecisionFromReviewSummary(summary) {
       setIntegrationCredentialDrafts({});
       setDocuments(documentsPayload.documents || []);
       setProjects(projectsPayload.projects || []);
-      setAuditPackages(auditPackagesPayload.audit_packages || []);
+      setAuditPackages(auditPackagesPayload.audit_packages?.length ? auditPackagesPayload.audit_packages : builtinAuditPackages);
       setMethodologyCatalog(methodologyPayload || emptyMethodology);
       setPolicyPacks((policyPacksPayload.policy_packs || []).filter((item) => item.id === "default"));
       setLlmRegistry({
@@ -3863,7 +4003,13 @@ function triageDecisionFromReviewSummary(summary) {
       setLearningCandidates(learningCandidatesPayload.learning_candidates || []);
       setLearningPromotions(learningPromotionsPayload.learning_promotions || []);
       setLearningJobs(learningJobsPayload.learning_jobs || []);
+      setBenchmarkSuites(benchmarkSuitesPayload.suites || []);
+      setBenchmarkSuiteDetail(benchmarkSuitePayload || null);
+      setBenchmarkReports(benchmarkReportsPayload.reports || benchmarkSuitePayload.reports || []);
+      const defaultCases = benchmarkSuitePayload.selected_default_cases || [];
+      setBenchmarkCaseIds((current) => current.length ? current : defaultCases);
       setLastGlobalSyncAt(new Date().toISOString());
+      setIntegrationRegistryLoading(true);
       const deferredLoad = Promise.allSettled([
         api("/stats/runs", undefined, requestContext),
         api("/stats/targets", undefined, requestContext),
@@ -3879,6 +4025,7 @@ function triageDecisionFromReviewSummary(summary) {
         if (integrationsResult.status === "fulfilled") {
           setIntegrationRegistry(integrationsResult.value.integrations || []);
         }
+        setIntegrationRegistryLoading(false);
         if (observabilityResult.status === "fulfilled") {
           setObservabilityHistory(observabilityResult.value || null);
         }
@@ -4240,7 +4387,7 @@ function triageDecisionFromReviewSummary(summary) {
     setAssistantState((current) => ({ ...current, loading: true, error: "" }));
     return api("/assistant/capabilities", undefined, requestContext)
       .then((capabilities) => {
-        if (!capabilities.enabled) throw new Error("Assistant is disabled. Set HARNESS_ENABLE_ASSISTANT=1 on the API server.");
+        if (!capabilities.enabled) throw new Error("Assistant is disabled by an API environment override.");
         return api("/assistant/sessions", {
           method: "POST",
           body: JSON.stringify({ scope_type: scopeType, scope_id: scopeId, context_key: contextKey })
@@ -4538,26 +4685,97 @@ function triageDecisionFromReviewSummary(summary) {
     load();
   }, [requestContext.workspaceId, requestContext.projectId, requestContext.actorId, requestContext.apiKey, currentSettingsScopeLevel]);
 
+  useLayoutEffect(() => {
+    const container = systemPanelScrollRef.current;
+    const previousKey = systemScrollKeyRef.current;
+    if (container && previousKey && previousKey !== systemScrollKey) {
+      systemScrollPositionsRef.current[previousKey] = container.scrollTop;
+    }
+    systemScrollKeyRef.current = systemScrollKey;
+    if (!container || !systemScrollKey) return undefined;
+    const nextTop = Number(systemScrollPositionsRef.current[systemScrollKey] || 0);
+    const restoreScroll = () => {
+      if (systemPanelScrollRef.current) {
+        systemPanelScrollRef.current.scrollTop = nextTop;
+      }
+    };
+    let nestedFrame = 0;
+    let timeout = 0;
+    const frame = window.requestAnimationFrame(() => {
+      restoreScroll();
+      nestedFrame = window.requestAnimationFrame(restoreScroll);
+      timeout = window.setTimeout(restoreScroll, 50);
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
+      if (nestedFrame) window.cancelAnimationFrame(nestedFrame);
+      if (timeout) window.clearTimeout(timeout);
+    };
+  }, [systemScrollKey]);
+
   useEffect(() => {
-    if (view !== "jobs" || !jobs.some(isActiveAsyncJob)) return undefined;
+    const container = systemPanelScrollRef.current;
+    if (view !== "system" || !container || !systemScrollKey) return undefined;
+    let frame = 0;
+    const saveScroll = () => {
+      if (systemScrollSaveSuspendedRef.current) return;
+      if (frame) window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        if (systemScrollSaveSuspendedRef.current) return;
+        systemScrollPositionsRef.current[systemScrollKey] = container.scrollTop;
+      });
+    };
+    container.addEventListener("scroll", saveScroll, { passive: true });
+    return () => {
+      if (frame) window.cancelAnimationFrame(frame);
+      if (systemScrollKeyRef.current === systemScrollKey) {
+        systemScrollPositionsRef.current[systemScrollKey] = container.scrollTop;
+      }
+      container.removeEventListener("scroll", saveScroll);
+    };
+  }, [view, systemScrollKey]);
+
+  useEffect(() => {
+    if (!((view === "system" && systemSubpage === "jobs") || view === "jobs") || !jobs.some(isActiveAsyncJob)) return undefined;
     const timer = window.setInterval(() => {
       refreshJobsQueue("");
     }, 2500);
     return () => window.clearInterval(timer);
-  }, [view, jobs.map((job) => `${job.job_id}:${job.status}`).join("|"), requestContext.workspaceId, requestContext.projectId, requestContext.actorId, requestContext.apiKey]);
+  }, [view, systemSubpage, jobs.map((job) => `${job.job_id}:${job.status}`).join("|"), requestContext.workspaceId, requestContext.projectId, requestContext.actorId, requestContext.apiKey]);
 
   useEffect(() => {
-    if (view !== "settings" || settingsSubpage !== "artifacts") return;
+    if (!((view === "system" && (systemSubpage === "artifacts" || systemSubpage === "data")) || (view === "settings" && settingsSubpage === "artifacts"))) return;
     loadArtifactRetentionSummary(false);
-  }, [view, settingsSubpage, artifactRetentionForm.kind, requestContext.workspaceId, requestContext.actorId, requestContext.apiKey]);
+  }, [view, systemSubpage, settingsSubpage, artifactRetentionForm.kind, requestContext.workspaceId, requestContext.actorId, requestContext.apiKey]);
 
   useEffect(() => {
-    const needsToolReadiness = (view === "admin" && adminSubpage === "tooling") || (view === "settings" && settingsSubpage === "static-tools");
+    const needsToolReadiness = (view === "system" && systemSubpage === "tools") || (view === "admin" && adminSubpage === "tooling") || (view === "settings" && settingsSubpage === "static-tools");
     if (!needsToolReadiness) return;
-    api("/static-tools", undefined, requestContext)
-      .then((payload) => setStaticToolsReadiness(payload.static_tools || emptyStaticToolsReadiness))
+    setStaticToolsLoading(true);
+    withUiTimeout(
+      Promise.all([
+        api("/static-tools", undefined, requestContext),
+        api("/static-tools/path", undefined, requestContext)
+      ]),
+      15000,
+      "Static tool readiness timed out. Check the API process and retry Tool Selection -> Refresh Tools."
+    )
+      .then(([toolsPayload, pathPayload]) => {
+        setStaticToolsReadiness(toolsPayload.static_tools || emptyStaticToolsReadiness);
+        setStaticToolsPathMeta(pathPayload.static_tools_path || null);
+        setStaticToolsPathDraft(pathPayload.static_tools_path?.file_value || "");
+      })
+      .catch((loadError) => setError(formatUiError(loadError)))
+      .finally(() => setStaticToolsLoading(false));
+  }, [view, systemSubpage, adminSubpage, settingsSubpage, requestContext.workspaceId, requestContext.actorId, requestContext.apiKey]);
+
+  useEffect(() => {
+    const loadKey = runtimeSandboxReadinessKey();
+    if (runtimeSandboxReadinessLoadKeyRef.current === loadKey) return;
+    setRuntimeSandboxReadinessChecked(false);
+    loadRuntimeSandboxReadiness({ force: true })
       .catch((loadError) => setError(formatUiError(loadError)));
-  }, [view, adminSubpage, settingsSubpage, requestContext.workspaceId, requestContext.actorId, requestContext.apiKey]);
+  }, [requestContext.workspaceId, requestContext.projectId, requestContext.actorId, requestContext.apiKey]);
 
   useEffect(() => {
     if (settings.providers_json.default_provider !== "openai_codex") {
@@ -4831,7 +5049,7 @@ function triageDecisionFromReviewSummary(summary) {
   function launchDiagnosticRun(kind, target = "pi") {
     const request = buildDiagnosticsRunRequest({ kind, target, effectiveSettings, auditPackages });
     if (kind !== "plumbing" && !request.llm_provider) {
-      setError("Configure a real LLM provider in Settings before launching static audit smoke or benchmark diagnostics.");
+      setError("Configure a real LLM provider in System -> Agents & Models before launching static audit smoke or benchmark diagnostics.");
       return;
     }
     act(
@@ -4845,7 +5063,8 @@ function triageDecisionFromReviewSummary(summary) {
         if (payload?.job?.current_run_id) {
           setSelectedRunId(payload.job.current_run_id);
         }
-        setView("jobs");
+        setView("system");
+        setSystemSubpage("jobs");
         return payload;
       }),
       kind === "plumbing"
@@ -4884,7 +5103,7 @@ function triageDecisionFromReviewSummary(summary) {
     }
     const providerRequired = selectedScenarios.some((scenario) => scenario.kind !== "plumbing");
     if (providerRequired && !diagnosticDefaultProvider) {
-      setError("Configure a real LLM provider in Settings before launching static audit smoke or benchmark validations.");
+      setError("Configure a real LLM provider in System -> Agents & Models before launching static audit smoke or benchmark validations.");
       return;
     }
     setValidationLaunching(true);
@@ -4904,10 +5123,103 @@ function triageDecisionFromReviewSummary(summary) {
         const queuedRunIds = payloads.map((payload) => payload?.job?.current_run_id).filter(Boolean);
         const lastRunId = queuedRunIds[queuedRunIds.length - 1];
         if (lastRunId) setSelectedRunId(lastRunId);
-        setView("jobs");
+        setView("system");
+        setSystemSubpage("jobs");
         return payloads;
       }).finally(() => setValidationLaunching(false)),
       `${selectedScenarios.length} validation job${selectedScenarios.length === 1 ? "" : "s"} queued.`
+    );
+  }
+
+  function refreshBenchmarkData() {
+    act(
+      () => Promise.all([
+        api("/benchmarks/suites", undefined, requestContext),
+        api("/benchmarks/suites/ai-agent-static-v1", undefined, requestContext),
+        api("/benchmarks/reports", undefined, requestContext)
+      ]).then(([suitesPayload, suitePayload, reportsPayload]) => {
+        setBenchmarkSuites(suitesPayload.suites || []);
+        setBenchmarkSuiteDetail(suitePayload || null);
+        setBenchmarkReports(reportsPayload.reports || suitePayload.reports || []);
+        if (!benchmarkCaseIds.length) setBenchmarkCaseIds(suitePayload.selected_default_cases || []);
+      }),
+      "Benchmark suite refreshed."
+    );
+  }
+
+  function toggleBenchmarkCase(caseId, checked) {
+    setBenchmarkCaseIds((current) => checked
+      ? [...new Set([...current, caseId])]
+      : current.filter((item) => item !== caseId));
+  }
+
+  function selectBenchmarkDefaults() {
+    setBenchmarkCaseIds(benchmarkSuiteDetail?.selected_default_cases || []);
+    setBenchmarkIncludeExtended(false);
+    setBenchmarkIncludeRuntimePending(false);
+  }
+
+  function selectBenchmarkAllStatic() {
+    const cases = benchmarkSuiteDetail?.suite?.cases || [];
+    setBenchmarkCaseIds(cases.filter((item) => item.tier !== "runtime_pending").map((item) => item.id));
+    setBenchmarkIncludeExtended(true);
+    setBenchmarkIncludeRuntimePending(false);
+  }
+
+  function runBenchmarkCases() {
+    if (benchmarkRunning) return;
+    if (!benchmarkCaseIds.length) {
+      setError("Select at least one benchmark case.");
+      return;
+    }
+    setBenchmarkRunning(true);
+    setBenchmarkLastSummary(null);
+    const suiteId = benchmarkSuiteDetail?.suite?.suite_id || "ai-agent-static-v1";
+    const selectedCases = [...benchmarkCaseIds];
+    act(
+      () => api(`/benchmarks/suites/${encodeURIComponent(suiteId)}/run`, {
+        method: "POST",
+        body: JSON.stringify({
+          case_ids: selectedCases,
+          include_extended: benchmarkIncludeExtended,
+          include_runtime_pending: benchmarkIncludeRuntimePending,
+          execute: benchmarkExecute,
+          strict: benchmarkStrict,
+          use_settings_provider: true
+        })
+      }, requestContext).then((payload) => {
+        const combinedReports = payload.reports || [];
+        const latestSummary = payload.benchmark_summary || null;
+        setBenchmarkLastSummary(latestSummary);
+        if (combinedReports.length) {
+          const byName = new Map([...combinedReports, ...benchmarkReports].map((item) => [item.file_name, item]));
+          setBenchmarkReports([...byName.values()].sort((left, right) => String(right.generated_at || right.modified_at || "").localeCompare(String(left.generated_at || left.modified_at || ""))));
+        }
+        return payload;
+      }).finally(() => setBenchmarkRunning(false)),
+      benchmarkExecute
+        ? `${selectedCases.length} benchmark case${selectedCases.length === 1 ? "" : "s"} executed.`
+        : `${selectedCases.length} benchmark case${selectedCases.length === 1 ? "" : "s"} dry-run complete.`
+    );
+  }
+
+  function compareBenchmarkReportsUi() {
+    if (!benchmarkCompareBaseline || !benchmarkCompareCurrent) {
+      setError("Select both baseline and current benchmark reports.");
+      return;
+    }
+    act(
+      () => api("/benchmarks/compare", {
+        method: "POST",
+        body: JSON.stringify({
+          baseline: benchmarkCompareBaseline,
+          current: benchmarkCompareCurrent
+        })
+      }, requestContext).then((payload) => {
+        setBenchmarkComparison(payload.comparison || null);
+        return payload;
+      }),
+      "Benchmark reports compared."
     );
   }
 
@@ -4920,12 +5232,124 @@ function triageDecisionFromReviewSummary(summary) {
     setView("runs");
   }
 
-  function refreshDiagnosticTools() {
+  function runtimeSandboxReadinessKey() {
+    return [
+      requestContext.workspaceId || "",
+      requestContext.projectId || "",
+      requestContext.actorId || "",
+      requestContext.apiKey || ""
+    ].join("|");
+  }
+
+  function loadRuntimeSandboxReadiness(options = {}) {
+    const { force = false } = options;
+    const loadKey = runtimeSandboxReadinessKey();
+    if (!force && runtimeSandboxReadinessLoadKeyRef.current === loadKey && runtimeSandboxReadinessChecked) {
+      return Promise.resolve(runtimeSandboxReadiness);
+    }
+    if (!force && runtimeSandboxReadinessInFlightKeyRef.current === loadKey) {
+      return Promise.resolve(runtimeSandboxReadiness);
+    }
+    runtimeSandboxReadinessInFlightKeyRef.current = loadKey;
+    setRuntimeSandboxReadinessLoading(true);
+    return withUiTimeout(
+      Promise.all([
+        api("/runtime-sandbox/readiness", undefined, requestContext),
+        api("/runtime-sandbox/setup-plan", undefined, requestContext)
+      ]),
+      15000,
+      "Runtime sandbox readiness timed out. Check the API process and retry Refresh Readiness."
+    ).then(([readinessPayload, setupPayload]) => {
+      const nextReadiness = readinessPayload.runtime_sandbox || emptyRuntimeSandboxReadiness;
+      setRuntimeSandboxReadiness(nextReadiness);
+      setRuntimeSandboxSetupPlan(setupPayload.runtime_sandbox_setup || null);
+      runtimeSandboxReadinessLoadKeyRef.current = loadKey;
+      return nextReadiness;
+    }).finally(() => {
+      if (runtimeSandboxReadinessInFlightKeyRef.current === loadKey) {
+        runtimeSandboxReadinessInFlightKeyRef.current = "";
+      }
+      setRuntimeSandboxReadinessLoading(false);
+      setRuntimeSandboxReadinessChecked(true);
+    });
+  }
+
+  function refreshRuntimeSandboxReadiness() {
+    setRuntimeSandboxReadinessChecked(false);
     act(
-      () => api("/static-tools", undefined, requestContext).then((payload) => {
-        setStaticToolsReadiness(payload.static_tools || emptyStaticToolsReadiness);
+      () => loadRuntimeSandboxReadiness({ force: true }),
+      "Runtime sandbox readiness refreshed."
+    );
+  }
+
+  function installRuntimeSandboxBackend() {
+    const confirmed = window.confirm("Install the recommended local runtime now? Tethermark will run the system package-manager command. Your operating system may show installer prompts, and you may need to start Docker Desktop or the selected runtime afterward.");
+    if (!confirmed) return;
+    setRuntimeSandboxSetupRunning(true);
+    setRuntimeSandboxReadinessChecked(false);
+    setRuntimeSandboxReadinessLoading(true);
+    act(
+      () => api("/runtime-sandbox/setup", {
+        method: "POST",
+        body: JSON.stringify({ confirm: true })
+      }, requestContext).then((payload) => {
+        setRuntimeSandboxSetupResult(payload.runtime_sandbox_setup || null);
+        if (payload.runtime_sandbox_setup?.readiness_after) {
+          setRuntimeSandboxReadiness(payload.runtime_sandbox_setup.readiness_after);
+        }
+        return loadRuntimeSandboxReadiness({ force: true }).then(() => {
+          return payload;
+        });
+      }).finally(() => {
+        setRuntimeSandboxSetupRunning(false);
+        setRuntimeSandboxReadinessLoading(false);
+        setRuntimeSandboxReadinessChecked(true);
       }),
-      "External tool readiness refreshed."
+      "Runtime sandbox setup finished."
+    );
+  }
+
+  function saveRuntimeSandboxSettings() {
+    act(
+      () => api("/ui/settings?scope_level=" + encodeURIComponent(currentSettingsScopeLevel), {
+        method: "PUT",
+        body: JSON.stringify((() => {
+          const integrationPayload = buildSettingsIntegrationPayload(settings, integrationRegistry, integrationCredentialDrafts);
+          return {
+            providers: buildSettingsProvidersPayload(settings, agentCredentialDrafts),
+            credentials: {
+              ...integrationPayload.credentials,
+              ...buildSettingsCredentialsPayload(settings, llmRegistry, providerCredentialDrafts)
+            },
+            audit_defaults: settings.audit_defaults_json,
+            preflight: {
+              ...(settings.preflight_json || {}),
+              runtime_sandbox: runtimeSandboxSettings
+            },
+            review: settings.review_json,
+            integrations: {
+              ...settings.integrations_json,
+              ...integrationPayload.integrations
+            },
+            test_mode: settings.test_mode_json,
+            learning: getLearningSettings(settings)
+          };
+        })())
+      }, requestContext).then((payload) => Promise.all([
+        api("/ui/settings?scope_level=effective", undefined, requestContext),
+        loadRuntimeSandboxReadiness({ force: true })
+      ]).then(([effectivePayload]) => {
+        setSettings(payload.settings || settings);
+        setEffectiveSettings({
+          effective: effectivePayload.settings || emptySettings,
+          layers: effectivePayload.layers || emptyEffectiveSettings.layers
+        });
+        setPreflightSummary(null);
+        setPreflightStale(true);
+        setPreflightCheckedAt(null);
+        setPreflightAcceptedAt(null);
+      })),
+      "Runtime sandbox settings saved."
     );
   }
 
@@ -5446,7 +5870,7 @@ function triageDecisionFromReviewSummary(summary) {
         method: "POST",
         body: "{}"
       }, requestContext).then(() => loadRunDetail(selectedRunId)),
-      "GitHub verification is hosted-only."
+      "Automatic GitHub access verification is available in Tethermark Cloud."
     );
   }
 
@@ -5460,7 +5884,7 @@ function triageDecisionFromReviewSummary(summary) {
           target_number: outboundTargetNumber ? Number(outboundTargetNumber) : null
         })
       }, requestContext).then(() => loadRunDetail(selectedRunId)),
-      "GitHub delivery is hosted-only."
+      "Automatic GitHub delivery is available in Tethermark Cloud."
     );
   }
 
@@ -5569,7 +5993,7 @@ function triageDecisionFromReviewSummary(summary) {
           ].filter(Boolean))),
           h(Field, { key: "policy-pack", label: "Policy Pack" }, h("div", { className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600" }, [
             h("div", { key: "value", className: "font-medium text-slate-900" }, getPolicyPackDisplayLabel(policyPacks, "default")),
-            h("div", { key: "note", className: "mt-1" }, "OSS uses the built-in default policy pack only.")
+            h("div", { key: "note", className: "mt-1" }, "Community Edition uses the built-in default policy pack only.")
           ])),
           h(Field, { key: "provider", label: "Provider" }, Select({
             value: runForm.llm_provider,
@@ -5763,7 +6187,7 @@ function triageDecisionFromReviewSummary(summary) {
       ]);
   const dashboard = h("div", { className: "space-y-6" }, [
     h("div", { key: "kpis", className: "grid gap-4 lg:grid-cols-4" }, [
-      h(DashboardKpiCard, { key: "runs", label: "Total Runs", value: String(stats.runs.total_runs || runs.length), hint: "Persisted audit history", tone: "blue" }),
+      h(DashboardKpiCard, { key: "runs", label: "Total Audits", value: String(stats.runs.total_runs || runs.length), hint: "Persisted audit history", tone: "blue" }),
       h(DashboardKpiCard, { key: "reviews", label: "Pending Reviews", value: String(pendingReviews.length), hint: `${overdueReviews} overdue`, tone: "amber" }),
       h(DashboardKpiCard, { key: "score", label: "Avg Security Score", value: averageScore, hint: "Average overall score across scored runs", tone: "emerald" }),
       h(DashboardKpiCard, { key: "followups", label: "Open Follow-ups", value: String(openRuntimeFollowups), hint: `${successfulRuns} successful runs`, tone: "slate" })
@@ -5800,16 +6224,16 @@ function triageDecisionFromReviewSummary(summary) {
             }))
           ]),
           h("div", { key: "actions", className: "grid gap-3 pt-2" }, [
-            h(Button, { key: "reviews", onClick: () => setView("reviews") }, "Open Review Inbox"),
-            h(Button, { key: "runs", variant: "outline", onClick: () => setView("runs") }, "Open Runs")
+            h(Button, { key: "findings", onClick: () => setView("findings") }, "Open Findings"),
+            h(Button, { key: "runs", variant: "outline", onClick: () => setView("runs") }, "Open Audits")
           ])
         ])
       ])
     ]),
-    h(Card, { key: "recent-runs", title: "Recent Runs", description: "Latest persisted runs for the current project.", className: "border-slate-200 bg-white shadow-sm" }, [
+    h(Card, { key: "recent-runs", title: "Recent Audits", description: "Latest persisted audit runs for the current project.", className: "border-slate-200 bg-white shadow-sm" }, [
       h("div", { key: "toolbar", className: "mb-4 flex items-center justify-between gap-3" }, [
         h("div", { key: "meta", className: "text-sm text-slate-500" }, `${recentRuns.length} recent run${recentRuns.length === 1 ? "" : "s"} shown`),
-        h(Button, { key: "open-all", variant: "outline", onClick: () => setView("runs") }, "View All Runs")
+        h(Button, { key: "open-all", variant: "outline", onClick: () => setView("runs") }, "View All Audits")
       ]),
       recentRuns.length
         ? h("div", { key: "table", className: "overflow-x-auto rounded-2xl border border-slate-200" }, h("table", { className: "w-full text-sm" }, [
@@ -6007,7 +6431,6 @@ function triageDecisionFromReviewSummary(summary) {
   const diagnosticDefaultProvider = effectiveSettings.effective.providers_json?.default_provider || "";
   const diagnosticDefaultModel = effectiveSettings.effective.providers_json?.default_model || "";
   const diagnosticTools = staticToolsReadiness.tools || [];
-  const diagnosticMandatoryTools = diagnosticTools.filter((tool) => tool.mandatory);
   const diagnosticDefaultTools = diagnosticTools.filter((tool) => tool.default_enabled);
   const diagnosticStaticTools = diagnosticDefaultTools.filter((tool) => (tool.run_modes || []).includes("static"));
   const diagnosticRuntimeTools = diagnosticDefaultTools.filter((tool) => (tool.run_modes || []).includes("runtime") && !(tool.run_modes || []).includes("static"));
@@ -6025,22 +6448,6 @@ function triageDecisionFromReviewSummary(summary) {
       ? "deferred"
       : "ready"
     : "unknown";
-  function renderToolCards(tools, emptyText) {
-    return tools.length
-      ? h("div", { className: "grid gap-3 md:grid-cols-3" }, tools.map((tool) => h("div", { key: tool.id, className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
-        h("div", { key: "head", className: "flex items-start justify-between gap-3" }, [
-          h("div", { key: "copy" }, [
-            h("div", { key: "label", className: "font-medium text-slate-900" }, tool.label),
-            h("div", { key: "cmd", className: "mt-1 text-xs text-slate-500" }, tool.command || "internal")
-          ]),
-          h(Badge, { key: "status" }, tool.status)
-        ]),
-        h("div", { key: "summary", className: "mt-2 text-sm text-slate-500" }, tool.summary),
-        h("div", { key: "modes", className: "mt-2 text-xs text-slate-500" }, `modes: ${(tool.run_modes || []).join(", ") || "n/a"}`),
-        tool.version ? h("div", { key: "version", className: "mt-2 text-xs text-slate-500" }, tool.version) : null
-      ])))
-      : h("div", { className: "rounded-2xl border border-dashed border-slate-200 px-4 py-6 text-sm text-slate-500" }, emptyText);
-  }
   const observabilityTotals = observabilityHistory?.totals || {};
   const rawObservabilityLearning = observabilityHistory?.learning || {};
   const latestUiLearningJob = learningJobs[0] || null;
@@ -6109,15 +6516,15 @@ function triageDecisionFromReviewSummary(summary) {
         { label: "Stages", value: traceSummary.stage_execution_count },
         { label: "Agents", value: traceSummary.agent_invocation_count },
         { label: "Handoffs", value: traceSummary.handoff_count },
-        { label: "QA Verdict", value: traceSummary.finding_quality_verdict || "n/a" },
-        { label: "QA Blockers", value: traceSummary.finding_quality_blocking_count }
+        { label: "Integrity Verdict", value: traceSummary.finding_quality_verdict || "n/a" },
+        { label: "Integrity Blockers", value: traceSummary.finding_quality_blocking_count }
       ].map((item) => h("div", { key: item.label, className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
         h("div", { key: "label", className: "text-xs font-mono uppercase tracking-[0.18em] text-slate-500" }, item.label),
         h("div", { key: "value", className: "mt-2 text-lg font-semibold text-slate-950" }, String(item.value ?? "n/a"))
       ]))),
       qaBlockers.length
         ? h("div", { key: "qa-blockers", className: "rounded-2xl border border-red-200 bg-red-50 px-4 py-3" }, [
-          h("div", { key: "title", className: "text-sm font-semibold text-red-950" }, "Finding QA Blockers"),
+          h("div", { key: "title", className: "text-sm font-semibold text-red-950" }, "Post-Supervisor Integrity Blockers"),
           h("ul", { key: "list", className: "mt-2 space-y-1 text-sm text-red-900" }, qaBlockers.map((item) => h("li", { key: item.finding_id }, `${item.finding_id}: evidence ${item.evidence_support_verdict}, controls ${item.control_mapping_verdict}`)))
         ])
         : null,
@@ -6141,7 +6548,7 @@ function triageDecisionFromReviewSummary(summary) {
         traceJsonDetails("Supervisor Review", observabilityTrace.supervisor_review),
         traceJsonDetails("Correction Plan", observabilityTrace.correction_plan),
         traceJsonDetails("Correction Result", observabilityTrace.correction_result),
-        traceJsonDetails("Finding Quality", observabilityTrace.finding_quality),
+        traceJsonDetails("Post-Supervisor Integrity", observabilityTrace.finding_quality),
         traceJsonDetails("Agent Invocations", observabilityTrace.agent_invocations),
         traceJsonDetails("Handoffs", observabilityTrace.handoffs),
         traceJsonDetails("Intermediate Outputs", observabilityTrace.intermediate_outputs),
@@ -6153,27 +6560,29 @@ function triageDecisionFromReviewSummary(summary) {
     { id: "system", label: "System" },
     { id: "methodology", label: "Methodology" },
     { id: "validation", label: "Validation" },
+    { id: "benchmarks", label: "Benchmarks" },
+    { id: "runtime-sandbox", label: "Runtime Sandbox" },
     { id: "tooling", label: "Tooling" },
     { id: "observability", label: "Observability" }
   ];
   const apiHealthLabel = authInfo.trusted_mode ? "API reachable" : authInfo.auth_mode === "none" ? "Local API reachable" : "Authenticated API reachable";
   const apiHealthNote = authInfo.trusted_mode
-    ? "The local API is responding in trusted local mode. If page data looks stale, sync all app data."
+    ? "The local API is responding in trusted local mode. If page data looks stale, refresh local data."
     : authInfo.auth_mode === "none"
       ? "The API is responding without authentication. Use only in trusted local environments."
       : "The API is responding with authentication enabled.";
   const adminSystemPanel = h("div", { className: "space-y-6" }, [
-    h(Card, { key: "app-state", title: "System Sync", description: "Manual recovery control for local UI state after external changes.", className: "border-slate-200 bg-white shadow-sm" }, [
+    h(Card, { key: "app-state", title: "Local Data Refresh", description: "Manual recovery control for local UI state after external changes.", className: "border-slate-200 bg-white shadow-sm" }, [
       h("div", { key: "top", className: "space-y-3" }, [
           h("div", { key: "status", className: "flex flex-wrap gap-2" }, [
             h(Badge, { key: "api" }, apiHealthLabel),
-            h(Badge, { key: "sync" }, globalSyncLoading ? "syncing" : `last sync: ${lastGlobalSyncAt ? formatDate(lastGlobalSyncAt) : "not synced"}`)
+            h(Badge, { key: "sync" }, globalSyncLoading ? "refreshing" : `last refresh: ${lastGlobalSyncAt ? formatDate(lastGlobalSyncAt) : "not refreshed"}`)
           ]),
           h("div", { key: "api-note", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600" }, apiHealthNote),
-          h("div", { key: "sync-note", className: "rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600" }, "Use Sync All App Data after another tab, CLI command, server restart, or environment change may have made the local UI stale. Normal pages use scoped refreshes where possible.")
+          h("div", { key: "sync-note", className: "rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600" }, "Use Refresh Local Data after another tab, CLI command, server restart, or environment change may have made the local UI stale. Normal pages use scoped refreshes where possible.")
       ]),
       h("div", { key: "actions", className: "mt-5 flex flex-wrap justify-end gap-3 border-t border-slate-200 pt-4" }, [
-        h(Button, { key: "sync", onClick: syncAllAppData, disabled: globalSyncLoading, "aria-busy": globalSyncLoading ? "true" : "false" }, globalSyncLoading ? "Syncing..." : "Sync All App Data")
+        h(Button, { key: "sync", onClick: syncAllAppData, disabled: globalSyncLoading, "aria-busy": globalSyncLoading ? "true" : "false" }, globalSyncLoading ? "Refreshing..." : "Refresh Local Data")
       ])
     ])
   ]);
@@ -6367,13 +6776,13 @@ function triageDecisionFromReviewSummary(summary) {
     },
     {
       id: "benchmark_pi",
-      title: "Benchmark Pi",
+      title: "Benchmark Pi Case",
       kind: "benchmark",
       target: "pi",
       category: "benchmark",
       provider: diagnosticDefaultProvider || "not configured",
       targetLabel: "Pi public repo",
-      summary: "Repeatable lightweight benchmark anchored to the pinned Pi commit.",
+      summary: "Repeatable lightweight case from the product benchmark suite, anchored to the pinned Pi commit.",
       reference: diagnosticsPiCommit,
       referenceLabel: "Pi pinned commit",
       recommended: false,
@@ -6387,7 +6796,7 @@ function triageDecisionFromReviewSummary(summary) {
       category: "benchmark",
       provider: diagnosticDefaultProvider || "not configured",
       targetLabel: "OpenClaw public repo",
-      summary: "Heavier public benchmark target for broader framework and repo-shape coverage.",
+      summary: "Legacy heavier benchmark scenario. The canonical product benchmark suite is managed through the CLI manifest.",
       reference: "latest remote checkout",
       referenceLabel: "moving reference",
       recommended: false,
@@ -6427,8 +6836,8 @@ function triageDecisionFromReviewSummary(summary) {
       ]),
       h("div", { key: "actions", className: "mt-5 flex flex-wrap items-center gap-3" }, [
         h(Button, { key: "run", onClick: () => launchValidationScenarios(validationScenarios), disabled: !validationCanRun }, validationLaunching ? "Starting..." : "Run Selected"),
-        h(Button, { key: "jobs", variant: "outline", onClick: () => setView("jobs") }, "Open Jobs"),
-        selectedValidationRequiresProvider && !diagnosticDefaultProvider ? h(Button, { key: "settings", variant: "outline", onClick: () => { setView("settings"); setSettingsSubpage("llm"); } }, "Configure Provider") : null
+        h(Button, { key: "jobs", variant: "outline", onClick: () => { setView("system"); setSystemSubpage("jobs"); } }, "Open Jobs"),
+        selectedValidationRequiresProvider && !diagnosticDefaultProvider ? h(Button, { key: "settings", variant: "outline", onClick: () => { setView("system"); setSystemSubpage("agents"); setSettingsSubpage("llm"); } }, "Configure Provider") : null
       ].filter(Boolean)),
       !validationCanRun ? h("div", { key: "blocker", className: "mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800" }, selectedValidationRequiresProvider && !diagnosticDefaultProvider
         ? "Selected audit-quality or benchmark scenarios require a configured real LLM provider."
@@ -6474,7 +6883,7 @@ function triageDecisionFromReviewSummary(summary) {
         ]),
         activeJob ? h("div", { key: "active-note", className: "mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800" }, [
           h("div", { key: "copy" }, `Active job ${activeJob.job_id} is already running for this scenario.`),
-          h(Button, { key: "open", variant: "outline", className: "mt-3", onClick: (event) => { event.preventDefault(); setView("jobs"); } }, "Open Jobs")
+          h(Button, { key: "open", variant: "outline", className: "mt-3", onClick: (event) => { event.preventDefault(); setView("system"); setSystemSubpage("jobs"); } }, "Open Jobs")
         ]) : null,
         h("div", { key: "details", className: "mt-4" }, h(DetailList, { items: [
           { label: "Provider", value: scenario.provider },
@@ -6484,65 +6893,481 @@ function triageDecisionFromReviewSummary(summary) {
         ] }))
       ]);
     })),
-    h(Card, { key: "pinning", title: "Pinned Smoke Test Target", description: "Pi Agent is the default public smoke-test repository for repeatable local validation.", className: "border-slate-200 bg-white shadow-sm" }, [
+    h(Card, { key: "pinning", title: "Product Benchmark Suite", description: "Pinned public AI-agent benchmark targets are managed by the product benchmark manifest.", className: "border-slate-200 bg-white shadow-sm" }, [
       h("div", { key: "copy", className: "space-y-3 text-sm leading-6 text-slate-600" }, [
         h("p", { key: "p1" }, `Tethermark uses Pi Agent as the lightweight smoke-test target because it is small enough for quick validation while still exercising agent-style repository detection and static controls.`),
         h("p", { key: "p2" }, `The smoke scenarios clone Pi from its public repository and check out pinned commit ${diagnosticsPiCommit}. This keeps expected behavior repeatable without bundling third-party source code in Tethermark.`),
-        h("p", { key: "p3" }, "OpenClaw remains a heavier moving benchmark target. Use it after the Pi smoke path is working.")
+        h("p", { key: "p3" }, "The canonical product benchmark suite lives at benchmarks/suites/ai-agent-static-v1.json and includes Pi, mini-swe-agent, Aider, MCP servers, CrewAI, LangGraph, Flowise, and a runtime-pending AgentDojo case. Use npm run benchmark:product or npm run benchmark:product:execute from the CLI.")
       ])
     ])
   ]);
-  const adminToolingPanel = h("div", { className: "space-y-6" }, [
-    h(Card, { key: "tool-doctor", title: "External Tool Doctor", description: "Local scanner readiness grouped by audit mode.", className: "border-slate-200 bg-white shadow-sm" }, [
-      h("div", { key: "top", className: "mb-4 flex flex-wrap items-center justify-between gap-3" }, [
-        h("div", { key: "status", className: "flex flex-wrap gap-2" }, [
-          h(Badge, { key: "static" }, `static:${diagnosticStaticStatus}`),
-          h(Badge, { key: "runtime" }, `runtime:${diagnosticRuntimeStatus}`),
-          h(Badge, { key: "gate" }, staticToolsReadiness.gate_policy || "warn"),
-          h(Badge, { key: "path" }, staticToolsReadiness.tool_path?.env_var || "HARNESS_STATIC_TOOLS_PATH")
+  const benchmarkSuite = benchmarkSuiteDetail?.suite || null;
+  const benchmarkCases = benchmarkSuite?.cases || [];
+  const benchmarkSuitePending = !benchmarkSuiteDetail && !benchmarkSuites.length && !benchmarkReports.length;
+  const selectedBenchmarkCases = benchmarkCases.filter((item) => benchmarkCaseIds.includes(item.id));
+  const benchmarkReportOptions = benchmarkReports.filter((item) => item.file_name);
+  const benchmarkSelectedReport = benchmarkLastSummary || null;
+  const adminBenchmarkPanel = h("div", { className: "space-y-6" }, [
+    h(Card, { key: "summary", title: "Product Benchmark Suite", description: "Pinned public AI-agent targets for Tethermark release and regression validation. This is separate from user repo baseline history.", className: "border-slate-200 bg-white shadow-sm" }, [
+      h("div", { key: "top", className: "flex flex-wrap items-start justify-between gap-3" }, [
+        h("div", { key: "copy", className: "min-w-0" }, [
+          h("div", { key: "title", className: "font-semibold text-slate-950" }, benchmarkSuite ? `${benchmarkSuite.title} (${benchmarkSuite.suite_id}@${benchmarkSuite.suite_version})` : "Benchmark suite not loaded"),
+          h("p", { key: "summary", className: "mt-1 max-w-3xl text-sm leading-6 text-slate-600" }, benchmarkSuite?.summary || "Refresh benchmark metadata to load available suites and cases.")
         ]),
-        h(Button, { key: "refresh", variant: "outline", onClick: refreshDiagnosticTools }, "Refresh Tools")
+        h(Button, { key: "refresh", variant: "outline", onClick: refreshBenchmarkData }, "Refresh")
       ]),
-      h("div", { key: "summary", className: "mb-5 grid gap-3 md:grid-cols-2" }, [
-        h("div", { key: "static", className: "rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3" }, [
-          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-emerald-700" }, "Static Repo Testing"),
-          h("div", { key: "status", className: "mt-1 text-xl font-semibold text-emerald-950" }, diagnosticStaticStatus),
-          h("div", { key: "detail", className: "mt-1 text-sm text-emerald-900" }, !diagnosticStaticTools.length
-            ? "Static tool readiness has not loaded yet."
-            : diagnosticStaticMissing.length
-            ? `${diagnosticStaticMissing.length} selected static tool${diagnosticStaticMissing.length === 1 ? "" : "s"} missing.`
-            : "Scorecard, Semgrep, and Trivy are available for static runs.")
+      h("div", { key: "stats", className: "mt-5 grid gap-3 md:grid-cols-5" }, [
+        h("div", { key: "cases", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-slate-500" }, "Cases"),
+          h("div", { key: "value", className: "mt-1 text-2xl font-semibold text-slate-950" }, String(benchmarkCases.length))
         ]),
-        h("div", { key: "runtime", className: "rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3" }, [
-          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-amber-700" }, "Runtime Eval Tooling"),
-          h("div", { key: "status", className: "mt-1 text-xl font-semibold text-amber-950" }, diagnosticRuntimeStatus),
-          h("div", { key: "detail", className: "mt-1 text-sm text-amber-900" }, !diagnosticRuntimeTools.length
-            ? "Runtime eval tool readiness has not loaded yet."
-            : diagnosticRuntimeMissing.length
-            ? `${diagnosticRuntimeMissing.length} runtime eval adapter${diagnosticRuntimeMissing.length === 1 ? "" : "s"} missing or deferred.`
-            : "Runtime eval adapters are available.")
+        h("div", { key: "selected", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-slate-500" }, "Selected"),
+          h("div", { key: "value", className: "mt-1 text-2xl font-semibold text-slate-950" }, String(selectedBenchmarkCases.length))
+        ]),
+        h("div", { key: "default", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-slate-500" }, "Default"),
+          h("div", { key: "value", className: "mt-1 text-2xl font-semibold text-slate-950" }, String((benchmarkSuiteDetail?.selected_default_cases || []).length))
+        ]),
+        h("div", { key: "reports", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-slate-500" }, "Reports"),
+          h("div", { key: "value", className: "mt-1 text-2xl font-semibold text-slate-950" }, String(benchmarkReports.length))
+        ]),
+        h("div", { key: "mode", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-slate-500" }, "Mode"),
+          h("div", { key: "value", className: "mt-1 font-semibold text-slate-950" }, benchmarkExecute ? "execute" : "dry run")
+        ])
+      ])
+    ]),
+    h(Card, { key: "cases", title: "Benchmark Cases", description: "Choose one or more manifest cases. Dry-run writes benchmark reports without cloning public repos; execute launches normal Tethermark audit runs.", className: "border-slate-200 bg-white shadow-sm" }, [
+      h("div", { key: "actions", className: "mb-4 flex flex-wrap items-center gap-3" }, [
+        h(Button, { key: "defaults", variant: "outline", onClick: selectBenchmarkDefaults, disabled: !benchmarkSuite }, "Default Cases"),
+        h(Button, { key: "all-static", variant: "outline", onClick: selectBenchmarkAllStatic, disabled: !benchmarkSuite }, "All Static Cases"),
+        h(Button, { key: "clear", variant: "outline", onClick: () => setBenchmarkCaseIds([]), disabled: benchmarkRunning }, "Clear"),
+        h(Button, { key: "run", onClick: runBenchmarkCases, disabled: benchmarkRunning || !benchmarkCaseIds.length }, benchmarkRunning ? "Running..." : benchmarkExecute ? "Execute Selected" : "Dry-Run Selected")
+      ]),
+      h("div", { key: "options", className: "mb-5 grid gap-3 md:grid-cols-4" }, [
+        h(Field, { key: "execute", label: "Execution" }, Select({ value: benchmarkExecute ? "execute" : "dry_run", onChange: (event) => setBenchmarkExecute(event.target.value === "execute") }, [
+          h("option", { key: "dry", value: "dry_run" }, "Dry run"),
+          h("option", { key: "execute", value: "execute" }, "Execute audits")
+        ])),
+        h(Field, { key: "strict", label: "Finding families" }, Select({ value: benchmarkStrict ? "strict" : "drift", onChange: (event) => setBenchmarkStrict(event.target.value === "strict") }, [
+          h("option", { key: "drift", value: "drift" }, "Track as drift"),
+          h("option", { key: "strict", value: "strict" }, "Fail if missing")
+        ])),
+        h(Field, { key: "extended", label: "Extended cases" }, Select({ value: benchmarkIncludeExtended ? "include" : "default", onChange: (event) => setBenchmarkIncludeExtended(event.target.value === "include") }, [
+          h("option", { key: "default", value: "default" }, "Default only"),
+          h("option", { key: "include", value: "include" }, "Include extended")
+        ])),
+        h(Field, { key: "runtime", label: "Runtime pending" }, Select({ value: benchmarkIncludeRuntimePending ? "include" : "exclude", onChange: (event) => setBenchmarkIncludeRuntimePending(event.target.value === "include") }, [
+          h("option", { key: "exclude", value: "exclude" }, "Exclude"),
+          h("option", { key: "include", value: "include" }, "Include")
+        ]))
+      ]),
+      benchmarkExecute ? h("div", { key: "execute-warning", className: "mb-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-900" }, "Executing benchmark cases clones pinned public repositories and runs normal Tethermark audit runs. Static cases should not execute target application code. Runtime-pending cases require Local Runtime Sandbox readiness and should remain excluded until runtime benchmark adapters are release-gated.") : null,
+      h("div", { key: "case-list", className: "grid gap-3" }, benchmarkSuitePending ? [
+        h("div", { key: "placeholder-a", className: "rounded-2xl border border-slate-200 bg-slate-50 p-4" }, [
+          h("div", { key: "line1", className: "h-4 w-56 rounded bg-slate-200" }),
+          h("div", { key: "line2", className: "mt-3 h-3 w-4/5 rounded bg-slate-200" }),
+          h("div", { key: "line3", className: "mt-4 h-8 rounded-xl bg-slate-200/80" })
+        ]),
+        h("div", { key: "placeholder-b", className: "rounded-2xl border border-slate-200 bg-slate-50 p-4" }, [
+          h("div", { key: "line1", className: "h-4 w-48 rounded bg-slate-200" }),
+          h("div", { key: "line2", className: "mt-3 h-3 w-2/3 rounded bg-slate-200" })
+        ])
+      ] : benchmarkCases.length ? benchmarkCases.map((item) => {
+        const selected = benchmarkCaseIds.includes(item.id);
+        const runtimePending = item.tier === "runtime_pending";
+        return h("label", {
+          key: item.id,
+          className: cn("block rounded-2xl border bg-white p-4 transition-colors", selected ? "border-slate-900" : "border-slate-200", runtimePending && !benchmarkIncludeRuntimePending ? "opacity-75" : "")
+        }, [
+          h("div", { key: "row", className: "flex min-w-0 items-start gap-3" }, [
+            h("input", {
+              key: "check",
+              type: "checkbox",
+              className: "mt-1",
+              checked: selected,
+              disabled: runtimePending && !benchmarkIncludeRuntimePending,
+              onChange: (event) => toggleBenchmarkCase(item.id, event.target.checked)
+            }),
+            h("div", { key: "copy", className: "min-w-0 flex-1" }, [
+              h("div", { key: "title", className: "font-semibold text-slate-950" }, item.id),
+              h("div", { key: "summary", className: "mt-1 text-sm leading-6 text-slate-600" }, `${item.target_name} at ${String(item.pinned_commit || "").slice(0, 12)}. ${item.notes?.[0] || ""}`),
+              h("div", { key: "badges", className: "mt-3 flex flex-wrap gap-2" }, [
+                h(CompactTag, { key: "tier" }, item.tier),
+                h(CompactTag, { key: "mode" }, item.run_mode || benchmarkSuite?.default_run_mode || "static"),
+                h(CompactTag, { key: "package" }, item.audit_package || benchmarkSuite?.default_audit_package || "agentic-static"),
+                ...(item.categories || []).slice(0, 4).map((category) => h(CompactTag, { key: category }, category))
+              ])
+            ])
+          ]),
+          h("div", { key: "details", className: "mt-4" }, h(DetailList, { items: [
+            { label: "Repo", value: item.repo_url },
+            { label: "Expected controls", value: (item.expected_controls || []).join(", ") || "none" },
+            { label: "Finding families", value: (item.expected_finding_families || []).join(", ") || "none" }
+          ] }))
+        ]);
+      }) : h("div", { className: "rounded-2xl border border-dashed border-slate-200 px-4 py-6 text-sm text-slate-500" }, "No benchmark cases loaded."))
+    ]),
+    benchmarkSelectedReport ? h(Card, { key: "last", title: "Latest Benchmark Result", description: "Most recent result returned by this UI session.", className: "border-slate-200 bg-white shadow-sm" }, [
+      h("div", { key: "stats", className: "grid gap-3 md:grid-cols-5" }, [
+        h("div", { key: "selected", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [h("div", { className: "text-xs uppercase tracking-wide text-slate-500" }, "Cases"), h("div", { className: "mt-1 text-2xl font-semibold text-slate-950" }, String(benchmarkSelectedReport.selected_cases || 0))]),
+        h("div", { key: "passed", className: "rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3" }, [h("div", { className: "text-xs uppercase tracking-wide text-emerald-700" }, "Passed"), h("div", { className: "mt-1 text-2xl font-semibold text-emerald-950" }, String(benchmarkSelectedReport.passed_cases || 0))]),
+        h("div", { key: "failed", className: "rounded-2xl border border-red-200 bg-red-50 px-4 py-3" }, [h("div", { className: "text-xs uppercase tracking-wide text-red-700" }, "Failed"), h("div", { className: "mt-1 text-2xl font-semibold text-red-950" }, String(benchmarkSelectedReport.failed_cases || 0))]),
+        h("div", { key: "dry", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [h("div", { className: "text-xs uppercase tracking-wide text-slate-500" }, "Dry-run"), h("div", { className: "mt-1 text-2xl font-semibold text-slate-950" }, String(benchmarkSelectedReport.dry_run_cases || 0))]),
+        h("div", { key: "report", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [h("div", { className: "text-xs uppercase tracking-wide text-slate-500" }, "Report"), h("div", { className: "mt-1 truncate text-sm font-semibold text-slate-950" }, benchmarkSelectedReport.report_path || "n/a")])
+      ]),
+      h("div", { key: "rows", className: "mt-4 grid gap-3" }, (benchmarkSelectedReport.results || []).map((result) => h("div", { key: result.case_id, className: "rounded-2xl border border-slate-200 px-4 py-3" }, [
+        h("div", { key: "head", className: "flex flex-wrap items-center justify-between gap-2" }, [
+          h("div", { key: "id", className: "font-semibold text-slate-950" }, result.case_id),
+          h(Badge, { key: "verdict" }, result.verdict)
+        ]),
+        h("div", { key: "meta", className: "mt-1 text-sm text-slate-600" }, `run ${result.run_id || "n/a"} · findings ${result.finding_count || 0} · controls ${result.control_ids?.length || 0}`),
+        result.issues?.length ? h("ul", { key: "issues", className: "mt-2 space-y-1 text-sm text-red-700" }, result.issues.slice(0, 4).map((issue, index) => h("li", { key: index }, `- ${issue}`))) : null,
+        result.drift?.length ? h("ul", { key: "drift", className: "mt-2 space-y-1 text-sm text-amber-700" }, result.drift.slice(0, 4).map((item, index) => h("li", { key: index }, `- ${item}`))) : null
+      ])))
+    ]) : null,
+    h(Card, { key: "reports", title: "Benchmark Reports", description: "Reports are stored under the local benchmark artifact directory and can be compared for drift.", className: "border-slate-200 bg-white shadow-sm" }, [
+      h("div", { key: "compare", className: "grid gap-3 md:grid-cols-[1fr_1fr_auto]" }, [
+        h(Field, { key: "baseline", label: "Baseline" }, Select({ value: benchmarkCompareBaseline, onChange: (event) => setBenchmarkCompareBaseline(event.target.value) }, [
+          h("option", { key: "none", value: "" }, "Select report"),
+          ...benchmarkReportOptions.map((report) => h("option", { key: report.file_name, value: report.file_name }, `${report.file_name} (${report.passed_cases || 0}/${report.selected_cases || 0})`))
+        ])),
+        h(Field, { key: "current", label: "Current" }, Select({ value: benchmarkCompareCurrent, onChange: (event) => setBenchmarkCompareCurrent(event.target.value) }, [
+          h("option", { key: "none", value: "" }, "Select report"),
+          ...benchmarkReportOptions.map((report) => h("option", { key: report.file_name, value: report.file_name }, `${report.file_name} (${report.passed_cases || 0}/${report.selected_cases || 0})`))
+        ])),
+        h("div", { key: "button", className: "flex items-end" }, h(Button, { onClick: compareBenchmarkReportsUi, disabled: !benchmarkCompareBaseline || !benchmarkCompareCurrent }, "Compare"))
+      ]),
+      benchmarkComparison ? h("div", { key: "comparison", className: cn("mt-4 rounded-2xl border px-4 py-3 text-sm", benchmarkComparison.passed ? "border-emerald-200 bg-emerald-50 text-emerald-900" : "border-red-200 bg-red-50 text-red-900") }, [
+        h("div", { key: "verdict", className: "font-semibold" }, `Comparison: ${benchmarkComparison.passed ? "pass" : "fail"}`),
+        h("div", { key: "summary", className: "mt-1" }, `Baseline ${benchmarkComparison.baseline_summary?.passed_cases || 0}/${benchmarkComparison.baseline_summary?.selected_cases || 0}; current ${benchmarkComparison.current_summary?.passed_cases || 0}/${benchmarkComparison.current_summary?.selected_cases || 0}.`),
+        benchmarkComparison.issues?.length ? h("ul", { key: "issues", className: "mt-2 space-y-1" }, benchmarkComparison.issues.map((issue, index) => h("li", { key: index }, `- ${issue}`))) : null,
+        benchmarkComparison.drift?.length ? h("ul", { key: "drift", className: "mt-2 space-y-1" }, benchmarkComparison.drift.slice(0, 8).map((item, index) => h("li", { key: index }, `- ${item}`))) : null
+      ]) : null,
+      h("div", { key: "list", className: "mt-5 grid gap-3" }, benchmarkReports.length ? benchmarkReports.slice(0, 12).map((report) => h("div", { key: report.file_name, className: "rounded-2xl border border-slate-200 px-4 py-3" }, [
+        h("div", { key: "head", className: "flex flex-wrap items-center justify-between gap-2" }, [
+          h("div", { key: "name", className: "min-w-0 truncate font-mono text-sm font-semibold text-slate-950" }, report.file_name),
+          h(Badge, { key: "mode" }, report.executed ? "executed" : "dry run")
+        ]),
+        h("div", { key: "meta", className: "mt-1 text-sm text-slate-600" }, `${report.suite_id || "unknown"}@${report.suite_version || "unknown"} · ${report.passed_cases || 0} passed · ${report.failed_cases || 0} failed · ${formatDate(report.generated_at || report.modified_at)}`)
+      ])) : h("div", { className: "rounded-2xl border border-dashed border-slate-200 px-4 py-6 text-sm text-slate-500" }, "No benchmark reports have been generated yet."))
+    ])
+  ]);
+  const adminToolingPanel = h("div", { className: "space-y-6" }, [
+    h(Card, { key: "tooling-moved", title: "Tooling", description: "External tool selection, readiness, lookup paths, and refresh are managed from System -> Setup -> Tools.", className: "border-border bg-card shadow-sm" }, [
+      h(Button, { key: "open-tools", onClick: () => { setView("system"); setSystemSubpage("tools"); } }, "Open Tools")
+    ])
+  ]);
+  const runtimeSandboxSettings = {
+    ...defaultRuntimeSandboxSettings,
+    ...((settings.preflight_json || {}).runtime_sandbox || {})
+  };
+  const runtimeSandboxResolution = runtimeSandboxReadiness.resolution || emptyRuntimeSandboxReadiness.resolution;
+  const runtimeSandboxCandidates = runtimeSandboxResolution.candidates || [];
+  const runtimeSandboxWarnings = runtimeSandboxResolution.warnings || runtimeSandboxReadiness.warnings || [];
+  const runtimeSandboxBlockers = runtimeSandboxResolution.blockers || runtimeSandboxReadiness.blockers || [];
+  const runtimeSandboxPolicySummary = runtimeSandboxReadiness.policy_summary || {};
+  const runtimeSandboxStatus = runtimeSandboxResolution.readiness_status || runtimeSandboxReadiness.status || "blocked";
+  const runtimeSetupItems = runtimeSandboxSetupPlan?.plan || [];
+  const runtimeSetupAutoItems = runtimeSetupItems.filter((item) => item.auto_run);
+  const runtimeSetupManualItems = runtimeSetupItems.filter((item) => !item.auto_run && item.command !== "detected");
+  const runtimeRecommendedSetupItem = runtimeSetupAutoItems[0] || runtimeSetupManualItems[0] || null;
+  const runtimeSandboxDataPending = runtimeSandboxReadinessLoading || !runtimeSandboxReadinessChecked;
+  const runtimeSandboxDisplayStatus = runtimeSandboxDataPending ? "checking" : runtimeSandboxStatus;
+  const runtimeSandboxStatusClass = runtimeSandboxDataPending
+    ? "border-blue-500/40 bg-blue-500/10 text-blue-100"
+    : runtimeSandboxStatus === "ready"
+    ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-100"
+    : runtimeSandboxStatus === "ready_with_warnings"
+      ? "border-amber-500/40 bg-amber-500/10 text-amber-100"
+      : "border-red-500/40 bg-red-500/10 text-red-100";
+  const runtimeBackendLabel = (backendId) => String(backendId || "unavailable").replace(/_/g, " ");
+  const runtimeInstallDisabled = runtimeSandboxSetupRunning || runtimeSandboxDataPending || runtimeSandboxStatus !== "blocked" || !runtimeSetupAutoItems.length;
+  const runtimeInstallLabel = runtimeSandboxSetupRunning
+    ? "Installing..."
+    : runtimeSandboxDataPending
+      ? "Checking Installer..."
+      : runtimeRecommendedSetupItem
+        ? `Install ${runtimeRecommendedSetupItem.label}`
+        : "Install Runtime Backend";
+  const runtimeLaunchable = runtimeSandboxStatus === "ready" || runtimeSandboxStatus === "ready_with_warnings";
+  const runtimePostInstallSteps = runtimeRecommendedSetupItem?.post_install?.length
+    ? runtimeRecommendedSetupItem.post_install
+    : [
+      "Start the installed runtime app if it has one.",
+      "Click Refresh Readiness.",
+      "Restart Tethermark if readiness still does not update."
+    ];
+  const runtimeSetupExecutedItems = runtimeSandboxSetupResult?.executed || [];
+  const runtimeSetupAttemptFailed = runtimeSetupExecutedItems.some((item) => item.error || (item.exit_code != null && item.exit_code !== 0));
+  const adminRuntimeSandboxPanel = h("div", { className: "space-y-6" }, [
+    h(Card, { key: "readiness", title: "Local Runtime Sandbox", description: "Runtime validation uses one local sandbox concept. Tethermark resolves the strongest allowed backend automatically and records the selected boundary as evidence.", className: "border-border bg-card shadow-sm" }, [
+      h("div", { key: "summary", className: "grid gap-3 md:grid-cols-4" }, [
+        h("div", { key: "status", className: cn("rounded-2xl border px-4 py-3", runtimeSandboxStatusClass) }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide opacity-80" }, "Readiness"),
+          h("div", { key: "value", className: "mt-1 text-xl font-semibold" }, runtimeSandboxDisplayStatus)
+        ]),
+        h("div", { key: "backend", className: "rounded-2xl border border-border bg-card px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-muted" }, "Selected Backend"),
+          h("div", { key: "value", className: "mt-1 font-semibold text-foreground" }, runtimeSandboxDataPending ? "checking..." : runtimeBackendLabel(runtimeSandboxResolution.selected_backend))
+        ]),
+        h("div", { key: "network", className: "rounded-2xl border border-border bg-card px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-muted" }, "Network"),
+          h("div", { key: "value", className: "mt-1 font-semibold text-foreground" }, runtimeSandboxPolicySummary.network_policy || runtimeSandboxSettings.network_policy || "none")
+        ]),
+        h("div", { key: "duration", className: "rounded-2xl border border-border bg-card px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-muted" }, "Max Duration"),
+          h("div", { key: "value", className: "mt-1 font-semibold text-foreground" }, `${runtimeSandboxPolicySummary.max_duration_ms || runtimeSandboxSettings.max_duration_ms} ms`)
         ])
       ]),
-      h("div", { key: "static-tools", className: "space-y-3" }, [
-        h("div", { key: "heading", className: "flex flex-wrap items-center justify-between gap-3" }, [
-          h("div", { key: "copy" }, [
-            h("h4", { key: "title", className: "text-lg font-semibold text-slate-950" }, "Static Tools"),
-            h("p", { key: "desc", className: "mt-1 text-sm text-slate-500" }, "Used by static repository audits and validation smoke tests.")
-          ]),
-          h(Badge, { key: "status" }, diagnosticStaticStatus)
+      !runtimeSandboxDataPending && (runtimeSandboxWarnings.length || runtimeSandboxBlockers.length)
+        ? h("div", { key: "messages", className: "mt-4 grid gap-3 lg:grid-cols-2" }, [
+          runtimeSandboxWarnings.length ? h("div", { key: "warnings", className: "rounded-2xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100" }, [
+            h("div", { key: "title", className: "font-semibold" }, "Warnings"),
+            h("ul", { key: "list", className: "mt-2 list-disc space-y-1 pl-5" }, runtimeSandboxWarnings.map((item, index) => h("li", { key: `${item}:${index}` }, item)))
+          ]) : null,
+          runtimeSandboxBlockers.length ? h("div", { key: "blockers", className: "rounded-2xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-100" }, [
+            h("div", { key: "title", className: "font-semibold" }, "Blockers"),
+            h("ul", { key: "list", className: "mt-2 list-disc space-y-1 pl-5" }, runtimeSandboxBlockers.map((item, index) => h("li", { key: `${item}:${index}` }, item)))
+          ]) : null
+        ].filter(Boolean))
+        : null,
+      !runtimeSandboxDataPending && runtimeSandboxStatus === "blocked" && (runtimeSandboxReadiness.setup_commands || []).length
+        ? h("div", { key: "setup-inline", className: "mt-4 rounded-2xl border border-blue-500/40 bg-blue-500/10 px-4 py-3 text-sm text-blue-100" }, [
+          h("div", { key: "title", className: "font-semibold text-blue-50" }, "Setup needed"),
+          h("p", { key: "body", className: "mt-1 leading-6 text-blue-100/90" }, "Runtime validation is not launchable yet. Complete the setup steps below, or refresh readiness if you already installed a runtime. Static-only audits remain available.")
+        ])
+        : null
+    ]),
+    h(Card, { key: "setup-plan", title: "Set Up Runtime Validation", description: "Follow the recommended local runtime path. Tethermark can run supported installer commands from this page after confirmation.", className: "border-border bg-card shadow-sm" }, runtimeSandboxDataPending
+      ? h("div", { className: "rounded-2xl border border-blue-500/40 bg-blue-500/10 px-4 py-3 text-sm leading-6 text-blue-100" }, "Checking local package managers, runtime backends, and installer options...")
+      : runtimeLaunchable
+      ? h("div", { className: "grid gap-4" }, [
+        h("div", { key: "ready", className: "rounded-2xl border border-emerald-500/40 bg-emerald-500/10 px-5 py-4 text-sm leading-6 text-emerald-100" }, [
+          h("div", { key: "title", className: "text-base font-semibold" }, "Runtime validation is ready"),
+          h("p", { key: "copy", className: "mt-1" }, `Tethermark selected ${runtimeBackendLabel(runtimeSandboxResolution.selected_backend)}. Runtime-validated audits can be launched with the current policy settings.`),
+          runtimeSandboxWarnings.length ? h("ul", { key: "warnings", className: "mt-3 list-disc space-y-1 pl-5" }, runtimeSandboxWarnings.map((item, index) => h("li", { key: `${item}:${index}` }, item))) : null
         ]),
-        renderToolCards(diagnosticStaticTools, "No static tool readiness data is available.")
-      ]),
-      h("div", { key: "runtime-tools", className: "mt-6 space-y-3" }, [
-        h("div", { key: "heading", className: "flex flex-wrap items-center justify-between gap-3" }, [
-          h("div", { key: "copy" }, [
-            h("h4", { key: "title", className: "text-lg font-semibold text-slate-950" }, "Runtime Eval Tools"),
-            h("p", { key: "desc", className: "mt-1 text-sm text-slate-500" }, "Deferred until runtime validation is enabled; missing items do not block static repo testing.")
-          ]),
-          h(Badge, { key: "status" }, diagnosticRuntimeStatus)
-        ]),
-        renderToolCards(diagnosticRuntimeTools, "No runtime eval tool readiness data is available.")
+        h("div", { key: "actions", className: "flex flex-wrap gap-3" }, [
+          h(Button, { key: "refresh", variant: "outline", onClick: refreshRuntimeSandboxReadiness, disabled: runtimeSandboxReadinessLoading || runtimeSandboxSetupRunning }, runtimeSandboxReadinessLoading ? "Refreshing..." : "Refresh Readiness")
+        ])
       ])
+      : runtimeSetupItems.length
+      ? h("div", { className: "grid gap-4" }, [
+        h("div", { key: "guided", className: "rounded-2xl border border-border bg-card px-5 py-4" }, [
+          h("div", { key: "install-step", className: "grid gap-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start" }, [
+            h("div", { key: "copy", className: "min-w-0" }, [
+              h("div", { key: "eyebrow", className: "text-xs font-semibold uppercase tracking-wide text-muted" }, "Step 1"),
+              h("div", { key: "head", className: "mt-2 flex flex-wrap items-center gap-3" }, [
+                h("div", { key: "title", className: "text-lg font-semibold text-foreground" }, runtimeRecommendedSetupItem?.label || "Install a local runtime"),
+                h(Badge, { key: "mode" }, runtimeSetupAutoItems.length ? "recommended" : "manual")
+              ]),
+              h("p", { key: "reason", className: "mt-2 text-sm leading-6 text-muted" }, runtimeRecommendedSetupItem?.reason || "Install Docker, Podman, or gVisor so Tethermark can run runtime validation in a local sandbox."),
+              runtimeSetupAutoItems.length
+                ? h("p", { key: "auto-copy", className: "mt-3 rounded-xl border border-blue-500/40 bg-blue-500/10 px-3 py-2 text-sm leading-6 text-blue-100" }, "Tethermark can run the installer command for you. You may still need to approve prompts from the OS installer.")
+                : h("p", { key: "manual-copy", className: "mt-3 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm leading-6 text-amber-100" }, "No supported package manager was detected. Follow the manual installation guidance, then refresh readiness.")
+            ]),
+            h("div", { key: "actions", className: "flex flex-wrap gap-3 lg:justify-end" }, [
+              h(Button, {
+                key: "install",
+                variant: runtimeSetupAutoItems.length ? "default" : "outline",
+                disabled: runtimeInstallDisabled,
+                onClick: installRuntimeSandboxBackend
+              }, runtimeInstallLabel),
+              h(Button, { key: "refresh", variant: "outline", onClick: refreshRuntimeSandboxReadiness, disabled: runtimeSandboxReadinessLoading || runtimeSandboxSetupRunning }, runtimeSandboxReadinessLoading ? "Refreshing..." : "Refresh Readiness")
+            ])
+          ]),
+          h("div", { key: "divider", className: "my-4 border-t border-border" }),
+          h("div", { key: "finish-step" }, [
+            h("div", { key: "eyebrow", className: "text-xs font-semibold uppercase tracking-wide text-muted" }, "Step 2"),
+            h("div", { key: "title", className: "mt-2 text-base font-semibold text-foreground" }, "Finish after installation"),
+            h("ol", { key: "list", className: "mt-3 list-decimal space-y-2 pl-5 text-sm leading-6 text-muted" }, runtimePostInstallSteps.map((step, index) => h("li", { key: `${step}:${index}` }, step))),
+            h("p", { key: "note", className: "mt-3 text-sm leading-6 text-muted" }, "Static audits still work while runtime validation is blocked. Runtime-validated audit launches unlock when readiness passes.")
+          ])
+        ]),
+        h("details", { key: "commands", className: "rounded-2xl border border-border bg-card px-5 py-4" }, [
+          h("summary", { key: "summary", className: "cursor-pointer text-sm font-semibold text-foreground" }, "Show install commands and alternatives"),
+          h("div", { key: "items", className: "mt-4 grid gap-3" }, runtimeSetupItems.map((item, index) => h("div", {
+            key: `${item.label}:${index}`,
+            className: "rounded-2xl border border-border bg-card px-4 py-3"
+          }, [
+            h("div", { key: "head", className: "flex flex-wrap items-center justify-between gap-3" }, [
+              h("div", { key: "label", className: "font-semibold text-foreground" }, item.label),
+              h(Badge, { key: "mode" }, item.command === "detected" ? "ready" : item.auto_run ? "auto" : "manual")
+            ]),
+            h("pre", { key: "command", className: "mt-2 overflow-x-auto whitespace-pre-wrap rounded-xl bg-slate-950 p-3 text-xs leading-5 text-slate-100" }, item.command_line || item.args?.join(" ") || "No command available."),
+            h("div", { key: "reason", className: "mt-2 text-sm leading-6 text-muted" }, item.reason)
+          ])))
+        ])
+      ])
+      : h("div", { className: "rounded-2xl border border-dashed border-border px-4 py-6 text-sm text-muted" }, "Refresh readiness to build a runtime setup plan.")),
+    runtimeSandboxSetupResult ? h(Card, { key: "setup-result", title: "Installation Result", description: "Result from the most recent UI-triggered runtime setup attempt.", className: "border-slate-200 bg-white shadow-sm" }, [
+      runtimeSetupExecutedItems.length
+        ? h("div", { key: "executed", className: "grid gap-4" }, [
+          h("div", { key: "summary", className: cn("rounded-2xl border px-5 py-4 text-sm leading-6", runtimeSetupAttemptFailed ? "border-red-200 bg-red-50 text-red-950" : "border-blue-200 bg-blue-50 text-blue-950") }, [
+            h("div", { key: "title", className: "text-base font-semibold" }, runtimeSetupAttemptFailed ? "Installer did not finish successfully" : "Installer command finished"),
+            h("p", { key: "copy", className: "mt-1" }, runtimeSetupAttemptFailed
+              ? "Review the installer message below, then use the manual install guidance if needed."
+              : "The package-manager command completed. Finish the runtime setup checklist, then refresh readiness."),
+            !runtimeSetupAttemptFailed ? h("ol", { key: "steps", className: "mt-3 list-decimal space-y-1 pl-5" }, runtimePostInstallSteps.map((step, index) => h("li", { key: `${step}:${index}` }, step))) : null
+          ]),
+          h("details", { key: "logs", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+            h("summary", { key: "summary", className: "cursor-pointer text-sm font-semibold text-slate-950" }, "Advanced: show installer output"),
+            h("div", { key: "items", className: "mt-3 grid gap-3" }, runtimeSetupExecutedItems.map((item, index) => h("div", { key: `${item.label}:${index}`, className: "rounded-2xl border border-slate-200 bg-white px-4 py-3" }, [
+              h("div", { key: "head", className: "flex flex-wrap items-center justify-between gap-3" }, [
+                h("div", { key: "label", className: "font-semibold text-slate-950" }, item.label),
+                h(Badge, { key: "exit" }, item.error ? "error" : `exit ${item.exit_code ?? "unknown"}`)
+              ]),
+              item.error ? h("div", { key: "error", className: "mt-2 text-sm text-red-700" }, item.error) : null,
+              item.stdout ? h("pre", { key: "stdout", className: "mt-2 max-h-52 overflow-auto whitespace-pre-wrap rounded-xl bg-slate-950 p-3 text-xs leading-5 text-slate-100" }, item.stdout.slice(-4000)) : null,
+              item.stderr ? h("pre", { key: "stderr", className: "mt-2 max-h-52 overflow-auto whitespace-pre-wrap rounded-xl bg-red-950 p-3 text-xs leading-5 text-red-100" }, item.stderr.slice(-4000)) : null
+            ])))
+          ])
+        ])
+        : h("div", { key: "none", className: "rounded-2xl border border-dashed border-slate-200 px-4 py-6 text-sm text-slate-500" }, "No installer command was executed.")
+    ]) : null,
+    h("details", {
+      key: "advanced-runtime",
+      className: "rounded-2xl border border-border bg-card px-5 py-4",
+      open: runtimeSandboxAdvancedOpen,
+      onToggle: (event) => setRuntimeSandboxAdvancedOpen(Boolean(event.currentTarget.open))
+    }, [
+      h("summary", { key: "summary", className: "cursor-pointer text-base font-semibold text-foreground" }, "Advanced Runtime Controls"),
+      h("p", { key: "description", className: "mt-2 text-sm leading-6 text-muted" }, "Backend selection, execution limits, candidate diagnostics, and raw setup commands are available here for administrators and troubleshooting. Most users should not need these during normal setup."),
+      runtimeSandboxAdvancedOpen ? h("div", { key: "content", className: "mt-5 space-y-6" }, [
+    h(Card, { key: "settings", title: "Backend Resolution Policy", description: "Controls how Tethermark chooses and gates the internal backend while the launch flow still shows one Local Runtime Sandbox option.", className: "border-border bg-card shadow-sm" }, [
+      h("div", { key: "grid", className: "grid gap-4 md:grid-cols-3" }, [
+        h(Field, { key: "enabled", label: "Runtime Sandbox" }, Select({
+          value: String(runtimeSandboxSettings.enabled !== false),
+          onChange: (event) => updateRuntimeSandboxSetting("enabled", event.target.value === "true")
+        }, [
+          h("option", { key: "enabled", value: "true" }, "enabled"),
+          h("option", { key: "disabled", value: "false" }, "disabled")
+        ])),
+        h(Field, { key: "mode", label: "Resolution Mode" }, Select({
+          value: runtimeSandboxSettings.resolution_mode || "auto",
+          onChange: (event) => updateRuntimeSandboxSetting("resolution_mode", event.target.value)
+        }, [
+          h("option", { key: "auto", value: "auto" }, "auto"),
+          h("option", { key: "prefer", value: "prefer" }, "prefer then fallback"),
+          h("option", { key: "pinned", value: "pinned" }, "pinned only")
+        ])),
+        h(Field, { key: "preferred", label: "Preferred Backend" }, Select({
+          value: runtimeSandboxSettings.preferred_backend || "auto",
+          onChange: (event) => updateRuntimeSandboxSetting("preferred_backend", event.target.value)
+        }, [
+          h("option", { key: "auto", value: "auto" }, "auto"),
+          ...runtimeSandboxBackendIds.map((backendId) => h("option", { key: backendId, value: backendId }, runtimeBackendLabel(backendId)))
+        ])),
+        h(Field, { key: "warning", label: "Warning Backends" }, Select({
+          value: String(runtimeSandboxSettings.allow_warning_backends !== false),
+          onChange: (event) => updateRuntimeSandboxSetting("allow_warning_backends", event.target.value === "true")
+        }, [
+          h("option", { key: "allow", value: "true" }, "allow with acceptance"),
+          h("option", { key: "block", value: "false" }, "block")
+        ])),
+        h(Field, { key: "untrusted", label: "Untrusted Repo Policy" }, Select({
+          value: String(Boolean(runtimeSandboxSettings.require_hardened_for_untrusted_repo)),
+          onChange: (event) => updateRuntimeSandboxSetting("require_hardened_for_untrusted_repo", event.target.value === "true")
+        }, [
+          h("option", { key: "normal", value: "false" }, "allow configured backends"),
+          h("option", { key: "hardened", value: "true" }, "require hardened backend")
+        ])),
+        h(Field, { key: "network", label: "Network Policy" }, Select({
+          value: runtimeSandboxSettings.network_policy || "none",
+          onChange: (event) => updateRuntimeSandboxSetting("network_policy", event.target.value)
+        }, [
+          h("option", { key: "none", value: "none" }, "none"),
+          h("option", { key: "dependency", value: "dependency_install_only" }, "dependency install only"),
+          h("option", { key: "bounded", value: "bounded" }, "bounded"),
+          h("option", { key: "allowlist", value: "allowlist" }, "allowlist")
+        ]))
+      ]),
+      h("div", { key: "allowed", className: "mt-5" }, [
+        h("div", { key: "label", className: "mb-2 text-sm font-semibold text-foreground" }, "Allowed Backends"),
+        h("div", { key: "list", className: "grid gap-2 md:grid-cols-3" }, runtimeSandboxBackendIds.map((backendId) => h("label", {
+          key: backendId,
+          className: "flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-sm text-foreground"
+        }, [
+          h("input", {
+            key: "check",
+            type: "checkbox",
+            checked: (runtimeSandboxSettings.allowed_backends || []).includes(backendId),
+            onChange: (event) => toggleRuntimeSandboxAllowedBackend(backendId, event.target.checked)
+          }),
+          h("span", { key: "name" }, runtimeBackendLabel(backendId))
+        ])))
+      ]),
+      h("div", { key: "actions", className: "mt-5 flex flex-wrap justify-end gap-3 border-t border-border pt-4" }, [
+        h(Button, { key: "save", onClick: saveRuntimeSandboxSettings, disabled: runtimeSandboxSetupRunning }, "Save Runtime Settings")
+      ])
+    ]),
+    h(Card, { key: "limits", title: "Runtime Policy Defaults", description: "These limits are copied into each runtime execution record and used when constructing sandbox plans.", className: "border-border bg-card shadow-sm" }, [
+      h("div", { key: "grid", className: "grid gap-4 md:grid-cols-3" }, [
+        h(Field, { key: "max-duration", label: "Max Duration Ms" }, h(Input, {
+          type: "number",
+          min: 1000,
+          value: runtimeSandboxSettings.max_duration_ms || 300000,
+          onChange: (event) => updateRuntimeSandboxSetting("max_duration_ms", Math.max(1000, Number(event.target.value || 300000)))
+        })),
+        h(Field, { key: "step-timeout", label: "Step Timeout Ms" }, h(Input, {
+          type: "number",
+          min: 1000,
+          value: runtimeSandboxSettings.step_timeout_ms || 60000,
+          onChange: (event) => updateRuntimeSandboxSetting("step_timeout_ms", Math.max(1000, Number(event.target.value || 60000)))
+        })),
+        h(Field, { key: "memory", label: "Memory Limit MB" }, h(Input, {
+          type: "number",
+          min: 128,
+          value: runtimeSandboxSettings.memory_limit_mb || 2048,
+          onChange: (event) => updateRuntimeSandboxSetting("memory_limit_mb", Math.max(128, Number(event.target.value || 2048)))
+        })),
+        h(Field, { key: "pids", label: "PID Limit" }, h(Input, {
+          type: "number",
+          min: 32,
+          value: runtimeSandboxSettings.pids_limit || 512,
+          onChange: (event) => updateRuntimeSandboxSetting("pids_limit", Math.max(32, Number(event.target.value || 512)))
+        })),
+        h(Field, { key: "stdout", label: "Stdout Excerpt Bytes" }, h(Input, {
+          type: "number",
+          min: 256,
+          value: runtimeSandboxSettings.max_stdout_bytes || 2000,
+          onChange: (event) => updateRuntimeSandboxSetting("max_stdout_bytes", Math.max(256, Number(event.target.value || 2000)))
+        })),
+        h(Field, { key: "stderr", label: "Stderr Excerpt Bytes" }, h(Input, {
+          type: "number",
+          min: 256,
+          value: runtimeSandboxSettings.max_stderr_bytes || 2000,
+          onChange: (event) => updateRuntimeSandboxSetting("max_stderr_bytes", Math.max(256, Number(event.target.value || 2000)))
+        }))
+      ])
+    ]),
+    h(Card, { key: "candidates", title: "Backend Candidates", description: "Readiness probe results in resolver priority order. These records explain why a backend was selected, warned, or blocked.", className: "border-border bg-card shadow-sm" }, runtimeSandboxDataPending
+      ? h("div", { className: "rounded-2xl border border-blue-500/40 bg-blue-500/10 px-4 py-3 text-sm leading-6 text-blue-100" }, "Checking available local runtime backends...")
+      : runtimeSandboxCandidates.length
+      ? h("div", { className: "grid gap-3" }, runtimeSandboxCandidates.map((candidate) => h("div", {
+        key: candidate.backend_id,
+        className: "rounded-2xl border border-border bg-card px-4 py-3"
+      }, [
+        h("div", { key: "head", className: "flex flex-wrap items-center justify-between gap-3" }, [
+          h("div", { key: "name", className: "font-semibold text-foreground" }, runtimeBackendLabel(candidate.backend_id)),
+          h("div", { key: "badges", className: "flex flex-wrap gap-2" }, [
+            h(Badge, { key: "status" }, candidate.status),
+            candidate.version ? h(Badge, { key: "version" }, candidate.version) : null
+          ])
+        ]),
+        h("div", { key: "reason", className: "mt-2 text-sm text-muted" }, candidate.reason),
+        candidate.security_notes?.length ? h("ul", { key: "notes", className: "mt-2 list-disc space-y-1 pl-5 text-sm text-muted" }, candidate.security_notes.map((note, index) => h("li", { key: `${candidate.backend_id}:${index}` }, note))) : null
+      ])))
+      : h("div", { className: "rounded-2xl border border-dashed border-border px-4 py-6 text-sm text-muted" }, "Refresh readiness to see backend candidates.")),
+    h(Card, { key: "setup", title: "Setup Commands", description: "Operator guidance only. The web UI does not silently install privileged container runtimes.", className: "border-border bg-card shadow-sm" }, runtimeSandboxDataPending
+      ? h("div", { className: "rounded-2xl border border-blue-500/40 bg-blue-500/10 px-4 py-3 text-sm leading-6 text-blue-100" }, "Checking platform setup commands...")
+      : (runtimeSandboxReadiness.setup_commands || []).length
+      ? h("pre", { className: "overflow-x-auto whitespace-pre-wrap rounded-2xl bg-slate-950 p-4 text-xs leading-5 text-slate-100" }, runtimeSandboxReadiness.setup_commands.join("\n"))
+      : h("div", { className: "rounded-2xl border border-dashed border-border px-4 py-6 text-sm text-muted" }, "No setup commands are available for this platform."))
+      ]) : null
     ])
   ]);
   const adminObservabilityPanel = h("div", { className: "space-y-6" }, [
@@ -6569,8 +7394,8 @@ function triageDecisionFromReviewSummary(summary) {
         `Retention: raw events ${observabilityRetention.raw_event_retention_days || "n/a"}d, raw metrics ${observabilityRetention.raw_metric_retention_days || "n/a"}d, rollups ${observabilityRetention.rollup_retention_days || "n/a"}d.`
       ),
       h("div", { key: "actions", className: "mt-4 flex flex-wrap gap-3" }, [
-        h(Button, { key: "runs", onClick: () => setView("runs") }, "Open Runs"),
-        h(Button, { key: "jobs", variant: "outline", onClick: () => setView("jobs") }, "Open Jobs"),
+        h(Button, { key: "runs", onClick: () => setView("runs") }, "Open Audits"),
+        h(Button, { key: "jobs", variant: "outline", onClick: () => { setView("system"); setSystemSubpage("jobs"); } }, "Open Jobs"),
         h(Button, { key: "refresh", variant: "outline", onClick: () => load({ includeDeferred: true }) }, "Refresh Observability")
       ])
     ]),
@@ -6598,14 +7423,14 @@ function triageDecisionFromReviewSummary(summary) {
       ]),
       h("div", { key: "actions", className: "mt-4 flex flex-wrap gap-3" }, [
         h(Button, { key: "learning", variant: "outline", onClick: () => setView("learning") }, "Open Learning"),
-        h(Button, { key: "settings", variant: "outline", onClick: () => { setView("settings"); setSettingsSubpage("learning-settings"); } }, "Learning Settings")
+        h(Button, { key: "settings", variant: "outline", onClick: () => { setView("system"); setSystemSubpage("self-learning-settings"); setSettingsSubpage("learning-settings"); } }, "Learning Settings")
       ])
     ]),
-    h(Card, { key: "modules", title: "Observability Modules", description: "OSS shows proof data. Hosted and operator modules expand scope and require stronger permissions.", className: "border-slate-200 bg-white shadow-sm" }, [
+    h(Card, { key: "modules", title: "Observability Modules", description: "Community Edition shows local proof data. Tethermark Cloud and operator modules expand scope and require stronger permissions.", className: "border-slate-200 bg-white shadow-sm" }, [
       h("div", { key: "grid", className: "grid gap-4 xl:grid-cols-3" }, [
         observabilityScopeCard({
           id: "oss",
-          title: "OSS Observability",
+          title: "Community Observability",
           badge: "included",
           enabled: true,
           description: "Local per-run proof that the harness executed the expected agents, tools, and stages.",
@@ -6618,9 +7443,9 @@ function triageDecisionFromReviewSummary(summary) {
           ]
         }),
         observabilityScopeCard({
-          id: "hosted",
-          title: "Hosted Observability",
-          badge: "requires hosted auth",
+          id: "cloud",
+          title: "Cloud Observability",
+          badge: "requires cloud workspace",
           enabled: false,
           description: "Organization-level monitoring across projects, users, providers, and audit history.",
           items: [
@@ -6630,7 +7455,7 @@ function triageDecisionFromReviewSummary(summary) {
             "Role-based access for security reviewers, project owners, and auditors",
             "Longer retention, exports, alerts, and scheduled reports"
           ],
-          note: "Requires authenticated hosted deployment and tenant-scoped permissions."
+          note: "Requires an authenticated Tethermark Cloud workspace and tenant-scoped permissions."
         }),
         observabilityScopeCard({
           id: "operator",
@@ -6646,7 +7471,7 @@ function triageDecisionFromReviewSummary(summary) {
             "Permission-gated access separate from normal reviewer workflows"
           ],
           note: authInfo.trusted_mode
-            ? "Trusted local mode can expose operator diagnostics. Hosted operator access should require explicit elevated permission."
+            ? "Trusted local mode can expose operator diagnostics. Cloud operator access should require explicit elevated permission."
             : "Requires elevated operator permission."
         })
       ])
@@ -6679,6 +7504,8 @@ function triageDecisionFromReviewSummary(summary) {
     system: adminSystemPanel,
     methodology: methodologyAdminPanel,
     validation: adminValidationPanel,
+    benchmarks: adminBenchmarkPanel,
+    "runtime-sandbox": adminRuntimeSandboxPanel,
     tooling: adminToolingPanel,
     observability: adminObservabilityPanel
   }[adminSubpage] || adminSystemPanel;
@@ -6808,7 +7635,7 @@ function triageDecisionFromReviewSummary(summary) {
       selectedRunId,
       onSelectRun: setSelectedRunId,
       onOpenLaunch: () => setLaunchModalOpen(true),
-      onOpenReviews: () => setView("reviews"),
+      onOpenReviews: () => setView("findings"),
       detailPane: runsDetailPane,
       launchModal: runsLaunchModal,
       helpers: {
@@ -6827,12 +7654,12 @@ function triageDecisionFromReviewSummary(summary) {
           h("div", { key: "queue-header", className: "border-b border-slate-200 px-5 py-5" }, [
             h("div", { key: "top", className: "flex items-start justify-between gap-4" }, [
               h("div", { key: "copy" }, [
-                h("h2", { key: "title", className: "text-2xl font-semibold tracking-tight text-slate-950" }, "Runs Inbox"),
+                h("h2", { key: "title", className: "text-2xl font-semibold tracking-tight text-slate-950" }, "Audits Inbox"),
                 h("p", { key: "desc", className: "mt-2 text-sm leading-6 text-slate-500" }, "Select a run from the queue, inspect the selected run on the right, and launch new audits from a dedicated modal.")
               ]),
               h("div", { key: "actions", className: "flex shrink-0 flex-wrap gap-3" }, [
                 h(Button, { key: "launch", onClick: () => setLaunchModalOpen(true) }, "Launch Audit"),
-                h(Button, { key: "reviews", variant: "outline", onClick: () => setView("reviews") }, "Open Reviews")
+                h(Button, { key: "findings", variant: "outline", onClick: () => setView("findings") }, "Open Findings")
               ])
             ]),
             h("div", { key: "queue-meta", className: "mt-4 flex items-center justify-between gap-3 text-sm text-slate-500" }, [
@@ -7204,8 +8031,9 @@ function triageDecisionFromReviewSummary(summary) {
     }, requestContext).then((payload) => Promise.all([
       api("/ui/settings?scope_level=effective", undefined, requestContext),
       api("/llm-providers", undefined, requestContext),
-      api("/static-tools", undefined, requestContext)
-    ]).then(([effectivePayload, llmProvidersPayload, staticToolsPayload]) => {
+      api("/static-tools", undefined, requestContext),
+      api("/runtime-sandbox/readiness", undefined, requestContext)
+    ]).then(([effectivePayload, llmProvidersPayload, staticToolsPayload, runtimeSandboxPayload]) => {
       const nextEnvironmentDefaults = llmProvidersPayload.environment_defaults || {};
       setSettings(applyEnvironmentDefaultsToSettings(payload.settings || emptySettings, nextEnvironmentDefaults));
       setLlmRegistry({
@@ -7222,6 +8050,7 @@ function triageDecisionFromReviewSummary(summary) {
       }, nextEnvironmentDefaults);
       setEffectiveSettings(nextEffectiveSettings);
       setStaticToolsReadiness(staticToolsPayload.static_tools || emptyStaticToolsReadiness);
+      setRuntimeSandboxReadiness(runtimeSandboxPayload.runtime_sandbox || emptyRuntimeSandboxReadiness);
       setRunForm(deriveRunFormDefaults(currentProject, nextEffectiveSettings, auditPackages));
       setPreflightSummary(null);
       setPreflightStale(true);
@@ -7439,7 +8268,7 @@ function triageDecisionFromReviewSummary(summary) {
         h("div", { key: "header", className: "mb-4 flex flex-col gap-2 md:flex-row md:items-start md:justify-between" }, [
           h("div", { key: "copy" }, [
             h("div", { key: "title", className: "font-medium text-slate-900" }, "Assistant Model"),
-            h("div", { key: "body", className: "mt-1 text-sm text-slate-500" }, "Used by the Ask This Audit assistant. OSS keeps deterministic evidence-grounding available when no assistant model is configured.")
+            h("div", { key: "body", className: "mt-1 text-sm text-slate-500" }, "Used by the Ask This Audit assistant. Community Edition keeps deterministic evidence-grounding available when no assistant model is configured.")
           ]),
           h("div", { key: "resolved", className: "rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600" }, settingsAssistantInheritsDefault
             ? `inherits ${settings.providers_json.default_model || "global default"}`
@@ -7649,99 +8478,109 @@ function triageDecisionFromReviewSummary(summary) {
     ])
   ]);
 
+  const selectedAuditPackageId = settings.audit_defaults_json.audit_package || "agentic-static";
+  const selectedAuditPackageConfig = resolvePackageFormConfig(auditPackages, selectedAuditPackageId);
+  const selectedAuditPackageLanes = sanitizeEnabledLanes(
+    selectedAuditPackageConfig.enabled_lanes,
+    selectedAuditPackageConfig.run_mode || "static"
+  );
+  const selectedAuditPackageDefinition = visibleAuditPackages.find((item) => item.id === selectedAuditPackageId) || getAuditPackageDefinition(auditPackages, selectedAuditPackageId) || null;
+  const selectedAuditPackageRuntimeAllowed = runtimeAllowedForPackageConfig(selectedAuditPackageConfig);
+  const selectedAuditPackageReviewSeverity = reviewSeverityForPackageConfig(selectedAuditPackageConfig);
+  const selectedAuditPackageLaneDetails = auditLaneCatalog.filter((lane) => selectedAuditPackageLanes.includes(lane.id));
+  const excludedAuditPackageLaneDetails = auditLaneCatalog.filter((lane) => !selectedAuditPackageLanes.includes(lane.id));
   const settingsAuditPanel = h("div", { className: "space-y-6" }, [
     h(Card, { key: "audit-defaults", title: "Audit Type", description: "Audit methodology used by project runs and as the starting point for custom runs." }, [
-      h("div", { key: "package-note", className: "mb-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600" }, "Selecting an audit package fills in run mode, runtime validation, review thresholds, budget, and audit area coverage. Projects reference an Audit Type; they do not customize their own methodology."),
-      h("div", { key: "fields", className: "grid gap-4 md:grid-cols-2" }, [
-        h(Field, { key: "package", label: "Audit Package" }, Select({
-          value: settings.audit_defaults_json.audit_package || "",
-          onChange: (event) => updateAuditDefaultsForPackage(event.target.value)
-        }, [
-          ...visibleAuditPackages.map((item) => h("option", { key: item.id, value: item.id }, item.title + " (" + item.id + ")")),
-          settings.audit_defaults_json.audit_package && !visibleAuditPackages.some((item) => item.id === settings.audit_defaults_json.audit_package)
-            ? h("option", { key: settings.audit_defaults_json.audit_package, value: settings.audit_defaults_json.audit_package }, settings.audit_defaults_json.audit_package + " (custom)")
-            : null
-        ].filter(Boolean))),
-        h(Field, { key: "mode", label: "Run Mode" }, Select({ value: normalizeRunModeSelection(settings.audit_defaults_json.run_mode) || "static", onChange: (event) => updateSettings("audit_defaults_json", "run_mode", event.target.value) }, [
-          h("option", { key: "static", value: "static" }, "static"),
-          h("option", { key: "runtime", value: "runtime" }, "runtime")
-        ])),
-        h(Field, { key: "runtime", label: "Runtime Validation" }, Select({ value: settings.preflight_json.runtime_allowed || settings.audit_defaults_json.runtime_allowed || "never", onChange: (event) => updateSettings("preflight_json", "runtime_allowed", event.target.value) }, [
-          h("option", { key: "never", value: "never" }, "never"),
-          h("option", { key: "targeted", value: "targeted_only" }, "targeted only"),
-          h("option", { key: "allowed", value: "allowed" }, "allowed")
-        ])),
-        h(Field, { key: "review-threshold", label: "Review Threshold" }, Select({ value: settings.review_json.require_human_review_for_severity || settings.audit_defaults_json.review_severity || "high", onChange: (event) => updateSettings("review_json", "require_human_review_for_severity", event.target.value) }, [
-          h("option", { key: "low", value: "low" }, "low"),
-          h("option", { key: "medium", value: "medium" }, "medium"),
-          h("option", { key: "high", value: "high" }, "high"),
-          h("option", { key: "critical", value: "critical" }, "critical")
-        ])),
-        h(Field, { key: "publishability", label: "Publishability Threshold" }, Select({ value: settings.review_json.publishability_threshold || settings.audit_defaults_json.publishability_threshold || "high", onChange: (event) => updateSettings("review_json", "publishability_threshold", event.target.value) }, [
-          h("option", { key: "low", value: "low" }, "low"),
-          h("option", { key: "medium", value: "medium" }, "medium"),
-          h("option", { key: "high", value: "high" }, "high")
-        ]))
-      ]),
-      h("div", { key: "advanced", className: "mt-5 space-y-4 rounded-2xl border border-slate-200 bg-white px-4 py-4" }, [
-        h("div", { key: "head" }, [
-          h("div", { key: "title", className: "text-sm font-medium text-slate-900" }, "Depth and Scope"),
-          h("div", { key: "copy", className: "mt-1 text-sm text-slate-500" }, "These become the default depth and coverage values in the run modal. Per-run changes still override them for that launch only.")
-        ]),
-        h("div", { key: "budget-grid", className: "grid gap-4 md:grid-cols-2 xl:grid-cols-4" }, [
-          h(Field, { key: "agents", label: "Max agent calls" }, h(Input, {
-            type: "number",
-            min: 1,
-            value: settings.audit_defaults_json.max_agent_calls || "",
-            onChange: (event) => updateAuditDefault("max_agent_calls", Math.max(1, Number(event.target.value || 1)))
-          })),
-          h(Field, { key: "tokens", label: "Max total tokens" }, h(Input, {
-            type: "number",
-            min: 1,
-            value: settings.audit_defaults_json.max_total_tokens || "",
-            onChange: (event) => updateAuditDefault("max_total_tokens", Math.max(1, Number(event.target.value || 1)))
-          })),
-          h(Field, { key: "reruns", label: "Max rerun rounds" }, h(Input, {
-            type: "number",
-            min: 1,
-            value: settings.audit_defaults_json.max_rerun_rounds || "",
-            onChange: (event) => updateAuditDefault("max_rerun_rounds", Math.max(1, Number(event.target.value || 1)))
-          })),
-          h(Field, { key: "publishability-advanced", label: "Publishability threshold" }, Select({
-            value: settings.audit_defaults_json.publishability_threshold || settings.review_json.publishability_threshold || "high",
-            onChange: (event) => {
-              updateAuditDefault("publishability_threshold", event.target.value);
-              updateSettings("review_json", "publishability_threshold", event.target.value);
-            }
-          }, [
-            h("option", { key: "low", value: "low" }, "low"),
-            h("option", { key: "medium", value: "medium" }, "medium"),
-            h("option", { key: "high", value: "high" }, "high")
-          ]))
-        ]),
-        h("div", { key: "lane-grid", className: "grid gap-3 md:grid-cols-2" }, auditLaneCatalog.map((lane) => {
-          const enabledLanes = sanitizeEnabledLanes(settings.audit_defaults_json.enabled_lanes, settings.audit_defaults_json.run_mode || "static");
-          const enabled = enabledLanes.includes(lane.id);
-          return h("label", {
-            key: lane.id,
+      h("div", { key: "package-note", className: "mb-5 rounded-2xl border border-border bg-muted/20 px-4 py-3 text-sm leading-6 text-muted" }, "Choose the audit type used by new project runs. Custom run can override this for one launch."),
+      visibleAuditPackages.length
+        ? h("div", { key: "package-cards", className: "grid gap-3 lg:grid-cols-4" }, visibleAuditPackages.map((item) => {
+          const config = resolvePackageFormConfig(auditPackages, item.id);
+          const active = item.id === selectedAuditPackageId;
+          return h("button", {
+            key: item.id,
+            type: "button",
+            onClick: () => updateAuditDefaultsForPackage(item.id),
             className: cn(
-              "flex items-start gap-3 rounded-2xl border px-4 py-4",
-              enabled ? "border-slate-300 bg-slate-50" : "border-slate-200 bg-white"
+              "rounded-2xl border px-4 py-4 text-left transition",
+              active
+                ? "border-blue-400 bg-blue-600/20 shadow-md ring-2 ring-blue-400/35"
+                : "border-border bg-card hover:border-blue-500/50 hover:bg-muted/20"
             )
           }, [
-            h("input", {
-              key: "input",
-              type: "checkbox",
-              checked: enabled,
-              onChange: () => toggleSettingsAuditLane(lane.id)
-            }),
-            h("div", { key: "copy", className: "min-w-0" }, [
-              h("div", { key: "title", className: "font-medium text-slate-900" }, lane.title),
-              h("div", { key: "summary", className: "mt-1 text-sm text-slate-500" }, lane.summary)
+            h("div", { key: "top", className: "flex items-start justify-between gap-3" }, [
+              h("div", { key: "title", className: cn("font-semibold", active ? "text-blue-50" : "text-foreground") }, item.title || item.id),
+              active ? h("span", { key: "active", className: "rounded-full border border-blue-300/50 bg-blue-500 px-2 py-0.5 text-xs font-semibold text-white shadow-sm" }, "Selected") : null
+            ]),
+            h("p", { key: "description", className: cn("mt-2 min-h-[3rem] text-sm leading-5", active ? "text-blue-100" : "text-muted") }, item.description || "Audit package preset."),
+            h("div", { key: "meta", className: "mt-4 flex flex-wrap gap-2 text-xs" }, [
+              h("span", { key: "mode", className: cn("rounded-full border px-2 py-1", active ? "border-blue-300/40 bg-blue-950/30 text-blue-100" : "border-border bg-card text-muted") }, normalizeRunModeSelection(config.run_mode) || "static"),
+              h("span", { key: "lanes", className: cn("rounded-full border px-2 py-1", active ? "border-blue-300/40 bg-blue-950/30 text-blue-100" : "border-border bg-card text-muted") }, `${sanitizeEnabledLanes(config.enabled_lanes, config.run_mode || "static").length} areas`)
             ])
           ]);
         }))
+        : h("div", { key: "packages-loading", className: "rounded-2xl border border-dashed border-border px-4 py-6 text-sm text-muted" }, "Loading audit packages..."),
+      h("div", { key: "summary", className: "mt-5 rounded-2xl border border-border bg-card px-4 py-4" }, [
+        h("div", { key: "head", className: "flex flex-wrap items-start justify-between gap-3" }, [
+          h("div", { key: "copy" }, [
+            h("div", { key: "eyebrow", className: "text-xs font-medium uppercase tracking-wide text-muted" }, "Selected Package"),
+            h("h3", { key: "title", className: "mt-1 text-lg font-semibold text-foreground" }, selectedAuditPackageDefinition?.title || selectedAuditPackageId),
+            h("p", { key: "description", className: "mt-1 max-w-3xl text-sm leading-6 text-muted" }, selectedAuditPackageDefinition?.description || "Package-defined audit methodology.")
+          ]),
+          h("span", { key: "id", className: "rounded-full border border-border bg-muted/20 px-3 py-1 text-xs font-mono uppercase tracking-[0.14em] text-muted" }, selectedAuditPackageId)
+        ]),
+        h("div", { key: "facts", className: "mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4" }, [
+          h("div", { key: "mode", className: "rounded-2xl border border-border bg-muted/20 px-4 py-3" }, [
+            h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-muted" }, "Run Mode"),
+            h("div", { key: "value", className: "mt-1 font-semibold text-foreground" }, normalizeRunModeSelection(selectedAuditPackageConfig.run_mode) || "static")
+          ]),
+          h("div", { key: "runtime", className: "rounded-2xl border border-border bg-muted/20 px-4 py-3" }, [
+            h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-muted" }, "Runtime Validation"),
+            h("div", { key: "value", className: "mt-1 font-semibold text-foreground" }, selectedAuditPackageRuntimeAllowed.replace(/_/g, " "))
+          ]),
+          h("div", { key: "review", className: "rounded-2xl border border-border bg-muted/20 px-4 py-3" }, [
+            h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-muted" }, "Review Default"),
+            h("div", { key: "value", className: "mt-1 font-semibold text-foreground" }, selectedAuditPackageReviewSeverity)
+          ]),
+          h("div", { key: "publishability", className: "rounded-2xl border border-border bg-muted/20 px-4 py-3" }, [
+            h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-muted" }, "Publishability Default"),
+            h("div", { key: "value", className: "mt-1 font-semibold text-foreground" }, selectedAuditPackageConfig.publishability_threshold || "high")
+          ])
+        ]),
+        h("div", { key: "policy-note", className: "mt-4 rounded-2xl border border-border bg-muted/20 px-4 py-3 text-sm leading-6 text-muted" }, "Policy settings can require stricter review than the package default. They do not change the selected audit methodology.")
       ]),
+      h("div", { key: "coverage", className: "mt-5 rounded-2xl border border-border bg-card px-4 py-4" }, [
+        h("div", { key: "title", className: "font-semibold text-foreground" }, "Coverage"),
+        h("div", { key: "included-label", className: "mt-3 text-xs font-medium uppercase tracking-wide text-muted" }, "Included Audit Areas"),
+        h("div", { key: "included", className: "mt-2 flex flex-wrap gap-2" }, selectedAuditPackageLaneDetails.map((lane) => h("span", {
+          key: lane.id,
+          className: "rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-sm font-medium text-emerald-200"
+        }, lane.title))),
+        excludedAuditPackageLaneDetails.length ? h("div", { key: "excluded-wrap" }, [
+          h("div", { key: "excluded-label", className: "mt-4 text-xs font-medium uppercase tracking-wide text-muted" }, "Not Included By This Package"),
+          h("div", { key: "excluded", className: "mt-2 flex flex-wrap gap-2" }, excludedAuditPackageLaneDetails.map((lane) => h("span", {
+            key: lane.id,
+            className: "rounded-full border border-border bg-muted/20 px-3 py-1 text-sm text-muted"
+          }, lane.title)))
+        ]) : null
+      ]),
+      h("details", { key: "technical", className: "mt-5 rounded-2xl border border-border bg-card px-4 py-3" }, [
+        h("summary", { key: "summary", className: "cursor-pointer text-sm font-semibold text-foreground" }, "Technical limits"),
+        h("p", { key: "copy", className: "mt-2 text-sm leading-6 text-muted" }, "These package limits are shown for transparency. Use Custom run for one-time launch changes."),
+        h("div", { key: "budget-grid", className: "mt-4 grid gap-3 md:grid-cols-3" }, [
+          h("div", { key: "agents", className: "rounded-2xl border border-border bg-muted/20 px-4 py-3" }, [
+            h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-muted" }, "Max Agent Calls"),
+            h("div", { key: "value", className: "mt-1 font-semibold text-foreground" }, String(selectedAuditPackageConfig.max_agent_calls || 0))
+          ]),
+          h("div", { key: "tokens", className: "rounded-2xl border border-border bg-muted/20 px-4 py-3" }, [
+            h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-muted" }, "Max Total Tokens"),
+            h("div", { key: "value", className: "mt-1 font-semibold text-foreground" }, String(selectedAuditPackageConfig.max_total_tokens || 0))
+          ]),
+          h("div", { key: "reruns", className: "rounded-2xl border border-border bg-muted/20 px-4 py-3" }, [
+            h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-muted" }, "Max Rerun Rounds"),
+            h("div", { key: "value", className: "mt-1 font-semibold text-foreground" }, String(selectedAuditPackageConfig.max_rerun_rounds || 0))
+          ])
+        ])
+      ])
     ])
   ]);
 
@@ -7809,165 +8648,377 @@ function triageDecisionFromReviewSummary(summary) {
     else current.delete(toolId);
     updateSettings("preflight_json", "external_audit_tool_ids", normalizeExternalAuditToolIds([...current]));
   };
-  const refreshStaticTools = () => act(
-    () => api("/static-tools", undefined, requestContext)
-      .then((payload) => setStaticToolsReadiness(payload.static_tools || emptyStaticToolsReadiness)),
-    "External audit tool readiness refreshed."
-  );
+  const refreshStaticTools = () => {
+    setStaticToolsLoading(true);
+    act(
+      () => withUiTimeout(
+        Promise.all([
+          api("/static-tools", undefined, requestContext),
+          api("/static-tools/path", undefined, requestContext)
+        ]),
+        15000,
+        "Static tool readiness timed out. Check the API process and retry Tool Selection -> Refresh Tools."
+      )
+        .then(([toolsPayload, pathPayload]) => {
+          setStaticToolsReadiness(toolsPayload.static_tools || emptyStaticToolsReadiness);
+          setStaticToolsPathMeta(pathPayload.static_tools_path || null);
+          setStaticToolsPathDraft(pathPayload.static_tools_path?.file_value || "");
+        })
+        .finally(() => setStaticToolsLoading(false)),
+      "External audit tool readiness refreshed."
+    );
+  };
+  const saveStaticToolsPath = () => {
+    setStaticToolsPathSaving(true);
+    act(
+      () => api("/static-tools/path", {
+        method: "PUT",
+        body: JSON.stringify({ value: staticToolsPathDraft })
+      }, requestContext).then((payload) => {
+        setStaticToolsPathMeta(payload.static_tools_path || null);
+        setStaticToolsPathDraft(payload.static_tools_path?.file_value ?? "");
+        setStaticToolsReadiness(payload.static_tools || emptyStaticToolsReadiness);
+      }).finally(() => setStaticToolsPathSaving(false)),
+      `${staticToolsEnvVar} saved to .env.`
+    );
+  };
   const staticToolRows = staticToolsReadiness.tools || [];
-  const settingsStaticToolsPanel = h("div", { className: "space-y-6" }, [
-    h(Card, { key: "policy", title: "External Audit Tools", description: "Choose which default tools Tethermark should plan around. OpenSSF Scorecard is always included as the baseline repo posture check." }, [
-      h("div", { key: "grid", className: "grid gap-4 md:grid-cols-2" }, [
-        h(Field, { key: "path", label: "Trusted Tools Path" }, h(Input, {
-          value: (staticToolsReadiness.tool_path?.managed_dirs || []).join("; ") || "system PATH only",
-          readOnly: true,
-          placeholder: "Set HARNESS_STATIC_TOOLS_PATH in the server environment"
-        }))
+  const staticToolsPending = staticToolsLoading && !staticToolRows.length;
+  const staticToolsManagedDirs = staticToolsReadiness.tool_path?.managed_dirs || [];
+  const staticToolsEnvVar = staticToolsReadiness.tool_path?.env_var || "HARNESS_STATIC_TOOLS_PATH";
+  const staticToolsPathDelimiter = staticToolsPathMeta?.delimiter || ";";
+  const staticSelectionTools = staticToolRows.filter((tool) => (tool.run_modes || []).includes("static"));
+  const runtimeSelectionTools = staticToolRows.filter((tool) => (tool.run_modes || []).includes("runtime") && !(tool.run_modes || []).includes("static"));
+  const otherSelectionTools = staticToolRows.filter((tool) => !(tool.run_modes || []).includes("static") && !(tool.run_modes || []).includes("runtime"));
+  const renderSelectableToolRows = (tools, emptyText) => tools.length ? tools.map((tool) => h("div", {
+    key: tool.id,
+    className: cn("rounded-2xl border px-4 py-3", selectedExternalToolIds.includes(tool.id) ? "border-blue-500/40 bg-blue-500/10 text-blue-100" : "border-border bg-card text-foreground")
+  }, [
+    h("div", { key: "head", className: "flex flex-wrap items-center justify-between gap-3" }, [
+      h("label", { key: "name", className: "flex items-center gap-3 font-medium text-current" }, [
+        h("input", {
+          key: "checkbox",
+          type: "checkbox",
+          checked: selectedExternalToolIds.includes(tool.id),
+          disabled: tool.mandatory || mandatoryExternalAuditToolIds.includes(tool.id),
+          onChange: (event) => updateExternalToolSelection(tool.id, event.target.checked)
+        }),
+        h("span", { key: "label" }, tool.label)
       ]),
-      h("div", { key: "note", className: "mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600" }, "The server reads tools from system PATH and optional HARNESS_STATIC_TOOLS_PATH. Tethermark does not download executables from the web UI. Missing included tools warn during readiness; accepting readiness is the operator override.")
+      h("div", { key: "badges", className: "flex flex-wrap gap-2" }, [
+        selectedExternalToolIds.includes(tool.id) ? h(Badge, { key: "selected" }, "selected") : null,
+        h(Badge, { key: "status" }, tool.status),
+        h(Badge, { key: "category" }, tool.category || "tool"),
+        tool.mandatory || mandatoryExternalAuditToolIds.includes(tool.id) ? h(Badge, { key: "mandatory" }, "required") : null
+      ])
     ]),
-    h(Card, { key: "readiness" }, [
+    h("div", { key: "summary", className: "mt-2 break-words text-sm leading-6 opacity-90" }, tool.summary),
+    h("div", { key: "details", className: "mt-2 grid gap-1 text-xs opacity-75 md:grid-cols-2" }, [
+      h("div", { key: "command" }, `command: ${tool.command || "internal"}`),
+      h("div", { key: "modes" }, `modes: ${(tool.run_modes || []).join(", ") || "n/a"}`),
+      tool.version ? h("div", { key: "version" }, tool.version) : null,
+      tool.fallback ? h("div", { key: "fallback" }, `fallback: ${tool.fallback}`) : null
+    ].filter(Boolean)),
+    selectedExternalToolIds.includes(tool.id) && !tool.installed
+      ? h("div", { key: "fix", className: "mt-2 text-sm opacity-90" }, tool.fix || "Selected but not detected. Check the command path or install the tool.")
+      : null
+  ])) : [
+    h("div", { key: "empty", className: "rounded-2xl border border-dashed border-border px-4 py-6 text-sm text-muted" }, emptyText)
+  ];
+  const settingsStaticToolsPanel = h("div", { className: "space-y-6" }, [
+    h(Card, { key: "readiness", className: "border-border bg-card shadow-sm" }, [
       h("div", { key: "readiness-header", className: "flex flex-wrap items-start justify-between gap-3" }, [
         h("div", { key: "copy" }, [
-          h("h3", { key: "title", className: "text-xl font-semibold tracking-tight text-slate-900" }, "Tool Readiness And Inclusion"),
-          h("p", { key: "description", className: "mt-2 text-sm leading-6 text-muted" }, `Current status: ${staticToolsReadiness.status || "unknown"}`)
+          h("h3", { key: "title", className: "text-xl font-semibold tracking-tight text-foreground" }, "Tool Selection"),
+          h("p", { key: "description", className: "mt-2 text-sm leading-6 text-muted" }, "Choose which external tools Tethermark should plan around and verify what the API can detect on this machine.")
         ]),
-        h(Button, { key: "refresh", variant: "outline", onClick: refreshStaticTools }, "Refresh Readiness")
+        h(Button, { key: "refresh", variant: "outline", onClick: refreshStaticTools, disabled: staticToolsLoading }, staticToolsLoading ? "Refreshing..." : "Refresh Tools")
       ]),
-      h("div", { key: "summary", className: "mt-5 grid gap-3 md:grid-cols-3" }, [
-        h("div", { key: "status", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
-          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-slate-500" }, "Included"),
-          h("div", { key: "value", className: "mt-1 font-medium text-slate-950" }, String(selectedExternalToolIds.length))
-        ]),
-        h("div", { key: "warnings", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
-          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-slate-500" }, "Warnings"),
-          h("div", { key: "value", className: "mt-1 font-medium text-slate-950" }, String((staticToolsReadiness.warnings || []).length))
-        ]),
-        h("div", { key: "blockers", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
-          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-slate-500" }, "Blockers"),
-          h("div", { key: "value", className: "mt-1 font-medium text-slate-950" }, "0")
+      h("div", { key: "lookup-banner", className: "mt-5 flex items-start gap-3 rounded-xl border border-blue-500/40 bg-blue-500/10 px-4 py-3 text-sm leading-6 text-blue-100" }, [
+        h("span", { key: "icon", className: "mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-blue-300 text-xs font-semibold text-blue-100" }, "i"),
+        h("div", { key: "copy", className: "min-w-0" }, [
+          h("div", { key: "title", className: "font-semibold text-blue-50" }, "Lookup source"),
+          h("p", { key: "body", className: "mt-1 text-blue-100/90" }, `Tethermark checks tools on the system PATH plus any optional ${staticToolsEnvVar} value configured below.`)
         ])
       ]),
-      h("div", { key: "tools", className: "mt-4 grid gap-3" }, staticToolRows.length ? staticToolRows.map((tool) => h("div", {
-        key: tool.id,
-        className: cn("rounded-2xl border px-4 py-3", selectedExternalToolIds.includes(tool.id) ? (tool.installed ? "border-emerald-200 bg-emerald-50/60" : "border-amber-200 bg-amber-50/60") : "border-slate-200 bg-slate-50")
-      }, [
-        h("div", { key: "head", className: "flex flex-wrap items-center justify-between gap-3" }, [
-          h("label", { key: "name", className: "flex items-center gap-3 font-medium text-slate-950" }, [
-            h("input", {
-              key: "checkbox",
-              type: "checkbox",
-              checked: selectedExternalToolIds.includes(tool.id),
-              disabled: tool.mandatory || mandatoryExternalAuditToolIds.includes(tool.id),
-              onChange: (event) => updateExternalToolSelection(tool.id, event.target.checked)
-            }),
-            h("span", { key: "label" }, tool.label)
-          ]),
-          h("div", { key: "badges", className: "flex flex-wrap gap-2" }, [
-            h(Badge, { key: "status" }, tool.status),
-            h(Badge, { key: "category" }, tool.category || "tool"),
-            tool.mandatory || mandatoryExternalAuditToolIds.includes(tool.id) ? h(Badge, { key: "mandatory" }, "required") : null
-          ])
+      h("div", { key: "summary", className: "mt-5 grid gap-3 md:grid-cols-4" }, [
+        h("div", { key: "status", className: "rounded-2xl border border-border bg-card px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-muted" }, "Selected"),
+          h("div", { key: "value", className: "mt-1 font-medium text-foreground" }, String(selectedExternalToolIds.length))
         ]),
-        h("div", { key: "summary", className: "mt-1 text-sm text-slate-600" }, tool.summary),
-        h("div", { key: "modes", className: "mt-1 text-xs text-slate-500" }, `modes: ${(tool.run_modes || []).join(", ") || "n/a"}`),
-        tool.version ? h("div", { key: "version", className: "mt-1 text-xs text-slate-500" }, tool.version) : null,
-        tool.fallback ? h("div", { key: "fallback", className: "mt-1 text-xs text-slate-500" }, `Fallback: ${tool.fallback}`) : null,
-        selectedExternalToolIds.includes(tool.id) && !tool.installed ? h("div", { key: "fix", className: "mt-2 text-sm text-slate-700" }, tool.fix) : null
-      ])) : h("div", { className: "text-sm text-muted" }, "No external tool readiness data loaded."))
+        h("div", { key: "static", className: "rounded-2xl border border-border bg-card px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-muted" }, "Static Status"),
+          h("div", { key: "value", className: "mt-1 font-medium text-foreground" }, diagnosticStaticStatus)
+        ]),
+        h("div", { key: "runtime", className: "rounded-2xl border border-border bg-card px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-muted" }, "Runtime Adapters"),
+          h("div", { key: "value", className: "mt-1 font-medium text-foreground" }, diagnosticRuntimeStatus)
+        ]),
+        h("div", { key: "warnings", className: "rounded-2xl border border-border bg-card px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-muted" }, "Warnings"),
+          h("div", { key: "value", className: "mt-1 font-medium text-foreground" }, String((staticToolsReadiness.warnings || []).length))
+        ])
+      ]),
+      h("div", { key: "tools", className: "mt-5 grid gap-5" }, staticToolsPending ? [
+        h("div", { key: "checking", className: "rounded-2xl border border-blue-500/40 bg-blue-500/10 px-4 py-3 text-sm leading-6 text-blue-100" }, "Checking external audit tool readiness...")
+      ] : staticToolRows.length ? [
+        h("div", { key: "static", className: "grid gap-3" }, [
+          h("div", { key: "heading", className: "flex flex-wrap items-center justify-between gap-3" }, [
+            h("div", { key: "copy" }, [
+              h("h4", { key: "title", className: "text-lg font-semibold text-foreground" }, "Static Tools"),
+              h("p", { key: "desc", className: "mt-1 text-sm text-muted" }, "Used by static repository audits and validation smoke tests.")
+            ]),
+            h(Badge, { key: "status" }, diagnosticStaticStatus)
+          ]),
+          ...renderSelectableToolRows(staticSelectionTools, "No static tool readiness data is available.")
+        ]),
+        h("div", { key: "runtime", className: "grid gap-3" }, [
+          h("div", { key: "heading", className: "flex flex-wrap items-center justify-between gap-3" }, [
+            h("div", { key: "copy" }, [
+              h("h4", { key: "title", className: "text-lg font-semibold text-foreground" }, "Runtime Eval Tools"),
+              h("p", { key: "desc", className: "mt-1 text-sm text-muted" }, "Deferred until runtime validation is enabled; missing items do not block static repo testing.")
+            ]),
+            h(Badge, { key: "status" }, diagnosticRuntimeStatus)
+          ]),
+          ...renderSelectableToolRows(runtimeSelectionTools, "No runtime eval tool readiness data is available.")
+        ]),
+        otherSelectionTools.length ? h("div", { key: "other", className: "grid gap-3" }, [
+          h("h4", { key: "title", className: "text-lg font-semibold text-foreground" }, "Other Tools"),
+          ...renderSelectableToolRows(otherSelectionTools, "No additional tool readiness data is available.")
+        ]) : null
+      ].filter(Boolean) : h("div", { className: "text-sm text-muted" }, "No external tool readiness data loaded."))
+    ]),
+    h(Card, { key: "tool-path", title: "Tool Path Configuration", description: "Optional extra lookup paths for locally installed audit tools. Leave blank to use the system PATH only.", className: "border-border bg-card shadow-sm" }, [
+      h("div", { key: "lookup-banner", className: "mt-4 flex items-start gap-3 rounded-xl border border-blue-500/40 bg-blue-500/10 px-4 py-3 text-sm leading-6 text-blue-100" }, [
+        h("span", { key: "icon", className: "mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-blue-300 text-xs font-semibold text-blue-100" }, "i"),
+        h("div", { key: "copy", className: "min-w-0" }, [
+          h("div", { key: "title", className: "font-semibold text-blue-50" }, "Tool lookup order"),
+          h("p", { key: "body", className: "mt-1 text-blue-100/90" }, `The API checks the system PATH first, then this optional ${staticToolsEnvVar} value. Saving here updates .env and the running API process; manual .env edits require an API restart.`)
+        ])
+      ]),
+      h("div", { key: "grid", className: "mt-4 grid gap-4" }, [
+        h(Field, { key: "path", label: `Additional Tool Path (${staticToolsEnvVar})` }, [
+          h(Input, {
+            key: "input",
+            value: staticToolsPathDraft,
+            onChange: (event) => setStaticToolsPathDraft(event.target.value),
+            placeholder: `Optional; separate paths with "${staticToolsPathDelimiter}"`
+          }),
+          h("div", { key: "meta", className: "mt-2 grid gap-1 text-xs leading-5 text-muted" }, [
+            h("div", { key: "env" }, `Saved in: ${staticToolsPathMeta?.env_path || ".env"}`),
+            h("div", { key: "saved" }, `Saved value: ${staticToolsPathMeta?.file_value || "blank"}`),
+            h("div", { key: "effective" }, `Effective additional value: ${staticToolsPathMeta?.effective_value || "blank"}`)
+          ]),
+          h("div", { key: "actions", className: "mt-3 flex flex-wrap gap-2" }, [
+            h(Button, {
+              key: "save",
+              onClick: saveStaticToolsPath,
+              disabled: staticToolsPathSaving || staticToolsLoading
+            }, staticToolsPathSaving ? "Saving..." : "Save Tool Path"),
+            h(Button, {
+              key: "clear",
+              variant: "outline",
+              onClick: () => setStaticToolsPathDraft(""),
+              disabled: staticToolsPathSaving || staticToolsLoading || !staticToolsPathDraft
+            }, "Clear Field")
+          ])
+        ])
+      ]),
+      h("details", { key: "setup", className: "mt-4 rounded-2xl border border-border bg-muted/20 px-4 py-3 text-sm leading-6 text-muted" }, [
+        h("summary", { key: "title", className: "cursor-pointer font-semibold text-foreground" }, "CLI setup helper"),
+        h("p", { key: "copy", className: "mt-2" }, "Use this when you want Tethermark to scan for common tool directories and propose an additional path value."),
+        h("pre", { key: "command", className: "mt-3 overflow-x-auto whitespace-pre-wrap rounded-xl bg-slate-950 p-3 text-xs leading-5 text-slate-100" }, "npm run scan -- setup-tools --dry-run\nnpm run scan -- setup-tools --yes")
+      ])
     ])
   ]);
 
-  const settingsIntegrationsPanel = h("div", { className: "space-y-6" }, [
-    h(Card, { key: "integration-cards", title: "Integrations", description: "Configure draft exports and local automation hooks. Hosted owns connector execution." }, [
-      h("div", { key: "cards", className: "grid gap-4 lg:grid-cols-2" }, [githubIntegration, genericWebhookIntegration].filter(Boolean).map((integration) => {
-        const integrationStatus = getIntegrationCredentialStatus(integrationRegistry, integration.id);
-        return h("div", {
-          key: integration.id,
-          className: cn(
-            "rounded-2xl border px-4 py-4 text-sm",
-            integrationStatus?.enabled
-              ? integrationStatus?.configured
-                ? "border-emerald-200 bg-emerald-50/80 text-emerald-900"
-                : "border-amber-200 bg-amber-50/80 text-amber-900"
-              : "border-border bg-white/70 text-foreground"
-          )
-        }, [
-          h("div", { key: "title", className: "font-medium" }, integration.name),
-          h("div", { key: "copy", className: "mt-1" }, integration.description),
-          h("div", { key: "status", className: "mt-2 text-xs font-mono uppercase tracking-[0.18em] text-muted" }, integrationStatus?.note || "No integration status available."),
-          h("div", { key: "fields", className: "mt-3 grid gap-3" }, getIntegrationCredentialFields(integrationRegistry, integration.id).map((field) => {
-            const status = getIntegrationCredentialFieldStatus(integrationRegistry, integration.id, field.id);
-            const persistedSection = field.location === "credentials" ? settings.credentials_json : settings.integrations_json;
-            const persistedOverride = persistedSection?.[field.id];
-            const persistedHere = typeof persistedOverride === "string" ? persistedOverride.trim().length > 0 : Boolean(persistedOverride);
-            const draftValue = integrationCredentialDrafts[field.id] || "";
-            return h("div", {
-              key: field.id,
-              className: "rounded-2xl border border-current/20 bg-white/70 px-4 py-3"
-            }, [
-              h("div", { key: "label", className: "font-medium text-foreground" }, field.label),
-              field.help_text ? h("div", { key: "help", className: "mt-1 text-xs text-muted" }, field.help_text) : null,
-              h("div", { key: "field-status", className: "mt-2 text-xs font-mono uppercase tracking-[0.18em] text-muted" }, status?.note || "No field status available."),
-              h(Input, {
-                key: "input",
-                type: field.secret ? "password" : "text",
-                value: field.secret ? draftValue : (persistedSection?.[field.id] || ""),
-                onChange: (event) => field.secret
-                  ? updateIntegrationCredentialDraft(field.id, event.target.value)
-                  : updateSettings(field.location === "credentials" ? "credentials_json" : "integrations_json", field.id, event.target.value || null),
-                placeholder: field.secret
-                  ? (persistedHere ? `stored value present${status?.source === "environment" ? " and env fallback available" : ""}; enter a new value to replace` : field.placeholder || "")
-                  : (field.placeholder || "")
-              }),
-              h("div", { key: "controls", className: "mt-3 flex flex-wrap gap-2" }, [
-                field.secret && draftValue ? h("div", { key: "pending", className: "text-xs text-emerald-700" }, "Pending replacement will be saved.") : null,
-                field.secret ? h(Button, { key: "clear-draft", variant: "outline", onClick: () => updateIntegrationCredentialDraft(field.id, "") }, "Clear Draft") : null,
-                h(Button, {
-                  key: "remove",
-                  variant: "outline",
-                  onClick: () => {
-                    updateSettings(field.location === "credentials" ? "credentials_json" : "integrations_json", field.id, null);
-                    updateIntegrationCredentialDraft(field.id, "");
-                  },
-                  disabled: !persistedHere && status?.source !== "persisted"
-                }, status?.source === "persisted" || persistedHere ? "Clear Persisted Override" : "No Persisted Override")
-              ].filter(Boolean)),
-              field.env_var ? h("div", { key: "env", className: "mt-2 text-xs text-muted" }, `Env fallback: ${field.env_var}`) : null
-            ]);
-          }))
-        ]);
-      })),
-      h("div", { key: "fields", className: "mt-5 grid gap-4 md:grid-cols-2" }, [
-        h(Field, { key: "completion-webhook", label: "Async Completion Webhook" }, h(Input, { value: settings.integrations_json.completion_webhook_url || "", onChange: (event) => updateSettings("integrations_json", "completion_webhook_url", event.target.value || null) })),
-        h(Field, { key: "generic-webhook-events", label: "Generic Webhook Events" }, h(Textarea, {
-          value: (settings.integrations_json.generic_webhook_events || []).join("\n"),
-          onChange: (event) => updateSettings("integrations_json", "generic_webhook_events", event.target.value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean))
-        })),
-        h(Field, { key: "github-mode", label: "GitHub Draft Export Mode" }, Select({ value: settings.integrations_json.github_mode || "disabled", onChange: (event) => updateSettings("integrations_json", "github_mode", event.target.value) }, [
-          h("option", { key: "disabled", value: "disabled" }, "disabled"),
-          h("option", { key: "manual", value: "manual" }, "manual"),
-          h("option", { key: "project_opt_in", value: "project_opt_in" }, "project_opt_in"),
-          h("option", { key: "workspace_default", value: "workspace_default" }, "workspace_default")
-        ])),
-        h(Field, { key: "github-actions", label: "GitHub Draft Actions" }, h(Textarea, {
-          value: (settings.integrations_json.github_allowed_actions || []).join("\n"),
-          onChange: (event) => updateSettings("integrations_json", "github_allowed_actions", event.target.value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean))
-        })),
-        h(Field, { key: "github-owned-prefixes", label: "Owned Repo Prefixes" }, h(Textarea, {
-          value: (settings.integrations_json.github_owned_repo_prefixes || []).join("\n"),
-          onChange: (event) => updateSettings("integrations_json", "github_owned_repo_prefixes", event.target.value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean))
-        })),
-        h(Field, { key: "github-owned-only", label: "Owned Repositories Only" }, Select({ value: String(settings.integrations_json.github_owned_repo_only !== false), onChange: (event) => updateSettings("integrations_json", "github_owned_repo_only", event.target.value === "true") }, [
-          h("option", { key: "true", value: "true" }, "true"),
-          h("option", { key: "false", value: "false" }, "false")
-        ])),
-        h(Field, { key: "github-approval", label: "Per-Run Approval Required" }, Select({ value: String(settings.integrations_json.github_require_per_run_approval !== false), onChange: (event) => updateSettings("integrations_json", "github_require_per_run_approval", event.target.value === "true") }, [
-          h("option", { key: "true", value: "true" }, "true"),
-          h("option", { key: "false", value: "false" }, "false")
-        ])),
-        h(Field, { key: "endpoints", label: "Configured Endpoints" }, h(Textarea, { value: (settings.credentials_json.configured_endpoints || []).join("\n"), onChange: (event) => updateSettings("credentials_json", "configured_endpoints", event.target.value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean)) }))
+  const githubStatus = getIntegrationCredentialStatus(integrationRegistry, "github_outbound");
+  const webhookStatus = getIntegrationCredentialStatus(integrationRegistry, "generic_webhook");
+  const integrationStatusClass = (status) => status?.enabled
+    ? status?.configured
+      ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-100"
+      : "border-amber-500/40 bg-amber-500/10 text-amber-100"
+    : "border-border bg-card text-foreground";
+  const githubActionOptions = [
+    ["pr_comment", "PR comment"],
+    ["issue_create", "Issue draft"],
+    ["label", "Label draft"],
+    ["check", "Check payload"]
+  ];
+  const genericWebhookEventOptions = [
+    ["run_completed", "Run completed"],
+    ["review_required", "Review required"],
+    ["review_requires_rerun", "Review requires rerun"],
+    ["outbound_delivery_failed", "Outbound delivery failed"]
+  ];
+  const integrationLoadingCard = h(Card, { key: "integrations-loading", title: "Integrations", description: "Checking local integration settings and saved connector status.", className: "border-border bg-card shadow-sm" }, [
+    h("div", { key: "rows", className: "grid gap-4 xl:grid-cols-2" }, [0, 1].map((item) => h("div", { key: item, className: "rounded-2xl border border-border bg-muted/20 px-4 py-4" }, [
+      h("div", { key: "title", className: "h-5 w-48 rounded bg-muted" }),
+      h("div", { key: "desc", className: "mt-3 h-4 w-4/5 rounded bg-muted" }),
+      h("div", { key: "field", className: "mt-5 h-10 rounded-xl bg-muted" }),
+      h("div", { key: "field2", className: "mt-3 h-10 rounded-xl bg-muted" })
+    ]))),
+    h("div", { key: "note", className: "mt-4 text-sm text-muted" }, "This page loads connector definitions from the local API so status labels match persisted settings and environment fallbacks.")
+  ]);
+  const toggleListSetting = (section, key, value, enabled) => {
+    const current = Array.isArray(settings[section]?.[key]) ? settings[section][key] : [];
+    const next = enabled ? [...new Set([...current, value])] : current.filter((item) => item !== value);
+    updateSettings(section, key, next);
+  };
+  const renderIntegrationCredentialField = (integrationId, field) => {
+    const status = getIntegrationCredentialFieldStatus(integrationRegistry, integrationId, field.id);
+    const persistedSection = field.location === "credentials" ? settings.credentials_json : settings.integrations_json;
+    const persistedOverride = persistedSection?.[field.id];
+    const persistedHere = typeof persistedOverride === "string" ? persistedOverride.trim().length > 0 : Boolean(persistedOverride);
+    const draftValue = integrationCredentialDrafts[field.id] || "";
+    const clearPersisted = () => {
+      updateSettings(field.location === "credentials" ? "credentials_json" : "integrations_json", field.id, null);
+      updateIntegrationCredentialDraft(field.id, "");
+    };
+    return h("div", {
+      key: field.id,
+      className: "rounded-2xl border border-border bg-card px-4 py-3"
+    }, [
+      h("div", { key: "label", className: "font-medium text-foreground" }, field.label),
+      field.help_text ? h("div", { key: "help", className: "mt-1 text-xs leading-5 text-muted" }, field.help_text) : null,
+      h(Input, {
+        key: "input",
+        className: "mt-3",
+        type: field.secret ? "password" : "text",
+        value: field.secret ? draftValue : (persistedSection?.[field.id] || ""),
+        onChange: (event) => field.secret
+          ? updateIntegrationCredentialDraft(field.id, event.target.value)
+          : updateSettings(field.location === "credentials" ? "credentials_json" : "integrations_json", field.id, event.target.value || null),
+        placeholder: field.secret
+          ? (persistedHere ? "stored secret present; enter a new value to replace" : field.placeholder || "")
+          : (field.placeholder || "")
+      }),
+      h("div", { key: "status", className: "mt-2 text-xs font-mono uppercase tracking-[0.18em] text-muted" }, status?.note || "No field status available."),
+      h("div", { key: "controls", className: "mt-3 flex flex-wrap items-center gap-2" }, [
+        field.secret && draftValue ? h("div", { key: "pending", className: "text-xs text-emerald-300" }, "New secret will be saved when you click Save Settings.") : null,
+        field.secret && draftValue ? h(Button, { key: "clear-draft", variant: "outline", onClick: () => updateIntegrationCredentialDraft(field.id, "") }, "Clear Draft") : null,
+        persistedHere ? h(Button, { key: "remove", variant: "outline", onClick: clearPersisted }, field.secret ? "Clear Stored Secret" : "Clear Saved Value") : null
+      ].filter(Boolean)),
+      field.env_var ? h("div", { key: "env", className: "mt-2 text-xs text-muted" }, `Environment fallback: ${field.env_var}`) : null
+    ]);
+  };
+  const githubDraftEnabled = String(settings.integrations_json.github_mode || "disabled") !== "disabled";
+  const webhookConfigured = Boolean(String(settings.integrations_json.generic_webhook_url || "").trim());
+  const settingsIntegrationsPanel = integrationRegistryLoading && !integrationRegistry.length
+    ? h("div", { className: "space-y-6" }, [integrationLoadingCard])
+    : h("div", { className: "space-y-6" }, [
+    h(Card, { key: "integrations", title: "Integrations", description: "Optional connections for sharing audit results with other tools. You can skip this page if you only use Tethermark directly.", className: "border-border bg-card shadow-sm" }, [
+      h("div", { key: "boundary", className: "mb-5 flex items-start gap-3 rounded-xl border border-blue-500/40 bg-blue-500/10 px-4 py-3 text-sm leading-6 text-blue-100" }, [
+        h("span", { key: "icon", className: "mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-blue-300 text-xs font-semibold text-blue-100" }, "i"),
+        h("div", { key: "copy", className: "min-w-0" }, [
+          h("div", { key: "title", className: "font-semibold text-blue-50" }, "When to use this page"),
+          h("p", { key: "body", className: "mt-1 text-blue-100/90" }, "Leave everything disabled unless you want Tethermark to prepare GitHub-ready drafts, send audit-event webhooks, or notify a callback URL when background jobs finish.")
+        ])
       ]),
+      h("div", { key: "workflow", className: "mb-5 grid gap-3 md:grid-cols-3" }, [
+        h("div", { key: "draft", className: "rounded-2xl border border-border bg-card px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-muted" }, "GitHub"),
+          h("div", { key: "copy", className: "mt-1 text-sm text-foreground" }, "Prepare issue, comment, label, or check text for manual review.")
+        ]),
+        h("div", { key: "webhook", className: "rounded-2xl border border-border bg-card px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-muted" }, "Automation Webhook"),
+          h("div", { key: "copy", className: "mt-1 text-sm text-foreground" }, "Send selected audit events to a URL from another system.")
+        ]),
+        h("div", { key: "callback", className: "rounded-2xl border border-border bg-card px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-muted" }, "Job Callback"),
+          h("div", { key: "copy", className: "mt-1 text-sm text-foreground" }, "Notify one callback URL when async jobs finish.")
+        ])
+      ]),
+      h("div", { key: "cards", className: "grid gap-4 xl:grid-cols-2" }, [
+        h("div", { key: "github", className: cn("rounded-2xl border px-4 py-4 text-sm", integrationStatusClass(githubStatus)) }, [
+          h("div", { key: "head", className: "flex flex-wrap items-start justify-between gap-3" }, [
+            h("div", { key: "copy" }, [
+              h("h3", { key: "title", className: "text-lg font-semibold" }, githubIntegration?.name || "GitHub Export Drafts"),
+              h("p", { key: "desc", className: "mt-1 leading-6 opacity-90" }, githubIntegration?.description || "Prepare GitHub-ready content for manual review and copy/paste.")
+            ]),
+            h(Badge, { key: "status" }, githubDraftEnabled ? "enabled" : "disabled")
+          ]),
+          h("div", { key: "note", className: "mt-3 text-xs font-mono uppercase tracking-[0.18em] opacity-75" }, githubStatus?.note || "GitHub draft export status unavailable."),
+          h("div", { key: "fields", className: "mt-4 grid gap-4" }, [
+            h(Field, { key: "mode", label: "GitHub Drafts" }, Select({ value: settings.integrations_json.github_mode || "disabled", onChange: (event) => updateSettings("integrations_json", "github_mode", event.target.value) }, [
+              h("option", { key: "disabled", value: "disabled" }, "Off"),
+              h("option", { key: "manual", value: "manual" }, "On - create drafts for manual use"),
+              h("option", { key: "project_opt_in", value: "project_opt_in" }, "On for selected projects"),
+              h("option", { key: "workspace_default", value: "workspace_default" }, "On by default")
+            ])),
+            !githubDraftEnabled ? h("div", { key: "skip", className: "rounded-xl border border-border bg-card px-3 py-2 text-sm opacity-90" }, "Nothing else is required. Turn this on only if you want Tethermark to prepare GitHub-ready draft content for findings or reviews.") : null,
+            githubDraftEnabled ? [
+            h("div", { key: "actions" }, [
+              h("div", { key: "label", className: "mb-2 text-sm font-medium text-current" }, "Draft Types"),
+              h("div", { key: "checks", className: "grid gap-2 sm:grid-cols-2" }, githubActionOptions.map(([value, label]) => h("label", { key: value, className: "flex items-center gap-2 rounded-xl border border-current/20 px-3 py-2" }, [
+                h("input", {
+                  key: "input",
+                  type: "checkbox",
+                  checked: (settings.integrations_json.github_allowed_actions || []).includes(value),
+                  onChange: (event) => toggleListSetting("integrations_json", "github_allowed_actions", value, event.target.checked)
+                }),
+                h("span", { key: "label" }, label)
+              ])))
+            ]),
+            h(Field, { key: "owned-prefixes", label: "Allowed GitHub Repository Prefixes" }, h(Textarea, {
+              value: (settings.integrations_json.github_owned_repo_prefixes || []).join("\n"),
+              placeholder: "https://github.com/your-org/\ngit@github.com:your-org/",
+              onChange: (event) => updateSettings("integrations_json", "github_owned_repo_prefixes", event.target.value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean))
+            })),
+            h("div", { key: "policy", className: "grid gap-4 md:grid-cols-2" }, [
+              h(Field, { key: "owned-only", label: "Limit To Allowed Repositories" }, Select({ value: String(settings.integrations_json.github_owned_repo_only !== false), onChange: (event) => updateSettings("integrations_json", "github_owned_repo_only", event.target.value === "true") }, [
+                h("option", { key: "true", value: "true" }, "Yes"),
+                h("option", { key: "false", value: "false" }, "No")
+              ])),
+              h(Field, { key: "approval", label: "Require Approval Before Drafting" }, Select({ value: String(settings.integrations_json.github_require_per_run_approval !== false), onChange: (event) => updateSettings("integrations_json", "github_require_per_run_approval", event.target.value === "true") }, [
+                h("option", { key: "true", value: "true" }, "Yes"),
+                h("option", { key: "false", value: "false" }, "No")
+              ]))
+            ])
+            ] : null
+          ])
+        ]),
+        h("div", { key: "webhook", className: cn("rounded-2xl border px-4 py-4 text-sm", integrationStatusClass(webhookStatus)) }, [
+          h("div", { key: "head", className: "flex flex-wrap items-start justify-between gap-3" }, [
+            h("div", { key: "copy" }, [
+              h("h3", { key: "title", className: "text-lg font-semibold" }, genericWebhookIntegration?.name || "Audit Event Webhook"),
+              h("p", { key: "desc", className: "mt-1 leading-6 opacity-90" }, genericWebhookIntegration?.description || "Send selected audit events to a webhook URL you provide.")
+            ]),
+            h(Badge, { key: "status" }, webhookStatus?.enabled ? "enabled" : "disabled")
+          ]),
+          h("div", { key: "note", className: "mt-3 text-xs font-mono uppercase tracking-[0.18em] opacity-75" }, webhookStatus?.note || "Webhook status unavailable."),
+          h("div", { key: "fields", className: "mt-4 grid gap-4" }, [
+            ...getIntegrationCredentialFields(integrationRegistry, "generic_webhook").map((field) => renderIntegrationCredentialField("generic_webhook", field)),
+            !webhookConfigured ? h("div", { key: "skip", className: "rounded-xl border border-border bg-card px-3 py-2 text-sm opacity-90" }, "Skip this unless another system gave you a webhook URL to receive audit events.") : null,
+            h("div", { key: "events" }, [
+              h("div", { key: "label", className: "mb-2 text-sm font-medium text-current" }, "Events To Send"),
+              h("div", { key: "checks", className: "grid gap-2 sm:grid-cols-2" }, genericWebhookEventOptions.map(([value, label]) => h("label", { key: value, className: "flex items-center gap-2 rounded-xl border border-current/20 px-3 py-2" }, [
+                h("input", {
+                  key: "input",
+                  type: "checkbox",
+                  checked: (settings.integrations_json.generic_webhook_events || []).includes(value),
+                  onChange: (event) => toggleListSetting("integrations_json", "generic_webhook_events", value, event.target.checked)
+                }),
+                h("span", { key: "label" }, label)
+              ])))
+            ])
+          ])
+        ])
+      ])
+    ]),
+    h(Card, { key: "async-callback", title: "Job Completion Callback", description: "Optional callback URL for background job completion. Most users can leave this blank.", className: "border-border bg-card shadow-sm" }, [
+      h("div", { key: "grid", className: "grid gap-4 md:grid-cols-2" }, [
+        h(Field, { key: "completion-webhook", label: "Completion Callback URL" }, h(Input, {
+          value: settings.integrations_json.completion_webhook_url || "",
+          placeholder: "https://example.internal/hooks/job-complete",
+          onChange: (event) => updateSettings("integrations_json", "completion_webhook_url", event.target.value || null)
+        })),
+        h(Field, { key: "endpoints", label: "Configured Runtime Endpoints" }, h(Textarea, {
+          value: (settings.credentials_json.configured_endpoints || []).join("\n"),
+          placeholder: "https://agent.example.internal\nhttp://localhost:3000",
+          onChange: (event) => updateSettings("credentials_json", "configured_endpoints", event.target.value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean))
+        }))
+      ])
     ])
   ]);
 
@@ -8032,14 +9083,14 @@ function triageDecisionFromReviewSummary(summary) {
         }))
       ]),
       h("div", { key: "actions", className: "mt-5 flex flex-wrap items-center gap-3" }, [
-        h(Button, { key: "summary", variant: "outline", onClick: () => loadArtifactRetentionSummary(true), disabled: artifactRetentionLoading }, "Measure Size"),
-        h(Button, { key: "preview", onClick: previewArtifactRetention, disabled: artifactRetentionLoading }, "Preview Prune"),
+        h(Button, { key: "summary", variant: "outline", onClick: () => loadArtifactRetentionSummary(true), disabled: artifactRetentionLoading }, artifactRetentionLoading ? "Measuring..." : "Measure Size"),
+        h(Button, { key: "preview", onClick: previewArtifactRetention, disabled: artifactRetentionLoading }, artifactRetentionLoading ? "Previewing..." : "Preview Prune"),
         h(Button, {
           key: "prune",
           variant: "secondary",
           onClick: pruneArtifactRetention,
           disabled: artifactRetentionLoading || !artifactRetentionCanPrune
-        }, "Prune Now")
+        }, artifactRetentionLoading ? "Working..." : "Prune Now")
       ]),
       h("div", {
         key: "action-note",
@@ -8070,11 +9121,11 @@ function triageDecisionFromReviewSummary(summary) {
   ]);
 
   const settingsPolicyPanel = h("div", { className: "space-y-6" }, [
-    h(Card, { key: "policy-pack", title: "Policy Pack", description: "OSS includes only the built-in default policy pack. Policy-pack management is read-only in this version." }, [
+    h(Card, { key: "policy-pack", title: "Policy Pack", description: "Community Edition includes the built-in default policy pack. Policy-pack management is read-only in this edition." }, [
       h("div", { key: "summary", className: "rounded-2xl border border-slate-200 bg-white/70 px-4 py-4 text-sm" }, [
         h("div", { key: "name", className: "font-medium text-foreground" }, defaultPolicyName),
         h("div", { key: "id", className: "mt-1 text-muted" }, `Pack id: ${defaultPolicyPack?.id || "default"}`),
-        h("div", { key: "note", className: "mt-3 text-muted" }, "The OSS UI does not support adding new policy packs or editing the default pack. Every run uses Default Audit Supervision.")
+        h("div", { key: "note", className: "mt-3 text-muted" }, "Community Edition does not support adding new policy packs or editing the default pack. Every run uses Default Audit Supervision.")
       ]),
       defaultPolicyObjectives.length
         ? h("div", { key: "objectives", className: "mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 text-sm" }, [
@@ -8100,7 +9151,7 @@ function triageDecisionFromReviewSummary(summary) {
   const settingsProjectPanel = h("div", { className: "space-y-6" }, [
     h(Card, { key: "projects", title: "Projects", description: "Create and manage project containers. Each project has a target and selected Audit Type." }, [
       h("div", { key: "header", className: "flex flex-wrap items-center justify-between gap-3" }, [
-        h("div", { key: "count", className: "text-sm text-muted" }, `${projectOptions.length} project${projectOptions.length === 1 ? "" : "s"} in this OSS installation`),
+        h("div", { key: "count", className: "text-sm text-muted" }, `${projectOptions.length} project${projectOptions.length === 1 ? "" : "s"} in this Community Edition installation`),
         h(Button, { key: "new", onClick: () => setProjectCreateOpen(true) }, "New Project")
       ]),
       projectOptions.length ? h("div", { key: "list", className: "mt-4 overflow-hidden rounded-2xl border border-slate-200" }, [
@@ -8212,7 +9263,7 @@ function triageDecisionFromReviewSummary(summary) {
     h(Card, {
       key: "project-activity",
       title: selectedProject ? `${selectedProject.name} Activity` : "Project Activity",
-      description: "Scoped project context. The main Runs and Reviews pages remain the full operational views and can add their own project filters."
+      description: "Scoped project context. The main Audits and Findings pages remain the full operational views and can add their own project filters."
     }, selectedProject ? [
       h("div", { key: "summary", className: "grid gap-3 md:grid-cols-4" }, [
         h("div", { key: "id", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
@@ -8228,14 +9279,14 @@ function triageDecisionFromReviewSummary(summary) {
           h("div", { key: "value", className: "mt-1 font-medium text-slate-950" }, projectDetailLoading ? "Loading" : String(selectedProjectRuns.length))
         ]),
         h("div", { key: "reviews", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
-          h("div", { key: "label", className: "text-xs font-semibold uppercase tracking-[0.16em] text-slate-500" }, "Open Reviews"),
+          h("div", { key: "label", className: "text-xs font-semibold uppercase tracking-[0.16em] text-slate-500" }, "Open Findings"),
           h("div", { key: "value", className: "mt-1 font-medium text-slate-950" }, projectDetailLoading ? "Loading" : String(selectedProjectReviews.length))
         ])
       ]),
       h("div", { key: "activity-grid", className: "mt-5 grid gap-5 xl:grid-cols-[1.2fr_0.8fr]" }, [
         h("div", { key: "runs" }, [
           h("div", { key: "header", className: "mb-3 flex items-center justify-between gap-3" }, [
-            h("div", { key: "title", className: "font-semibold text-slate-950" }, "Recent Runs"),
+            h("div", { key: "title", className: "font-semibold text-slate-950" }, "Recent Audits"),
             h(Button, {
               key: "refresh",
               variant: "outline",
@@ -8263,7 +9314,7 @@ function triageDecisionFromReviewSummary(summary) {
               selectedRunId,
               onSelect: (runId) => {
                 setSelectedRunId(runId);
-                setView("reviews");
+                setView("findings");
               }
             })
             : h("div", { key: "empty", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-8 text-center text-sm text-muted" }, "No open reviews for this project.")
@@ -8406,9 +9457,224 @@ function triageDecisionFromReviewSummary(summary) {
         ])
       ])
     ]),
-    h("div", { key: "panel", className: "min-h-0 min-w-0 overflow-y-auto bg-white px-6 pb-6" }, [
+    h("div", { key: "panel", ref: systemPanelScrollRef, className: "min-h-0 min-w-0 overflow-y-auto bg-white px-6 pb-6", style: { overflowAnchor: "none" } }, [
       settingsPageHeader,
       h("div", { key: "content", className: "mt-6" }, settingsSubpageContent)
+    ])
+  ]);
+
+  const toolsSystemPanel = h("div", { className: "space-y-6" }, [
+    settingsStaticToolsPanel,
+  ]);
+  const auditConfigurationSystemPanel = h("div", { className: "space-y-6" }, [
+    settingsAuditPanel,
+    methodologyAdminPanel
+  ]);
+  const dataMaintenanceSystemPanel = h("div", { className: "space-y-6" }, [
+    adminSystemPanel,
+    settingsArtifactsPanel
+  ]);
+  const systemFeaturePanels = {
+    "audit-configuration": auditConfigurationSystemPanel,
+    agents: settingsLlmPanel,
+    "runtime-sandbox": adminRuntimeSandboxPanel,
+    tools: toolsSystemPanel,
+    policy: settingsGovernancePanel,
+    integrations: settingsIntegrationsPanel,
+    artifacts: settingsArtifactsPanel,
+    "self-learning-settings": settingsLearningPanel,
+    benchmarks: adminBenchmarkPanel,
+    validation: adminValidationPanel,
+    observability: adminObservabilityPanel,
+    jobs: jobsView,
+    data: dataMaintenanceSystemPanel
+  };
+  const systemSettingsSubpageMap = {
+    "audit-configuration": "audit",
+    agents: "llm",
+    tools: "static-tools",
+    policy: "governance",
+    integrations: "integrations",
+    artifacts: "artifacts",
+    "self-learning-settings": "learning-settings",
+    data: "artifacts"
+  };
+  const systemAdminSubpageMap = {
+    "audit-configuration": "methodology",
+    "runtime-sandbox": "runtime-sandbox",
+    tools: "tooling",
+    benchmarks: "benchmarks",
+    validation: "validation",
+    observability: "observability",
+    data: "system"
+  };
+  const systemFeatureItems = [
+    { id: "runtime-sandbox", group: "setup", label: "Runtime Sandbox", description: "Local runtime readiness, backend policy, resource limits, and setup guidance.", status: runtimeSandboxReadiness.status === "ready" ? "Ready" : runtimeSandboxReadiness.status === "ready_with_warnings" ? "Warning" : "Needs setup", settings: false },
+    { id: "tools", group: "setup", label: "Tools", description: "Scorecard, Semgrep, Trivy, static tool readiness, and tool-control mapping.", status: staticToolsReadiness.status === "ready" ? "Ready" : staticToolsReadiness.status === "blocked" ? "Blocked" : "Warning", settings: true },
+    { id: "integrations", group: "setup", label: "Integrations", description: "Outbound delivery, repository integration, webhooks, and connector settings.", status: "Optional", settings: true },
+    { id: "audit-configuration", group: "audit-behavior", label: "Audit Configuration", description: "Audit type defaults, run shape, methodology, lanes, and built-in controls.", status: "Configured", settings: true },
+    { id: "agents", group: "audit-behavior", label: "Agents & Models", description: "Default models, credentials, assistant routing, and agent-specific overrides.", status: settingsProviderCredentialStatus.configured ? "Ready" : "Needs setup", settings: true },
+    { id: "policy", group: "audit-behavior", label: "Policy", description: "Review gates, policy packs, reference documents, and governance settings.", status: "Configured", settings: true },
+    { id: "artifacts", group: "audit-behavior", label: "Artifacts & Exports", description: "Export behavior, report-related settings, artifact retention, and pruning.", status: "Configured", settings: true },
+    { id: "self-learning-settings", group: "quality", label: "Self-Learning Settings", description: "Learning triggers, thresholds, LLM synthesis, and promotion guardrails.", status: learningSettings.enabled === false ? "Off" : "On", settings: true },
+    { id: "benchmarks", group: "quality", label: "Benchmarks", description: "Product benchmark suite execution, report history, and baseline comparison.", status: benchmarkReports.length ? `${benchmarkReports.length} reports` : "Ready", settings: false },
+    { id: "validation", group: "quality", label: "Validation Suite", description: "Installation, static audit, and benchmark smoke checks.", status: "Ready", settings: false },
+    { id: "observability", group: "operations", label: "Observability", description: "Agent traces, QA checks, tool executions, handoffs, and troubleshooting evidence.", status: observabilityTraceLoading ? "Loading" : "Ready", settings: false },
+    { id: "jobs", group: "operations", label: "Jobs", description: "Durable background work, retries, cancellations, and completed run links.", status: jobs.some(isActiveAsyncJob) ? `${jobs.filter(isActiveAsyncJob).length} active` : "Idle", settings: false },
+    { id: "data", group: "data", label: "Data & Maintenance", description: "Local data refresh, retained artifacts, cleanup previews, storage, and maintenance controls.", status: globalSyncLoading ? "Refreshing" : "Ready", settings: true }
+  ];
+  const systemFeatureById = Object.fromEntries(systemFeatureItems.map((item) => [item.id, item]));
+  const systemDefaultSubpageByGroup = {
+    setup: "runtime-sandbox",
+    "audit-behavior": "audit-configuration",
+    quality: "self-learning-settings",
+    operations: "observability",
+    data: "data"
+  };
+  const systemGroups = [
+    { id: "setup", label: "Setup", description: "Installation readiness, local runtime, tools, and integrations." },
+    { id: "audit-behavior", label: "Audit Behavior", description: "How audits run, which models agents use, and which policies apply." },
+    { id: "quality", label: "Quality & Improvement", description: "Product validation, benchmarks, and governed self-learning controls." },
+    { id: "operations", label: "Operations", description: "Runtime jobs, traces, failures, handoffs, and troubleshooting evidence." },
+    { id: "data", label: "Data", description: "Local state, retained artifacts, cleanup, and maintenance." }
+  ];
+  const systemGroupById = Object.fromEntries(systemGroups.map((item) => [item.id, item]));
+  const activeSystemFeature = systemFeatureById[systemSubpage] || null;
+  const activeSystemGroupId = activeSystemFeature?.group || (systemGroupById[systemSubpage] ? systemSubpage : "setup");
+  const activeSystemGroup = systemGroupById[activeSystemGroupId] || systemGroups[0];
+  const systemScrollKeyForSubpage = (subpageId, tabId = governanceTab) => (
+    subpageId === "policy" ? `page:${subpageId}:policy:${tabId}` : `page:${subpageId}`
+  );
+  const saveCurrentSystemScroll = (options = {}) => {
+    const container = systemPanelScrollRef.current;
+    const currentKey = systemScrollKeyRef.current;
+    if (!options.force && systemScrollSaveSuspendedRef.current) return;
+    if (container && currentKey) {
+      systemScrollPositionsRef.current[currentKey] = container.scrollTop;
+    }
+  };
+  const prepareSystemTabChange = (event) => {
+    if (event?.preventDefault) event.preventDefault();
+    if (systemScrollSaveSuspendedRef.current) return;
+    saveCurrentSystemScroll({ force: true });
+    systemScrollSaveSuspendedRef.current = true;
+    window.setTimeout(() => {
+      systemScrollSaveSuspendedRef.current = false;
+    }, 600);
+  };
+  const restoreSystemScroll = (key) => {
+    const nextTop = Number(systemScrollPositionsRef.current[key] || 0);
+    const restore = () => {
+      if (systemPanelScrollRef.current) {
+        systemPanelScrollRef.current.scrollTop = nextTop;
+      }
+    };
+    window.requestAnimationFrame(() => {
+      restore();
+      window.requestAnimationFrame(restore);
+      window.setTimeout(restore, 50);
+      window.setTimeout(() => {
+        restore();
+        systemScrollSaveSuspendedRef.current = false;
+      }, 150);
+    });
+  };
+  const changeSystemSubpage = (subpageId) => {
+    const resolvedSubpageId = systemDefaultSubpageByGroup[subpageId] || subpageId;
+    saveCurrentSystemScroll();
+    setSystemSubpage(resolvedSubpageId);
+    if (systemSettingsSubpageMap[resolvedSubpageId]) setSettingsSubpage(systemSettingsSubpageMap[resolvedSubpageId]);
+    if (systemAdminSubpageMap[resolvedSubpageId]) setAdminSubpage(systemAdminSubpageMap[resolvedSubpageId]);
+    restoreSystemScroll(systemScrollKeyForSubpage(resolvedSubpageId));
+  };
+  const systemInnerTabs = systemFeatureItems.filter((item) => item.group === activeSystemGroupId);
+  const systemGroupTabs = systemInnerTabs.length > 1
+    ? h("div", { key: "group-tabs", className: "flex flex-wrap gap-2" }, systemInnerTabs.map((tab) => h("button", {
+      key: tab.id,
+      type: "button",
+      onPointerDownCapture: prepareSystemTabChange,
+      onMouseDownCapture: prepareSystemTabChange,
+      onMouseDown: prepareSystemTabChange,
+      onClick: () => changeSystemSubpage(tab.id),
+      style: systemSubpage === tab.id ? {
+        backgroundColor: "#2563eb",
+        border: "1px solid #60a5fa",
+        color: "#ffffff"
+      } : undefined,
+      className: cn(
+        "rounded-xl px-3 py-2 text-sm font-medium transition-colors",
+        systemSubpage === tab.id
+          ? "system-tab-active shadow-sm"
+          : "border border-border bg-card text-muted hover:border-blue-500/50 hover:text-foreground"
+      )
+    }, tab.label)))
+    : h("div", { key: "spacer" });
+  const policyTabs = systemSubpage === "policy"
+    ? h("div", { key: "tabs", className: "flex flex-wrap gap-2" }, governanceTabs.map((tab) => h("button", {
+      key: tab.id,
+      type: "button",
+      onPointerDownCapture: prepareSystemTabChange,
+      onMouseDownCapture: prepareSystemTabChange,
+      onMouseDown: prepareSystemTabChange,
+      onClick: () => {
+        saveCurrentSystemScroll();
+        setGovernanceTab(tab.id);
+        restoreSystemScroll(systemScrollKeyForSubpage("policy", tab.id));
+      },
+      style: governanceTab === tab.id ? {
+        backgroundColor: "#2563eb",
+        border: "1px solid #60a5fa",
+        color: "#ffffff"
+      } : undefined,
+      className: cn(
+        "rounded-xl px-3 py-2 text-sm font-medium transition-colors",
+        governanceTab === tab.id
+          ? "system-tab-active shadow-sm"
+          : "border border-border bg-card text-muted hover:border-blue-500/50 hover:text-foreground"
+      )
+    }, tab.label)))
+    : h("div", { key: "spacer" });
+  const visibleSystemNavItem = activeSystemGroup;
+  const systemSubpageContent = activeSystemFeature
+    ? systemFeaturePanels[activeSystemFeature.id] || adminSystemPanel
+    : systemFeaturePanels["runtime-sandbox"] || adminSystemPanel;
+  const systemCanSave = Boolean(activeSystemFeature?.settings);
+  const systemView = h("section", { className: "h-[calc(100vh-11rem)] min-h-0 overflow-hidden rounded-3xl border border-slate-200 bg-white xl:grid xl:grid-cols-[260px_minmax(0,1fr)]" }, [
+    h("aside", { key: "system-nav", className: "min-h-0 overflow-y-auto border-b border-slate-200 bg-slate-50/80 px-4 py-5 xl:border-b-0 xl:border-r" }, [
+      h("div", { key: "label", className: "px-2 text-xs font-medium text-slate-400" }, "System"),
+      h("nav", { key: "nav", className: "mt-4 grid gap-1.5" }, systemGroups.map((item) => h("button", {
+        key: item.id,
+        type: "button",
+        onPointerDownCapture: prepareSystemTabChange,
+        onMouseDownCapture: prepareSystemTabChange,
+        onMouseDown: prepareSystemTabChange,
+        onClick: () => changeSystemSubpage(item.id),
+        className: cn(
+          "flex items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition-colors",
+          activeSystemGroupId === item.id
+            ? "bg-slate-100 font-semibold text-slate-950"
+            : "text-slate-700 hover:bg-slate-50"
+        )
+      }, [
+        h("span", { key: "dot", className: cn("h-2.5 w-2.5 rounded-full", activeSystemGroupId === item.id ? "bg-slate-900" : "bg-slate-300") }),
+        h("span", { key: "text" }, item.label)
+      ])))
+    ]),
+    h("div", { key: "panel", className: "flex min-h-0 min-w-0 flex-col bg-white" }, [
+      h("div", { key: "system-header", className: "border-b border-slate-200 bg-white px-6 pt-6" }, [
+        h("div", { key: "head", className: "pb-7" }, [
+          h("h2", { key: "title", className: "text-lg font-semibold text-slate-950" }, visibleSystemNavItem.label),
+          h("p", { key: "description", className: "mt-1 text-sm text-slate-500" }, visibleSystemNavItem.description)
+        ]),
+        h("div", { key: "action-row", className: "flex flex-col gap-3 pb-4 md:flex-row md:items-center md:justify-between" }, [
+          systemGroupTabs,
+          systemCanSave ? h(Button, { key: "save", onClick: saveSettings }, "Save Settings") : h("div", { key: "no-save" })
+        ]),
+        systemSubpage === "policy" ? h("div", { key: "policy-tabs", className: "border-t border-slate-200 py-3" }, policyTabs) : null
+      ]),
+      h("div", { key: "content-scroll", ref: systemPanelScrollRef, className: "min-h-0 flex-1 overflow-y-auto px-6 pb-6", style: { overflowAnchor: "none" } }, [
+        h("div", { key: `content:${systemScrollKey}`, className: "mt-6" }, systemSubpageContent)
+      ])
     ])
   ]);
 
@@ -8433,7 +9699,7 @@ function triageDecisionFromReviewSummary(summary) {
         h("button", {
           key: "mail",
           type: "button",
-          onClick: () => setView("reviews"),
+          onClick: () => setView("findings"),
           className: "flex h-11 w-11 items-center justify-center rounded-2xl border border-border bg-white text-slate-700 hover:bg-slate-50"
         }, h(SidebarIcon, { kind: "mail" })),
         h("button", {
@@ -8486,12 +9752,16 @@ function triageDecisionFromReviewSummary(summary) {
       h(ViewErrorBoundary, {
         key: `view:${view}`,
         resetKey: `${view}:${selectedRunId || ""}:${selectedRuntimeFollowupId || ""}`
-      }, h("div", { key: "view", className: view === "runs" || view === "settings" ? "" : "mt-6" }, view === "dashboard"
+      }, h("div", { key: "view", className: view === "runs" || view === "settings" || view === "system" ? "" : "mt-6" }, view === "dashboard"
         ? dashboard
         : view === "projects"
           ? projectsView
         : view === "runs"
           ? runsView
+          : view === "findings"
+            ? reviewsView
+          : view === "remediation"
+            ? runtimeFollowupsView
           : view === "jobs"
             ? jobsView
             : view === "followups"
@@ -8500,6 +9770,8 @@ function triageDecisionFromReviewSummary(summary) {
                 ? learningView
               : view === "reviews"
                 ? reviewsView
+                : view === "system"
+                  ? systemView
                 : view === "admin"
                   ? adminView
                   : settingsView))

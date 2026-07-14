@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 
 import { buildToolPathEnv, staticToolPathDetails } from "../../../packages/core-engine/src/tool-paths.js";
 import { resolvePostgresConnectionConfig } from "../../../packages/core-engine/src/persistence/postgres.js";
+import { buildRuntimeSandboxReadiness } from "../../../packages/validation-runner/src/index.js";
 import { resolveAgentProviderConfig } from "../../../packages/llm-provider/src/index.js";
 
 type CheckStatus = "pass" | "warn" | "fail";
@@ -230,10 +231,25 @@ export function buildDoctorReport(): DoctorReport {
     details: toolPathDetails
   });
   addCommandCheck(checks, { id: "scorecard", label: "OpenSSF Scorecard", command: "scorecard", versionArgs: ["version"], required: true, fix: ["Install OpenSSF Scorecard through an OS-approved package manager or set HARNESS_STATIC_TOOLS_PATH to a trusted bin directory."] });
-  addCommandCheck(checks, { id: "semgrep", label: "Semgrep", command: "semgrep", versionArgs: semgrepProbeArgs(), required: true, timeoutMs: 120_000, fix: ["Install Semgrep with python -m pip install semgrep, pipx install semgrep, or an OS-approved package manager.", "Tethermark uses a bundled local Semgrep ruleset by default; set HARNESS_SEMGREP_CONFIG to use an organization ruleset."] });
+  addCommandCheck(checks, { id: "semgrep", label: "Semgrep", command: "semgrep", versionArgs: semgrepProbeArgs(), shell: process.platform === "win32", required: true, timeoutMs: 120_000, fix: ["Install Semgrep with python -m pip install semgrep, pipx install semgrep, or an OS-approved package manager.", "Tethermark uses a bundled local Semgrep ruleset by default; set HARNESS_SEMGREP_CONFIG to use an organization ruleset."] });
   addCommandCheck(checks, { id: "trivy", label: "Trivy", command: "trivy", required: true, fix: ["Install Trivy through Aqua Security packages, Homebrew, winget, choco, or another OS-approved package manager."] });
   addCommandCheck(checks, { id: "docker", label: "Docker", command: "docker", required: false, fix: ["Install Docker or Podman for Linux runtime validation."] });
   addCommandCheck(checks, { id: "podman", label: "Podman", command: "podman", required: false, fix: ["Install Podman or Docker for Linux runtime validation."] });
+  const runtimeReadiness = buildRuntimeSandboxReadiness();
+  checks.push({
+    id: "local-runtime-sandbox",
+    label: "Local Runtime Sandbox",
+    status: runtimeReadiness.resolution.readiness_status === "ready"
+      ? "pass"
+      : runtimeReadiness.resolution.readiness_status === "ready_with_warnings"
+        ? "warn"
+        : "fail",
+    summary: runtimeReadiness.resolution.readiness_status === "blocked"
+      ? `Local Runtime Sandbox blocked: ${runtimeReadiness.resolution.blockers.join("; ") || "no supported backend available"}.`
+      : `Local Runtime Sandbox selected ${runtimeReadiness.resolution.selected_backend} (${runtimeReadiness.resolution.readiness_status}).`,
+    details: runtimeReadiness as unknown as Record<string, unknown>,
+    fix: runtimeReadiness.resolution.readiness_status === "blocked" ? runtimeReadiness.setup_commands : undefined
+  });
   const postgresConfig = resolvePostgresConnectionConfig();
   const psql = commandVersion(envValue("HARNESS_PSQL_COMMAND") ?? "psql", ["--version"], process.platform === "win32");
   checks.push({
@@ -320,10 +336,11 @@ export function printOnboarding(args: { dryRun?: boolean } = {}): void {
   console.log("Next steps:");
   console.log("1. Configure provider credentials in .env or the web UI Settings page.");
   console.log("2. Run npm run scan -- doctor.");
-  console.log("3. Install optional static tools flagged by doctor: scorecard, semgrep, trivy.");
-  console.log("4. Run npm run scan -- validate-fixtures --llm-provider mock.");
-  console.log("5. Start the local app with npm run oss and open http://127.0.0.1:8788.");
-  console.log("6. Run your first static repo audit before trying runtime validation.");
+  console.log("3. Install static tools flagged by doctor: scorecard, semgrep, trivy.");
+  console.log("4. Configure Local Runtime Sandbox with npm run scan -- setup-runtime --dry-run.");
+  console.log("5. Run npm run scan -- validate-fixtures --llm-provider mock.");
+  console.log("6. Run npm run scan -- validate-runtime-fixtures when local runtime is ready.");
+  console.log("7. Start the local app with npm run oss and open http://127.0.0.1:8788.");
 }
 
 export function runOnboarding(args: { dryRun?: boolean; skipDoctor?: boolean; skipFixtures?: boolean } = {}): DoctorReport | null {
@@ -373,16 +390,31 @@ export function runOnboarding(args: { dryRun?: boolean; skipDoctor?: boolean; sk
   }
 
   console.log("");
-  console.log("Step 4/5: Fixture validation");
+  console.log("Step 4/5: Local Runtime Sandbox");
+  const runtimeCheck = report.checks.find((check) => check.id === "local-runtime-sandbox");
+  console.log(runtimeCheck?.summary || "Local Runtime Sandbox readiness was not reported.");
+  if (runtimeCheck?.status !== "pass") {
+    console.log("Preview runtime setup guidance:");
+    console.log("  npm run scan -- setup-runtime --dry-run");
+    console.log("Verify runtime readiness:");
+    console.log("  npm run scan -- runtime-doctor");
+  } else {
+    console.log("Runtime-validated audits are launchable from this machine.");
+  }
+
+  console.log("");
+  console.log("Step 5/6: Fixture validation");
   if (args.skipFixtures) {
     console.log("Fixture validation skipped by flag.");
   } else {
     console.log("Run the offline smoke fixtures before auditing real repos:");
     console.log("  npm run scan -- validate-fixtures --llm-provider mock");
+    console.log("When Local Runtime Sandbox is ready, run:");
+    console.log("  npm run scan -- validate-runtime-fixtures");
   }
 
   console.log("");
-  console.log("Step 5/5: Start local UI");
+  console.log("Step 6/6: Start local UI");
   console.log("  npm run oss");
   console.log("  open http://127.0.0.1:8788");
   console.log("The web UI will use the external tool paths recorded in .env when the local API starts.");

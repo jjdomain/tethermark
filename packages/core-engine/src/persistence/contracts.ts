@@ -486,6 +486,80 @@ export interface PersistedUiSettingsRecord {
   learning_json: unknown;
 }
 
+export interface PersistedRuntimeSandboxReadinessRecord {
+  id: string;
+  workspace_id: string;
+  project_id: string;
+  provider_id: "local_runtime";
+  selected_backend: string;
+  readiness_status: "ready" | "ready_with_warnings" | "blocked";
+  candidates_json: unknown;
+  settings_json: unknown;
+  warnings_json: unknown;
+  blockers_json: unknown;
+  generated_at: string;
+}
+
+export interface PersistedRuntimeValidationRunRecord {
+  id: string;
+  run_id: string;
+  workspace_id: string;
+  project_id: string;
+  provider_id: "local_runtime";
+  selected_backend: string;
+  readiness_status: "ready" | "ready_with_warnings" | "blocked";
+  policy_json: unknown;
+  plan_json: unknown;
+  result_count: number;
+  created_at: string;
+}
+
+export interface PersistedRuntimeValidationStepRecord {
+  id: string;
+  run_id: string;
+  workspace_id: string;
+  project_id: string;
+  step_id: string;
+  provider_id: "local_runtime";
+  selected_backend: string;
+  phase: string | null;
+  adapter: string | null;
+  command_json: unknown;
+  status: string;
+  exit_code: number | null;
+  duration_ms: number | null;
+  stdout_excerpt: string | null;
+  stderr_excerpt: string | null;
+  artifact_json: unknown;
+  checked_at: string;
+}
+
+export interface PersistedRuntimeValidationArtifactRecord {
+  id: string;
+  run_id: string;
+  workspace_id: string;
+  project_id: string;
+  artifact_type: string;
+  path: string | null;
+  summary: string;
+  metadata_json: unknown;
+  created_at: string;
+}
+
+export interface PersistedRuntimeSandboxEventRecord {
+  id: string;
+  run_id: string | null;
+  workspace_id: string;
+  project_id: string;
+  event_type: string;
+  level: "info" | "warn" | "error";
+  provider_id: "local_runtime";
+  selected_backend: string;
+  summary: string;
+  details_json: unknown;
+  created_at: string;
+}
+
 export interface PersistedUiDocumentRecord {
   id: string;
   scope: "workspace_project";

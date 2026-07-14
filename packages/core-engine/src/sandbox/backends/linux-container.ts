@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 
+import { buildRuntimeExecutionPolicy, buildRuntimeSandboxReadiness } from "../../../../validation-runner/src/index.js";
 import type { AuditRequest, ContainerWorkspaceContract, SandboxExecutionPlan, SandboxExecutionResult, SandboxExecutionStep, SandboxSession } from "../../contracts.js";
 import { createId } from "../../utils.js";
 import { buildSourceProvenance, cloneRepo, collectStorageUsage, inferGitRepoUrl, mirrorDirectory, resolvePinnedCheckoutRef } from "./shared.js";
@@ -59,7 +60,7 @@ function truncateOutput(value: string | Buffer | null | undefined): string | nul
 }
 
 function isHostSandboxExecutionEnabled(): boolean {
-  return process.env.HARNESS_ENABLE_HOST_SANDBOX_EXECUTION === "1";
+  return process.env.HARNESS_ENABLE_RUNTIME_VALIDATION === "1" || process.env.HARNESS_ENABLE_HOST_SANDBOX_EXECUTION === "1";
 }
 
 function getStepTimeoutMs(phase: SandboxExecutionStep["phase"]): number {
@@ -81,7 +82,11 @@ function getStepTimeoutMs(phase: SandboxExecutionStep["phase"]): number {
 
 async function commandExists(command: string): Promise<boolean> {
   try {
-    await execFileAsync("which", [command], { maxBuffer: 1024 * 1024 });
+    if (process.platform === "win32") {
+      await execFileAsync("where", [command], { maxBuffer: 1024 * 1024, shell: true });
+    } else {
+      await execFileAsync("which", [command], { maxBuffer: 1024 * 1024 });
+    }
     return true;
   } catch {
     return false;
@@ -1122,6 +1127,18 @@ export class LinuxContainerSandboxBackend {
     const targetDir = path.join(sandboxRoot, "target");
     const artifactDir = path.join(sandboxRoot, "artifacts");
     const runtime = await detectContainerRuntime();
+    const runtimeSettings = (request.hints as any)?.runtime_sandbox ?? null;
+    const runtimeReadiness = buildRuntimeSandboxReadiness({
+      settings: runtimeSettings,
+      target: {
+        source_type: request.repo_url ? "repo" : request.local_path ? "path" : request.endpoint_url ? "endpoint" : null,
+        trusted: Boolean(request.local_path)
+      }
+    });
+    const runtimePolicy = buildRuntimeExecutionPolicy({
+      settings: runtimeSettings,
+      selectedBackend: runtimeReadiness.resolution.selected_backend
+    });
 
     await fs.mkdir(sandboxRoot, { recursive: true });
     await fs.mkdir(targetDir, { recursive: true });
@@ -1150,13 +1167,14 @@ export class LinuxContainerSandboxBackend {
       target_dir: targetDir,
       run_mode: runMode,
       enforcement_notes: [
-        "Linux container sandbox backend.",
+        "Local Runtime Sandbox backend.",
         "Per-run target and artifact directories are prepared for container mounting.",
         `Derived ${executionPlan.steps.length} bounded execution step(s) for ${runMode} mode.`,
         `Execution readiness is ${executionPlan.readiness_status}.`,
+        `Resolved local runtime backend: ${runtimeReadiness.resolution.selected_backend}.`,
         isHostSandboxExecutionEnabled()
-          ? "Bounded host execution is enabled; derived steps were attempted with per-step timeouts."
-          : "Bounded host execution is disabled; execution results reflect readiness probes only.",
+          ? "Local runtime execution is enabled; derived steps were attempted with per-step timeouts."
+          : "Local runtime execution is disabled; execution results reflect readiness probes only.",
         "Repository provenance and storage usage are captured before execution phases."
       ],
       command_policy: {
@@ -1202,6 +1220,9 @@ export class LinuxContainerSandboxBackend {
       },
       execution_plan: executionPlan,
       execution_results: executionResults,
+      runtime_sandbox_readiness: runtimeReadiness,
+      runtime_backend_resolution: runtimeReadiness.resolution,
+      runtime_execution_policy: runtimePolicy,
       source_provenance: buildSourceProvenance({ repoUrl: request.repo_url, localPath: request.local_path, endpointUrl: request.endpoint_url, commitSha, upstreamRepoUrl }),
       storage_usage: storageUsage
     };

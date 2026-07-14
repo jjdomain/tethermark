@@ -230,10 +230,11 @@ function appendLimited(current: string, chunk: Buffer, limit = 20_000): string {
   return next.length > limit ? next.slice(next.length - limit) : next;
 }
 
-function runProcess(command: string, args: string[], stdin: string, timeoutMs: number): Promise<ProcessResult> {
+function runProcess(command: string, args: string[], stdin: string, timeoutMs: number, env?: NodeJS.ProcessEnv): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       stdio: ["pipe", "pipe", "pipe"],
+      env,
       windowsHide: true
     });
     let stdout = "";
@@ -311,7 +312,8 @@ export class OpenAICodexCliProvider implements ModelProvider {
     private readonly command = readEnv("AUDIT_LLM_CODEX_COMMAND") ?? readEnv("CODEX_COMMAND") ?? "codex",
     private readonly sandbox = readEnv("AUDIT_LLM_CODEX_SANDBOX") ?? "read-only",
     private readonly timeoutMs = readNumberEnv("AUDIT_LLM_CODEX_TIMEOUT_MS", 600_000),
-    private readonly commandPrefixArgs: string[] = []
+    private readonly commandPrefixArgs: string[] = [],
+    private readonly processEnv?: NodeJS.ProcessEnv
   ) {
     const resolved = resolveCodexCommand(this.command, this.commandPrefixArgs);
     this.resolvedCommand = resolved.command;
@@ -338,7 +340,7 @@ export class OpenAICodexCliProvider implements ModelProvider {
       if (this.modelName) {
         args.push("--model", this.modelName);
       }
-      const result = await runProcess(this.resolvedCommand, args, buildCodexPrompt(request), this.timeoutMs);
+      const result = await runProcess(this.resolvedCommand, args, buildCodexPrompt(request), this.timeoutMs, this.processEnv);
       if (result.exitCode !== 0) {
         throw new Error(`Codex CLI exited with code ${result.exitCode}. ${result.stderr || result.stdout}`.trim());
       }

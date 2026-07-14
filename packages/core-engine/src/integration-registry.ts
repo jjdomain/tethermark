@@ -44,19 +44,19 @@ export interface IntegrationDefinition {
 const BUILTIN_INTEGRATIONS: IntegrationDefinition[] = [
   {
     id: "github_outbound",
-    name: "GitHub Draft Export",
-    description: "Draft-only GitHub issue, pull request comment, label, and check payloads for manual use.",
+    name: "GitHub Export Drafts",
+    description: "Create GitHub-ready issue, pull request comment, label, and check payloads that an operator can review and copy manually.",
     mode: "manual",
     notes: [
-      "Disabled by default and never posts from OSS.",
-      "Token-backed verification and delivery live in the hosted product."
+      "Disabled by default.",
+      "This local installation creates drafts only; it does not post to GitHub automatically."
     ],
     credential_fields: []
   },
   {
     id: "generic_webhook",
-    name: "Generic Automation Webhook",
-    description: "Optional signed webhook mirror for OSS automation events like run completion and rerun requests.",
+    name: "Audit Event Webhook",
+    description: "Send selected audit events to a webhook URL you provide, such as run completion or rerun requests.",
     mode: "webhook",
     notes: [
       "Only sends events explicitly selected in settings.",
@@ -70,7 +70,7 @@ const BUILTIN_INTEGRATIONS: IntegrationDefinition[] = [
         secret: false,
         required: false,
         placeholder: "https://example.internal/hooks/audit",
-        help_text: "Target URL for signed OSS automation event delivery.",
+        help_text: "Target URL for signed audit event delivery.",
         env_var: null,
         location: "integrations"
       },
@@ -159,7 +159,7 @@ function describeIntegrationStatus(
       : "missing",
     note: integration.id === "github_outbound"
       ? enabled
-        ? "GitHub draft export is enabled. Posting and webhook sync are hosted-only."
+        ? "GitHub draft export is enabled. This installation prepares drafts only and does not post to GitHub automatically. Use Tethermark Cloud for automatic posting."
         : "GitHub draft export is disabled."
       : enabled
         ? "Generic webhook delivery is configured."

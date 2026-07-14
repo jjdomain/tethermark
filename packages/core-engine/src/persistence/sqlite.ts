@@ -12,6 +12,7 @@ const require = createRequire(import.meta.url);
 const initSqlJs: any = require("sql.js/dist/sql-wasm.js");
 
 let sqlJsPromise: Promise<any> | null = null;
+const sqliteSaveQueues = new Map<string, Promise<void>>();
 
 interface PendingRecordUpsert {
   tableName: string;
@@ -271,6 +272,77 @@ export async function readLocalPersistenceMetadata(rootDir: string): Promise<Loc
   return readPersistenceMetadata(rootDir);
 }
 
+async function waitForWritablePathError(error: unknown, attempt: number): Promise<boolean> {
+  const code = typeof error === "object" && error && "code" in error ? String((error as { code?: unknown }).code) : "";
+  if (!["EBUSY", "EPERM", "EACCES"].includes(code)) return false;
+  await new Promise((resolve) => setTimeout(resolve, Math.min(1500, 75 * (attempt + 1) * (attempt + 1))));
+  return true;
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function tolerateMissingTempDuringCleanup(error: unknown, tempPath: string, dbPath: string): Promise<boolean> {
+  const code = typeof error === "object" && error && "code" in error ? String((error as { code?: unknown }).code) : "";
+  if (code !== "ENOENT") return false;
+  const tempExists = await pathExists(tempPath);
+  if (tempExists) return false;
+  const rootExists = await pathExists(path.dirname(dbPath));
+  if (!rootExists) return true;
+  return pathExists(dbPath);
+}
+
+async function replaceSqliteFile(tempPath: string, dbPath: string): Promise<void> {
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    try {
+      await fs.rename(tempPath, dbPath);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (await tolerateMissingTempDuringCleanup(error, tempPath, dbPath)) return;
+      if (!await waitForWritablePathError(error, attempt)) throw error;
+    }
+  }
+
+  // Windows can intermittently reject replacing an existing file even after
+  // retries when scanners or another request briefly touch the destination.
+  // Copying over the existing file preserves the destination path and avoids
+  // the rename-over-existing edge while the per-path queue prevents same-process
+  // writers from interleaving bytes.
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    try {
+      await fs.copyFile(tempPath, dbPath);
+      await fs.rm(tempPath, { force: true });
+      return;
+    } catch (error) {
+      lastError = error;
+      if (await tolerateMissingTempDuringCleanup(error, tempPath, dbPath)) return;
+      if (!await waitForWritablePathError(error, attempt)) throw error;
+    }
+  }
+  throw lastError;
+}
+
+async function enqueueSqliteSave(dbPath: string, task: () => Promise<void>): Promise<void> {
+  const previous = sqliteSaveQueues.get(dbPath) ?? Promise.resolve();
+  const next = previous.catch(() => undefined).then(task);
+  sqliteSaveQueues.set(dbPath, next);
+  try {
+    await next;
+  } finally {
+    if (sqliteSaveQueues.get(dbPath) === next) {
+      sqliteSaveQueues.delete(dbPath);
+    }
+  }
+}
+
 export async function saveSqliteDatabase(rootDir: string, db: any, databaseMode: DatabaseMode = "local", bundleExportPolicy?: BundleExportPolicy): Promise<void> {
   if (isRemoteDatabase(db)) {
     ensureSqliteSchema(db);
@@ -280,20 +352,16 @@ export async function saveSqliteDatabase(rootDir: string, db: any, databaseMode:
   await fs.mkdir(rootDir, { recursive: true });
   const bytes = db.export();
   const dbPath = sqliteDbPath(rootDir);
-  const tempPath = `${dbPath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
-  await fs.writeFile(tempPath, Buffer.from(bytes));
-  for (let attempt = 0; attempt < 8; attempt += 1) {
+  await enqueueSqliteSave(dbPath, async () => {
+    const tempPath = `${dbPath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
     try {
-      await fs.rename(tempPath, dbPath);
-      break;
+      await fs.writeFile(tempPath, Buffer.from(bytes));
+      await replaceSqliteFile(tempPath, dbPath);
     } catch (error) {
-      const code = typeof error === "object" && error && "code" in error ? String((error as { code?: unknown }).code) : "";
-      if (!["EBUSY", "EPERM", "EACCES"].includes(code) || attempt === 7) {
-        throw error;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+      await fs.rm(tempPath, { force: true }).catch(() => undefined);
+      throw error;
     }
-  }
+  });
   const { resolveBundleExportPolicy } = await import("./bundle-exports.js");
   await writePersistenceMetadata(rootDir, databaseMode, bundleExportPolicy ?? resolveBundleExportPolicy(databaseMode));
 }

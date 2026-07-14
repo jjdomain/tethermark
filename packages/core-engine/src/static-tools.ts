@@ -1,6 +1,4 @@
-import { spawnSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 import { buildToolPathEnv, staticToolPathDetails } from "./tool-paths.js";
@@ -123,12 +121,45 @@ const TOOL_DEFS: Array<{
   }
 ];
 
-function firstLine(value: string): string {
-  return value.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? "";
-}
-
 function normalizeGatePolicy(value: unknown): StaticToolGatePolicy {
   return value === "require_local_scanners" || value === "require_all" ? value : "warn";
+}
+
+function executableCandidates(command: string): string[] {
+  const parsed = path.parse(command);
+  if (parsed.dir || parsed.ext || process.platform !== "win32") return [command];
+  const extensions = String(process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM")
+    .split(";")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return [
+    command,
+    ...extensions.map((extension) => `${command}${extension.toLowerCase()}`),
+    ...extensions.map((extension) => `${command}${extension.toUpperCase()}`)
+  ];
+}
+
+function isFile(filePath: string): boolean {
+  try {
+    return fs.statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function findCommandOnPath(command: string): string | null {
+  const candidates = executableCandidates(command);
+  if (path.isAbsolute(command) || path.parse(command).dir) {
+    return candidates.find(isFile) ?? null;
+  }
+  const pathEnv = buildToolPathEnv();
+  for (const dir of pathEnv.split(path.delimiter).map((item) => item.trim()).filter(Boolean)) {
+    for (const candidate of candidates) {
+      const resolved = path.join(dir, candidate);
+      if (isFile(resolved)) return resolved;
+    }
+  }
+  return null;
 }
 
 function normalizeSelectedToolIds(value: unknown): string[] {
@@ -136,23 +167,6 @@ function normalizeSelectedToolIds(value: unknown): string[] {
   const mandatory = TOOL_DEFS.filter((tool) => tool.mandatory).map((tool) => tool.id);
   const raw = Array.isArray(value) ? value : TOOL_DEFS.filter((tool) => tool.default_enabled).map((tool) => tool.id);
   return [...new Set([...mandatory, ...raw.filter((item): item is string => typeof item === "string" && known.has(item))])];
-}
-
-function semgrepProbeArgs(): string[] {
-  const root = path.join(os.tmpdir(), "tethermark-semgrep-probe");
-  const configPath = path.join(root, "rules.yml");
-  const targetPath = path.join(root, "target.txt");
-  fs.mkdirSync(root, { recursive: true });
-  fs.writeFileSync(configPath, [
-    "rules:",
-    "  - id: tethermark.probe",
-    "    message: Tethermark Semgrep probe.",
-    "    severity: INFO",
-    "    languages: [generic]",
-    "    pattern-regex: tethermark-semgrep-probe"
-  ].join("\n"), "utf8");
-  fs.writeFileSync(targetPath, "tethermark-semgrep-probe\n", "utf8");
-  return ["scan", "--config", configPath, "--json", "--metrics", "off", targetPath];
 }
 
 function probeTool(def: (typeof TOOL_DEFS)[number], selectedToolIds: Set<string>): StaticToolStatus {
@@ -194,20 +208,10 @@ function probeTool(def: (typeof TOOL_DEFS)[number], selectedToolIds: Set<string>
       fix: def.fix
     };
   }
-  const probeArgs = def.id === "semgrep" ? semgrepProbeArgs() : def.versionArgs;
-  const result = spawnSync(def.command, probeArgs, {
-    encoding: "utf8",
-    env: { ...process.env, PATH: buildToolPathEnv() },
-    shell: process.platform === "win32",
-    timeout: def.id === "semgrep" ? 120_000 : 10_000,
-    windowsHide: true
-  });
-  const combined = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
-  const errorMessage = result.error?.message ?? "";
-  const deniedOrTimedOut = Boolean(errorMessage) && /denied|eperm|timedout|timeout/i.test(errorMessage);
-  const installed = result.status === 0 && !result.error;
-  const status = installed ? "available" : deniedOrTimedOut ? "blocked" : "missing";
-  const message = errorMessage || firstLine(combined) || `exit ${result.status ?? "unknown"}`;
+  const resolvedCommand = findCommandOnPath(def.command);
+  const installed = Boolean(resolvedCommand);
+  const status = installed ? "available" : "missing";
+  const message = installed ? `found at ${resolvedCommand}` : "not found on trusted tools path";
   return {
     id: def.id as StaticToolId,
     label: def.label,
@@ -221,8 +225,8 @@ function probeTool(def: (typeof TOOL_DEFS)[number], selectedToolIds: Set<string>
     fallback: def.fallback,
     installed,
     status,
-    version: installed ? (def.id === "semgrep" ? "available" : firstLine(combined) || "available") : null,
-    summary: installed ? `${def.label} is available.` : `${def.label} is ${status}: ${message}.`,
+    version: installed ? "path-detected" : null,
+    summary: installed ? `${def.label} is available (${message}).` : `${def.label} is ${status}: ${message}.`,
     fix: def.fix
   };
 }

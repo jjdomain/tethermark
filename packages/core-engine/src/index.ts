@@ -16,6 +16,7 @@ export * from "./llm-provider-registry.js";
 export * from "./integration-registry.js";
 export * from "./preflight.js";
 export * from "./static-tools.js";
+export * from "../../validation-runner/src/index.js";
 export * from "./tool-runner.js";
 export * from "./standards-audit.js";
 export * from "./orchestrator.js";
@@ -56,6 +57,7 @@ export { createPersistedWebhookDelivery, listPersistedWebhookDeliveries } from "
 export { SqliteAssistantStorage } from "./persistence/assistant.js";
 export { listPersistedRuntimeFollowups, readPersistedRuntimeFollowup, upsertRuntimeFollowupFromReviewAction, markRuntimeFollowupLaunched, markRuntimeFollowupJobTerminal } from "./persistence/runtime-followups.js";
 export { readPersistedRemediationItemsForRun, upsertPersistedRemediationItem, updatePersistedRemediationItem } from "./persistence/remediation-items.js";
+export { persistRuntimeValidationRecords, readPersistedRuntimeValidation } from "./persistence/runtime-validation.js";
 export {
   createLearningExperiment,
   extractLearningEventsForRun,

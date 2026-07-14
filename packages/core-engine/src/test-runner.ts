@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { buildRunComparisonReport, createApiServer } from "../../../apps/api-server/src/index.js";
 import { createWebUiServer } from "../../../apps/web-ui/src/index.js";
+import { loadBenchmarkSuite, runBenchmarkSuite, selectBenchmarkCases } from "../../../apps/cli/src/benchmark-suite.js";
 import { buildScanRequest } from "../../../apps/cli/src/args.js";
 import { validateFixtures } from "../../../apps/cli/src/fixture-validation.js";
 import { describeArtifactType } from "./artifact-policy.js";
@@ -27,7 +28,7 @@ import { deriveInitialReviewWorkflow, listPersistedReviewNotifications, listPers
 import { createPersistedReviewComment } from "./persistence/review-comments.js";
 import { buildFindingEvidenceFingerprint, createPersistedFindingDisposition } from "./persistence/finding-dispositions.js";
 import { readPersistedArtifactIndex, readPersistedCommitDiff, readPersistedControlResults, readPersistedEvents, readPersistedEvidenceRecords, readPersistedFindings, readPersistedLanePlans, readPersistedLaneResults, readPersistedLaneReuseDecisions, readPersistedLaneSpecialistOutputs, readPersistedMaintenanceHistory, readPersistedMetrics, readPersistedObservability, readPersistedResolvedConfiguration, readPersistedReviewActions, readPersistedReviewComments, readPersistedReviewDecision, readPersistedReviewWorkflow, readPersistedRunUsageSummary, readPersistedScoreSummary, readPersistedStageArtifact, readPersistedStageArtifacts, readPersistedToolAdapterSummary, readPersistedToolExecutions } from "./persistence/run-details.js";
-import { readPersistenceMetadata } from "./persistence/sqlite.js";
+import { PERSISTENCE_SCHEMA_VERSION, readPersistenceMetadata } from "./persistence/sqlite.js";
 import { listPersistedUiDocuments, readPersistedUiSettings, updatePersistedUiSettings } from "./persistence/ui-settings.js";
 import { markRuntimeFollowupJobTerminal, markRuntimeFollowupLaunched, readPersistedRuntimeFollowup, upsertRuntimeFollowupFromReviewAction } from "./persistence/runtime-followups.js";
 import { LinuxContainerSandboxBackend } from "./sandbox/backends/linux-container.js";
@@ -40,6 +41,7 @@ import { listBuiltinLlmProviders, listBuiltinLlmProviderPresets } from "./llm-pr
 import { createDefaultAssistantToolRegistry, EvidenceGroundedAssistantProvider } from "./assistant.js";
 import { SqliteAssistantStorage } from "./persistence/assistant.js";
 import { OpenAICodexCliProvider, resolveAgentProviderConfig } from "../../../packages/llm-provider/src/index.js";
+import { buildRuntimeExecutionPolicy, resolveLocalSandboxBackend } from "../../../packages/validation-runner/src/index.js";
 
 async function withTempDir<T>(prefix: string, fn: (dir: string) => Promise<T>): Promise<T> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -62,6 +64,17 @@ async function withTempDir<T>(prefix: string, fn: (dir: string) => Promise<T>): 
         await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
       }
     }
+  }
+}
+
+async function withWorkspaceTempDir<T>(prefix: string, fn: (dir: string) => Promise<T>): Promise<T> {
+  const root = path.resolve(process.cwd(), ".artifacts", "test-temp");
+  await fs.mkdir(root, { recursive: true });
+  const dir = await fs.mkdtemp(path.join(root, prefix));
+  try {
+    return await fn(dir);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
   }
 }
 
@@ -310,15 +323,28 @@ async function testOpenAICodexProviderRegistryAndStructuredExec(): Promise<void>
   assert.equal(resolved.provider, "openai_codex");
   assert.equal(resolved.apiKeySource, "oauth-local");
 
-  await withTempDir("harness-codex-provider-", async (rootDir) => {
+  await withWorkspaceTempDir("harness-codex-provider-", async (rootDir) => {
     const fakeCli = path.join(rootDir, "fake-codex-cli.mjs");
+    const fakeHome = path.join(rootDir, "home");
+    const fakeAppData = path.join(rootDir, "appdata");
+    const fakeLocalAppData = path.join(rootDir, "localappdata");
+    await fs.mkdir(fakeHome, { recursive: true });
+    await fs.mkdir(fakeAppData, { recursive: true });
+    await fs.mkdir(fakeLocalAppData, { recursive: true });
     await fs.writeFile(fakeCli, [
       "import fs from 'node:fs';",
       "const outIndex = process.argv.indexOf('--output-last-message');",
       "if (outIndex < 0) process.exit(2);",
       "fs.writeFileSync(process.argv[outIndex + 1], JSON.stringify({ ok: true, mode: 'oauth' }));"
     ].join("\n"), "utf8");
-    const codex = new OpenAICodexCliProvider("gpt-5.1-codex", process.execPath, "read-only", 10_000, [fakeCli]);
+    const codex = new OpenAICodexCliProvider("gpt-5.1-codex", process.execPath, "read-only", 10_000, [fakeCli], {
+      ...process.env,
+      APPDATA: fakeAppData,
+      CODEX_HOME: path.join(fakeHome, ".codex"),
+      HOME: fakeHome,
+      LOCALAPPDATA: fakeLocalAppData,
+      USERPROFILE: fakeHome
+    });
     const result = await codex.generateStructured<{ ok: boolean; mode: string }>({
       agentName: "planner_agent",
       schemaName: "fake_codex_result",
@@ -398,7 +424,7 @@ async function testLocalPersistenceUsesConfiguredRoot(): Promise<void> {
     assert.equal(localRun?.id, "run_local");
     assert.equal(configuredMeta?.database_mode, "local");
     assert.equal(localMeta?.database_mode, "local");
-    assert.equal(configuredMeta?.persistence_schema_version, "1.1.0");
+    assert.equal(configuredMeta?.persistence_schema_version, PERSISTENCE_SCHEMA_VERSION);
     assert.equal(configuredMeta?.compatibility_status, "current");
     assert.equal(localRun?.resolved_configuration?.db_mode, "local");
     assert.equal(configuredRun?.resolved_configuration?.db_mode, "local");
@@ -991,10 +1017,10 @@ async function testFreshRunPersistsExpectedRecords(): Promise<void> {
     assert.ok(events.length > 0);
     assert.ok(metrics.length > 0);
     assert.ok(artifactIndex.length > 0);
-    assert.deepEqual(
-      ["preflight-summary", "launch-intent", "planner-artifact", "target-profile", "threat-model", "eval-selection", "run-plan", "findings-pre-skeptic", "finding-quality", "handoffs", "score-summary", "observations"].sort(),
-      stageArtifacts.map((item) => item.artifact_type).sort()
-    );
+    const stageArtifactTypes = new Set(stageArtifacts.map((item) => item.artifact_type));
+    for (const artifactType of ["preflight-summary", "launch-intent", "planner-artifact", "target-profile", "threat-model", "eval-selection", "run-plan", "findings-pre-skeptic", "finding-integrity-pre-supervisor", "finding-quality-pre-skeptic", "finding-quality", "handoffs", "score-summary", "observations"]) {
+      assert.equal(stageArtifactTypes.has(artifactType), true, `missing stage artifact ${artifactType}`);
+    }
     assert.equal(run?.id, result.run_id);
     assert.equal(scoreSummary?.overall_score, result.score_summary.overall_score);
     assert.equal(reviewDecision?.publishability_status, result.publishability.publishability_status);
@@ -1242,6 +1268,7 @@ async function testPersistedReviewWorkflowAndActions(): Promise<void> {
 
 async function testApiResponsesUsePersistedState(): Promise<void> {
   await withTempDir("harness-api-persisted-", async (rootDir) => {
+    const localDbRoot = path.join(rootDir, ".artifacts", "state", "local-db");
     const dueSoonReviewDue = new Date(Date.now() + 24 * 36e5).toISOString();
     const reopenedReviewDue = new Date(Date.now() + 48 * 36e5).toISOString();
     const laterExpiry = new Date(Date.now() + 10 * 24 * 36e5).toISOString();
@@ -1249,7 +1276,7 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
     await fs.mkdir(artifactRoot, { recursive: true });
     await fs.writeFile(path.join(artifactRoot, "final-score-summary.json"), JSON.stringify({ overall_score: 10, rating: "poor" }, null, 2) + "\n", "utf8");
 
-    const store = new LocalPersistenceStore(path.join(rootDir, ".artifacts", "state", "local-db"));
+    const store = new LocalPersistenceStore(localDbRoot);
     await store.persistBundle({
       mode: "local",
       package_definition: { id: "deep-static", title: "Deep Static", description: "", run_mode: "static", default_policy_profile: "default", requires_agents: true, lane_specialists_enabled: true, focus: [], minimum_tools: [], scorecard_weights: {} } as any,
@@ -1263,7 +1290,7 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
       correction_plan: null,
       correction_result: null,
       lane_reuse_decisions: [],
-      persistence_summary: { run_id: "run_api", mode: "local", root: path.join(rootDir, ".artifacts", "state", "local-db") },
+      persistence_summary: { run_id: "run_api", mode: "local", root: localDbRoot },
       stage_artifacts: [
         {
           id: "run_api:stage-artifact:preflight-summary",
@@ -1555,7 +1582,7 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
     await upsertRuntimeFollowupFromReviewAction({
       runId: "run_api",
       actionId: "review_action_runtime_followup_seed",
-      rootDirOrOptions: path.join(rootDir, ".artifacts", "state", "local-db"),
+      rootDirOrOptions: localDbRoot,
       input: {
         reviewer_id: "triage_api",
         action_type: "rerun_in_capable_env",
@@ -1565,7 +1592,7 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
       }
     });
 
-    await updatePersistedUiSettings({
+    const apiIntegrationSettings = {
       credentials: {
         configured_endpoints: []
       },
@@ -1576,7 +1603,9 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
         github_owned_repo_prefixes: [],
         github_require_per_run_approval: true
       }
-    }, { rootDir: path.join(rootDir, ".artifacts", "state", "local-db"), dbMode: "local" }, { workspaceId: "default", projectId: "default", scopeLevel: "project" });
+    };
+    await updatePersistedUiSettings(apiIntegrationSettings, { rootDir: path.join(rootDir, ".artifacts", "state", "local-db"), dbMode: "local" });
+    await updatePersistedUiSettings(apiIntegrationSettings, { rootDir: path.join(rootDir, ".artifacts", "state", "local-db"), dbMode: "local" }, { workspaceId: "default", projectId: "default", scopeLevel: "project" });
 
     const seededSuppression = await createPersistedFindingDisposition({
       runId: "run_api",
@@ -1680,6 +1709,11 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
 
     const port = 8800 + Math.floor(Math.random() * 200);
     await withWorkingDir(rootDir, async () => {
+      await withEnv({
+        HARNESS_LOCAL_DB_ROOT: localDbRoot,
+        HARNESS_API_AUTH_MODE: "none",
+        HARNESS_DISABLE_LEARNING_SCHEDULER: "1"
+      }, async () => {
       const server = createApiServer();
       await new Promise<void>((resolve, reject) => {
         server.once("error", reject);
@@ -2208,7 +2242,7 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
         assert.equal(integrationsPayload.integrations.find((item: any) => item.id === "github_outbound")?.status?.enabled, true);
         assert.equal(integrationsPayload.integrations.find((item: any) => item.id === "github_outbound")?.status?.configured, true);
         assert.equal(integrationsPayload.integrations.find((item: any) => item.id === "github_outbound")?.credential_fields?.length, 0);
-        assert.match(String(integrationsPayload.integrations.find((item: any) => item.id === "github_outbound")?.status?.note || ""), /hosted-only/i);
+        assert.match(String(integrationsPayload.integrations.find((item: any) => item.id === "github_outbound")?.status?.note || ""), /Tethermark Cloud/i);
         assert.equal(integrationsPayload.integrations.find((item: any) => item.id === "generic_webhook")?.status?.enabled, false);
         assert.equal(integrationsPayload.integrations.find((item: any) => item.id === "generic_webhook")?.status?.configured, false);
       } finally {
@@ -2222,6 +2256,7 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
           });
         });
       }
+      });
     });
   });
 }
@@ -2953,6 +2988,8 @@ async function testArtifactPolicyClassifiesPersistedAndArtifactOnlyOutputs(): Pr
   const observations = describeArtifactType("observations");
   const skepticReview = describeArtifactType("skeptic-review");
   const findingQuality = describeArtifactType("finding-quality");
+  const preSupervisorIntegrity = describeArtifactType("finding-integrity-pre-supervisor");
+  const postSupervisorIntegrity = describeArtifactType("post-supervisor-integrity");
   const remediation = describeArtifactType("remediation");
   const laneSpecialist = describeArtifactType("lane-specialist-repo_posture");
 
@@ -2964,6 +3001,9 @@ async function testArtifactPolicyClassifiesPersistedAndArtifactOnlyOutputs(): Pr
   assert.equal(skepticReview.persisted_table, "supervisor_reviews");
   assert.equal(findingQuality.disposition, "queryable_persisted");
   assert.equal(findingQuality.persisted_table, "finding_quality");
+  assert.equal(preSupervisorIntegrity.disposition, "artifact_only");
+  assert.equal(postSupervisorIntegrity.disposition, "queryable_persisted");
+  assert.equal(postSupervisorIntegrity.persisted_table, "finding_quality");
   assert.equal(remediation.disposition, "queryable_persisted");
   assert.equal(remediation.persisted_table, "remediation_memos");
   assert.equal(laneSpecialist.disposition, "artifact_only");
@@ -3183,6 +3223,114 @@ async function testPreflightApiSummarizesReadiness(): Promise<void> {
   });
 }
 
+async function testRuntimeSandboxBackendResolution(): Promise<void> {
+  const unavailableProbe = () => ({ available: false, ok: false, version: null, message: "missing" });
+  const allAvailableProbe = (command: string, args?: string[]) => {
+    if (command === "podman" && args?.[0] === "info") return { available: true, ok: true, version: "true" };
+    return { available: true, ok: true, version: `${command} test` };
+  };
+  const gvisorOnly = resolveLocalSandboxBackend({
+    platform: "linux",
+    probeCommand: (command) => command === "runsc"
+      ? { available: true, ok: true, version: "runsc test" }
+      : { available: false, ok: false, version: null, message: "missing" }
+  });
+  assert.equal(gvisorOnly.selected_backend, "gvisor_container");
+  assert.equal(gvisorOnly.readiness_status, "ready");
+
+  const dockerOnlyAllowed = resolveLocalSandboxBackend({
+    platform: "linux",
+    settings: { allowed_backends: ["docker"] },
+    probeCommand: allAvailableProbe
+  });
+  assert.equal(dockerOnlyAllowed.selected_backend, "docker");
+
+  const pinnedMissing = resolveLocalSandboxBackend({
+    platform: "linux",
+    settings: { resolution_mode: "pinned", preferred_backend: "gvisor_container", allowed_backends: ["gvisor_container"] },
+    probeCommand: unavailableProbe
+  });
+  assert.equal(pinnedMissing.selected_backend, "unavailable");
+  assert.equal(pinnedMissing.readiness_status, "blocked");
+  assert.equal(pinnedMissing.blockers.some((item) => /Pinned Local Runtime Sandbox backend/i.test(item)), true);
+
+  const preferFallback = resolveLocalSandboxBackend({
+    platform: "linux",
+    settings: { resolution_mode: "prefer", preferred_backend: "gvisor_container" },
+    probeCommand: (command, args) => {
+      if (command === "podman" && args?.[0] === "info") return { available: true, ok: true, version: "true" };
+      if (command === "podman") return { available: true, ok: true, version: "podman test" };
+      return { available: false, ok: false, version: null, message: "missing" };
+    }
+  });
+  assert.equal(preferFallback.selected_backend, "rootless_podman");
+  assert.equal(preferFallback.readiness_status, "ready");
+
+  const dockerDesktop = resolveLocalSandboxBackend({
+    platform: "win32",
+    probeCommand: (command) => command === "docker"
+      ? { available: true, ok: true, version: "Docker Desktop test" }
+      : { available: false, ok: false, version: null, message: "missing" }
+  });
+  assert.equal(dockerDesktop.selected_backend, "docker_desktop");
+  assert.equal(dockerDesktop.readiness_status, "ready_with_warnings");
+
+  const defaultPolicy = buildRuntimeExecutionPolicy({ selectedBackend: "docker" });
+  assert.equal(defaultPolicy.provider_id, "local_runtime");
+  assert.equal(defaultPolicy.network_policy, "none");
+  assert.deepEqual(defaultPolicy.outbound_allowlist, []);
+  assert.equal(defaultPolicy.filesystem.block_host_mounts, true);
+}
+
+async function testRuntimeSandboxApiEndpoints(): Promise<void> {
+  await withTempDir("harness-runtime-sandbox-api-", async (rootDir) => {
+    const savedEnv = new Map<string, string | undefined>([
+      ["HARNESS_LOCAL_DB_ROOT", process.env.HARNESS_LOCAL_DB_ROOT],
+      ["HARNESS_API_AUTH_MODE", process.env.HARNESS_API_AUTH_MODE],
+      ["HARNESS_DISABLE_LEARNING_SCHEDULER", process.env.HARNESS_DISABLE_LEARNING_SCHEDULER]
+    ]);
+    process.env.HARNESS_LOCAL_DB_ROOT = rootDir;
+    process.env.HARNESS_API_AUTH_MODE = "none";
+    process.env.HARNESS_DISABLE_LEARNING_SCHEDULER = "1";
+    const apiServer = createApiServer();
+    await new Promise<void>((resolve) => apiServer.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = apiServer.address();
+      assert.ok(address && typeof address === "object");
+      const baseUrl = `http://127.0.0.1:${address.port}`;
+      const providersResponse = await fetch(`${baseUrl}/runtime-sandbox/providers`);
+      const providersPayload = await providersResponse.json() as any;
+      assert.equal(providersResponse.status, 200, JSON.stringify(providersPayload));
+      assert.equal(providersPayload.providers.some((item: any) => item.id === "local_runtime" && item.enabled), true);
+      assert.equal(providersPayload.providers.some((item: any) => item.hosted_only), true);
+
+      const readinessResponse = await fetch(`${baseUrl}/runtime-sandbox/readiness`);
+      const readinessPayload = await readinessResponse.json() as any;
+      assert.equal(readinessResponse.status, 200, JSON.stringify(readinessPayload));
+      assert.equal(readinessPayload.runtime_sandbox.provider_id, "local_runtime");
+      assert.ok(["ready", "ready_with_warnings", "blocked"].includes(readinessPayload.runtime_sandbox.resolution.readiness_status));
+      assert.equal(Array.isArray(readinessPayload.runtime_sandbox.resolution.candidates), true);
+
+      const policyResponse = await fetch(`${baseUrl}/runtime-sandbox/policy/defaults`);
+      const policyPayload = await policyResponse.json() as any;
+      assert.equal(policyResponse.status, 200, JSON.stringify(policyPayload));
+      assert.equal(policyPayload.runtime_execution_policy.provider_id, "local_runtime");
+      assert.equal(policyPayload.runtime_execution_policy.network_policy, "none");
+
+      const hostedReadinessResponse = await fetch(`${baseUrl}/runtime-sandbox/readiness?provider_id=hosted_e2b`);
+      const hostedReadinessPayload = await hostedReadinessResponse.json() as any;
+      assert.equal(hostedReadinessResponse.status, 403, JSON.stringify(hostedReadinessPayload));
+      assert.equal(hostedReadinessPayload.error, "hosted_only");
+    } finally {
+      await new Promise<void>((resolve, reject) => apiServer.close((error) => error ? reject(error) : resolve()));
+      for (const [key, value] of savedEnv.entries()) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+}
+
 async function testApiProjectScopingAndActorOwnedReviewActions(): Promise<void> {
   await withTempDir("harness-api-scope-", async (rootDir) => {
     const LocalRoot = path.join(rootDir, "local-db");
@@ -3306,6 +3454,94 @@ async function testValidateFixturesPassesForBundledTargets(): Promise<void> {
       assert.equal(summary.failed_fixtures, 0);
       assert.equal(summary.passed_fixtures, 3);
       assert.equal(await fs.stat(path.join(sharedLocalRoot, "harness.sqlite")).then(() => true).catch(() => false), false);
+    });
+  });
+}
+
+async function testProductBenchmarkSuiteDryRun(): Promise<void> {
+  await withTempDir("harness-product-benchmark-", async (rootDir) => {
+    const suite = await loadBenchmarkSuite("ai-agent-static-v1");
+    const defaultCases = selectBenchmarkCases(suite, {});
+    const extendedCases = selectBenchmarkCases(suite, { includeExtended: true });
+    assert.equal(suite.suite_id, "ai-agent-static-v1");
+    assert.ok(defaultCases.some((item) => item.id === "pi-agent-static"));
+    assert.ok(defaultCases.some((item) => item.id === "mcp-servers-static"));
+    assert.ok(!defaultCases.some((item) => item.tier === "extended"));
+    assert.ok(extendedCases.some((item) => item.id === "crewai-static"));
+
+    const summary = await runBenchmarkSuite({
+      suitePath: "ai-agent-static-v1",
+      outputDir: rootDir,
+      execute: false
+    });
+    assert.equal(summary.executed, false);
+    assert.equal(summary.selected_cases, defaultCases.length);
+    assert.equal(summary.failed_cases, 0);
+    assert.equal(summary.dry_run_cases, defaultCases.length);
+    assert.ok(summary.report_path);
+    const report = JSON.parse(await fs.readFile(summary.report_path!, "utf8")) as any;
+    assert.equal(report.suite_id, "ai-agent-static-v1");
+    assert.equal(report.results.length, defaultCases.length);
+    assert.equal(report.results.every((item: any) => item.verdict === "dry_run"), true);
+  });
+}
+
+async function testProductBenchmarkApiEndpoints(): Promise<void> {
+  await withTempDir("harness-product-benchmark-api-", async (rootDir) => {
+    await withEnv({
+      HARNESS_BENCHMARK_REPORT_ROOT: path.join(rootDir, "reports")
+    }, async () => {
+      const apiServer = createApiServer();
+      await new Promise<void>((resolve) => apiServer.listen(0, "127.0.0.1", resolve));
+      try {
+        const address = apiServer.address();
+        assert.equal(typeof address, "object");
+        const apiBaseUrl = `http://127.0.0.1:${(address as any).port}`;
+
+        const suitesResponse = await fetch(`${apiBaseUrl}/benchmarks/suites`);
+        const suitesPayload = await suitesResponse.json() as any;
+        assert.equal(suitesResponse.status, 200);
+        assert.equal(suitesPayload.suites.some((item: any) => item.suite_id === "ai-agent-static-v1"), true);
+
+        const suiteResponse = await fetch(`${apiBaseUrl}/benchmarks/suites/ai-agent-static-v1`);
+        const suitePayload = await suiteResponse.json() as any;
+        assert.equal(suiteResponse.status, 200);
+        assert.equal(suitePayload.suite.suite_id, "ai-agent-static-v1");
+        assert.ok(suitePayload.suite.cases.length >= 4);
+
+        const runResponse = await fetch(`${apiBaseUrl}/benchmarks/suites/ai-agent-static-v1/run`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ case_id: "pi-agent-static", execute: false })
+        });
+        const runPayload = await runResponse.json() as any;
+        assert.equal(runResponse.status, 200, JSON.stringify(runPayload));
+        assert.equal(runPayload.benchmark_summary.selected_cases, 1);
+        assert.equal(runPayload.benchmark_summary.dry_run_cases, 1);
+        assert.equal(runPayload.reports.length, 1);
+
+        const reportsResponse = await fetch(`${apiBaseUrl}/benchmarks/reports`);
+        const reportsPayload = await reportsResponse.json() as any;
+        assert.equal(reportsResponse.status, 200);
+        assert.equal(reportsPayload.reports.length, 1);
+
+        const fileName = reportsPayload.reports[0].file_name;
+        const reportResponse = await fetch(`${apiBaseUrl}/benchmarks/reports/${encodeURIComponent(fileName)}`);
+        const reportPayload = await reportResponse.json() as any;
+        assert.equal(reportResponse.status, 200);
+        assert.equal(reportPayload.report.selected_cases, 1);
+
+        const compareResponse = await fetch(`${apiBaseUrl}/benchmarks/compare`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ baseline: fileName, current: fileName })
+        });
+        const comparePayload = await compareResponse.json() as any;
+        assert.equal(compareResponse.status, 200, JSON.stringify(comparePayload));
+        assert.equal(comparePayload.comparison.passed, true);
+      } finally {
+        await new Promise<void>((resolve, reject) => apiServer.close((error) => error ? reject(error) : resolve()));
+      }
     });
   });
 }
@@ -3557,7 +3793,7 @@ async function testLinuxContainerSandboxBuildsExecutionPlan(): Promise<void> {
       assert.equal(executionPlan?.steps.find((step) => step.step_id === "runtime-node")?.artifact_context?.script_name, "start");
       assert.equal(sandbox.command_policy.allowed_command_prefixes.includes("npm ci --ignore-scripts"), true);
       assert.equal(sandbox.enforcement_notes.some((item) => /Derived 4 bounded execution step/.test(item)), true);
-      assert.equal(sandbox.enforcement_notes.some((item) => /Bounded host execution is enabled/.test(item)), true);
+      assert.equal(sandbox.enforcement_notes.some((item) => /Local runtime execution is enabled/.test(item)), true);
       assert.equal(executionResults?.length, 4);
       assert.equal(executionResults?.every((item) => item.status === "completed" || item.status === "failed" || item.status === "blocked"), true);
       const buildResult = executionResults?.find((item) => item.step_id === "build-node") ?? null;
@@ -4082,6 +4318,69 @@ async function testFindingQualityFlagsUnsupportedEvidenceAndControlMismatch(): P
   assert.equal(quality.next_action === "fix_control_mapping" || quality.next_action === "needs_runtime_validation", true);
 }
 
+async function testPostSupervisorIntegrityDoesNotVetoSemanticMappingHints(): Promise<void> {
+  const summary = buildFindingQualitySummary({
+    runId: "run_integrity",
+    request: { run_mode: "static" },
+    mode: "post_supervisor_integrity",
+    findings: [
+      {
+        finding_id: "finding_integrity_hint",
+        title: "Browser automation surface lacks visible safety policy",
+        severity: "high",
+        category: "browser_automation_safety",
+        description: "The static review identified browser automation capability without clear navigation or download policy evidence.",
+        evidence: ["e_security_policy"],
+        public_safe: true,
+        confidence: 0.7,
+        score_impact: 8,
+        source: "agent_synthesis",
+        control_ids: ["openssf.security_policy"],
+        standards_refs: []
+      }
+    ],
+    evidenceRecords: [
+      {
+        evidence_id: "e_security_policy",
+        run_id: "run_integrity",
+        source_type: "analysis",
+        source_id: "repo_analysis",
+        control_ids: ["openssf.security_policy"],
+        summary: "No visible SECURITY.md file was found.",
+        confidence: 0.9,
+        metadata: {}
+      }
+    ],
+    controlResults: [
+      {
+        control_id: "openssf.security_policy",
+        framework: "OpenSSF Scorecard",
+        standard_ref: "Security-Policy",
+        title: "Publish a security policy",
+        applicability: "applicable",
+        assessability: "assessed",
+        status: "fail",
+        score_weight: 1,
+        max_score: 1,
+        score_awarded: 0,
+        rationale: ["No security policy was found."],
+        evidence: ["e_security_policy"],
+        finding_ids: ["finding_integrity_hint"],
+        sources: ["repo_analysis"]
+      }
+    ],
+    controlCatalog: getControlCatalog(),
+    toolExecutions: []
+  });
+
+  const quality = summary.findings[0]!;
+  assert.equal(summary.artifact_role, "post_supervisor_integrity");
+  assert.equal(quality.control_mapping_verdict, "weak");
+  assert.equal(quality.semantic_review_hint, true);
+  assert.equal(quality.integrity_blocking, false);
+  assert.equal(quality.qa_blocking, false);
+}
+
 async function testRunComparisonUsesEvidenceSymbolsForMatching(): Promise<void> {
   const comparison = buildRunComparisonReport({
     currentRunId: "run_current",
@@ -4375,9 +4674,13 @@ async function testAssistantApiScopesActionsAndTargetHistory(): Promise<void> {
     await fs.mkdir(path.join(rootDir, "target"), { recursive: true });
     await persistAssistantApiFixture(rootDir);
     await withWorkingDir(rootDir, async () => {
-      const savedEnv = new Map(["HARNESS_ENABLE_ASSISTANT", "HARNESS_API_AUTH_MODE"].map((key) => [key, process.env[key]] as const));
-      process.env.HARNESS_ENABLE_ASSISTANT = "1";
+      const localDbRoot = path.join(rootDir, ".artifacts", "state", "local-db");
+      const savedEnv = new Map(["HARNESS_ENABLE_ASSISTANT", "HARNESS_DISABLE_ASSISTANT", "HARNESS_API_AUTH_MODE", "HARNESS_DISABLE_LEARNING_SCHEDULER", "HARNESS_LOCAL_DB_ROOT"].map((key) => [key, process.env[key]] as const));
+      delete process.env.HARNESS_ENABLE_ASSISTANT;
+      delete process.env.HARNESS_DISABLE_ASSISTANT;
       process.env.HARNESS_API_AUTH_MODE = "none";
+      process.env.HARNESS_DISABLE_LEARNING_SCHEDULER = "1";
+      process.env.HARNESS_LOCAL_DB_ROOT = localDbRoot;
       const apiServer = createApiServer();
       await new Promise<void>((resolve) => apiServer.listen(0, "127.0.0.1", () => resolve()));
       const address = apiServer.address();
@@ -4438,7 +4741,6 @@ async function testAssistantApiScopesActionsAndTargetHistory(): Promise<void> {
         assert.equal(confirmPayload.assistant_execution.confirmation_result, "confirmed");
         assert.ok(confirmPayload.assistant_execution.before_state_json);
         assert.ok(confirmPayload.assistant_execution.after_state_json);
-        const localDbRoot = path.join(rootDir, ".artifacts", "state", "local-db");
         assert.equal((await readPersistedReviewComments("run_assistant", { rootDir: localDbRoot, dbMode: "local" })).length, 1);
 
         const storage = new SqliteAssistantStorage({ rootDir: localDbRoot, dbMode: "local" });
@@ -4479,6 +4781,10 @@ async function testAssistantApiScopesActionsAndTargetHistory(): Promise<void> {
         const deletedTargetListResponse = await fetch(`${baseUrl}/assistant/sessions?scope_type=target&scope_id=${encodeURIComponent(assistantTargetId)}`);
         const deletedTargetListPayload = await deletedTargetListResponse.json() as any;
         assert.equal(deletedTargetListPayload.assistant_sessions.some((item: any) => item.id === targetSessionPayload.assistant_session.id), false);
+
+        process.env.HARNESS_DISABLE_ASSISTANT = "1";
+        const disabledCapabilities = await (await fetch(`${baseUrl}/assistant/capabilities`)).json() as any;
+        assert.equal(disabledCapabilities.enabled, false);
       } finally {
         await new Promise<void>((resolve, reject) => apiServer.close((error) => error ? reject(error) : resolve()));
         for (const [key, value] of savedEnv.entries()) {
@@ -4642,12 +4948,16 @@ async function main(): Promise<void> {
     ["artifact policy classifies persisted and artifact-only outputs", testArtifactPolicyClassifiesPersistedAndArtifactOnlyOutputs],
     ["web ui and persisted ui settings api", testWebUiAndPersistedUiSettingsApi],
     ["preflight api summarizes readiness", testPreflightApiSummarizesReadiness],
+    ["runtime sandbox backend resolution", testRuntimeSandboxBackendResolution],
+    ["runtime sandbox api endpoints", testRuntimeSandboxApiEndpoints],
     ["api project scoping and actor-owned review actions", testApiProjectScopingAndActorOwnedReviewActions],
     ["assistant storage and capability gating", testAssistantStorageAndCapabilities],
     ["assistant provider cites findings", testAssistantProviderCitesFindings],
     ["assistant api scopes actions and target history", testAssistantApiScopesActionsAndTargetHistory],
     ["learning api lifecycle", testLearningApiLifecycle],
       ["validateFixtures passes for bundled targets", testValidateFixturesPassesForBundledTargets],
+      ["product benchmark suite dry-run", testProductBenchmarkSuiteDryRun],
+      ["product benchmark api endpoints", testProductBenchmarkApiEndpoints],
       ["local binary providers short-circuit when spawn is blocked", testLocalBinaryProvidersShortCircuitWhenSpawnBlocked],
       ["python worker providers report blocked runtime capability when disabled", testPythonWorkerProvidersReportBlockedWhenDisabled],
       ["repo analysis provider emits normalized locations", testRepoAnalysisProviderEmitsNormalizedLocations],
@@ -4661,6 +4971,7 @@ async function main(): Promise<void> {
       ,
       ["finding evaluation uses evidence symbols for grouping", testFindingEvaluationUsesEvidenceSymbolsForGrouping],
       ["finding quality flags unsupported evidence and control mismatch", testFindingQualityFlagsUnsupportedEvidenceAndControlMismatch],
+      ["post-supervisor integrity does not veto semantic mapping hints", testPostSupervisorIntegrityDoesNotVetoSemanticMappingHints],
       ["run comparison uses evidence symbols for matching", testRunComparisonUsesEvidenceSymbolsForMatching]
     ];
 

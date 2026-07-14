@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import { DEFAULT_RUNTIME_SANDBOX_SETTINGS } from "../../../validation-runner/src/index.js";
 import { deriveScopeId, normalizeProjectId, normalizeWorkspaceId } from "../request-scope.js";
 import type { PersistenceReadOptions } from "./backend.js";
 import { resolvePersistenceLocation } from "./backend.js";
@@ -63,6 +64,17 @@ function mergeJson(base: Record<string, unknown>, override: unknown): Record<str
   };
 }
 
+function mergePreflightJson(base: Record<string, unknown>, override: unknown): Record<string, unknown> {
+  const merged = mergeJson(base, override);
+  return {
+    ...merged,
+    runtime_sandbox: mergeJson(
+      DEFAULT_RUNTIME_SANDBOX_SETTINGS as unknown as Record<string, unknown>,
+      merged.runtime_sandbox
+    )
+  };
+}
+
 function normalizedWorkspace(scope?: UiScopeInput): string {
   return normalizeWorkspaceId(scope?.workspaceId);
 }
@@ -114,6 +126,7 @@ function defaultUiSettingsForScope(args: {
       strictness: "standard",
       readiness_gate_policy: "risk_or_drift",
       runtime_allowed: "targeted_only",
+      runtime_sandbox: DEFAULT_RUNTIME_SANDBOX_SETTINGS,
       isolation_preference: "restricted_container_no_egress",
       include_defaults: [],
       exclude_defaults: ["examples", "fixtures", "generated"]
@@ -197,7 +210,7 @@ function mergeSettingsLayers(layers: UiSettingsResolution["layers"]): PersistedU
     providers_json: mergeJson(layers.global.providers_json as Record<string, unknown>, layers.project.providers_json),
     credentials_json: mergeJson(layers.global.credentials_json as Record<string, unknown>, layers.project.credentials_json),
     audit_defaults_json: mergeJson(layers.global.audit_defaults_json as Record<string, unknown>, layers.project.audit_defaults_json),
-    preflight_json: mergeJson(layers.global.preflight_json as Record<string, unknown>, layers.project.preflight_json),
+    preflight_json: mergePreflightJson(layers.global.preflight_json as Record<string, unknown>, layers.project.preflight_json),
     review_json: mergeJson(layers.global.review_json as Record<string, unknown>, layers.project.review_json),
     integrations_json: mergeJson(layers.global.integrations_json as Record<string, unknown>, layers.project.integrations_json),
     test_mode_json: mergeJson(layers.global.test_mode_json as Record<string, unknown>, layers.project.test_mode_json),

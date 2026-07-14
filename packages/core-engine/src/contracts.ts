@@ -1,5 +1,6 @@
 import type { HandoffRecord } from "../../handoff-contracts/src/index.js";
 import type { AgentInvocationRecord } from "../../trace-recorder/src/index.js";
+import type { LocalSandboxBackendResolution, RuntimeExecutionPolicy, RuntimeSandboxReadiness } from "../../validation-runner/src/index.js";
 
 export type TargetKind = "path" | "repo" | "endpoint";
 export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
@@ -152,6 +153,12 @@ export interface SandboxExecutionArtifact {
   runtime: ContainerWorkspaceContract["runtime"] | "unconfigured";
   plan: SandboxExecutionPlan;
   results: SandboxExecutionResult[];
+  runtime_sandbox?: {
+    provider_id: "local_runtime";
+    selected_backend: string;
+    readiness: RuntimeSandboxReadiness;
+    policy: RuntimeExecutionPolicy;
+  } | null;
 }
 
 export interface SandboxSourceProvenance {
@@ -178,6 +185,9 @@ export interface SandboxSession {
   container_workspace?: ContainerWorkspaceContract;
   execution_plan?: SandboxExecutionPlan;
   execution_results?: SandboxExecutionResult[];
+  runtime_sandbox_readiness?: RuntimeSandboxReadiness;
+  runtime_backend_resolution?: LocalSandboxBackendResolution;
+  runtime_execution_policy?: RuntimeExecutionPolicy;
   source_provenance: SandboxSourceProvenance;
   storage_usage: SandboxStorageUsage;
 }
@@ -287,6 +297,7 @@ export interface PreflightSummary {
     warnings: string[];
     blockers: string[];
   };
+  runtime_sandbox?: RuntimeSandboxReadiness;
   recommended_audit_package: {
     id: string;
     title: string;
@@ -1100,6 +1111,8 @@ export interface FindingQualityRecord {
   evidence_support_verdict: FindingEvidenceSupportVerdict;
   control_mapping_verdict: FindingControlMappingVerdict;
   qa_blocking: boolean;
+  integrity_blocking?: boolean;
+  semantic_review_hint?: boolean;
   quality_score: number;
   matched_evidence_ids: string[];
   missing_evidence_refs: string[];
@@ -1114,6 +1127,8 @@ export interface FindingQualityRecord {
 export interface FindingQualitySummary {
   run_id: string;
   generated_at: string;
+  artifact_role?: "pre_supervisor_evidence_packet" | "post_supervisor_integrity" | "legacy_quality";
+  authority?: "deterministic_facts_and_hints" | "deterministic_integrity_gate";
   overall_verdict: "pass" | "needs_review" | "fail";
   validated_count: number;
   plausible_count: number;

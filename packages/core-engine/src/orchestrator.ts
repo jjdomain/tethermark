@@ -26,7 +26,7 @@ import { ArtifactStore } from "./artifact-store.js";
 import { computeCommitDiffGate } from "./commit-diff.js";
 import { refreshLaneArtifacts } from "./lane-analyzers.js";
 import { formatEventJsonl } from "./observability/events.js";
-import { buildFindingQualitySummary } from "./finding-quality.js";
+import { buildPostSupervisorIntegritySummary, buildPreSupervisorEvidencePacket } from "./finding-quality.js";
 import { buildStageExecutions, persistAuditResult, persistPersistenceSummary } from "./persistence/index.js";
 import { buildPreflightSummary } from "./preflight.js";
 import { registerRunArtifactLocation } from "./run-registry.js";
@@ -660,7 +660,15 @@ export class AuditEngine {
         readiness_status: prepared.sandbox.execution_plan?.readiness_status ?? "blocked",
         runtime: prepared.sandbox.container_workspace?.runtime ?? "unconfigured",
         plan: prepared.sandbox.execution_plan ?? { readiness_status: "blocked", detected_stack: [], entry_signals: [], steps: [], warnings: ["No sandbox execution plan was generated."] },
-        results: prepared.sandbox.execution_results ?? []
+        results: prepared.sandbox.execution_results ?? [],
+        runtime_sandbox: prepared.sandbox.runtime_sandbox_readiness && prepared.sandbox.runtime_execution_policy
+          ? {
+              provider_id: "local_runtime",
+              selected_backend: prepared.sandbox.runtime_sandbox_readiness.resolution.selected_backend,
+              readiness: prepared.sandbox.runtime_sandbox_readiness,
+              policy: prepared.sandbox.runtime_execution_policy
+            }
+          : null
       });
     }
     await artifactStore.writeJson(runId, "target", prepared.target);
@@ -931,7 +939,7 @@ export class AuditEngine {
     await artifactStore.writeJson(runId, "stage-executions", buildStageExecutions(runId, observer.events));
     this.ensureRunNotCanceled(runId);
 
-    let findingQualityPreSkeptic = buildFindingQualitySummary({
+    let preSupervisorEvidencePacket = buildPreSupervisorEvidencePacket({
       runId,
       request: effectiveRequest,
       findings: cycle.findings,
@@ -940,12 +948,13 @@ export class AuditEngine {
       controlCatalog,
       toolExecutions: cycle.evidenceExecutions
     });
-    await artifactStore.writeJson(runId, "finding-quality-pre-skeptic", findingQualityPreSkeptic);
+    await artifactStore.writeJson(runId, "finding-integrity-pre-supervisor", preSupervisorEvidencePacket);
+    await artifactStore.writeJson(runId, "finding-quality-pre-skeptic", preSupervisorEvidencePacket);
 
     let skepticReview = await observer.observeStage({
       stage: "skeptic_review",
       actor: "audit_supervisor_agent",
-      details: { finding_count: cycle.findings.length, qa_blocking_count: findingQualityPreSkeptic.blocking_count },
+      details: { finding_count: cycle.findings.length, integrity_blocking_count: preSupervisorEvidencePacket.blocking_count },
       fn: async () => stageSkepticReview({
       runId,
       request: effectiveRequest,
@@ -960,7 +969,7 @@ export class AuditEngine {
           threatModel: threatModel!,
       scoreSummary: cycle.scoreSummary,
       controlCatalog,
-      findingQuality: findingQualityPreSkeptic,
+      findingQuality: preSupervisorEvidencePacket,
       lanePlans,
       laneResults: cycle.laneResults,
       auditPolicy,
@@ -1113,7 +1122,7 @@ export class AuditEngine {
       }
 
       threatModel = currentThreatModel;
-      findingQualityPreSkeptic = buildFindingQualitySummary({
+      preSupervisorEvidencePacket = buildPreSupervisorEvidencePacket({
         runId,
         request: effectiveRequest,
         findings: cycle.findings,
@@ -1122,7 +1131,8 @@ export class AuditEngine {
         controlCatalog,
         toolExecutions: cycle.evidenceExecutions
       });
-      await artifactStore.writeJson(runId, "finding-quality-pre-skeptic", findingQualityPreSkeptic);
+      await artifactStore.writeJson(runId, "finding-integrity-pre-supervisor", preSupervisorEvidencePacket);
+      await artifactStore.writeJson(runId, "finding-quality-pre-skeptic", preSupervisorEvidencePacket);
 
       skepticReview = await stageSkepticReview({
         runId,
@@ -1138,7 +1148,7 @@ export class AuditEngine {
         threatModel: currentThreatModel,
         scoreSummary: cycle.scoreSummary,
         controlCatalog,
-        findingQuality: findingQualityPreSkeptic,
+        findingQuality: preSupervisorEvidencePacket,
         lanePlans,
         laneResults: cycle.laneResults,
         auditPolicy,
@@ -1194,7 +1204,7 @@ export class AuditEngine {
     const findings = policyApplied.findings;
     const controlResults = policyApplied.controlResults;
     const policyApplication = policyApplied.policyApplication;
-    const findingQuality = buildFindingQualitySummary({
+    const findingQuality = buildPostSupervisorIntegritySummary({
       runId,
       request: effectiveRequest,
       findings,
@@ -1224,6 +1234,7 @@ export class AuditEngine {
     await artifactStore.writeJson(runId, "policy-application", policyApplication);
     await artifactStore.writeJson(runId, "findings", findings);
     await artifactStore.writeJson(runId, "control-results", controlResults);
+    await artifactStore.writeJson(runId, "post-supervisor-integrity", findingQuality);
     await artifactStore.writeJson(runId, "finding-quality", findingQuality);
     await artifactStore.writeJson(runId, "final-score-summary", scoreSummary);
     await artifactStore.writeJson(runId, hasSkepticActions(skepticReview) ? "skeptic-review-final" : "skeptic-review", skepticReview);
@@ -1301,6 +1312,9 @@ export class AuditEngine {
       ...(await materializeLaneSpecialistArtifacts(runId, artifactStore, cycle.laneSpecialistOutputs ?? [])),
       await artifactStore.writeJson(runId, "tool-executions", cycle.evidenceExecutions),
       await artifactStore.writeJson(runId, "control-results", controlResults),
+      await artifactStore.writeJson(runId, "finding-integrity-pre-supervisor", preSupervisorEvidencePacket),
+      await artifactStore.writeJson(runId, "finding-quality-pre-skeptic", preSupervisorEvidencePacket),
+      await artifactStore.writeJson(runId, "post-supervisor-integrity", findingQuality),
       await artifactStore.writeJson(runId, "finding-quality", findingQuality),
       await artifactStore.writeJson(runId, "findings-pre-skeptic", cycle.findings),
       await artifactStore.writeJson(runId, "score-summary", cycle.scoreSummary),

@@ -118,11 +118,12 @@ function arrayOfStrings(value: unknown): string[] {
   return Array.isArray(value) ? value.map((item) => String(item)) : [];
 }
 
-async function runCommand(command: string, args: string[], options?: { timeoutMs?: number }): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+async function runCommand(command: string, args: string[], options?: { timeoutMs?: number; shell?: boolean }): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   try {
     const result = await execFileAsync(command, args, {
       env: { ...process.env, PATH: buildToolPathEnv() },
       maxBuffer: 16 * 1024 * 1024,
+      shell: options?.shell ?? false,
       timeout: options?.timeoutMs ?? 10 * 60 * 1000
     });
     return { exitCode: 0, stdout: result.stdout, stderr: result.stderr };
@@ -859,7 +860,7 @@ export async function executeEvidenceProvider(args: {
         });
       }
       try {
-        const { exitCode, stdout, stderr } = await runCommand("semgrep", command);
+        const { exitCode, stdout, stderr } = await runCommand("semgrep", command, { shell: process.platform === "win32" });
         const parsed = parseCommandJson(stdout, stderr);
         const failure = classifyCommandFailure(stdout, stderr);
         if (failure) {
