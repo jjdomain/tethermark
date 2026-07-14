@@ -6,6 +6,15 @@ Use these before broader public-repo benchmarking. They verify that Tethermark c
 
 Pi is the preferred quick public-repo smoke test. It is a real public AI-agent monorepo, but it is much smaller than OpenClaw and gives faster feedback on clone, detection, static tooling, persistence, and report output.
 
+Automated API and UI E2E commands:
+
+```powershell
+npm run e2e:static-pi
+npm run e2e:static-pi-ui
+```
+
+These E2E checks pin Pi to commit `3d9e14d7482f4a99d5224926099bec0d17ff86fd`, run with the deterministic mock provider, verify static-only sandbox policy, exercise persistence/export endpoints, and simulate the human review workflow through assignment, review start, triage, capable-environment follow-up, finding disposition, review comment, remediation visibility, and final approval.
+
 Command:
 
 ```powershell
@@ -18,7 +27,7 @@ Expected behavior:
 - Target classification is `mcp_server_plugin_skill_package` or another agentic class with high confidence.
 - Agentic detection includes manifest/import/content signals for AI SDKs, MCP/plugin surfaces, shell/file/network tools, and agent-specific controls.
 - Static-only evidence runs. No runtime server, browser session, container runtime, or endpoint execution is attempted.
-- Semgrep and Trivy execute when installed and enabled.
+- Semgrep and Trivy execute as required production static scanners. Semgrep uses the bundled Tethermark local ruleset unless `HARNESS_SEMGREP_CONFIG` is set.
 - OpenSSF Scorecard executes against the staged sandbox with `scorecard --local`; if the local binary is unavailable or blocked, the run must report Scorecard as skipped/failed evidence instead of treating it as clean.
 - The CLI and report output list completed tools, skipped tools, fallbacks, controls not assessed, and confidence limits.
 - Artifacts are copied to `.artifacts\smoke\pi-agentic-static`.
@@ -48,7 +57,7 @@ Expected behavior:
 - Target classification is `mcp_server_plugin_skill_package`.
 - Agentic detection includes manifest/import/content signals for AI SDKs, MCP, browser automation, shell/file/network tools, and extension surfaces.
 - Static-only evidence runs. No runtime server, browser session, container runtime, or endpoint execution is attempted.
-- Semgrep and Trivy execute when installed and enabled.
+- Semgrep and Trivy execute as required production static scanners. Semgrep uses the bundled Tethermark local ruleset unless `HARNESS_SEMGREP_CONFIG` is set.
 - OpenSSF Scorecard executes against the staged sandbox with `scorecard --local`; if the local binary is unavailable or blocked, the run must report Scorecard as skipped/failed evidence instead of treating it as clean.
 - The CLI and report output list completed tools, skipped tools, fallbacks, controls not assessed, and confidence limits.
 - Artifacts are copied to `.artifacts\smoke\openclaw-agentic-static`.

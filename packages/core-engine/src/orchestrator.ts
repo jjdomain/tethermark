@@ -26,6 +26,7 @@ import { ArtifactStore } from "./artifact-store.js";
 import { computeCommitDiffGate } from "./commit-diff.js";
 import { refreshLaneArtifacts } from "./lane-analyzers.js";
 import { formatEventJsonl } from "./observability/events.js";
+import { buildFindingQualitySummary } from "./finding-quality.js";
 import { buildStageExecutions, persistAuditResult, persistPersistenceSummary } from "./persistence/index.js";
 import { buildPreflightSummary } from "./preflight.js";
 import { registerRunArtifactLocation } from "./run-registry.js";
@@ -378,6 +379,13 @@ function toEvidenceRecord(record: any): any {
   };
 }
 
+function normalizeReusedEvidenceRecords(records: any[], runId: string): any[] {
+  return records.map((record) => ({
+    ...record,
+    run_id: runId
+  }));
+}
+
 function toToolExecution(record: any): any {
   return {
     tool: record.tool,
@@ -454,11 +462,18 @@ async function materializeLaneSpecialistArtifacts(runId: string, artifactStore: 
   return artifacts;
 }
 
-async function loadReusedAssessmentCycle(previousRunId: string): Promise<AssessmentCycle> {
+async function loadReusableEvidenceRecords(previousRunId: string, runId: string): Promise<any[]> {
+  const persistedRows = await readPersistedEvidenceRecords(previousRunId);
+  if (persistedRows.length) return normalizeReusedEvidenceRecords(persistedRows.map(toEvidenceRecord), runId);
+  const artifactRecords = await readPersistedStageArtifact<any[]>(previousRunId, "evidence-records").catch(() => []);
+  return normalizeReusedEvidenceRecords(Array.isArray(artifactRecords) ? artifactRecords : [], runId);
+}
+
+async function loadReusedAssessmentCycle(previousRunId: string, runId: string): Promise<AssessmentCycle> {
   const [
     runPlan,
     toolExecutions,
-    evidenceRecordRows,
+    evidenceRecords,
     laneResultRows,
     laneSpecialistRows,
     findingsPreSkeptic,
@@ -470,7 +485,7 @@ async function loadReusedAssessmentCycle(previousRunId: string): Promise<Assessm
   ] = await Promise.all([
     readPersistedStageArtifact<any>(previousRunId, "run-plan"),
     readPersistedToolExecutions(previousRunId),
-    readPersistedEvidenceRecords(previousRunId),
+    loadReusableEvidenceRecords(previousRunId, runId),
     readPersistedLaneResults(previousRunId),
     readPersistedLaneSpecialistOutputs(previousRunId),
     readPersistedStageArtifact<any[]>(previousRunId, "findings-pre-skeptic"),
@@ -490,7 +505,7 @@ async function loadReusedAssessmentCycle(previousRunId: string): Promise<Assessm
   return {
     runPlan,
     evidenceExecutions: toolExecutions.map(toToolExecution),
-    evidenceRecords: evidenceRecordRows.map(toEvidenceRecord),
+    evidenceRecords,
     laneResults,
     laneSpecialistOutputs: laneSpecialistRows.map(toLaneSpecialistOutput),
     findings,
@@ -841,7 +856,7 @@ export class AuditEngine {
         status: "reused",
         details: { source_run_id: commitDiff.previous_run_id, reused_lane_count: reusedLaneNames.length }
       });
-      cycle = await loadReusedAssessmentCycle(commitDiff.previous_run_id);
+      cycle = await loadReusedAssessmentCycle(commitDiff.previous_run_id, runId);
     } else {
       cycle = await observer.observeStage({
         stage: "assess_controls",
@@ -873,7 +888,7 @@ export class AuditEngine {
       const [priorLaneResultRows, priorLaneSpecialistRows, priorEvidenceRecordRows, priorControlResultRows, priorFindingRows, priorObservations] = await Promise.all([
         readPersistedLaneResults(commitDiff.previous_run_id).catch(() => []),
         readPersistedLaneSpecialistOutputs(commitDiff.previous_run_id).catch(() => []),
-        readPersistedEvidenceRecords(commitDiff.previous_run_id).catch(() => []),
+        loadReusableEvidenceRecords(commitDiff.previous_run_id, runId).catch(() => []),
         readPersistedControlResults(commitDiff.previous_run_id).catch(() => []),
         readPersistedFindings(commitDiff.previous_run_id).catch(() => []),
         readPersistedStageArtifact<any[]>(commitDiff.previous_run_id, "observations").then((value) => value ?? []).catch(() => [])
@@ -882,7 +897,7 @@ export class AuditEngine {
       const priorControlResults = priorControlResultRows.map(toControlResult);
       const priorLaneResults = buildLaneResultsFromPersistedRecords(priorLaneResultRows, priorFindings, priorControlResults);
       const priorLaneSpecialistOutputs = priorLaneSpecialistRows.map(toLaneSpecialistOutput);
-      const priorEvidenceRecords = priorEvidenceRecordRows.map(toEvidenceRecord);
+      const priorEvidenceRecords = priorEvidenceRecordRows;
 
       const reusedLaneResults = priorLaneResults.filter((lane) => reusedLaneNames.includes(lane.lane_name));
       const reusedControlIds = new Set(reusedLaneResults.flatMap((lane) => lane.control_results.map((control: any) => control.control_id)));
@@ -916,10 +931,21 @@ export class AuditEngine {
     await artifactStore.writeJson(runId, "stage-executions", buildStageExecutions(runId, observer.events));
     this.ensureRunNotCanceled(runId);
 
+    let findingQualityPreSkeptic = buildFindingQualitySummary({
+      runId,
+      request: effectiveRequest,
+      findings: cycle.findings,
+      evidenceRecords: cycle.evidenceRecords,
+      controlResults: cycle.controlResults,
+      controlCatalog,
+      toolExecutions: cycle.evidenceExecutions
+    });
+    await artifactStore.writeJson(runId, "finding-quality-pre-skeptic", findingQualityPreSkeptic);
+
     let skepticReview = await observer.observeStage({
       stage: "skeptic_review",
       actor: "audit_supervisor_agent",
-      details: { finding_count: cycle.findings.length },
+      details: { finding_count: cycle.findings.length, qa_blocking_count: findingQualityPreSkeptic.blocking_count },
       fn: async () => stageSkepticReview({
       runId,
       request: effectiveRequest,
@@ -934,6 +960,7 @@ export class AuditEngine {
           threatModel: threatModel!,
       scoreSummary: cycle.scoreSummary,
       controlCatalog,
+      findingQuality: findingQualityPreSkeptic,
       lanePlans,
       laneResults: cycle.laneResults,
       auditPolicy,
@@ -1086,6 +1113,16 @@ export class AuditEngine {
       }
 
       threatModel = currentThreatModel;
+      findingQualityPreSkeptic = buildFindingQualitySummary({
+        runId,
+        request: effectiveRequest,
+        findings: cycle.findings,
+        evidenceRecords: cycle.evidenceRecords,
+        controlResults: cycle.controlResults,
+        controlCatalog,
+        toolExecutions: cycle.evidenceExecutions
+      });
+      await artifactStore.writeJson(runId, "finding-quality-pre-skeptic", findingQualityPreSkeptic);
 
       skepticReview = await stageSkepticReview({
         runId,
@@ -1101,6 +1138,7 @@ export class AuditEngine {
         threatModel: currentThreatModel,
         scoreSummary: cycle.scoreSummary,
         controlCatalog,
+        findingQuality: findingQualityPreSkeptic,
         lanePlans,
         laneResults: cycle.laneResults,
         auditPolicy,
@@ -1156,6 +1194,15 @@ export class AuditEngine {
     const findings = policyApplied.findings;
     const controlResults = policyApplied.controlResults;
     const policyApplication = policyApplied.policyApplication;
+    const findingQuality = buildFindingQualitySummary({
+      runId,
+      request: effectiveRequest,
+      findings,
+      evidenceRecords: cycle.evidenceRecords,
+      controlResults,
+      controlCatalog,
+      toolExecutions: cycle.evidenceExecutions
+    });
     const reconciledLaneResults = reconcileLaneResultsWithPolicy(cycle.laneResults, findings, controlResults);
     const refreshedLaneArtifacts = refreshLaneArtifacts({
       auditPackageId: auditPackage.id,
@@ -1177,6 +1224,7 @@ export class AuditEngine {
     await artifactStore.writeJson(runId, "policy-application", policyApplication);
     await artifactStore.writeJson(runId, "findings", findings);
     await artifactStore.writeJson(runId, "control-results", controlResults);
+    await artifactStore.writeJson(runId, "finding-quality", findingQuality);
     await artifactStore.writeJson(runId, "final-score-summary", scoreSummary);
     await artifactStore.writeJson(runId, hasSkepticActions(skepticReview) ? "skeptic-review-final" : "skeptic-review", skepticReview);
     this.ensureRunNotCanceled(runId);
@@ -1253,6 +1301,7 @@ export class AuditEngine {
       ...(await materializeLaneSpecialistArtifacts(runId, artifactStore, cycle.laneSpecialistOutputs ?? [])),
       await artifactStore.writeJson(runId, "tool-executions", cycle.evidenceExecutions),
       await artifactStore.writeJson(runId, "control-results", controlResults),
+      await artifactStore.writeJson(runId, "finding-quality", findingQuality),
       await artifactStore.writeJson(runId, "findings-pre-skeptic", cycle.findings),
       await artifactStore.writeJson(runId, "score-summary", cycle.scoreSummary),
       await artifactStore.writeJson(runId, "skeptic-review", skepticReview),
@@ -1311,6 +1360,7 @@ export class AuditEngine {
       observations: finalObservations,
       score_summary: scoreSummary,
       skeptic_review: skepticReview,
+      finding_quality: findingQuality,
       correction_plan: correctionPlan,
       correction_result: correctionResult,
       remediation,

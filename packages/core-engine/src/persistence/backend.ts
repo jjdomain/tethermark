@@ -3,6 +3,7 @@ import path from "node:path";
 import type { DatabaseMode } from "../contracts.js";
 import type { PersistenceStore } from "./contracts.js";
 import { LocalPersistenceStore } from "./local-store.js";
+import { SqliteFilePersistenceStore } from "./sqlite-file-store.js";
 
 export interface PersistenceLocation {
   mode: DatabaseMode;
@@ -19,18 +20,19 @@ function resolveModeRootEnv(_mode: DatabaseMode): string | undefined {
 }
 
 function isDatabaseMode(value: unknown): value is DatabaseMode {
-  return value === "local";
+  return value === "local" || value === "postgres" || value === "supabase";
 }
 
 export function resolvePersistenceMode(request?: { db_mode?: DatabaseMode } | null): DatabaseMode {
   const requestedMode = request?.db_mode ?? process.env.HARNESS_DB_MODE;
   if (!requestedMode) return "local";
   if (isDatabaseMode(requestedMode)) return requestedMode;
-  throw new Error(`Unsupported OSS database mode "${requestedMode}". Use "local". Hosted production storage is provided by the hosted Supabase/Postgres adapter.`);
+  throw new Error(`Unsupported database mode "${requestedMode}". Use "local", "postgres", or "supabase".`);
 }
 
 export function defaultPersistenceRoot(mode?: DatabaseMode): string {
   const resolvedMode = mode ?? resolvePersistenceMode();
+  if (resolvedMode === "postgres" || resolvedMode === "supabase") return resolvedMode;
   const envRoot = resolveModeRootEnv(resolvedMode);
   if (envRoot) return path.resolve(envRoot);
   return path.resolve(process.cwd(), ".artifacts", "state", "local-db");
@@ -40,12 +42,11 @@ export function resolvePersistenceLocation(args?: PersistenceReadOptions): Persi
   const mode = args?.dbMode ?? resolvePersistenceMode();
   return {
     mode,
-    rootDir: path.resolve(args?.rootDir ?? defaultPersistenceRoot(mode))
+    rootDir: mode === "local" ? path.resolve(args?.rootDir ?? defaultPersistenceRoot(mode)) : defaultPersistenceRoot(mode)
   };
 }
 
 export function createPersistenceStore(mode: DatabaseMode, rootDir?: string): PersistenceStore {
-  const resolvedRoot = path.resolve(rootDir ?? defaultPersistenceRoot(mode));
-  if (mode === "local") return new LocalPersistenceStore(resolvedRoot);
-  throw new Error(`Unsupported OSS database mode "${mode}". Use "local".`);
+  if (mode === "local") return new LocalPersistenceStore(path.resolve(rootDir ?? defaultPersistenceRoot(mode)));
+  return new SqliteFilePersistenceStore(mode, rootDir ?? defaultPersistenceRoot(mode));
 }

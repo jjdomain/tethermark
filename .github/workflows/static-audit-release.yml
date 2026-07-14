@@ -1,0 +1,98 @@
+name: Static Audit Release Gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_network_e2e:
+        description: "Run Pi public-repo static API E2E. Requires GitHub network access."
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      run_ui_e2e:
+        description: "Run browser UI E2E. Requires Playwright browser install and GitHub network access."
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+jobs:
+  deterministic-release-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build --silent
+
+      - name: Run regression tests
+        run: npm test --silent
+
+      - name: Check export schemas and snapshots
+        run: npm run exports:check --silent
+
+      - name: Check Codex OAuth wiring with isolated first-run profile
+        run: npm run smoke:openai-codex-oauth --silent
+
+  static-pi-api-e2e:
+    if: ${{ inputs.run_network_e2e == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: deterministic-release-checks
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Pi static API E2E
+        run: npm run e2e:static-pi --silent
+
+  static-pi-ui-e2e:
+    if: ${{ inputs.run_ui_e2e == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: deterministic-release-checks
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        run: npx playwright install chromium
+
+      - name: Run Pi static UI E2E
+        run: npm run e2e:static-pi-ui --silent

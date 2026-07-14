@@ -135,6 +135,11 @@ function toAttemptStatus(status: RunEnvelope["status"]): AsyncJobStatus {
   return "failed";
 }
 
+function asyncMonitorMaxPolls(): number {
+  const configured = Number(process.env.HARNESS_ASYNC_MONITOR_MAX_POLLS);
+  return Number.isFinite(configured) && configured > 0 ? Math.floor(configured) : 14_400;
+}
+
 export class PersistedAsyncJobManager {
   constructor(
     private readonly engine: AuditEngine,
@@ -192,7 +197,7 @@ export class PersistedAsyncJobManager {
     void (async () => {
       const found = await findPersistedAsyncJob(jobId, rootDirOrOptions);
       if (!found) return;
-      for (let attemptIndex = 0; attemptIndex < 1200; attemptIndex += 1) {
+      for (let attemptIndex = 0; attemptIndex < asyncMonitorMaxPolls(); attemptIndex += 1) {
         const envelope = this.engine.getRun(runId);
         if (envelope && (envelope.status === "succeeded" || envelope.status === "failed" || envelope.status === "canceled")) {
           const attempts = await readPersistedAsyncJobAttempts(jobId, found.location);

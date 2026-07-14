@@ -24,6 +24,14 @@ function contentTypeFor(filePath: string): string {
   return "application/octet-stream";
 }
 
+function staticHeaders(filePath: string): Record<string, string> {
+  const headers: Record<string, string> = { "content-type": contentTypeFor(filePath) };
+  if (filePath.endsWith(".html") || filePath.endsWith(".js") || filePath.endsWith(".css")) {
+    headers["cache-control"] = "no-store";
+  }
+  return headers;
+}
+
 function safeJoin(rootDir: string, pathname: string): string | null {
   const normalized = pathname === "/" ? "/index.html" : pathname;
   const resolved = path.resolve(rootDir, "." + normalized);
@@ -60,7 +68,7 @@ async function serveStaticAsset(res: http.ServerResponse, pathname: string): Pro
   if (vendorAsset) {
     try {
       const body = await fs.readFile(vendorAsset);
-      res.writeHead(200, { "content-type": contentTypeFor(vendorAsset) });
+      res.writeHead(200, staticHeaders(vendorAsset));
       res.end(body);
       return true;
     } catch {
@@ -73,7 +81,7 @@ async function serveStaticAsset(res: http.ServerResponse, pathname: string): Pro
     const stat = await fs.stat(assetPath);
     if (!stat.isFile()) return false;
     const body = await fs.readFile(assetPath);
-    res.writeHead(200, { "content-type": contentTypeFor(assetPath) });
+    res.writeHead(200, staticHeaders(assetPath));
     res.end(body);
     return true;
   } catch {
@@ -84,7 +92,7 @@ async function serveStaticAsset(res: http.ServerResponse, pathname: string): Pro
 async function serveIndex(res: http.ServerResponse): Promise<void> {
   const indexPath = path.join(staticDir, "index.html");
   const body = await fs.readFile(indexPath);
-  res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+  res.writeHead(200, staticHeaders(indexPath));
   res.end(body);
 }
 

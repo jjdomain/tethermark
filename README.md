@@ -14,6 +14,7 @@ The harness combines deterministic evidence collection, LLM-guided planning and 
 - Supports OSS `local` persistence with SQLite-backed roots and metadata.
 - Exposes stable query APIs and separate best-effort artifact/debug APIs.
 - Includes a self-hostable OSS web UI for runs, jobs, reviews, artifacts, and persisted settings.
+- Adds a governed self-learning loop for review-derived improvement candidates, dry-run experiments, explicit promotion, and rollback history. See [`docs/self-learning-governed-improvement-loop.md`](docs/self-learning-governed-improvement-loop.md).
 
 ## Current Status
 
@@ -23,7 +24,7 @@ Tethermark is in public OSS release-candidate shape for local and trusted-team s
 - Hosted production storage is not an OSS database mode; the hosted product provides its own Supabase/Postgres adapter around the shared persistence contracts.
 - The default `.env.example` configuration uses the mock LLM runtime, so the repo can build and run without live model credentials.
 - OSS auth defaults to `none`, which is appropriate for solo operators and trusted internal teams. In that mode, review roles and assignments are advisory governance rather than hard identity enforcement.
-- The supported OSS path is end-to-end for repository and local-path audits: preflight, run execution, findings, review workflow, runtime follow-up, exports, and guarded manual outbound GitHub actions.
+- The supported OSS path is end-to-end for repository and local-path audits: preflight, run execution, findings, review workflow, runtime follow-up, exports, SARIF upload, and manual external remediation links.
 - Runtime validation is intended for cloned or local targets that can be built and run in an isolated local/container/microVM environment with synthetic credentials and controlled tool backends.
 - The main remaining non-goals for OSS are enterprise identity, hosted notification infrastructure, and non-SQLite persistence backends.
 
@@ -44,41 +45,73 @@ Hosted or production endpoints are not a primary OSS claim. When an endpoint URL
 ## Architecture
 
 ```mermaid
-flowchart LR
+flowchart TD
     U["User / CI / Scheduler"] --> CLI["CLI (`apps/cli`)"]
+    U --> WEB["Web UI (`apps/web-ui`)"]
     U --> API["HTTP API (`apps/api-server`)"]
     U --> MCP["MCP Bridge (`apps/mcp-server`)"]
-    U --> WEB["Web UI (`apps/web-ui`)"]
 
+    WEB --> API
     CLI --> ORCH["Core Orchestrator (`packages/core-engine`)"]
     API --> QUEUE["Async Run Queue"]
     API --> ORCH
     MCP --> ORCH
-    WEB --> API
-
     QUEUE --> ORCH
-    ORCH --> PREP["Prepare Target"]
-    PREP --> PLAN["Planner Agent"]
-    PLAN --> TM["Threat Model Agent"]
-    TM --> EVAL["Eval Selection Agent"]
-    EVAL --> LANES["Lane Plans + Standards Audit"]
-    LANES --> TOOLS["Deterministic Tools / Evidence Providers"]
-    TOOLS --> EVIDENCE["Normalized Evidence Records"]
-    EVIDENCE --> SUP["Supervisor / Skeptic Agent"]
-    SUP --> CORR["Selective Corrections / Reuse"]
-    CORR --> SCORE["Scoring + Publishability"]
-    SCORE --> REM["Remediation Agent"]
-    REM --> REVIEW["Human Review Workflow"]
-    REVIEW --> RFQ["Runtime Follow-up Queue"]
-    RFQ --> RERUN["Linked Rerun Jobs"]
-    RERUN --> EVIDENCE
-    QUEUE --> WEBHOOK["Completion Webhook"]
+    QUEUE --> JOBS["Job Poll / Cancel / Retry"]
 
-    ORCH --> PERSIST["Normalized Persistence"]
-    ORCH --> ART["Artifact Store"]
-    PERSIST --> QUERY["Stable Query APIs"]
+    ORCH --> TARGET["Target Intake: repo, path, package, run defaults"]
+    TARGET --> PREFLIGHT["Preflight: scope, repo metadata, runtime readiness"]
+    PREFLIGHT --> CONFIG["Resolve policy pack, audit package, settings"]
+    CONFIG --> PREP["Prepare Target: clone/path snapshot, ignore rules, manifests"]
+    PREP --> PLAN["Planner Agent: controls, scope, lane plan"]
+    PLAN --> THREAT["Threat Model Agent: target class and abuse cases"]
+    THREAT --> EVAL["Eval Selection Agent: evidence and runtime probes"]
+    EVAL --> LANES["Lane Execution: repo posture, dependencies, code, agent/tool risks"]
+    LANES --> TOOLS["Deterministic Evidence Providers: static tools, manifests, runtime probes"]
+    TOOLS --> EVIDENCE["Normalized Evidence: locations, symbols, tool outputs, transcripts"]
+    EVIDENCE --> SUP["Supervisor / Skeptic Review: dedupe, confidence, conflicts"]
+    SUP --> CORR["Selective Corrections / Reuse Invalidation"]
+    CORR --> SCORE["Scoring, Finding Evaluation, Publishability"]
+    SCORE --> REMMEMO["Remediation Agent: memo, checklist, prioritized work"]
+    SCORE --> PERSIST["Normalized Persistence: runs, findings, evidence, review, remediation"]
+    SCORE --> ART["Artifact Store: raw/debug artifacts"]
+
+    PERSIST --> APIQ["Stable Query APIs"]
     ART --> DEBUG["Artifact / Debug APIs"]
-    QUERY --> REVIEW
+    APIQ --> UIREVIEW["Run Detail, Findings, Review, Exports"]
+    DEBUG --> UIREVIEW
+    UIREVIEW --> ASSIST["AI Assistant: cited Q&A, drafts, confirmed local actions"]
+
+    UIREVIEW --> TRIAGE["Human Triage Decision"]
+    TRIAGE --> CONFIRMED["Confirmed"]
+    TRIAGE --> NEEDSVAL["Needs Validation"]
+    TRIAGE --> FP["False Positive / Not Applicable"]
+    TRIAGE --> RISK["Accepted Risk"]
+    FP --> SUPPRESS["Suppression / Exception Record"]
+    RISK --> WAIVER["Waiver / Accepted-Risk Record"]
+    NEEDSVAL --> RFQ["Runtime Follow-up Queue"]
+    CONFIRMED --> REMITEM["Remediation Item: owner, due date, acceptance criteria"]
+    REMITEM --> FIXING["Fix In Progress"]
+    FIXING --> READY["Fix Ready / Verification Pending"]
+    READY --> RFQ
+    RFQ --> RERUN["Linked Validation Rerun"]
+    RERUN --> EVIDENCE
+    READY --> RESOLVE["Resolve only with validation evidence or reviewer closure"]
+    RESOLVE --> HISTORY["History for future run comparison and recurrence tracking"]
+    SUPPRESS --> HISTORY
+    WAIVER --> HISTORY
+    PERSIST --> HISTORY
+
+    UIREVIEW --> EXPORTS["Exports: executive summary, review bundle, JSON, Markdown, SARIF"]
+    EXPORTS --> SARIF["OSS GitHub Code Scanning via SARIF upload"]
+    API --> GENERICWEBHOOK["OSS Generic Completion Webhooks"]
+
+    REMITEM -.->|Hosted-only connector path| HOSTED["Hosted Control Plane (`D:/ai-security-audit-engine-hosted`)"]
+    HOSTED --> GHVERIFY["GitHub/Jira/Slack verification and RBAC policy"]
+    GHVERIFY --> GHISSUE["Create issue, comment, label, or notification"]
+    GHISSUE --> GHEVENT["Signed webhook ingestion"]
+    GHEVENT --> SYNC["Hosted remediation external-link sync"]
+    SYNC --> READY
 ```
 
 ## Repo Layout
@@ -155,6 +188,24 @@ You can also scan a repo URL:
 ```bash
 npm run scan -- scan repo https://github.com/example/project --mode static --package deep-static
 ```
+
+Repository URL requirements:
+
+- Git must be installed and available on `PATH`.
+- Tethermark uses the operator's local Git access. Public and private repos must work non-interactively with `git ls-remote` and `git clone` from the same machine.
+- HTTPS URLs require normal Git credentials when the repo is private, usually Git Credential Manager, a PAT-backed credential helper, and any required SSO authorization.
+- SSH URLs are supported in both `git@host:org/repo.git` and `ssh://git@host/org/repo.git` forms when the local SSH key, agent, and host trust are already configured.
+- Tethermark disables interactive Git prompts during preflight so missing credentials fail before a queued job starts.
+- On Windows, if Git's bundled CA store rejects a valid HTTPS certificate chain, Tethermark retries the Git command with the Windows certificate store for that command only. It does not change global Git config or disable TLS verification.
+
+Quick access checks:
+
+```bash
+git ls-remote https://github.com/example/project.git HEAD
+git ls-remote git@github.com:example/project.git HEAD
+```
+
+If either command fails locally, fix Git/network credentials first or audit a local clone with `scan path`.
 
 ### 4. Start the API
 
@@ -326,6 +377,12 @@ The current runtime follows this high-level sequence:
 8. Persist normalized records and export raw artifacts.
 9. Accept reviewer actions and track explicit review state transitions when human review is required.
 
+### Publisher Module
+
+The OSS UI keeps public publishing controls disabled by default. Normal users see finding triage, reports, and local exports, but not publication-safety overrides intended for downstream editorial workflows.
+
+The optional publisher module is reserved for AI Security Base-style operation, where audit results are reviewed for public website/newsletter use. To enable those UI controls in a private deployment, set `window.HARNESS_WEB_UI_CONFIG.publisher.enabled` to `true` in `apps/web-ui/static/config.js`.
+
 ## Built-In Audit Packages
 
 - `baseline-static`: cheapest recurring static audit
@@ -402,7 +459,7 @@ Current settings sections:
 
 The OSS audit engine treats governance settings as local execution policy. The `Gates` tab decides when an audit launch, finding, disposition, or output requires human control. The `Policy Packs` tab manages the portable rule/control contract used by audit runs. The `Reference Documents` tab attaches contextual policy, standard, runbook, and exception material for audits and reviewers. In integrated deployments, an external assurance control plane can become the authoritative system for policy lifecycle, evidence retention, accepted risk, recertification, and audit packets while the OSS engine continues to persist the resolved policy and document snapshots used by each run.
 
-The integrations section now supports safe outbound preview settings for GitHub-style workflows. External posting remains disabled unless explicitly configured, and the current OSS surface prepares preview payloads through `/runs/:runId/outbound-preview`, records explicit per-run approval through `/runs/:runId/outbound-approval`, verifies repository write access through `/runs/:runId/outbound-verification`, stores a manual-send handoff through `/runs/:runId/outbound-send`, and records actual delivery attempts through `/runs/:runId/outbound-delivery`. GitHub execution requires an API token and base URL in persisted credentials, and it remains operator-triggered rather than automatic.
+The integrations section now supports safe outbound preview settings for GitHub-style workflows. The OSS surface prepares preview payloads through `/runs/:runId/outbound-preview`, records explicit per-run approval through `/runs/:runId/outbound-approval`, and stores a manual-send handoff through `/runs/:runId/outbound-send`. Token-backed repository verification and external GitHub/Jira/Slack/email delivery are hosted-only; OSS `/runs/:runId/outbound-verification` and `/runs/:runId/outbound-delivery` return `hosted_only` guidance instead of sending data externally.
 
 These records are available through the `/ui/settings` and `/ui/documents` API routes and are intended to back self-hosted operator preferences rather than browser-local-only state.
 

@@ -29,6 +29,8 @@ const exactPolicies = new Map<string, ArtifactPolicy>([
   ["lane-results", { disposition: "queryable_persisted", persisted_table: "lane_results", rationale: "Lane results are persisted in normalized query tables." }],
   ["lane-specialists", { disposition: "queryable_persisted", persisted_table: "lane_specialists", rationale: "Lane specialist outputs are persisted in normalized query tables." }],
   ["control-results", { disposition: "queryable_persisted", persisted_table: "control_results", rationale: "Control results are persisted in normalized query tables." }],
+  ["finding-quality", { disposition: "queryable_persisted", persisted_table: "finding_quality", rationale: "Finding quality validation is persisted as normalized run-level QA output." }],
+  ["finding-quality-pre-skeptic", { disposition: "artifact_only", persisted_table: null, rationale: "Pre-skeptic finding quality remains archival debug output for supervisor/correction review." }],
   ["findings-pre-skeptic", { disposition: "queryable_persisted", persisted_table: "stage_artifacts", rationale: "Pre-skeptic findings are normalized as a reusable stage artifact." }],
   ["score-summary", { disposition: "queryable_persisted", persisted_table: "stage_artifacts", rationale: "Intermediate score summary is normalized as a reusable stage artifact." }],
   ["stage-executions", { disposition: "queryable_persisted", persisted_table: "stage_executions", rationale: "Stage execution records are persisted in normalized query tables." }],

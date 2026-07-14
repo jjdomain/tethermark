@@ -20,6 +20,9 @@ import {
   getPersistedTargetStats,
   listBuiltinAuditPackages,
   listBuiltinAuditPolicyPacks,
+  getControlCatalog,
+  getMethodologyArtifact,
+  getStaticBaselineMethodology,
   listBuiltinLlmProviders,
   listBuiltinLlmProviderPresets,
   attachLlmProviderCredentialStatus,
@@ -47,8 +50,10 @@ import {
   readPersistedDimensionScores,
   readPersistedRemediationMemo,
   readPersistedStageArtifact,
+  readPersistedStageArtifacts,
   readPersistedStageExecutions,
   readPersistedSupervisorReview,
+  readPersistedFindingQuality,
   readPersistedTargetSummary,
   readPersistedToolExecutions,
   readPersistedResolvedConfiguration,
@@ -62,9 +67,13 @@ import {
   upsertPersistedStageArtifact,
   buildReviewSummary,
   buildFindingEvaluationSummary,
+  buildFindingQualitySummary,
   createPersistedFindingDisposition,
   updatePersistedFindingDisposition,
   revokePersistedFindingDisposition,
+  readPersistedRemediationItemsForRun,
+  upsertPersistedRemediationItem,
+  updatePersistedRemediationItem,
   resolveFindingDispositions,
   findingDispositionSignature,
   buildFindingEvidenceFingerprint,
@@ -106,28 +115,50 @@ import {
   upsertRuntimeFollowupFromReviewAction,
   markRuntimeFollowupLaunched,
   markRuntimeFollowupJobTerminal,
+  createLearningExperiment,
+  listPersistedLearningCandidates,
+  listPersistedLearningEvents,
+  listPersistedLearningExperiments,
+  listPersistedLearningJobs,
+  listPersistedLearningPromotions,
+  normalizeLearningSettings,
+  promoteLearningCandidate,
+  readPersistedLearningCandidate,
+  rejectLearningCandidate,
+  rollbackLearningPromotion,
+  runLearningPipeline,
+  syncLearningEventsForScope,
+  syncLearningEventsForRun,
   buildPreflightSummary,
   buildStaticToolsReadiness,
   canCommentOnReview,
   canExportReviewAudit,
   canPerformReviewAction,
   buildGithubOutboundPreview,
-  executeGithubOutboundDelivery,
-  normalizeGithubExecutionConfig,
   normalizeGithubIntegrationPolicy,
-  verifyGithubRepositoryAccess,
+  assistantEnabled,
+  createDefaultAssistantToolRegistry,
+  DefaultAssistantContextBuilder,
+  deriveAssistantSessionScope,
+  EvidenceGroundedAssistantProvider,
+  LlmBackedAssistantProvider,
+  resolveAssistantProductMode,
+  SqliteAssistantStorage,
   normalizeActorId,
   normalizeProjectId,
   normalizeWorkspaceId,
   type ReviewActorRole,
   type GenericWebhookEventType,
   type OutboundApprovalArtifact,
-  type OutboundDeliveryArtifact,
   type OutboundSendArtifact,
   type OutboundVerificationArtifact,
   type AuditRequest,
+  type AssistantActionProposalRecord,
+  type AssistantSessionRecord,
+  type AssistantScopeType,
   type ArtifactRetentionKind,
   type PersistedProjectRecord,
+  type RemediationItemStatus,
   type PersistedRunListItem,
   type PersistedTargetListItem
 } from "../../../packages/core-engine/src/index.js";
@@ -137,6 +168,9 @@ loadEnvironment();
 const engine = createEngine();
 const TETHERMARK_VERSION = process.env.TETHERMARK_VERSION ?? "0.2.0";
 const EXPORT_SCHEMA_VERSION = "1.0.0";
+const assistantToolRegistry = createDefaultAssistantToolRegistry();
+const assistantContextBuilder = new DefaultAssistantContextBuilder();
+const assistantProvider = new LlmBackedAssistantProvider(new EvidenceGroundedAssistantProvider());
 const asyncJobs = new PersistedAsyncJobManager(engine, {
   onTerminalJob: async ({ job, attempt, rootDirOrOptions }) => {
     await markRuntimeFollowupJobTerminal({
@@ -146,6 +180,28 @@ const asyncJobs = new PersistedAsyncJobManager(engine, {
       rootDirOrOptions
     });
     if (!attempt.run_id) return;
+    try {
+      const settingsResolution = await resolvePersistedUiSettings(rootDirOrOptions, {
+        workspaceId: job.workspace_id,
+        projectId: job.project_id
+      });
+      const learningSettings = normalizeLearningSettings(settingsResolution.effective.learning_json);
+      if (learningSettings.enabled && learningSettings.event_driven_enabled) {
+        await runLearningPipeline({
+          rootDir: typeof rootDirOrOptions === "string" ? rootDirOrOptions : rootDirOrOptions?.rootDir,
+          dbMode: typeof rootDirOrOptions === "string" ? "local" : rootDirOrOptions?.dbMode ?? "local",
+          workspaceId: job.workspace_id,
+          projectId: job.project_id,
+          runId: attempt.run_id,
+          trigger: "run_completed",
+          actorId: "system_async",
+          settings: settingsResolution.effective.learning_json,
+          providers: settingsResolution.effective.providers_json
+        });
+      }
+    } catch (error) {
+      console.warn("Learning trigger failed after terminal job:", error);
+    }
     await emitConfiguredWebhookForRun(attempt.run_id, "run_completed", "system_async", {
       async_job_id: job.job_id,
       async_attempt_number: attempt.attempt_number,
@@ -173,6 +229,7 @@ type RunSubresource =
   | "control-results"
   | "tool-executions"
   | "agent-invocations"
+  | "agent-trace"
   | "artifact-index"
   | "score-summary"
   | "dimension-scores"
@@ -183,9 +240,12 @@ type RunSubresource =
   | "review-comments"
   | "review-summary"
   | "runtime-followups"
+  | "remediation-items"
+  | "learning"
   | "exports"
   | "finding-dispositions"
   | "finding-evaluations"
+  | "finding-quality"
   | "webhook-deliveries"
   | "report-markdown"
   | "report-sarif"
@@ -267,6 +327,10 @@ function buildExportEnvelope<T>(schemaName: string, payload: T) {
   };
 }
 
+function canGovernLearning(context: { roles: ReviewActorRole[] }): boolean {
+  return context.roles.some((role) => role === "admin" || role === "triage_lead" || role === "reviewer");
+}
+
 function buildRunExportIndex(runId: string, compareToRunId: string | null) {
   return {
     run_id: runId,
@@ -276,7 +340,9 @@ function buildRunExportIndex(runId: string, compareToRunId: string | null) {
       { export_type: "run_report", format: "markdown", filename: `${runId}-report.md`, route: `/runs/${encodeURIComponent(runId)}/report-markdown`, schema_name: null },
       { export_type: "run_report", format: "sarif", filename: `${runId}-report.sarif.json`, route: `/runs/${encodeURIComponent(runId)}/report-sarif`, schema_name: null },
       { export_type: "finding_evaluations", format: "json", filename: `${runId}-finding-evaluations.json`, route: `/runs/${encodeURIComponent(runId)}/finding-evaluations`, schema_name: "finding_evaluations.v1" },
+      { export_type: "finding_quality", format: "json", filename: `${runId}-finding-quality.json`, route: `/runs/${encodeURIComponent(runId)}/finding-quality`, schema_name: "finding_quality.v1" },
       { export_type: "review_audit", format: "json", filename: `${runId}-review-audit.json`, route: `/runs/${encodeURIComponent(runId)}/review-audit`, schema_name: "review_audit.v1" },
+      { export_type: "learning_candidates", format: "json", filename: `${runId}-learning-candidates.json`, route: `/runs/${encodeURIComponent(runId)}/learning`, schema_name: "learning_candidates.v1" },
       ...(compareToRunId ? [
         { export_type: "run_comparison", format: "json", filename: `${runId}-vs-${compareToRunId}-comparison.json`, route: `/runs/${encodeURIComponent(runId)}/report-compare?compare_to=${encodeURIComponent(compareToRunId)}&format=json`, schema_name: "run_comparison.v1" },
         { export_type: "run_comparison", format: "markdown", filename: `${runId}-vs-${compareToRunId}-comparison.md`, route: `/runs/${encodeURIComponent(runId)}/report-compare?compare_to=${encodeURIComponent(compareToRunId)}&format=markdown`, schema_name: null }
@@ -287,6 +353,74 @@ function buildRunExportIndex(runId: string, compareToRunId: string | null) {
 
 function normalizeFindingSignature(finding: { title?: string | null; category?: string | null }): string {
   return `${String(finding.category ?? "unknown").trim().toLowerCase()}::${String(finding.title ?? "").trim().toLowerCase()}`;
+}
+
+function describeControlCrosswalk(control: any): {
+  source_framework: string;
+  mapped_frameworks: string[];
+  evidence_providers: string[];
+  mapping_basis: "direct_tool_check" | "standards_crosswalk" | "internal_methodology";
+  methodology_note: string;
+} {
+  const providerMap: Record<string, string[]> = {
+    "openssf.security_policy": ["repo_analysis", "scorecard"],
+    "openssf.dependency_update_tool": ["repo_analysis", "scorecard"],
+    "openssf.pinned_dependencies": ["repo_analysis", "scorecard", "trivy"],
+    "openssf.token_permissions": ["repo_analysis", "scorecard", "semgrep"],
+    "openssf.dangerous_workflow": ["scorecard", "semgrep"],
+    "openssf.branch_protection": ["scorecard"],
+    "slsa.pinned_build_dependencies": ["repo_analysis", "semgrep"],
+    "slsa.provenance": ["repo_analysis"],
+    "nist_ssdf.disclosure_process": ["repo_analysis", "scorecard"],
+    "nist_ssdf.automated_security_checks": ["repo_analysis", "scorecard", "semgrep", "trivy"],
+    "owasp_llm.prompt_injection_guardrails": ["repo_analysis", "semgrep"],
+    "owasp_llm.sensitive_information_disclosure": ["repo_analysis", "trivy", "semgrep"],
+    "owasp_agentic.tool_misuse_boundary": ["repo_analysis", "semgrep"],
+    "mitre_atlas.tool_misuse_mitigation": ["repo_analysis", "semgrep"],
+    "harness_internal.audit_traceability": ["repo_analysis"],
+    "harness_internal.security_logging": ["repo_analysis"],
+    "harness_internal.eval_harness_presence": ["repo_analysis"],
+    "harness_internal.architecture_evidence": ["repo_analysis"],
+    "harness_internal.agent_tool_allowlist": ["repo_analysis", "semgrep"],
+    "harness_internal.agent_permission_boundaries": ["repo_analysis", "semgrep"],
+    "harness_internal.untrusted_content_prompt_injection": ["repo_analysis", "semgrep"],
+    "harness_internal.secret_env_isolation": ["repo_analysis", "trivy", "semgrep"],
+    "harness_internal.mcp_plugin_permissions": ["repo_analysis", "semgrep"],
+    "harness_internal.browser_automation_safety": ["repo_analysis", "semgrep"],
+    "harness_internal.telemetry_log_redaction": ["repo_analysis"]
+  };
+  const mappedFrameworkMap: Record<string, string[]> = {
+    "nist_ssdf.disclosure_process": ["OpenSSF Scorecard / Security-Policy"],
+    "nist_ssdf.automated_security_checks": ["OpenSSF Scorecard", "Semgrep", "Trivy"],
+    "slsa.pinned_build_dependencies": ["OpenSSF Scorecard / Pinned-Dependencies"],
+    "owasp_agentic.tool_misuse_boundary": ["MITRE ATLAS / Tool misuse mitigation"],
+    "mitre_atlas.tool_misuse_mitigation": ["OWASP Agentic Applications / Tool misuse boundaries"],
+    "harness_internal.agent_tool_allowlist": ["OWASP Agentic Applications", "MITRE ATLAS"],
+    "harness_internal.agent_permission_boundaries": ["OWASP Agentic Applications", "MITRE ATLAS"],
+    "harness_internal.untrusted_content_prompt_injection": ["OWASP LLM Applications", "NIST AI RMF"],
+    "harness_internal.secret_env_isolation": ["OWASP LLM Applications", "NIST AI RMF"],
+    "harness_internal.mcp_plugin_permissions": ["OWASP Agentic Applications", "MITRE ATLAS"],
+    "harness_internal.browser_automation_safety": ["OWASP Agentic Applications", "NIST AI RMF"],
+    "harness_internal.telemetry_log_redaction": ["NIST AI RMF", "NIST SP 800-218A"],
+    "harness_internal.audit_traceability": ["NIST SSDF", "NIST AI RMF"],
+    "harness_internal.security_logging": ["NIST SSDF", "NIST AI RMF"],
+    "harness_internal.eval_harness_presence": ["NIST SSDF", "NIST SP 800-218A"],
+    "harness_internal.architecture_evidence": ["NIST AI RMF", "NIST SP 800-218A"]
+  };
+  const isHarnessInternal = String(control.control_id || "").startsWith("harness_internal.");
+  const isOpenSsf = control.framework === "OpenSSF Scorecard";
+  const isDirect = isOpenSsf || ["slsa.pinned_build_dependencies", "owasp_llm.sensitive_information_disclosure"].includes(control.control_id);
+  return {
+    source_framework: control.framework,
+    mapped_frameworks: mappedFrameworkMap[control.control_id] ?? [],
+    evidence_providers: providerMap[control.control_id] ?? ["repo_analysis"],
+    mapping_basis: isHarnessInternal ? "internal_methodology" : isDirect ? "direct_tool_check" : "standards_crosswalk",
+    methodology_note: isHarnessInternal
+      ? "Harness-defined control used to operationalize external AI security, evidence-readiness, and auditability concerns."
+      : isDirect
+        ? "Tool-native or directly observable evidence is used as the primary assessment signal."
+        : "Engine-owned standards crosswalk maps tool and repository evidence into this framework control."
+  };
 }
 
 function normalizeEvidenceSymbols(value: unknown): string[] {
@@ -504,6 +638,7 @@ type UiSettingsBody = {
   review?: Record<string, unknown>;
   integrations?: Record<string, unknown>;
   test_mode?: Record<string, unknown>;
+  learning?: Record<string, unknown>;
 };
 
 const LLM_AGENT_ENV_PREFIXES: Record<string, string[]> = {
@@ -512,8 +647,10 @@ const LLM_AGENT_ENV_PREFIXES: Record<string, string[]> = {
   eval_selection_agent: ["AUDIT_LLM_EVIDENCE_SELECTION"],
   lane_specialist_agent: ["AUDIT_LLM_AREA_REVIEW"],
   audit_supervisor_agent: ["AUDIT_LLM_SUPERVISOR"],
-  remediation_agent: ["AUDIT_LLM_REMEDIATION"]
+  remediation_agent: ["AUDIT_LLM_REMEDIATION"],
+  learning_synthesizer_agent: ["AUDIT_LLM_LEARNING_SYNTHESIZER"]
 };
+const ASSISTANT_LLM_ENV_PREFIX = "AUDIT_LLM_ASSISTANT";
 const MASKED_SECRET_PLACEHOLDER = "************";
 
 function readEnv(name: string): string | undefined {
@@ -521,6 +658,13 @@ function readEnv(name: string): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   return trimmed.length ? trimmed : undefined;
+}
+
+function readNumberEnv(name: string, fallback: number): number {
+  const value = readEnv(name);
+  if (!value) return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function stringifyEnvValue(value: string): string {
@@ -592,6 +736,20 @@ function applyEnvironmentLlmSettings(settings: any): any {
     default_provider: providerCanUseEnv ? (envDefaultProvider || currentProviders.default_provider || "") : currentProviders.default_provider,
     default_model: modelCanUseEnv ? (envDefaultModel || currentProviders.default_model || "") : currentProviders.default_model
   };
+  const envAssistantModel = readEnv(`${ASSISTANT_LLM_ENV_PREFIX}_MODEL`);
+  const envAssistantProvider = readEnv(`${ASSISTANT_LLM_ENV_PREFIX}_PROVIDER`) ?? inferLlmProviderForModel(envAssistantModel);
+  const assistantCanUseEnv = currentProviders.assistant_inherit_default !== false
+    && !currentProviders.assistant_provider
+    && !currentProviders.assistant_model;
+  if (assistantCanUseEnv && (envAssistantProvider || envAssistantModel)) {
+    nextProviders.assistant_inherit_default = false;
+    nextProviders.assistant_provider = envAssistantProvider || "";
+    nextProviders.assistant_model = envAssistantModel || "";
+  } else {
+    nextProviders.assistant_inherit_default = currentProviders.assistant_inherit_default !== false;
+    nextProviders.assistant_provider = currentProviders.assistant_provider || "";
+    nextProviders.assistant_model = currentProviders.assistant_model || "";
+  }
   const currentOverrides = currentProviders.agent_overrides && typeof currentProviders.agent_overrides === "object"
     ? currentProviders.agent_overrides as Record<string, any>
     : {};
@@ -647,10 +805,45 @@ function describeEnvironmentLlmDefaults(): Record<string, unknown> {
     default_provider_env_var: defaultProvider ? (readEnv("AUDIT_LLM_PROVIDER") ? "AUDIT_LLM_PROVIDER" : null) : null,
     default_model: defaultModel ?? null,
     default_model_env_var: defaultModel ? "AUDIT_LLM_MODEL" : null,
+    assistant_provider: readEnv(`${ASSISTANT_LLM_ENV_PREFIX}_PROVIDER`) ?? inferLlmProviderForModel(readEnv(`${ASSISTANT_LLM_ENV_PREFIX}_MODEL`)) ?? null,
+    assistant_provider_env_var: readEnv(`${ASSISTANT_LLM_ENV_PREFIX}_PROVIDER`) ? `${ASSISTANT_LLM_ENV_PREFIX}_PROVIDER` : null,
+    assistant_model: readEnv(`${ASSISTANT_LLM_ENV_PREFIX}_MODEL`) ?? null,
+    assistant_model_env_var: readEnv(`${ASSISTANT_LLM_ENV_PREFIX}_MODEL`) ? `${ASSISTANT_LLM_ENV_PREFIX}_MODEL` : null,
     default_api_key_configured: Boolean(defaultApiKey),
     default_api_key_env_var: defaultApiKey,
     default_api_key_value: null,
     agent_overrides: agentOverrides
+  };
+}
+
+function resolveAssistantModelConfig(settings: any) {
+  const providers = settings?.providers_json && typeof settings.providers_json === "object"
+    ? settings.providers_json as Record<string, any>
+    : {};
+  const envModel = readEnv(`${ASSISTANT_LLM_ENV_PREFIX}_MODEL`);
+  const envProvider = readEnv(`${ASSISTANT_LLM_ENV_PREFIX}_PROVIDER`) ?? inferLlmProviderForModel(envModel);
+  const canUseEnv = providers.assistant_inherit_default !== false && !providers.assistant_provider && !providers.assistant_model;
+  if (canUseEnv && (envProvider || envModel)) {
+    return {
+      inherit_default: false,
+      provider: envProvider ?? null,
+      model: envModel ?? null,
+      source: "environment" as const
+    };
+  }
+  if (providers.assistant_inherit_default === false) {
+    return {
+      inherit_default: false,
+      provider: providers.assistant_provider || null,
+      model: providers.assistant_model || null,
+      source: providers.assistant_provider || providers.assistant_model ? "assistant_override" as const : "unset" as const
+    };
+  }
+  return {
+    inherit_default: true,
+    provider: providers.default_provider || null,
+    model: providers.default_model || null,
+    source: providers.default_provider || providers.default_model ? "global_default" as const : "unset" as const
   };
 }
 
@@ -693,6 +886,80 @@ function buildCodexArgs(resolution: CodexCommandResolution, args: string[]): str
   return [...resolution.argsPrefix, ...args];
 }
 
+function decodeJwtPayload(token: string): Record<string, unknown> | null {
+  const [, payload] = token.split(".");
+  if (!payload) return null;
+  try {
+    const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+    return JSON.parse(Buffer.from(padded, "base64").toString("utf8")) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function codexHomeDirectory(): string {
+  const configured = readEnv("CODEX_HOME");
+  if (configured) return configured;
+  const home = process.env.USERPROFILE || process.env.HOME;
+  return home ? path.join(home, ".codex") : ".codex";
+}
+
+async function readCodexAuthFileStatus(): Promise<Record<string, unknown> | null> {
+  const authPath = path.join(codexHomeDirectory(), "auth.json");
+  let parsed: Record<string, any>;
+  try {
+    parsed = JSON.parse(await fs.readFile(authPath, "utf8")) as Record<string, any>;
+  } catch {
+    return null;
+  }
+  const authMode = typeof parsed.auth_mode === "string" ? parsed.auth_mode : null;
+  const tokens = parsed.tokens && typeof parsed.tokens === "object" ? parsed.tokens as Record<string, unknown> : {};
+  const accessToken = typeof tokens.access_token === "string" ? tokens.access_token : "";
+  const idToken = typeof tokens.id_token === "string" ? tokens.id_token : "";
+  const refreshToken = typeof tokens.refresh_token === "string" ? tokens.refresh_token : "";
+  const apiKey = typeof parsed.OPENAI_API_KEY === "string" && parsed.OPENAI_API_KEY.trim() ? parsed.OPENAI_API_KEY.trim() : "";
+  const tokenPayload = decodeJwtPayload(accessToken) ?? decodeJwtPayload(idToken);
+  const exp = typeof tokenPayload?.exp === "number" ? tokenPayload.exp : null;
+  const expiresAt = exp ? new Date(exp * 1000).toISOString() : null;
+  const expired = exp ? exp * 1000 <= Date.now() : false;
+  const openaiAuth = tokenPayload?.["https://api.openai.com/auth"];
+  const planType = openaiAuth && typeof openaiAuth === "object" && "chatgpt_plan_type" in openaiAuth
+    ? String((openaiAuth as Record<string, unknown>).chatgpt_plan_type ?? "")
+    : null;
+  const hasChatGptTokens = Boolean(accessToken && idToken && refreshToken);
+  if (authMode === "chatgpt" && hasChatGptTokens && !expired) {
+    return {
+      connected: true,
+      status: "connected",
+      credential_source: "codex_auth_file",
+      auth_mode: "chatgpt",
+      expires_at: expiresAt,
+      chatgpt_plan_type: planType,
+      note: "Codex ChatGPT OAuth credentials are present in the local Codex auth file."
+    };
+  }
+  if (apiKey) {
+    return {
+      connected: true,
+      status: "connected",
+      credential_source: "codex_auth_file",
+      auth_mode: "api_key",
+      note: "Codex API key credentials are present in the local Codex auth file."
+    };
+  }
+  return {
+    connected: false,
+    status: expired ? "expired" : "not_connected",
+    credential_source: "codex_auth_file",
+    auth_mode: authMode,
+    expires_at: expiresAt,
+    note: expired
+      ? "Codex auth file is present, but the cached access token is expired. Run codex login or codex login status to refresh it."
+      : "Codex auth file is present, but it does not contain complete ChatGPT OAuth or API key credentials."
+  };
+}
+
 async function launchOpenAICodexLogin(context: RequestContext): Promise<Record<string, unknown>> {
   if (!isLocalOAuthConnectEnabled()) {
     throw new Error("Local OAuth connect is disabled. Set HARNESS_ENABLE_LOCAL_OAUTH_CONNECT=1 to allow the API server to launch local provider login commands.");
@@ -703,6 +970,18 @@ async function launchOpenAICodexLogin(context: RequestContext): Promise<Record<s
     ? credentials.codex_command.trim()
     : readEnv("AUDIT_LLM_CODEX_COMMAND") ?? readEnv("CODEX_COMMAND") ?? "codex";
   const resolvedCommand = resolveCodexCommand(configuredCommand);
+  if (readEnv("HARNESS_LOCAL_OAUTH_CONNECT_DRY_RUN") === "1") {
+    return {
+      provider_id: "openai_codex",
+      command: resolvedCommand.displayCommand,
+      status: "started",
+      dry_run: true,
+      checked_at: new Date().toISOString(),
+      note: resolvedCommand.note
+        ? `${resolvedCommand.note} Dry run only; no local login command was launched.`
+        : "Dry run only; no local login command was launched."
+    };
+  }
   let child;
   try {
     if (process.platform === "win32") {
@@ -743,6 +1022,16 @@ async function getOpenAICodexLoginStatus(context: RequestContext): Promise<Recor
     ? credentials.codex_command.trim()
     : readEnv("AUDIT_LLM_CODEX_COMMAND") ?? readEnv("CODEX_COMMAND") ?? "codex";
   const resolvedCommand = resolveCodexCommand(configuredCommand);
+  const authFileStatus = await readCodexAuthFileStatus();
+  if (authFileStatus?.connected === true) {
+    return {
+      provider_id: "openai_codex",
+      command: resolvedCommand.displayCommand,
+      checked_at: new Date().toISOString(),
+      ...authFileStatus
+    };
+  }
+  const statusTimeoutMs = readNumberEnv("AUDIT_LLM_CODEX_STATUS_TIMEOUT_MS", 30000);
   return await new Promise((resolve) => {
     let output = "";
     let settled = false;
@@ -775,9 +1064,9 @@ async function getOpenAICodexLoginStatus(context: RequestContext): Promise<Recor
       finish({
         connected: false,
         status: "timeout",
-        note: "Could not check Codex sign-in status before the request timed out."
+        note: `Could not check Codex sign-in status before the request timed out after ${statusTimeoutMs}ms. If the command is npx-based, preinstall @openai/codex and set AUDIT_LLM_CODEX_COMMAND to the installed codex executable so status checks do not depend on package download startup.`
       });
-    }, 10000);
+    }, statusTimeoutMs);
     child.stdout?.on("data", (chunk) => {
       output += chunk.toString();
     });
@@ -814,6 +1103,10 @@ async function persistLlmEnvironmentSettings(input: UiSettingsBody): Promise<voi
   const credentials = input.credentials && typeof input.credentials === "object" ? input.credentials as Record<string, any> : {};
   if (typeof providers.default_provider === "string" && providers.default_provider) updates.AUDIT_LLM_PROVIDER = providers.default_provider;
   if (typeof providers.default_model === "string" && providers.default_model) updates.AUDIT_LLM_MODEL = providers.default_model;
+  if (providers.assistant_inherit_default === false) {
+    if (typeof providers.assistant_provider === "string" && providers.assistant_provider) updates[`${ASSISTANT_LLM_ENV_PREFIX}_PROVIDER`] = providers.assistant_provider;
+    if (typeof providers.assistant_model === "string" && providers.assistant_model) updates[`${ASSISTANT_LLM_ENV_PREFIX}_MODEL`] = providers.assistant_model;
+  }
   if (typeof credentials.openai_api_key === "string" && credentials.openai_api_key && credentials.openai_api_key !== MASKED_SECRET_PLACEHOLDER) {
     updates.AUDIT_LLM_API_KEY = credentials.openai_api_key;
   }
@@ -891,6 +1184,9 @@ type FindingDispositionBody = {
   owner_id?: string | null;
   reviewed_at?: string | null;
   review_due_by?: string | null;
+  triage_decision?: string | null;
+  review_priority?: string | null;
+  validation_intent?: string | null;
 };
 
 type FindingDispositionUpdateBody = {
@@ -900,6 +1196,9 @@ type FindingDispositionUpdateBody = {
   owner_id?: string | null;
   reviewed_at?: string | null;
   review_due_by?: string | null;
+  triage_decision?: string | null;
+  review_priority?: string | null;
+  validation_intent?: string | null;
 };
 
 type ArtifactRetentionBody = {
@@ -1043,6 +1342,174 @@ async function attachProjectRunStats(projects: PersistedProjectRecord[], workspa
   });
 }
 
+function assistantUnavailable(res: http.ServerResponse): boolean {
+  if (assistantEnabled()) return false;
+  sendJson(res, 403, { error: "assistant_disabled", guidance: "Set HARNESS_ENABLE_ASSISTANT=1 to enable the OSS assistant endpoints." });
+  return true;
+}
+
+function scopedSessionAllowed(session: { workspace_id: string; project_id: string } | null | undefined, context: RequestContext): boolean {
+  return !!session && normalizeWorkspaceId(session.workspace_id) === context.workspaceId && normalizeProjectId(session.project_id) === context.projectId;
+}
+
+async function executeAssistantAction(args: {
+  proposal: AssistantActionProposalRecord;
+  session: AssistantSessionRecord;
+  context: RequestContext;
+}): Promise<Record<string, unknown>> {
+  const payload = args.proposal.payload_json ?? {};
+  const payloadRunId = typeof payload.run_id === "string" ? payload.run_id : null;
+  if (payloadRunId && args.session.run_id && payloadRunId !== args.session.run_id) {
+    throw new Error("assistant_action_scope_mismatch");
+  }
+  if (args.proposal.action_type === "generate_export") {
+    return {
+      status: "prepared",
+      route: payload.route ?? null,
+      export_type: payload.export_type ?? "executive_summary",
+      note: "Export route prepared. The caller can download it from the canonical report endpoint."
+    };
+  }
+  if (args.proposal.action_type === "draft_finding_disposition") {
+    const runId = String(payload.run_id ?? "");
+    const findingId = String(payload.finding_id ?? "");
+    const findings = await readPersistedFindings(runId);
+    const finding = findings.find((item) => item.id === findingId);
+    if (!finding) throw new Error("finding_not_found");
+    const disposition = await createPersistedFindingDisposition({
+      runId,
+      input: {
+        disposition_type: payload.disposition_type === "waiver" ? "waiver" : "suppression",
+        scope_level: payload.scope_level === "project" ? "project" : "run",
+        finding_id: findingId,
+        finding_signature: payload.scope_level === "project" ? findingDispositionSignature(finding) : null,
+        reason: String(payload.reason ?? "Assistant-confirmed disposition."),
+        notes: typeof payload.notes === "string" ? payload.notes : null,
+        created_by: args.context.actorId,
+        metadata: {
+          triage_decision: payload.triage_decision ?? null,
+          evidence_fingerprint: buildFindingEvidenceFingerprint(finding),
+          assistant_action_id: args.proposal.id
+        }
+      }
+    });
+    await triggerLearningForReviewMutation({ runId, context: args.context, source: "assistant_finding_disposition" });
+    return { status: "saved", finding_disposition: disposition };
+  }
+  if (args.proposal.action_type === "add_review_comment") {
+    const runId = String(payload.run_id ?? "");
+    const body = String(payload.body ?? "").trim();
+    const comment = await createPersistedReviewComment({
+      runId,
+      authorId: args.context.actorId,
+      body,
+      findingId: typeof payload.finding_id === "string" ? payload.finding_id : null,
+      metadata: { assistant_action_id: args.proposal.id }
+    });
+    return { status: "saved", review_comment: comment };
+  }
+  if (args.proposal.action_type === "launch_run") {
+    const request = payload.request_json as AuditRequest | undefined;
+    if (!request || typeof request !== "object") throw new Error("request_required");
+    const job = await asyncJobs.createJob({
+      request: applyRequestContextToAuditRequest(request, args.context)
+    });
+    return { status: "queued", async_job: job };
+  }
+  if (args.proposal.action_type === "retry_job") {
+    const jobId = String(payload.job_id ?? "");
+    const existing = await asyncJobs.getJob(jobId);
+    if (!existing || !scopedSessionAllowed(existing.job, args.context)) throw new Error("job_not_found");
+    const retried = await asyncJobs.retryJob(jobId);
+    if (!retried) throw new Error("job_not_retryable");
+    return { status: "queued", async_job: retried };
+  }
+  if (args.proposal.action_type === "cancel_job") {
+    const jobId = String(payload.job_id ?? "");
+    const existing = await asyncJobs.getJob(jobId);
+    if (!existing || !scopedSessionAllowed(existing.job, args.context)) throw new Error("job_not_found");
+    const canceled = await asyncJobs.cancelJob(jobId);
+    if (!canceled) throw new Error("job_not_found");
+    return { status: "canceled", async_job: canceled };
+  }
+  if (args.proposal.action_type === "queue_runtime_followup") {
+    const followupId = String(payload.followup_id ?? "");
+    const followup = await readPersistedRuntimeFollowup(followupId);
+    if (!followup) throw new Error("runtime_followup_not_found");
+    if (!followup.rerun_request_json) throw new Error("runtime_followup_not_launchable");
+    const request = applyRequestContextToAuditRequest({
+      ...followup.rerun_request_json,
+      requested_by: args.context.actorId,
+      hints: {
+        ...((followup.rerun_request_json.hints as Record<string, unknown> | null) ?? {}),
+        runtime_followup: {
+          ...(((followup.rerun_request_json.hints as Record<string, any> | null)?.runtime_followup as Record<string, unknown> | null) ?? {}),
+          followup_id: followup.id
+        }
+      }
+    }, args.context);
+    const job = await asyncJobs.createJob({
+      request
+    });
+    const launched = await markRuntimeFollowupLaunched({
+      id: followupId,
+      job: job.job
+    });
+    return { status: "queued", runtime_followup: launched, async_job: job };
+  }
+  if (args.proposal.action_type === "external_outbound_preview") {
+    return {
+      status: "draft_only",
+      note: "OSS assistant mode can draft external payloads, but connector execution is hosted-only or manual."
+    };
+  }
+  throw new Error("assistant_action_not_supported");
+}
+
+function originalUserRequestFromAssistantAction(proposal: AssistantActionProposalRecord): string | null {
+  const value = proposal.payload_json?.requested_from;
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+async function readAssistantActionStateSnapshot(proposal: AssistantActionProposalRecord): Promise<Record<string, unknown> | null> {
+  const payload = proposal.payload_json ?? {};
+  if (proposal.action_type === "draft_finding_disposition") {
+    const runId = typeof payload.run_id === "string" ? payload.run_id : "";
+    return {
+      run_id: runId,
+      finding_id: typeof payload.finding_id === "string" ? payload.finding_id : null,
+      dispositions: await readPersistedFindingDispositions(runId)
+    };
+  }
+  if (proposal.action_type === "add_review_comment") {
+    const runId = typeof payload.run_id === "string" ? payload.run_id : "";
+    return {
+      run_id: runId,
+      review_comments: await readPersistedReviewComments(runId)
+    };
+  }
+  if (proposal.action_type === "launch_run") {
+    return {
+      request_json: payload.request_json ?? null
+    };
+  }
+  if (proposal.action_type === "retry_job" || proposal.action_type === "cancel_job") {
+    const jobId = typeof payload.job_id === "string" ? payload.job_id : "";
+    return {
+      job_id: jobId,
+      async_job: jobId ? await asyncJobs.getJob(jobId) : null
+    };
+  }
+  if (proposal.action_type === "queue_runtime_followup") {
+    const followupId = typeof payload.followup_id === "string" ? payload.followup_id : "";
+    return {
+      followup_id: followupId,
+      runtime_followup: followupId ? await readPersistedRuntimeFollowup(followupId) : null
+    };
+  }
+  return null;
+}
+
 function buildScopedTargetList(runs: PersistedRunListItem[]): PersistedTargetListItem[] {
   const grouped = new Map<string, PersistedRunListItem[]>();
   for (const run of runs) {
@@ -1101,9 +1568,27 @@ function buildScopedTargetStats(targets: PersistedTargetListItem[]) {
 }
 
 function matchRunSubresource(url: URL): { runId: string; resource: RunSubresource } | null {
-  const match = url.pathname.match(/^\/runs\/([^/]+)\/(observability|observations|events|metrics|observability-summary|maintenance|lane-plans|lane-results|lane-specialists|lane-reuse-decisions|evidence-records|findings|control-results|tool-executions|tool-adapters|agent-invocations|artifact-index|score-summary|dimension-scores|usage-summary|review-decision|review-workflow|review-actions|review-comments|review-summary|runtime-followups|exports|finding-dispositions|finding-evaluations|webhook-deliveries|report-markdown|report-sarif|report-executive|report-compare|sandbox-execution|review-audit|outbound-preview|outbound-approval|outbound-send|outbound-verification|outbound-delivery|supervisor-review|remediation|summary|preflight|launch-intent|commit-diff|persistence|stage-executions|publishability|policy-application|resolved-config|correction-plan|correction-result)$/);
+  const match = url.pathname.match(/^\/runs\/([^/]+)\/(observability|observations|events|metrics|observability-summary|maintenance|lane-plans|lane-results|lane-specialists|lane-reuse-decisions|evidence-records|findings|control-results|tool-executions|tool-adapters|agent-invocations|agent-trace|artifact-index|score-summary|dimension-scores|usage-summary|review-decision|review-workflow|review-actions|review-comments|review-summary|runtime-followups|remediation-items|learning|exports|finding-dispositions|finding-evaluations|finding-quality|webhook-deliveries|report-markdown|report-sarif|report-executive|report-compare|sandbox-execution|review-audit|outbound-preview|outbound-approval|outbound-send|outbound-verification|outbound-delivery|supervisor-review|remediation|summary|preflight|launch-intent|commit-diff|persistence|stage-executions|publishability|policy-application|resolved-config|correction-plan|correction-result)$/);
   if (!match) return null;
   return { runId: match[1] ?? "", resource: match[2] as RunSubresource };
+}
+
+function matchLearningCandidate(url: URL): { candidateId: string; action: "detail" | "experiment" | "promote" | "reject" } | null {
+  const match = url.pathname.match(/^\/learning\/candidates\/([^/]+)(?:\/(experiment|promote|reject))?$/);
+  if (!match) return null;
+  return {
+    candidateId: decodeURIComponent(match[1] ?? ""),
+    action: (match[2] ?? "detail") as "detail" | "experiment" | "promote" | "reject"
+  };
+}
+
+function matchLearningPromotion(url: URL): { promotionId: string; action: "rollback" } | null {
+  const match = url.pathname.match(/^\/learning\/promotions\/([^/]+)\/(rollback)$/);
+  if (!match) return null;
+  return {
+    promotionId: decodeURIComponent(match[1] ?? ""),
+    action: "rollback"
+  };
 }
 
 function matchRunReviewActions(url: URL): { runId: string } | null {
@@ -1126,6 +1611,31 @@ function matchRunFindingDispositionItem(url: URL): { runId: string; dispositionI
     dispositionId: decodeURIComponent(match[2] ?? ""),
     action: match[3] === "revoke" ? "revoke" : "update"
   };
+}
+
+function matchRunRemediationItems(url: URL): { runId: string } | null {
+  const match = url.pathname.match(/^\/runs\/([^/]+)\/remediation-items$/);
+  if (!match) return null;
+  return { runId: decodeURIComponent(match[1] ?? "") };
+}
+
+function matchRunRemediationItem(url: URL): { runId: string; remediationItemId: string } | null {
+  const match = url.pathname.match(/^\/runs\/([^/]+)\/remediation-items\/([^/]+)$/);
+  if (!match) return null;
+  return {
+    runId: decodeURIComponent(match[1] ?? ""),
+    remediationItemId: decodeURIComponent(match[2] ?? "")
+  };
+}
+
+function reviewActionForRemediationStatus(status: RemediationItemStatus) {
+  if (status === "open") return "open_remediation";
+  if (status === "fix_in_progress") return "mark_fix_in_progress";
+  if (status === "fix_ready_for_validation") return "mark_fix_ready_for_validation";
+  if (status === "verification_pending") return "mark_verification_pending";
+  if (status === "resolved") return "resolve_finding";
+  if (status === "reopened") return "reopen_finding";
+  return "open_remediation";
 }
 
 function matchReviewNotification(url: URL): { notificationId: string } | null {
@@ -1182,6 +1692,28 @@ function matchRunArtifact(url: URL): { runId: string; artifactType: string } | n
   return {
     runId: decodeURIComponent(match[1] ?? ""),
     artifactType: decodeURIComponent(match[2] ?? "")
+  };
+}
+
+function matchAssistantSession(url: URL): { sessionId: string } | null {
+  const match = url.pathname.match(/^\/assistant\/sessions\/([^/]+)$/);
+  if (!match) return null;
+  return { sessionId: decodeURIComponent(match[1] ?? "") };
+}
+
+function matchAssistantMessages(url: URL): { sessionId: string } | null {
+  const match = url.pathname.match(/^\/assistant\/sessions\/([^/]+)\/messages$/);
+  if (!match) return null;
+  return { sessionId: decodeURIComponent(match[1] ?? "") };
+}
+
+function matchAssistantAction(url: URL): { sessionId: string; actionId: string; decision: "confirm" | "reject" } | null {
+  const match = url.pathname.match(/^\/assistant\/sessions\/([^/]+)\/actions\/([^/]+)\/(confirm|reject)$/);
+  if (!match) return null;
+  return {
+    sessionId: decodeURIComponent(match[1] ?? ""),
+    actionId: decodeURIComponent(match[2] ?? ""),
+    decision: (match[3] ?? "reject") as "confirm" | "reject"
   };
 }
 
@@ -1468,7 +2000,7 @@ async function buildOutboundPreviewForRun(run: PersistedRunListItem): Promise<Re
     reviewWorkflow: workflow,
     reviewSummary: buildReviewSummary({ workflow, findings, actions, comments, dispositions }),
     policy: normalizeGithubIntegrationPolicy(settingsResolution.effective.integrations_json as Record<string, unknown>),
-    executionConfig: normalizeGithubExecutionConfig(settingsResolution.effective.credentials_json as Record<string, unknown>),
+    executionConfig: null,
     approval: approval ? { approved_by: approval.approved_by, approved_at: approval.approved_at } : null,
     verification: verification ?? null
   });
@@ -1520,9 +2052,121 @@ async function emitConfiguredWebhookForRun(
   }
 }
 
+async function triggerLearningForReviewMutation(args: {
+  runId: string;
+  context: RequestContext;
+  source: string;
+}): Promise<void> {
+  try {
+    const run = await getPersistedRun(args.runId);
+    if (!runMatchesScope(run, args.context)) return;
+    const settingsResolution = await resolvePersistedUiSettings(undefined, {
+      workspaceId: args.context.workspaceId,
+      projectId: args.context.projectId
+    });
+    const learningSettings = normalizeLearningSettings(settingsResolution.effective.learning_json);
+    if (!learningSettings.enabled || !learningSettings.event_driven_enabled) return;
+    await runLearningPipeline({
+      workspaceId: args.context.workspaceId,
+      projectId: args.context.projectId,
+      runId: args.runId,
+      trigger: "review_action",
+      actorId: args.context.actorId,
+      settings: settingsResolution.effective.learning_json,
+      providers: settingsResolution.effective.providers_json
+    });
+  } catch (error) {
+    console.warn(`Learning review_action trigger failed after ${args.source}:`, error);
+  }
+}
+
+function learningSchedulerPollMs(): number {
+  const parsed = Number(process.env.HARNESS_LEARNING_SCHEDULER_POLL_MS);
+  return Number.isFinite(parsed) && parsed >= 10_000 ? parsed : 60_000;
+}
+
+function learningSchedulerDisabled(): boolean {
+  return /^(1|true|yes)$/i.test(String(process.env.HARNESS_DISABLE_LEARNING_SCHEDULER ?? ""));
+}
+
+function sameUtcDay(left: string | null | undefined, right: string): boolean {
+  return Boolean(left && left.slice(0, 10) === right.slice(0, 10));
+}
+
+function scheduledLearningDue(args: {
+  settings: ReturnType<typeof normalizeLearningSettings>;
+  jobs: Awaited<ReturnType<typeof listPersistedLearningJobs>>;
+  now: Date;
+}): boolean {
+  if (!args.settings.enabled) return false;
+  if (args.settings.trigger_mode === "manual") return false;
+  const scheduledJobs = args.jobs.filter((job) => job.trigger === "scheduled");
+  const lastScheduled = scheduledJobs[0] ?? null;
+  if (args.settings.scheduled_enabled) {
+    const intervalMs = Math.max(5, args.settings.scheduled_interval_minutes) * 60 * 1000;
+    const lastStarted = lastScheduled ? Date.parse(lastScheduled.started_at) : 0;
+    if (!lastScheduled || !Number.isFinite(lastStarted) || args.now.getTime() - lastStarted >= intervalMs) {
+      return true;
+    }
+  }
+  if (args.settings.llm_nightly_consolidation && args.settings.llm_synthesis_enabled) {
+    const today = args.now.toISOString();
+    return !scheduledJobs.some((job) => sameUtcDay(job.completed_at || job.started_at, today));
+  }
+  return false;
+}
+
+function createSelfLearningScheduler(): { start(): void; stop(): void } {
+  let timer: NodeJS.Timeout | null = null;
+  let running = false;
+
+  const tick = async () => {
+    if (running || learningSchedulerDisabled()) return;
+    running = true;
+    try {
+      const workspaceId = "default";
+      const projects = await listPersistedProjects(workspaceId).catch(() => []);
+      const projectIds = [...new Set(["default", ...projects.map((project) => normalizeProjectId(project.id))])];
+      const now = new Date();
+      for (const projectId of projectIds) {
+        const settingsResolution = await resolvePersistedUiSettings(undefined, { workspaceId, projectId });
+        const settings = normalizeLearningSettings(settingsResolution.effective.learning_json);
+        const jobs = await listPersistedLearningJobs({ workspaceId, projectId, limit: 100 });
+        if (!scheduledLearningDue({ settings, jobs, now })) continue;
+        await runLearningPipeline({
+          workspaceId,
+          projectId,
+          trigger: "scheduled",
+          actorId: "system_learning_scheduler",
+          settings: settingsResolution.effective.learning_json,
+          providers: settingsResolution.effective.providers_json
+        });
+      }
+    } catch (error) {
+      console.warn("Self-learning scheduler tick failed:", error);
+    } finally {
+      running = false;
+    }
+  };
+
+  return {
+    start() {
+      if (timer || learningSchedulerDisabled()) return;
+      timer = setInterval(() => { void tick(); }, learningSchedulerPollMs());
+      timer.unref?.();
+      setTimeout(() => { void tick(); }, 2_000).unref?.();
+    },
+    stop() {
+      if (timer) clearInterval(timer);
+      timer = null;
+    }
+  };
+}
+
 export function createApiServer(): http.Server {
   void asyncJobs.recoverJobs();
-  return http.createServer(async (req, res) => {
+  const scheduler = createSelfLearningScheduler();
+  const server = http.createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", `http://${host}:${port}`);
 
   if (req.method === "GET" && url.pathname === "/health") {
@@ -1541,6 +2185,318 @@ export function createApiServer(): http.Server {
     return;
   }
   const context = auth.context;
+
+  if (req.method === "GET" && url.pathname === "/assistant/capabilities") {
+    const productMode = resolveAssistantProductMode();
+    sendJson(res, 200, {
+      enabled: assistantEnabled(),
+      ...assistantToolRegistry.capabilities(productMode)
+    });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/assistant/sessions") {
+    if (assistantUnavailable(res)) return;
+    const productMode = resolveAssistantProductMode();
+    const scopeType = (url.searchParams.get("scope_type") || "run") as AssistantScopeType;
+    const scopeId = String(url.searchParams.get("scope_id") || "").trim();
+    const contextKey = String(url.searchParams.get("context_key") || "").trim();
+    const statusParam = String(url.searchParams.get("status") || "active").trim();
+    const sessionStatus = statusParam === "all" || statusParam === "archived" || statusParam === "closed"
+      ? statusParam as AssistantSessionRecord["status"] | "all"
+      : "active";
+    if (!assistantToolRegistry.isScopeAllowed(scopeType, productMode)) {
+      sendJson(res, 403, { error: "hosted_only", scope_type: scopeType });
+      return;
+    }
+    const storage = new SqliteAssistantStorage();
+    const sessions = (await storage.listSessions({
+      workspaceId: context.workspaceId,
+      projectId: context.projectId,
+      scopeType,
+      scopeId: scopeId || undefined,
+      status: sessionStatus
+    })).filter((session) => {
+      if (!contextKey) return true;
+      return String(session.metadata_json?.context_key || "") === contextKey;
+    });
+    const summaries = await Promise.all(sessions.slice(0, 20).map(async (session) => {
+      const messages = await storage.listMessages(session.id);
+      const firstUser = messages.find((message) => message.role === "user");
+      const lastMessage = messages[messages.length - 1] || null;
+      return {
+        ...session,
+        message_count: messages.length,
+        title: String(session.metadata_json?.title || firstUser?.body || "New chat").slice(0, 96),
+        last_message: lastMessage ? {
+          role: lastMessage.role,
+          body: lastMessage.body.slice(0, 160),
+          created_at: lastMessage.created_at
+        } : null
+      };
+    }));
+    sendJson(res, 200, { assistant_sessions: summaries });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/assistant/sessions") {
+    if (assistantUnavailable(res)) return;
+    try {
+      const body = await readJson<{ scope_type?: AssistantScopeType; scope_id?: string; context_key?: string; title?: string }>(req);
+      const scopeType = body.scope_type ?? "run";
+      const scopeId = String(body.scope_id ?? "").trim();
+      if (!scopeId) {
+        sendJson(res, 400, { error: "scope_id_required" });
+        return;
+      }
+      const productMode = resolveAssistantProductMode();
+      if (!assistantToolRegistry.isScopeAllowed(scopeType, productMode)) {
+        sendJson(res, 403, { error: "hosted_only", scope_type: scopeType });
+        return;
+      }
+      const assistantContext = await assistantContextBuilder.buildContext({ scopeType, scopeId });
+      if (assistantContext.run && !runMatchesScope(assistantContext.run, context)) {
+        sendJson(res, 404, { error: "assistant_scope_not_found", scope_type: scopeType, scope_id: scopeId });
+        return;
+      }
+      const settingsResolution = await resolvePersistedUiSettings(undefined, {
+        workspaceId: assistantContext.run?.workspace_id,
+        projectId: assistantContext.run?.project_id
+      });
+      const assistantModelConfig = resolveAssistantModelConfig(settingsResolution.effective);
+      const storage = new SqliteAssistantStorage();
+      const sessionInput = deriveAssistantSessionScope({
+        scopeType,
+        scopeId,
+        context: assistantContext,
+        actorId: context.actorId,
+        productMode
+      });
+      const session = await storage.createSession({
+        ...sessionInput,
+        metadata_json: {
+          ...(sessionInput.metadata_json || {}),
+          assistant_model_config: assistantModelConfig,
+          context_key: typeof body.context_key === "string" ? body.context_key.slice(0, 300) : null,
+          title: typeof body.title === "string" ? body.title.slice(0, 120) : null
+        }
+      });
+      sendJson(res, 201, {
+        assistant_session: session,
+        capabilities: assistantToolRegistry.capabilities(productMode),
+        assistant_model_config: assistantModelConfig
+      });
+    } catch (error) {
+      sendJson(res, error instanceof Error && error.message === "hosted_only_scope" ? 403 : 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
+  const assistantSession = ["GET", "PATCH", "DELETE"].includes(req.method || "") ? matchAssistantSession(url) : null;
+  if (assistantSession) {
+    if (assistantUnavailable(res)) return;
+    const storage = new SqliteAssistantStorage();
+    const session = await storage.getSession(assistantSession.sessionId);
+    if (!scopedSessionAllowed(session, context)) {
+      sendJson(res, 404, { error: "assistant_session_not_found", session_id: assistantSession.sessionId });
+      return;
+    }
+    if (req.method === "PATCH") {
+      const body = await readJson<{ title?: string | null; status?: AssistantSessionRecord["status"] }>(req);
+      const nextTitle = typeof body.title === "string" ? body.title.trim().slice(0, 120) : undefined;
+      const nextStatus = body.status === "active" || body.status === "archived" || body.status === "closed"
+        ? body.status
+        : undefined;
+      if (body.status && !nextStatus) {
+        sendJson(res, 400, { error: "assistant_session_status_invalid", status: body.status });
+        return;
+      }
+      const metadata = {
+        ...(session!.metadata_json || {})
+      };
+      if (nextTitle !== undefined) {
+        if (nextTitle) metadata.title = nextTitle;
+        else delete metadata.title;
+      }
+      const updated = await storage.updateSession({
+        ...session!,
+        status: nextStatus || session!.status,
+        metadata_json: metadata
+      });
+      sendJson(res, 200, { assistant_session: updated });
+      return;
+    }
+    if (req.method === "DELETE") {
+      const updated = await storage.updateSession({
+        ...session!,
+        status: "deleted"
+      });
+      sendJson(res, 200, { assistant_session: updated, deleted: true });
+      return;
+    }
+    sendJson(res, 200, { assistant_session: session });
+    return;
+  }
+
+  const assistantMessages = req.method === "GET" || req.method === "POST" ? matchAssistantMessages(url) : null;
+  if (assistantMessages) {
+    if (assistantUnavailable(res)) return;
+    const storage = new SqliteAssistantStorage();
+    const session = await storage.getSession(assistantMessages.sessionId);
+    if (!scopedSessionAllowed(session, context)) {
+      sendJson(res, 404, { error: "assistant_session_not_found", session_id: assistantMessages.sessionId });
+      return;
+    }
+    if (req.method === "GET") {
+      sendJson(res, 200, { assistant_session: session, messages: await storage.listMessages(assistantMessages.sessionId) });
+      return;
+    }
+    try {
+      const body = await readJson<{ message?: string }>(req);
+      const prompt = String(body.message ?? "").trim();
+      if (!prompt) {
+        sendJson(res, 400, { error: "message_required" });
+        return;
+      }
+      const userMessage = await storage.appendMessage({
+        session_id: session!.id,
+        role: "user",
+        body: prompt,
+        response_json: null
+      });
+      const assistantContext = await assistantContextBuilder.buildContext({
+        scopeType: session!.scope_type,
+        scopeId: session!.scope_id
+      });
+      const settingsResolution = await resolvePersistedUiSettings(undefined, {
+        workspaceId: assistantContext.run?.workspace_id,
+        projectId: assistantContext.run?.project_id
+      });
+      const assistantModelConfig = resolveAssistantModelConfig(settingsResolution.effective);
+      const capabilities = assistantToolRegistry.capabilities(session!.product_mode);
+      const response = await assistantProvider.answer({
+        prompt,
+        session: session!,
+        context: assistantContext,
+        capabilities,
+        modelConfig: assistantModelConfig
+      });
+      const assistantMessage = await storage.appendMessage({
+        session_id: session!.id,
+        role: "assistant",
+        body: response.message,
+        response_json: response
+      });
+      const artifacts = await storage.persistResponseArtifacts({
+        sessionId: session!.id,
+        messageId: assistantMessage.id,
+        response
+      });
+      sendJson(res, 200, {
+        assistant_session: session,
+        user_message: userMessage,
+        assistant_message: assistantMessage,
+        response,
+        citations: artifacts.citations,
+        proposed_actions: artifacts.actions
+      });
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error), session_id: assistantMessages.sessionId });
+    }
+    return;
+  }
+
+  const assistantAction = req.method === "POST" ? matchAssistantAction(url) : null;
+  if (assistantAction) {
+    if (assistantUnavailable(res)) return;
+    const storage = new SqliteAssistantStorage();
+    const session = await storage.getSession(assistantAction.sessionId);
+    if (!scopedSessionAllowed(session, context)) {
+      sendJson(res, 404, { error: "assistant_session_not_found", session_id: assistantAction.sessionId });
+      return;
+    }
+    const proposal = await storage.getActionProposal(assistantAction.sessionId, assistantAction.actionId);
+    if (!proposal) {
+      sendJson(res, 404, { error: "assistant_action_not_found", action_id: assistantAction.actionId });
+      return;
+    }
+    if (proposal.status !== "proposed") {
+      sendJson(res, 409, { error: "assistant_action_already_resolved", action: proposal });
+      return;
+    }
+    if (assistantAction.decision === "reject") {
+      const resolved = await storage.updateActionProposal({
+        ...proposal,
+        status: "rejected",
+        resolved_at: new Date().toISOString(),
+        resolved_by: context.actorId
+      });
+      const execution = await storage.createActionExecution({
+        session_id: session!.id,
+        action_id: proposal.id,
+        actor_id: context.actorId,
+        status: "rejected",
+        original_user_request: originalUserRequestFromAssistantAction(proposal),
+        proposed_action_json: proposal,
+        confirmation_result: "rejected",
+        before_state_json: await readAssistantActionStateSnapshot(proposal),
+        after_state_json: await readAssistantActionStateSnapshot(proposal),
+        request_json: proposal.payload_json,
+        result_json: { status: "rejected" },
+        error: null
+      });
+      sendJson(res, 200, { assistant_action: resolved, assistant_execution: execution });
+      return;
+    }
+    const capabilities = assistantToolRegistry.capabilities(session!.product_mode);
+    if (proposal.hosted_only || !capabilities.enabled_capabilities.includes(proposal.capability)) {
+      sendJson(res, 403, { error: "hosted_only", action_type: proposal.action_type, capability: proposal.capability });
+      return;
+    }
+    try {
+      const beforeState = await readAssistantActionStateSnapshot(proposal);
+      const result = await executeAssistantAction({ proposal, session: session!, context });
+      const afterState = await readAssistantActionStateSnapshot(proposal);
+      const resolved = await storage.updateActionProposal({
+        ...proposal,
+        status: "confirmed",
+        resolved_at: new Date().toISOString(),
+        resolved_by: context.actorId
+      });
+      const execution = await storage.createActionExecution({
+        session_id: session!.id,
+        action_id: proposal.id,
+        actor_id: context.actorId,
+        status: "succeeded",
+        original_user_request: originalUserRequestFromAssistantAction(proposal),
+        proposed_action_json: proposal,
+        confirmation_result: "confirmed",
+        before_state_json: beforeState,
+        after_state_json: afterState,
+        request_json: proposal.payload_json,
+        result_json: result,
+        error: null
+      });
+      sendJson(res, 200, { assistant_action: resolved, assistant_execution: execution, result });
+    } catch (error) {
+      const execution = await storage.createActionExecution({
+        session_id: session!.id,
+        action_id: proposal.id,
+        actor_id: context.actorId,
+        status: "failed",
+        original_user_request: originalUserRequestFromAssistantAction(proposal),
+        proposed_action_json: proposal,
+        confirmation_result: "failed",
+        before_state_json: await readAssistantActionStateSnapshot(proposal),
+        after_state_json: await readAssistantActionStateSnapshot(proposal),
+        request_json: proposal.payload_json,
+        result_json: null,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error), assistant_execution: execution });
+    }
+    return;
+  }
 
   if (req.method === "GET" && url.pathname === "/ui/settings") {
     const scopeLevel = (url.searchParams.get("scope_level") as "global" | "workspace" | "project" | "effective" | null) ?? "effective";
@@ -1821,6 +2777,224 @@ export function createApiServer(): http.Server {
       runtime_followup_summary: buildRuntimeFollowupSummary(followups),
       runtime_followups: followups
     });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/learning/events") {
+    try {
+      const runId = url.searchParams.get("run_id") || undefined;
+      if (runId) {
+        const runForSync = await getPersistedRun(runId);
+        if (!runMatchesScope(runForSync, context)) {
+          sendJson(res, 404, { error: "run_not_found", run_id: runId });
+          return;
+        }
+        await syncLearningEventsForRun(runId);
+      } else {
+        await syncLearningEventsForScope({
+          workspaceId: context.workspaceId,
+          projectId: context.projectId,
+          limit: readNumberParam(url, "sync_limit") ?? 100
+        });
+      }
+      const events = await listPersistedLearningEvents({
+        workspaceId: context.workspaceId,
+        projectId: context.projectId,
+        runId,
+        targetId: url.searchParams.get("target_id") || undefined,
+        eventType: (url.searchParams.get("event_type") || undefined) as any,
+        limit: readNumberParam(url, "limit") ?? 250
+      });
+      sendJson(res, 200, {
+        export_schema: buildExportEnvelope("learning_events.v1", { learning_events: events }),
+        learning_events: events
+      });
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/learning/candidates") {
+    try {
+      const runId = url.searchParams.get("run_id") || undefined;
+      if (runId) {
+        const runForSync = await getPersistedRun(runId);
+        if (!runMatchesScope(runForSync, context)) {
+          sendJson(res, 404, { error: "run_not_found", run_id: runId });
+          return;
+        }
+      }
+      const settingsResolution = await resolvePersistedUiSettings(undefined, context);
+      const syncLimit = readNumberParam(url, "sync_limit");
+      const learningSettings = {
+        ...((settingsResolution.effective.learning_json && typeof settingsResolution.effective.learning_json === "object") ? settingsResolution.effective.learning_json as Record<string, unknown> : {}),
+        ...(syncLimit ? { sync_limit: syncLimit } : {})
+      };
+      const trigger = (url.searchParams.get("trigger") || (runId ? "run_detail" : "page_load")) as any;
+      const result = await runLearningPipeline({
+        workspaceId: context.workspaceId,
+        projectId: context.projectId,
+        runId,
+        trigger,
+        actorId: context.actorId,
+        settings: learningSettings,
+        providers: settingsResolution.effective.providers_json
+      });
+      const candidates = await listPersistedLearningCandidates({
+        workspaceId: context.workspaceId,
+        projectId: context.projectId,
+        runId,
+        targetId: url.searchParams.get("target_id") || undefined,
+        status: url.searchParams.get("status") || undefined,
+        limit: readNumberParam(url, "limit") ?? 250
+      });
+      sendJson(res, 200, {
+        generated_count: result.job.candidates_generated,
+        learning_job: result.job,
+        export_schema: buildExportEnvelope("learning_candidates.v1", { learning_candidates: candidates }),
+        learning_candidates: candidates
+      });
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/learning/jobs") {
+    try {
+      const jobs = await listPersistedLearningJobs({
+        workspaceId: context.workspaceId,
+        projectId: context.projectId,
+        runId: url.searchParams.get("run_id") || undefined,
+        limit: readNumberParam(url, "limit") ?? 50
+      });
+      sendJson(res, 200, {
+        export_schema: buildExportEnvelope("learning_jobs.v1", { learning_jobs: jobs }),
+        learning_jobs: jobs
+      });
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
+  const learningCandidate = ["GET", "POST"].includes(req.method || "") ? matchLearningCandidate(url) : null;
+  if (learningCandidate) {
+    try {
+      const candidate = await readPersistedLearningCandidate(learningCandidate.candidateId);
+      if (!candidate || normalizeWorkspaceId(candidate.workspace_id) !== context.workspaceId || normalizeProjectId(candidate.project_id) !== context.projectId) {
+        sendJson(res, 404, { error: "learning_candidate_not_found", candidate_id: learningCandidate.candidateId });
+        return;
+      }
+      if (req.method === "GET" && learningCandidate.action === "detail") {
+        const [experiments, promotions] = await Promise.all([
+          listPersistedLearningExperiments({ candidateId: candidate.id, workspaceId: context.workspaceId, projectId: context.projectId }),
+          listPersistedLearningPromotions({ workspaceId: context.workspaceId, projectId: context.projectId })
+        ]);
+        sendJson(res, 200, {
+          learning_candidate: candidate,
+          learning_experiments: experiments,
+          learning_promotions: promotions.filter((item) => item.candidate_id === candidate.id)
+        });
+        return;
+      }
+      if (req.method !== "POST") {
+        sendJson(res, 405, { error: "method_not_allowed" });
+        return;
+      }
+      if (learningCandidate.action === "experiment") {
+        const result = await createLearningExperiment({ candidateId: candidate.id, actorId: context.actorId });
+        sendJson(res, 200, {
+          export_schema: buildExportEnvelope("learning_experiments.v1", { learning_experiments: [result.experiment] }),
+          learning_candidate: result.candidate,
+          learning_experiment: result.experiment
+        });
+        return;
+      }
+      if (!canGovernLearning(context)) {
+        sendJson(res, 403, { error: "forbidden", required_roles: ["admin", "triage_lead", "reviewer"] });
+        return;
+      }
+      if (learningCandidate.action === "promote") {
+        const body = await readJson<{ expires_at?: string | null }>(req);
+        const result = await promoteLearningCandidate({
+          candidateId: candidate.id,
+          actorId: context.actorId,
+          expiresAt: body.expires_at ?? null
+        });
+        sendJson(res, 200, {
+          export_schema: buildExportEnvelope("learning_promotions.v1", { learning_promotions: [result.promotion] }),
+          learning_candidate: result.candidate,
+          learning_promotion: result.promotion
+        });
+        return;
+      }
+      if (learningCandidate.action === "reject") {
+        const body = await readJson<{ reason?: string | null }>(req);
+        const rejected = await rejectLearningCandidate({
+          candidateId: candidate.id,
+          actorId: context.actorId,
+          reason: body.reason ?? null
+        });
+        sendJson(res, 200, { learning_candidate: rejected });
+        return;
+      }
+      sendJson(res, 404, { error: "learning_candidate_action_not_found", action: learningCandidate.action });
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error), candidate_id: learningCandidate.candidateId });
+    }
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/learning/promotions") {
+    try {
+      const promotions = await listPersistedLearningPromotions({
+        workspaceId: context.workspaceId,
+        projectId: context.projectId,
+        status: url.searchParams.get("status") || undefined,
+        limit: readNumberParam(url, "limit") ?? 250
+      });
+      sendJson(res, 200, {
+        export_schema: buildExportEnvelope("learning_promotions.v1", { learning_promotions: promotions }),
+        learning_promotions: promotions
+      });
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
+  const learningPromotion = req.method === "POST" ? matchLearningPromotion(url) : null;
+  if (learningPromotion) {
+    try {
+      if (!canGovernLearning(context)) {
+        sendJson(res, 403, { error: "forbidden", required_roles: ["admin", "triage_lead", "reviewer"] });
+        return;
+      }
+      const scopedPromotions = await listPersistedLearningPromotions({
+        workspaceId: context.workspaceId,
+        projectId: context.projectId,
+        limit: Number.MAX_SAFE_INTEGER
+      });
+      if (!scopedPromotions.some((item) => item.id === learningPromotion.promotionId)) {
+        sendJson(res, 404, { error: "learning_promotion_not_found", promotion_id: learningPromotion.promotionId });
+        return;
+      }
+      const body = await readJson<{ reason?: string | null }>(req);
+      const result = await rollbackLearningPromotion({
+        promotionId: learningPromotion.promotionId,
+        actorId: context.actorId,
+        reason: body.reason ?? null
+      });
+      sendJson(res, 200, {
+        export_schema: buildExportEnvelope("learning_promotions.v1", { learning_promotions: [result.promotion] }),
+        learning_candidate: result.candidate,
+        learning_promotion: result.promotion
+      });
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error), promotion_id: learningPromotion.promotionId });
+    }
     return;
   }
 
@@ -2222,6 +3396,9 @@ export function createApiServer(): http.Server {
         previous_severity?: string | null;
         updated_severity?: string | null;
         visibility_override?: string | null;
+        triage_decision?: any;
+        review_priority?: any;
+        validation_intent?: any;
         notes?: string | null;
         metadata?: Record<string, unknown> | null;
       }>(req);
@@ -2254,6 +3431,9 @@ export function createApiServer(): http.Server {
           previous_severity: body.previous_severity as any,
           updated_severity: body.updated_severity as any,
           visibility_override: body.visibility_override as any,
+          triage_decision: body.triage_decision as any,
+          review_priority: body.review_priority as any,
+          validation_intent: body.validation_intent as any,
           notes: body.notes ?? null,
             metadata: body.metadata ?? null
           }
@@ -2269,6 +3449,9 @@ export function createApiServer(): http.Server {
             previous_severity: body.previous_severity as any,
             updated_severity: body.updated_severity as any,
             visibility_override: body.visibility_override as any,
+            triage_decision: body.triage_decision as any,
+            review_priority: body.review_priority as any,
+            validation_intent: body.validation_intent as any,
             notes: body.notes ?? null,
             metadata: body.metadata ?? null
           }
@@ -2279,6 +3462,7 @@ export function createApiServer(): http.Server {
             finding_id: submitted.action.finding_id ?? null
           });
         }
+        await triggerLearningForReviewMutation({ runId: runReviewActions.runId, context, source: "review_action" });
         sendJson(res, 200, {
           run_id: runReviewActions.runId,
           workflow: submitted.workflow,
@@ -2347,7 +3531,7 @@ export function createApiServer(): http.Server {
         return;
       }
       const scopeLevel = body.scope_level ?? (body.disposition_type === "waiver" ? "project" : "run");
-      if (scopeLevel === "project" && body.disposition_type === "waiver") {
+      if (body.disposition_type === "waiver") {
         if (!String(body.owner_id ?? "").trim()) {
           sendJson(res, 400, { error: "waiver_owner_required", finding_id: body.finding_id });
           return;
@@ -2372,14 +3556,18 @@ export function createApiServer(): http.Server {
             created_via: "api",
             workspace_id: context.workspaceId,
             project_id: context.projectId,
-            owner_id: scopeLevel === "project" ? String(body.owner_id ?? "").trim() || null : null,
-            reviewed_at: scopeLevel === "project" ? String(body.reviewed_at ?? "").trim() || null : null,
-            review_due_by: scopeLevel === "project" ? String(body.review_due_by ?? "").trim() || null : null,
+            owner_id: body.disposition_type === "waiver" ? String(body.owner_id ?? "").trim() || null : null,
+            reviewed_at: body.disposition_type === "waiver" ? String(body.reviewed_at ?? "").trim() || null : null,
+            review_due_by: body.disposition_type === "waiver" ? String(body.review_due_by ?? "").trim() || null : null,
+            triage_decision: String(body.triage_decision ?? (body.disposition_type === "waiver" ? "accepted_risk" : "out_of_scope")).trim() || null,
+            review_priority: String(body.review_priority ?? "").trim() || null,
+            validation_intent: String(body.validation_intent ?? "").trim() || null,
             evidence_fingerprint: buildFindingEvidenceFingerprint(finding)
           }
         }
       });
       const dispositions = await readPersistedFindingDispositions(runFindingDispositions.runId);
+      await triggerLearningForReviewMutation({ runId: runFindingDispositions.runId, context, source: "finding_disposition_create" });
       sendJson(res, 201, {
         run_id: runFindingDispositions.runId,
         finding_disposition: disposition,
@@ -2419,6 +3607,7 @@ export function createApiServer(): http.Server {
           revokedBy: context.actorId,
           notes: body.notes ?? null
         });
+        await triggerLearningForReviewMutation({ runId: runFindingDispositionItem.runId, context, source: "finding_disposition_revoke" });
         sendJson(res, 200, {
           run_id: runFindingDispositionItem.runId,
           finding_disposition: revoked,
@@ -2430,7 +3619,7 @@ export function createApiServer(): http.Server {
       const metadata = existing.metadata_json && typeof existing.metadata_json === "object"
         ? { ...(existing.metadata_json as Record<string, unknown>) }
         : {};
-      if (existing.disposition_type === "waiver" && existing.scope_level === "project") {
+      if (existing.disposition_type === "waiver") {
         const ownerId = body.owner_id === undefined ? metadata.owner_id : String(body.owner_id ?? "").trim() || null;
         const reviewedAt = body.reviewed_at === undefined ? metadata.reviewed_at : String(body.reviewed_at ?? "").trim() || null;
         const reviewDueBy = body.review_due_by === undefined ? metadata.review_due_by : String(body.review_due_by ?? "").trim() || null;
@@ -2446,6 +3635,9 @@ export function createApiServer(): http.Server {
         metadata.reviewed_at = reviewedAt;
         metadata.review_due_by = reviewDueBy;
       }
+      if (body.triage_decision !== undefined) metadata.triage_decision = String(body.triage_decision ?? "").trim() || null;
+      if (body.review_priority !== undefined) metadata.review_priority = String(body.review_priority ?? "").trim() || null;
+      if (body.validation_intent !== undefined) metadata.validation_intent = String(body.validation_intent ?? "").trim() || null;
       const finding = findings.find((item) => item.id === existing.finding_id) ?? findings.find((item) => findingDispositionSignature(item) === existing.finding_signature);
       if (finding) {
         metadata.evidence_fingerprint = buildFindingEvidenceFingerprint(finding);
@@ -2462,6 +3654,7 @@ export function createApiServer(): http.Server {
           metadata
         }
       });
+      await triggerLearningForReviewMutation({ runId: runFindingDispositionItem.runId, context, source: "finding_disposition_update" });
       sendJson(res, 200, {
         run_id: runFindingDispositionItem.runId,
         finding_disposition: updated,
@@ -2469,6 +3662,148 @@ export function createApiServer(): http.Server {
       });
     } catch (error) {
       sendJson(res, 400, { error: error instanceof Error ? error.message : String(error), run_id: runFindingDispositionItem.runId });
+    }
+    return;
+  }
+
+  const runRemediationItems = req.method === "POST" ? matchRunRemediationItems(url) : null;
+  if (runRemediationItems) {
+    try {
+      const body = await readJson<{
+        finding_id?: string;
+        status?: RemediationItemStatus;
+        owner_id?: string | null;
+        priority?: any;
+        due_at?: string | null;
+        summary?: string | null;
+        acceptance_criteria?: string | null;
+        external_provider?: "manual" | "github" | "jira" | null;
+        external_issue_url?: string | null;
+        external_issue_number?: string | null;
+        external_pr_url?: string | null;
+        external_pr_number?: string | null;
+        fix_commit_sha?: string | null;
+        validation_run_id?: string | null;
+        resolution_notes?: string | null;
+      }>(req);
+      const run = await getPersistedRun(runRemediationItems.runId);
+      if (!runMatchesScope(run, context)) {
+        sendJson(res, 404, { error: "run_not_found", run_id: runRemediationItems.runId });
+        return;
+      }
+      const workflow = await readPersistedReviewWorkflow(runRemediationItems.runId);
+      if (!canPerformReviewAction({ roles: context.roles, actorId: context.actorId, workflow, actionType: "open_remediation" })) {
+        sendJson(res, 403, { error: "forbidden", required_roles: ["admin", "triage_lead", "reviewer"] });
+        return;
+      }
+      if (!body.finding_id) {
+        sendJson(res, 400, { error: "finding_id_required", run_id: runRemediationItems.runId });
+        return;
+      }
+      const item = await upsertPersistedRemediationItem({
+        runId: runRemediationItems.runId,
+        input: {
+          finding_id: body.finding_id,
+          status: body.status ?? "open",
+          owner_id: body.owner_id ?? null,
+          priority: body.priority ?? null,
+          due_at: body.due_at ?? null,
+          summary: body.summary ?? null,
+          acceptance_criteria: body.acceptance_criteria ?? null,
+          external_provider: body.external_provider ?? null,
+          external_issue_url: body.external_issue_url ?? null,
+          external_issue_number: body.external_issue_number ?? null,
+          external_pr_url: body.external_pr_url ?? null,
+          external_pr_number: body.external_pr_number ?? null,
+          fix_commit_sha: body.fix_commit_sha ?? null,
+          validation_run_id: body.validation_run_id ?? null,
+          resolution_notes: body.resolution_notes ?? null,
+          actor_id: context.actorId,
+          metadata: { created_via: "api" }
+        }
+      });
+      const actionType = reviewActionForRemediationStatus(item.status);
+      const submitted = await submitPersistedReviewAction({
+        runId: runRemediationItems.runId,
+        input: {
+          reviewer_id: context.actorId,
+          action_type: actionType as any,
+          finding_id: item.finding_id,
+          review_priority: item.priority ?? null,
+          validation_intent: item.status === "verification_pending" || item.status === "fix_ready_for_validation" ? "rerun_required" : null,
+          notes: item.resolution_notes || item.summary || `Remediation ${item.status}`,
+          metadata: { remediation_item_id: item.id, remediation_status: item.status }
+        }
+      });
+      await triggerLearningForReviewMutation({ runId: runRemediationItems.runId, context, source: "remediation_item_create" });
+      sendJson(res, 201, {
+        run_id: runRemediationItems.runId,
+        remediation_item: item,
+        review_action: submitted.action,
+        remediation_items: await readPersistedRemediationItemsForRun(runRemediationItems.runId)
+      });
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error), run_id: runRemediationItems.runId });
+    }
+    return;
+  }
+
+  const runRemediationItem = req.method === "PATCH" ? matchRunRemediationItem(url) : null;
+  if (runRemediationItem) {
+    try {
+      const body = await readJson<{
+        status?: RemediationItemStatus;
+        owner_id?: string | null;
+        priority?: any;
+        due_at?: string | null;
+        summary?: string | null;
+        acceptance_criteria?: string | null;
+        external_provider?: "manual" | "github" | "jira" | null;
+        external_issue_url?: string | null;
+        external_issue_number?: string | null;
+        external_pr_url?: string | null;
+        external_pr_number?: string | null;
+        fix_commit_sha?: string | null;
+        validation_run_id?: string | null;
+        resolution_notes?: string | null;
+      }>(req);
+      const run = await getPersistedRun(runRemediationItem.runId);
+      if (!runMatchesScope(run, context)) {
+        sendJson(res, 404, { error: "run_not_found", run_id: runRemediationItem.runId });
+        return;
+      }
+      const workflow = await readPersistedReviewWorkflow(runRemediationItem.runId);
+      if (!canPerformReviewAction({ roles: context.roles, actorId: context.actorId, workflow, actionType: "open_remediation" })) {
+        sendJson(res, 403, { error: "forbidden", required_roles: ["admin", "triage_lead", "reviewer"] });
+        return;
+      }
+      const item = await updatePersistedRemediationItem({
+        runId: runRemediationItem.runId,
+        remediationItemId: runRemediationItem.remediationItemId,
+        input: { ...body, actor_id: context.actorId }
+      });
+      const actionType = reviewActionForRemediationStatus(item.status);
+      const submitted = await submitPersistedReviewAction({
+        runId: runRemediationItem.runId,
+        input: {
+          reviewer_id: context.actorId,
+          action_type: actionType as any,
+          finding_id: item.finding_id,
+          review_priority: item.priority ?? null,
+          validation_intent: item.status === "verification_pending" || item.status === "fix_ready_for_validation" ? "rerun_required" : null,
+          notes: item.resolution_notes || item.summary || `Remediation ${item.status}`,
+          metadata: { remediation_item_id: item.id, remediation_status: item.status }
+        }
+      });
+      await triggerLearningForReviewMutation({ runId: runRemediationItem.runId, context, source: "remediation_item_update" });
+      sendJson(res, 200, {
+        run_id: runRemediationItem.runId,
+        remediation_item: item,
+        review_action: submitted.action,
+        remediation_items: await readPersistedRemediationItemsForRun(runRemediationItem.runId)
+      });
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error), run_id: runRemediationItem.runId });
     }
     return;
   }
@@ -2516,37 +3851,11 @@ export function createApiServer(): http.Server {
     return { runId: decodeURIComponent(match[1] ?? "") };
   })() : null;
   if (runOutboundVerification) {
-    try {
-      const run = await getPersistedRun(runOutboundVerification.runId);
-      if (!runMatchesScope(run, context)) {
-        sendJson(res, 404, { error: "run_not_found", run_id: runOutboundVerification.runId });
-        return;
-      }
-      if (!run) {
-        sendJson(res, 404, { error: "run_not_found", run_id: runOutboundVerification.runId });
-        return;
-      }
-      const workflow = await readPersistedReviewWorkflow(runOutboundVerification.runId);
-      if (!canExportReviewAudit({ roles: context.roles, actorId: context.actorId, workflow })) {
-        sendJson(res, 403, { error: "forbidden", required_roles: ["admin", "triage_lead", "reviewer"] });
-        return;
-      }
-      const settingsResolution = await resolvePersistedUiSettings(undefined, { workspaceId: run.workspace_id, projectId: run.project_id });
-      const verification = await verifyGithubRepositoryAccess({
-        repoUrl: run.target?.repo_url ?? run.target_summary?.repo_url ?? null,
-        config: normalizeGithubExecutionConfig(settingsResolution.effective.credentials_json as Record<string, unknown>),
-        actorId: context.actorId
-      });
-      await upsertPersistedStageArtifact({
-        runId: runOutboundVerification.runId,
-        artifactType: "outbound-verification",
-        payload: verification,
-        targetId: run.target_id
-      });
-      sendJson(res, 200, { run_id: runOutboundVerification.runId, outbound_verification: verification });
-    } catch (error) {
-      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error), run_id: runOutboundVerification.runId });
-    }
+    sendJson(res, 403, {
+      error: "hosted_only",
+      capability: "github_outbound_verification",
+      message: "GitHub token-backed repository verification is hosted-only. OSS can generate outbound preview payloads for manual use."
+    });
     return;
   }
 
@@ -2610,68 +3919,40 @@ export function createApiServer(): http.Server {
     return { runId: decodeURIComponent(match[1] ?? "") };
   })() : null;
   if (runOutboundDelivery) {
-    try {
-      const run = await getPersistedRun(runOutboundDelivery.runId);
-      if (!runMatchesScope(run, context)) {
-        sendJson(res, 404, { error: "run_not_found", run_id: runOutboundDelivery.runId });
-        return;
-      }
-      if (!run) {
-        sendJson(res, 404, { error: "run_not_found", run_id: runOutboundDelivery.runId });
-        return;
-      }
-      const workflow = await readPersistedReviewWorkflow(runOutboundDelivery.runId);
-      if (!canExportReviewAudit({ roles: context.roles, actorId: context.actorId, workflow })) {
-        sendJson(res, 403, { error: "forbidden", required_roles: ["admin", "triage_lead", "reviewer"] });
-        return;
-      }
-      const body = await readJson<{ action_type?: string | null; target_number?: number | string | null }>(req);
-      const preview = await buildOutboundPreviewForRun(run);
-      if (preview["readiness"] && typeof preview["readiness"] === "object" && (preview["readiness"] as any).execute_allowed !== true) {
-        sendJson(res, 409, { error: "outbound_delivery_not_allowed", outbound_preview: preview });
-        return;
-      }
-      const selectedAction = Array.isArray(preview["proposed_actions"])
-        ? (preview["proposed_actions"] as Array<Record<string, unknown>>).find((item) => String(item["action_type"]) === String(body.action_type || "pr_comment"))
-          ?? (preview["proposed_actions"] as Array<Record<string, unknown>>)[0]
-        : null;
-      const settingsResolution = await resolvePersistedUiSettings(undefined, { workspaceId: run.workspace_id, projectId: run.project_id });
-      const verification = await readPersistedStageArtifact<OutboundVerificationArtifact>(runOutboundDelivery.runId, "outbound-verification");
-      const delivery = await executeGithubOutboundDelivery({
-        config: normalizeGithubExecutionConfig(settingsResolution.effective.credentials_json as Record<string, unknown>),
-        verification: verification ?? null,
-        actionType: String(selectedAction?.["action_type"] ?? body.action_type ?? "pr_comment") as any,
-        payloadPreview: (selectedAction?.["payload_preview"] as Record<string, unknown> | null | undefined) ?? null,
-        actorId: context.actorId,
-        targetNumber: body.target_number === null || body.target_number === undefined || body.target_number === "" ? null : Number(body.target_number)
-      });
-      await upsertPersistedStageArtifact({
-        runId: runOutboundDelivery.runId,
-        artifactType: "outbound-delivery",
-        payload: delivery,
-        targetId: run.target_id
-      });
-      await emitConfiguredWebhookForRun(
-        runOutboundDelivery.runId,
-        delivery.status === "sent" ? "outbound_delivery_sent" : "outbound_delivery_failed",
-        context.actorId,
-        {
-          outbound_delivery: delivery
-        }
-      );
-      sendJson(res, delivery.status === "sent" ? 200 : delivery.status === "blocked" ? 409 : 502, {
-        run_id: runOutboundDelivery.runId,
-        outbound_delivery: delivery
-      });
-    } catch (error) {
-      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error), run_id: runOutboundDelivery.runId });
-    }
+    sendJson(res, 403, {
+      error: "hosted_only",
+      capability: "github_outbound_delivery",
+      message: "GitHub issue, comment, label, and check delivery is hosted-only. OSS can prepare the payload for manual posting."
+    });
     return;
   }
 
   if (req.method === "GET" && url.pathname === "/audit-packages") {
     try {
       sendJson(res, 200, { audit_packages: listBuiltinAuditPackages() });
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/methodology") {
+    try {
+      const controlCatalog = getControlCatalog();
+      sendJson(res, 200, {
+        methodology: getMethodologyArtifact(),
+        static_baseline: getStaticBaselineMethodology(),
+        audit_packages: listBuiltinAuditPackages(),
+        control_catalog: controlCatalog.map((control) => ({
+          ...control,
+          crosswalk: describeControlCrosswalk(control)
+        })),
+        management: {
+          builtin_catalog_editable: false,
+          custom_overlays_supported: false,
+          note: "Built-in methodology is read-only. Custom methodology overlays should be versioned and validated before enabling edits."
+        }
+      });
     } catch (error) {
       sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
     }
@@ -2966,6 +4247,151 @@ export function createApiServer(): http.Server {
         sendJson(res, 200, { run_id: runSubresource.runId, agent_invocations: await readPersistedAgentInvocations(runSubresource.runId) });
         return;
       }
+      if (runSubresource.resource === "agent-trace") {
+        const [
+          stageExecutions,
+          agentInvocations,
+          handoffs,
+          stageArtifacts,
+          laneSpecialists,
+          toolExecutions,
+          evidenceRecords,
+          supervisorReview,
+          correctionPlan,
+          correctionResult,
+          persistedQuality,
+          events,
+          metrics
+        ] = await Promise.all([
+          readPersistedStageExecutions(runSubresource.runId),
+          readPersistedAgentInvocations(runSubresource.runId),
+          readPersistedStageArtifact(runSubresource.runId, "handoffs"),
+          readPersistedStageArtifacts(runSubresource.runId),
+          readPersistedLaneSpecialistOutputs(runSubresource.runId),
+          readPersistedToolExecutions(runSubresource.runId),
+          readPersistedEvidenceRecords(runSubresource.runId),
+          readPersistedSupervisorReview(runSubresource.runId),
+          readPersistedCorrectionPlan(runSubresource.runId),
+          readPersistedCorrectionResult(runSubresource.runId),
+          readPersistedFindingQuality(runSubresource.runId),
+          readPersistedEvents(runSubresource.runId),
+          readPersistedMetrics(runSubresource.runId)
+        ]);
+        const findingQuality = persistedQuality ?? buildFindingQualitySummary({
+          runId: runSubresource.runId,
+          request: { run_mode: ((await readPersistedResolvedConfiguration(runSubresource.runId))?.run_mode as AuditRequest["run_mode"] | undefined) ?? "static" },
+          findings: await readPersistedFindings(runSubresource.runId),
+          evidenceRecords,
+          controlResults: await readPersistedControlResults(runSubresource.runId),
+          controlCatalog: getControlCatalog(),
+          toolExecutions
+        });
+        const handoffItems = Array.isArray(handoffs) ? handoffs : Array.isArray((handoffs as any)?.handoffs) ? (handoffs as any).handoffs : [];
+        const timeline = [
+          ...stageExecutions.map((item) => ({
+            kind: "stage",
+            id: item.id,
+            at: item.started_at,
+            completed_at: item.completed_at,
+            actor: item.actor,
+            stage_name: item.stage_name,
+            status: item.status,
+            summary: `${item.stage_name} by ${item.actor}: ${item.status}`,
+            details: item.details_json
+          })),
+          ...agentInvocations.map((item) => ({
+            kind: "agent",
+            id: item.id,
+            at: item.started_at,
+            completed_at: item.completed_at,
+            actor: item.agent_name,
+            stage_name: item.stage_name,
+            status: item.status,
+            summary: `${item.agent_name} ${item.status}${item.output_artifact ? ` -> ${item.output_artifact}` : ""}`,
+            details: {
+              lane_name: item.lane_name,
+              provider: item.provider,
+              model: item.model,
+              attempts: item.attempts,
+              input_artifacts: item.input_artifacts_json,
+              output_artifact: item.output_artifact,
+              tokens: {
+                prompt: item.prompt_tokens,
+                completion: item.completion_tokens,
+                total: item.total_tokens
+              },
+              estimated_cost_usd: item.estimated_cost_usd
+            }
+          })),
+          ...handoffItems.map((item: any, index: number) => ({
+            kind: "handoff",
+            id: String(item.id ?? item.handoff_id ?? `${runSubresource.runId}:handoff:${index}`),
+            at: String(item.created_at ?? item.timestamp ?? item.completed_at ?? ""),
+            completed_at: String(item.completed_at ?? item.created_at ?? item.timestamp ?? ""),
+            actor: String(item.from_agent ?? item.source_agent ?? item.actor ?? "agent"),
+            stage_name: String(item.stage_name ?? item.stage ?? "handoff"),
+            status: String(item.status ?? "recorded"),
+            summary: `${String(item.from_agent ?? item.source_agent ?? "agent")} -> ${String(item.to_agent ?? item.target_agent ?? "next")}`,
+            details: item
+          }))
+        ].sort((left, right) => String(left.at || "").localeCompare(String(right.at || "")) || left.kind.localeCompare(right.kind));
+        const intermediateArtifacts = stageArtifacts
+          .filter((item) => [
+            "preflight-summary",
+            "launch-intent",
+            "planner-artifact",
+            "target-profile",
+            "threat-model",
+            "eval-selection",
+            "run-plan",
+            "findings-pre-skeptic",
+            "finding-quality-pre-skeptic",
+            "finding-quality",
+            "handoffs",
+            "score-summary",
+            "observations"
+          ].includes(item.artifact_type))
+          .map((item) => ({
+            artifact_type: item.artifact_type,
+            created_at: item.created_at,
+            payload_json: item.payload_json
+          }));
+        sendJson(res, 200, {
+          run_id: runSubresource.runId,
+          trace_policy: {
+            hidden_chain_of_thought_stored: false,
+            note: "This endpoint exposes structured agent inputs, outputs, rationale summaries, handoffs, QA verdicts, corrections, tool evidence, and persisted artifacts. It does not store or reveal hidden model chain-of-thought."
+          },
+          summary: {
+            stage_execution_count: stageExecutions.length,
+            agent_invocation_count: agentInvocations.length,
+            handoff_count: handoffItems.length,
+            tool_execution_count: toolExecutions.length,
+            evidence_record_count: evidenceRecords.length,
+            event_count: events.length,
+            metric_count: metrics.length,
+            finding_quality_verdict: findingQuality.overall_verdict,
+            finding_quality_blocking_count: findingQuality.blocking_count,
+            supervisor_action_count: Array.isArray(supervisorReview?.actions_json) ? supervisorReview.actions_json.length : 0,
+            correction_triggered: Boolean(correctionPlan?.triggered || correctionResult?.triggered)
+          },
+          timeline,
+          agent_invocations: agentInvocations,
+          handoffs: handoffItems,
+          stage_executions: stageExecutions,
+          intermediate_outputs: intermediateArtifacts,
+          lane_specialists: laneSpecialists,
+          tool_executions: toolExecutions,
+          evidence_records: evidenceRecords,
+          supervisor_review: supervisorReview,
+          correction_plan: correctionPlan,
+          correction_result: correctionResult,
+          finding_quality: findingQuality,
+          events,
+          metrics
+        });
+        return;
+      }
       if (runSubresource.resource === "artifact-index") {
         sendJson(res, 200, { run_id: runSubresource.runId, artifact_index: await readPersistedArtifactIndex(runSubresource.runId) });
         return;
@@ -3023,6 +4449,52 @@ export function createApiServer(): http.Server {
           });
           return;
         }
+      if (runSubresource.resource === "remediation-items") {
+        sendJson(res, 200, {
+          run_id: runSubresource.runId,
+          remediation_items: await readPersistedRemediationItemsForRun(runSubresource.runId)
+        });
+        return;
+      }
+      if (runSubresource.resource === "learning") {
+        const settingsResolution = await resolvePersistedUiSettings(undefined, context);
+        const syncLimit = readNumberParam(url, "sync_limit");
+        const learningSettings = {
+          ...((settingsResolution.effective.learning_json && typeof settingsResolution.effective.learning_json === "object") ? settingsResolution.effective.learning_json as Record<string, unknown> : {}),
+          ...(syncLimit ? { sync_limit: syncLimit } : {})
+        };
+        const result = await runLearningPipeline({
+          workspaceId: context.workspaceId,
+          projectId: context.projectId,
+          runId: runSubresource.runId,
+          trigger: "run_detail",
+          actorId: context.actorId,
+          settings: learningSettings,
+          providers: settingsResolution.effective.providers_json
+        });
+        const [events, candidates] = await Promise.all([
+          listPersistedLearningEvents({
+            workspaceId: context.workspaceId,
+            projectId: context.projectId,
+            runId: runSubresource.runId,
+            limit: Number.MAX_SAFE_INTEGER
+          }),
+          listPersistedLearningCandidates({
+            workspaceId: context.workspaceId,
+            projectId: context.projectId,
+            runId: runSubresource.runId,
+            limit: Number.MAX_SAFE_INTEGER
+          })
+        ]);
+        sendJson(res, 200, {
+          run_id: runSubresource.runId,
+          learning_job: result.job,
+          export_schema: buildExportEnvelope("learning_candidates.v1", { learning_events: events, learning_candidates: candidates }),
+          learning_events: events,
+          learning_candidates: candidates
+        });
+        return;
+      }
         if (runSubresource.resource === "exports") {
           const compareToRunId = url.searchParams.get("compare_to") || (await readPersistedCommitDiff(runSubresource.runId))?.previous_run_id || null;
           sendJson(res, 200, {
@@ -3052,6 +4524,24 @@ export function createApiServer(): http.Server {
             workspaceId: context.workspaceId,
             projectId: context.projectId
           })
+        });
+        return;
+      }
+      if (runSubresource.resource === "finding-quality") {
+        const persistedQuality = await readPersistedFindingQuality(runSubresource.runId);
+        const findingQuality = persistedQuality ?? buildFindingQualitySummary({
+          runId: runSubresource.runId,
+          request: { run_mode: ((await readPersistedResolvedConfiguration(runSubresource.runId))?.run_mode as AuditRequest["run_mode"] | undefined) ?? "static" },
+          findings: await readPersistedFindings(runSubresource.runId),
+          evidenceRecords: await readPersistedEvidenceRecords(runSubresource.runId),
+          controlResults: await readPersistedControlResults(runSubresource.runId),
+          controlCatalog: getControlCatalog(),
+          toolExecutions: await readPersistedToolExecutions(runSubresource.runId)
+        });
+        sendJson(res, 200, {
+          run_id: runSubresource.runId,
+          export_schema: buildExportEnvelope("finding_quality.v1", findingQuality),
+          finding_quality: findingQuality
         });
         return;
       }
@@ -3287,11 +4777,12 @@ export function createApiServer(): http.Server {
           sendJson(res, 403, { error: "forbidden", required_roles: ["admin", "triage_lead", "reviewer"] });
           return;
         }
-        const [actions, comments, findings, dispositions] = await Promise.all([
+        const [actions, comments, findings, dispositions, remediationItems] = await Promise.all([
           readPersistedReviewActions(runSubresource.runId),
           readPersistedReviewComments(runSubresource.runId),
           readPersistedFindings(runSubresource.runId),
-          readPersistedFindingDispositions(runSubresource.runId)
+          readPersistedFindingDispositions(runSubresource.runId),
+          readPersistedRemediationItemsForRun(runSubresource.runId)
         ]);
         sendJson(res, 200, {
           run_id: runSubresource.runId,
@@ -3300,14 +4791,16 @@ export function createApiServer(): http.Server {
             actions,
             comments,
             summary: buildReviewSummary({ workflow, findings, actions, comments, dispositions }),
-            finding_dispositions: dispositions
+            finding_dispositions: dispositions,
+            remediation_items: remediationItems
           }),
           review_audit: {
             workflow,
             actions,
             comments,
             summary: buildReviewSummary({ workflow, findings, actions, comments, dispositions }),
-            finding_dispositions: dispositions
+            finding_dispositions: dispositions,
+            remediation_items: remediationItems
           }
         });
         return;
@@ -3399,6 +4892,9 @@ export function createApiServer(): http.Server {
 
     sendJson(res, 404, { error: "not_found" });
   });
+  server.on("listening", () => scheduler.start());
+  server.on("close", () => scheduler.stop());
+  return server;
 }
 
 const entryHref = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : null;

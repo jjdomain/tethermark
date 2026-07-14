@@ -1,0 +1,35 @@
+{
+  "type": "object",
+  "required": ["schema_name", "schema_version", "generated_at", "tethermark_version", "payload"],
+  "properties": {
+    "schema_name": { "const": "learning_experiments.v1" },
+    "schema_version": { "type": "string" },
+    "generated_at": { "type": "string" },
+    "tethermark_version": { "type": "string" },
+    "payload": {
+      "type": "object",
+      "required": ["learning_experiments"],
+      "properties": {
+        "learning_experiments": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "candidate_id", "workspace_id", "project_id", "status", "created_at", "created_by"],
+            "properties": {
+              "id": { "type": "string" },
+              "candidate_id": { "type": "string" },
+              "workspace_id": { "type": "string" },
+              "project_id": { "type": "string" },
+              "status": { "type": "string" },
+              "created_at": { "type": "string" },
+              "created_by": { "type": "string" }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

@@ -1,4 +1,7 @@
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import { buildToolPathEnv, staticToolPathDetails } from "./tool-paths.js";
 
@@ -66,9 +69,9 @@ const TOOL_DEFS: Array<{
     category: "sast",
     run_modes: ["static"],
     default_enabled: true,
-    mandatory: false,
+    mandatory: true,
     fallback: null,
-    fix: "Install Semgrep with pipx, pip --user, or an OS-approved package manager and ensure semgrep is on PATH."
+    fix: "Install Semgrep with pipx, pip --user, or an OS-approved package manager and ensure semgrep is on PATH. Tethermark uses a bundled local ruleset by default; set HARNESS_SEMGREP_CONFIG for a custom ruleset."
   },
   {
     id: "trivy",
@@ -78,7 +81,7 @@ const TOOL_DEFS: Array<{
     category: "supply_chain",
     run_modes: ["static"],
     default_enabled: true,
-    mandatory: false,
+    mandatory: true,
     fallback: null,
     fix: "Install Trivy through winget, choco, Homebrew, Aqua packages, or another OS-approved package manager and ensure trivy is on PATH."
   },
@@ -135,6 +138,23 @@ function normalizeSelectedToolIds(value: unknown): string[] {
   return [...new Set([...mandatory, ...raw.filter((item): item is string => typeof item === "string" && known.has(item))])];
 }
 
+function semgrepProbeArgs(): string[] {
+  const root = path.join(os.tmpdir(), "tethermark-semgrep-probe");
+  const configPath = path.join(root, "rules.yml");
+  const targetPath = path.join(root, "target.txt");
+  fs.mkdirSync(root, { recursive: true });
+  fs.writeFileSync(configPath, [
+    "rules:",
+    "  - id: tethermark.probe",
+    "    message: Tethermark Semgrep probe.",
+    "    severity: INFO",
+    "    languages: [generic]",
+    "    pattern-regex: tethermark-semgrep-probe"
+  ].join("\n"), "utf8");
+  fs.writeFileSync(targetPath, "tethermark-semgrep-probe\n", "utf8");
+  return ["scan", "--config", configPath, "--json", "--metrics", "off", targetPath];
+}
+
 function probeTool(def: (typeof TOOL_DEFS)[number], selectedToolIds: Set<string>): StaticToolStatus {
   if (!def.command) {
     return {
@@ -155,11 +175,31 @@ function probeTool(def: (typeof TOOL_DEFS)[number], selectedToolIds: Set<string>
       fix: def.fix
     };
   }
-  const result = spawnSync(def.command, def.versionArgs, {
+  if (process.env.HARNESS_DISABLE_LOCAL_BINARIES === "1") {
+    return {
+      id: def.id as StaticToolId,
+      label: def.label,
+      command: def.command,
+      required_for_full_static: def.id === "scorecard" || def.id === "semgrep" || def.id === "trivy",
+      category: def.category,
+      run_modes: def.run_modes,
+      default_enabled: def.default_enabled,
+      mandatory: Boolean(def.mandatory),
+      selected: selectedToolIds.has(def.id),
+      fallback: def.fallback,
+      installed: false,
+      status: "blocked",
+      version: null,
+      summary: `${def.label} is blocked: local binary execution disabled by HARNESS_DISABLE_LOCAL_BINARIES.`,
+      fix: def.fix
+    };
+  }
+  const probeArgs = def.id === "semgrep" ? semgrepProbeArgs() : def.versionArgs;
+  const result = spawnSync(def.command, probeArgs, {
     encoding: "utf8",
     env: { ...process.env, PATH: buildToolPathEnv() },
     shell: process.platform === "win32",
-    timeout: 10_000,
+    timeout: def.id === "semgrep" ? 120_000 : 10_000,
     windowsHide: true
   });
   const combined = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
@@ -181,21 +221,26 @@ function probeTool(def: (typeof TOOL_DEFS)[number], selectedToolIds: Set<string>
     fallback: def.fallback,
     installed,
     status,
-    version: installed ? firstLine(combined) || "available" : null,
+    version: installed ? (def.id === "semgrep" ? "available" : firstLine(combined) || "available") : null,
     summary: installed ? `${def.label} is available.` : `${def.label} is ${status}: ${message}.`,
     fix: def.fix
   };
 }
 
 export function buildStaticToolsReadiness(args: { gatePolicy?: unknown; selectedToolIds?: unknown } = {}): StaticToolsReadiness {
-  const gatePolicy = "warn";
+  const gatePolicy = normalizeGatePolicy(args.gatePolicy ?? process.env.HARNESS_STATIC_TOOL_GATE_POLICY ?? "require_local_scanners");
+  const localBinaryExecutionDisabled = process.env.HARNESS_DISABLE_LOCAL_BINARIES === "1";
   const selectedToolIds = normalizeSelectedToolIds(args.selectedToolIds);
   const selectedSet = new Set(selectedToolIds);
   const tools = TOOL_DEFS.map((tool) => probeTool(tool, selectedSet));
   const warnings = tools
     .filter((tool) => tool.selected && !tool.installed)
     .map((tool) => `${tool.label} is not available${tool.fallback ? `; fallback: ${tool.fallback}` : ""}.`);
-  const blockers: string[] = [];
+  const blockers = localBinaryExecutionDisabled
+    ? []
+    : tools
+      .filter((tool) => tool.selected && tool.mandatory && !tool.installed)
+      .map((tool) => `${tool.label} is required for production static audits.`);
   return {
     generated_at: new Date().toISOString(),
     status: blockers.length ? "blocked" : warnings.length ? "ready_with_warnings" : "ready",

@@ -95,7 +95,8 @@ const AGENT_ENV_PREFIX: Record<string, string[]> = {
   eval_selection_agent: ["AUDIT_LLM_EVIDENCE_SELECTION"],
   audit_supervisor_agent: ["AUDIT_LLM_SUPERVISOR"],
   remediation_agent: ["AUDIT_LLM_REMEDIATION"],
-  lane_specialist_agent: ["AUDIT_LLM_AREA_REVIEW"]
+  lane_specialist_agent: ["AUDIT_LLM_AREA_REVIEW"],
+  learning_synthesizer_agent: ["AUDIT_LLM_LEARNING_SYNTHESIZER"]
 };
 
 function readAgentEnv(agentName: string, suffix: "PROVIDER" | "MODEL" | "API_KEY"): string | undefined {
@@ -282,7 +283,7 @@ function resolveCodexCommand(command: string, prefixArgs: string[]): { command: 
     return { command, prefixArgs };
   }
   return {
-    command: "npx",
+    command: process.platform === "win32" ? "npx.cmd" : "npx",
     prefixArgs: ["-y", "@openai/codex"]
   };
 }
@@ -489,13 +490,34 @@ function inferMockPayload(request: StructuredGenerationRequest): unknown {
         },
         grader_outputs: (context?.findings ?? []).map((finding: any) => ({
           finding_id: finding.finding_id,
-          evidence_sufficiency: finding.source === "tool" ? "high" : "medium",
-          false_positive_risk: finding.source === "tool" ? "low" : "medium",
-          validation_recommendation: "no",
-          reasoning_summary: "Mock supervisor review adjusted confidence based on source type and available evidence."
+          evidence_sufficiency: (context?.findingQuality?.findings ?? []).find((item: any) => item.finding_id === finding.finding_id)?.evidence_support_verdict === "unsupported"
+            ? "low"
+            : finding.source === "tool" ? "high" : "medium",
+          false_positive_risk: (context?.findingQuality?.findings ?? []).find((item: any) => item.finding_id === finding.finding_id)?.qa_blocking
+            ? "high"
+            : finding.source === "tool" ? "low" : "medium",
+          validation_recommendation: (context?.findingQuality?.findings ?? []).find((item: any) => item.finding_id === finding.finding_id)?.qa_blocking ? "yes" : "no",
+          evidence_support_verdict: (context?.findingQuality?.findings ?? []).find((item: any) => item.finding_id === finding.finding_id)?.evidence_support_verdict ?? (finding.evidence?.length ? "partially_supported" : "unsupported"),
+          control_mapping_verdict: (context?.findingQuality?.findings ?? []).find((item: any) => item.finding_id === finding.finding_id)?.control_mapping_verdict ?? (finding.control_ids?.length ? "plausible" : "missing_control"),
+          recommended_control_ids: (context?.findingQuality?.findings ?? []).find((item: any) => item.finding_id === finding.finding_id)?.recommended_control_ids ?? finding.control_ids ?? [],
+          unsupported_claims: (context?.findingQuality?.findings ?? []).find((item: any) => item.finding_id === finding.finding_id)?.unsupported_claims ?? [],
+          qa_blocking: !!(context?.findingQuality?.findings ?? []).find((item: any) => item.finding_id === finding.finding_id)?.qa_blocking,
+          reasoning_summary: "Mock supervisor review incorporated deterministic finding-quality checks and source evidence posture."
         })),
-        actions: [],
-        notes: ["Mock supervisor review found no additional corrective actions."]
+        actions: (context?.findingQuality?.findings ?? [])
+          .filter((item: any) => item.qa_blocking)
+          .slice(0, 5)
+          .map((item: any) => ({
+            type: item.evidence_support_verdict === "unsupported" ? "request_additional_evidence" : "reassess_control_subset",
+            reason: `Deterministic QA flagged ${item.finding_id}: evidence ${item.evidence_support_verdict}, controls ${item.control_mapping_verdict}.`,
+            lane_names: [],
+            control_ids: item.claimed_control_ids ?? [],
+            finding_ids: [item.finding_id],
+            provider_ids: []
+          })),
+        notes: (context?.findingQuality?.blocking_count ?? 0) > 0
+          ? ["Mock supervisor review found deterministic QA blockers requiring correction or reviewer attention."]
+          : ["Mock supervisor review found no additional corrective actions."]
       };
     case "remediation_agent":
       return {

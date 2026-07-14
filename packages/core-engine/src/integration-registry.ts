@@ -44,37 +44,14 @@ export interface IntegrationDefinition {
 const BUILTIN_INTEGRATIONS: IntegrationDefinition[] = [
   {
     id: "github_outbound",
-    name: "GitHub Outbound",
-    description: "Manual outbound verification and delivery for PR comments, issue creation, labels, and checks.",
+    name: "GitHub Draft Export",
+    description: "Draft-only GitHub issue, pull request comment, label, and check payloads for manual use.",
     mode: "manual",
     notes: [
-      "Disabled by default and never posts automatically.",
-      "Requires a GitHub token for repository verification and manual delivery."
+      "Disabled by default and never posts from OSS.",
+      "Token-backed verification and delivery live in the hosted product."
     ],
-    credential_fields: [
-      {
-        id: "github_api_base_url",
-        label: "GitHub API Base URL",
-        kind: "base_url",
-        secret: false,
-        required: false,
-        placeholder: "https://api.github.com",
-        help_text: "Override only for GitHub Enterprise Server or a local test double.",
-        env_var: "GITHUB_API_BASE_URL",
-        location: "credentials"
-      },
-      {
-        id: "github_token",
-        label: "GitHub API Token",
-        kind: "api_key",
-        secret: true,
-        required: false,
-        placeholder: "ghp_...",
-        help_text: "Used for outbound repository verification and manual delivery.",
-        env_var: "GITHUB_TOKEN",
-        location: "credentials"
-      }
-    ]
+    credential_fields: []
   },
   {
     id: "generic_webhook",
@@ -170,7 +147,7 @@ function describeIntegrationStatus(
   const fields = integration.credential_fields.map((field) => describeFieldStatus(field, credentials, integrations, environment));
   const enabled = integrationEnabled(integration.id, integrations);
   const configured = integration.id === "github_outbound"
-    ? fields.some((field) => field.id === "github_token" && field.configured)
+    ? enabled
     : integration.id === "generic_webhook"
       ? fields.some((field) => field.id === "generic_webhook_url" && field.configured)
       : fields.every((field) => field.configured);
@@ -182,10 +159,8 @@ function describeIntegrationStatus(
       : "missing",
     note: integration.id === "github_outbound"
       ? enabled
-        ? configured
-          ? "GitHub outbound integration is ready for verification and manual delivery."
-          : "GitHub outbound is enabled but still missing a token."
-        : "GitHub outbound is disabled."
+        ? "GitHub draft export is enabled. Posting and webhook sync are hosted-only."
+        : "GitHub draft export is disabled."
       : enabled
         ? "Generic webhook delivery is configured."
         : "Generic webhook delivery is disabled.",

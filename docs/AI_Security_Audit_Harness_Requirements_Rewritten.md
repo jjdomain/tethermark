@@ -936,6 +936,40 @@ tethermark/
 
 This roadmap is **phase-based implementation of one complete architecture**, not a sequence of conceptually different products.
 
+### OSS static-audit production release gate
+
+Before local runtime sandbox implementation becomes the primary release focus, the OSS static audit path must pass an end-to-end production gate against a real AI-agent repository.
+
+Required production behavior:
+- static audits complete without requiring target build, install, runtime server, browser, container, or endpoint execution
+- source provenance records the audited repo and pinned commit
+- every finding includes evidence, observations or tool output, confidence rationale, control mappings, and actionable remediation guidance
+- skipped, unavailable, blocked, or failed static tools are represented as evidence/limitations and are never converted into a clean pass
+- review, disposition, suppression/waiver, remediation, follow-up, export, and assistant workflows are usable from the OSS UI
+- confirmed findings can move into remediation, and remediation actions write audit history automatically so users do not need to update disconnected states by hand
+- assistant answers cite persisted run/finding/evidence/review/remediation records and respect OSS/hosted capability boundaries
+
+Manual release validation should use the Pi Agent static audit plan in `docs/manual-pi-static-audit-test-plan.md`. Automated API/UI E2E tests remain required smoke/regression coverage, but the manual Pi plan is the release gate for agent judgment quality, control mapping quality, and remediation workflow quality.
+
+### Runtime validation production boundary
+
+Runtime validation is not production-ready simply because the UI can request it. If runtime audit modes are visible to production users, they must either be fully implemented and release-gated or clearly marked experimental/queued follow-up.
+
+Until the OSS runtime sandbox is implemented:
+- runtime validation actions must be framed as follow-up planning or queued capable-environment validation
+- OSS must not claim runtime proof, exploit reproduction, or behavioral validation when only static evidence exists
+- runtime findings must carry reduced confidence unless supported by actual runtime evidence
+
+Before OSS local runtime sandbox release, the implementation must document and test:
+- process and filesystem isolation
+- command allow/deny policy
+- network egress policy
+- CPU, memory, process, and wall-clock limits
+- synthetic credentials and simulated service backends
+- artifact capture, audit logging, cleanup, and failure reporting
+
+Third-party on-demand sandbox execution remains a valid hosted or paid usage-based architecture option. Hosted sandbox execution must preserve the same evidence, policy, and confirmation semantics as local execution.
+
 ### Phase 1 — Complete harness, narrow scope
 
 Goal:
@@ -968,6 +1002,7 @@ Success criteria:
 - emits planner decisions and traces
 - can feed downstream case-file workflows
 - can run from CLI by one operator on KVM2
+- passes the OSS static-audit production release gate, including the manual Pi Agent validation plan
 
 ### Phase 2 — Broader runtime coverage
 

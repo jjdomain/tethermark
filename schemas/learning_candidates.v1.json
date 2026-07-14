@@ -1,0 +1,43 @@
+{
+  "type": "object",
+  "required": ["schema_name", "schema_version", "generated_at", "tethermark_version", "payload"],
+  "properties": {
+    "schema_name": { "const": "learning_candidates.v1" },
+    "schema_version": { "type": "string" },
+    "generated_at": { "type": "string" },
+    "tethermark_version": { "type": "string" },
+    "payload": {
+      "type": "object",
+      "required": ["learning_candidates"],
+      "properties": {
+        "learning_events": { "type": "array" },
+        "learning_candidates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "workspace_id", "project_id", "scope_type", "scope_id", "candidate_type", "status", "title", "summary", "requires_human_approval", "created_at", "updated_at"],
+            "properties": {
+              "id": { "type": "string" },
+              "workspace_id": { "type": "string" },
+              "project_id": { "type": "string" },
+              "scope_type": { "type": "string" },
+              "scope_id": { "type": "string" },
+              "target_id": { "type": ["string", "null"] },
+              "candidate_type": { "type": "string" },
+              "status": { "type": "string" },
+              "title": { "type": "string" },
+              "summary": { "type": "string" },
+              "risk_level": { "type": "string" },
+              "requires_human_approval": { "type": "boolean" },
+              "created_at": { "type": "string" },
+              "updated_at": { "type": "string" }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

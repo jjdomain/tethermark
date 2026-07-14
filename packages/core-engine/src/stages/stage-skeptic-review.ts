@@ -1,6 +1,6 @@
 import type { AgentRuntime } from "../../../agent-runtime/src/index.js";
 import { buildSupervisorContext } from "../agent-context-builders.js";
-import type { AuditPolicyArtifact, AuditRequest, RepoContextArtifact, SandboxSession, SkepticArtifact, StandardControlDefinition, TargetDescriptor, ThreatModelArtifact } from "../contracts.js";
+import type { AuditPolicyArtifact, AuditRequest, FindingQualitySummary, RepoContextArtifact, SandboxSession, SkepticArtifact, StandardControlDefinition, TargetDescriptor, ThreatModelArtifact } from "../contracts.js";
 
 export async function stageSkepticReview(args: {
   runId: string;
@@ -17,6 +17,7 @@ export async function stageSkepticReview(args: {
   threatModel: ThreatModelArtifact;
   scoreSummary: any;
   controlCatalog: StandardControlDefinition[];
+  findingQuality?: FindingQualitySummary | null;
   lanePlans?: any[];
   laneResults?: any[];
   agentRuntime: AgentRuntime;
@@ -37,6 +38,7 @@ export async function stageSkepticReview(args: {
       threatModel: args.threatModel,
       scoreSummary: args.scoreSummary,
       controlCatalog: args.controlCatalog,
+      findingQuality: args.findingQuality ?? null,
       lanePlans: args.lanePlans,
       laneResults: args.laneResults,
       auditPolicy: args.auditPolicy,

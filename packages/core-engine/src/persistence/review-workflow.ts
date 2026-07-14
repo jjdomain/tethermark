@@ -249,6 +249,9 @@ export async function submitPersistedReviewAction(args: {
     previous_severity: args.input.previous_severity ?? null,
     updated_severity: args.input.updated_severity ?? null,
     visibility_override: args.input.visibility_override ?? null,
+    triage_decision: args.input.triage_decision ?? null,
+    review_priority: args.input.review_priority ?? null,
+    validation_intent: args.input.validation_intent ?? null,
     notes: args.input.notes ?? null,
     metadata_json: args.input.metadata ?? null
   };

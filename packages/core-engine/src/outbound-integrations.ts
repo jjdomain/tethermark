@@ -1,5 +1,4 @@
 import type {
-  OutboundDeliveryArtifact,
   OutboundVerificationArtifact
 } from "./contracts.js";
 import type { PersistedFindingRecord, PersistedReviewWorkflowRecord } from "./persistence/contracts.js";
@@ -16,9 +15,8 @@ export type GithubIntegrationPolicy = {
   require_per_run_approval: boolean;
 };
 
-export type GithubExecutionConfig = {
+export type GithubPreviewExecutionConfig = {
   api_base_url: string;
-  token: string | null;
   configured: boolean;
 };
 
@@ -49,16 +47,6 @@ export function normalizeGithubIntegrationPolicy(integrations: Record<string, un
     owned_repo_only: integrations?.github_owned_repo_only !== false,
     owned_repo_prefixes: ownedRepoPrefixes,
     require_per_run_approval: integrations?.github_require_per_run_approval !== false
-  };
-}
-
-export function normalizeGithubExecutionConfig(credentials: Record<string, unknown> | null | undefined): GithubExecutionConfig {
-  const apiBaseUrl = safeString(credentials?.github_api_base_url) ?? "https://api.github.com";
-  const token = safeString(credentials?.github_token);
-  return {
-    api_base_url: apiBaseUrl.replace(/\/+$/, ""),
-    token,
-    configured: Boolean(token)
   };
 }
 
@@ -96,204 +84,6 @@ export function parseGithubRepoRef(repoUrl: string | null | undefined): GithubRe
   }
 }
 
-async function readResponseBody(response: Response): Promise<Record<string, unknown> | null> {
-  const text = await response.text();
-  if (!text.trim()) return null;
-  try {
-    const parsed = JSON.parse(text);
-    return parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : { value: parsed };
-  } catch {
-    return { raw_text: text };
-  }
-}
-
-function createGithubHeaders(token: string): Record<string, string> {
-  return {
-    "accept": "application/vnd.github+json",
-    "authorization": `Bearer ${token}`,
-    "user-agent": "tethermark"
-  };
-}
-
-function normalizePermissions(value: unknown): OutboundVerificationArtifact["permissions"] {
-  if (!value || typeof value !== "object") return null;
-  const permissions = value as Record<string, unknown>;
-  return {
-    admin: permissions.admin === true,
-    maintain: permissions.maintain === true,
-    push: permissions.push === true,
-    triage: permissions.triage === true,
-    pull: permissions.pull === true
-  };
-}
-
-export async function verifyGithubRepositoryAccess(args: {
-  repoUrl: string | null | undefined;
-  config: GithubExecutionConfig;
-  actorId: string;
-}): Promise<OutboundVerificationArtifact> {
-  const repoRef = parseGithubRepoRef(args.repoUrl);
-  const baseArtifact = {
-    integration: "github" as const,
-    verified_by: args.actorId,
-    verified_at: new Date().toISOString(),
-    repo_full_name: repoRef?.full_name ?? null,
-    api_base_url: args.config.api_base_url,
-    permissions: null
-  };
-  if (!repoRef) {
-    return {
-      ...baseArtifact,
-      status: "blocked",
-      reason: "Run target does not resolve to a GitHub repository URL."
-    };
-  }
-  if (!args.config.token) {
-    return {
-      ...baseArtifact,
-      status: "blocked",
-      reason: "GitHub API token is not configured for outbound verification."
-    };
-  }
-  try {
-    const response = await fetch(`${args.config.api_base_url}/repos/${repoRef.owner}/${repoRef.repo}`, {
-      method: "GET",
-      headers: createGithubHeaders(args.config.token)
-    });
-    const responseBody = await readResponseBody(response);
-    if (!response.ok) {
-      return {
-        ...baseArtifact,
-        status: response.status === 403 || response.status === 404 ? "blocked" : "error",
-        reason: `GitHub repository lookup failed with status ${response.status}.`,
-        permissions: normalizePermissions(responseBody?.permissions)
-      };
-    }
-    const permissions = normalizePermissions(responseBody?.permissions);
-    if (!permissions || !(permissions.admin || permissions.maintain || permissions.push)) {
-      return {
-        ...baseArtifact,
-        status: "blocked",
-        reason: "GitHub credentials do not have write access to the target repository.",
-        permissions
-      };
-    }
-    return {
-      ...baseArtifact,
-      status: "verified",
-      reason: "Verified GitHub repository access with write permissions.",
-      permissions
-    };
-  } catch (error) {
-    return {
-      ...baseArtifact,
-      status: "error",
-      reason: error instanceof Error ? error.message : String(error)
-    };
-  }
-}
-
-export async function executeGithubOutboundDelivery(args: {
-  config: GithubExecutionConfig;
-  verification: OutboundVerificationArtifact | null;
-  actionType: GithubOutboundAction;
-  payloadPreview: Record<string, unknown> | null;
-  actorId: string;
-  targetNumber?: number | null;
-}): Promise<OutboundDeliveryArtifact> {
-  const attemptedAt = new Date().toISOString();
-  const repoFullName = args.verification?.repo_full_name ?? null;
-  const blockedBase = {
-    integration: "github" as const,
-    action_type: args.actionType,
-    attempted_by: args.actorId,
-    attempted_at: attemptedAt,
-    target_number: args.targetNumber ?? null,
-    external_url: null,
-    response_status: null,
-    payload_preview: args.payloadPreview,
-    response_body: null
-  };
-  if (!args.config.token) {
-    return {
-      ...blockedBase,
-      status: "blocked",
-      reason: "GitHub API token is not configured."
-    };
-  }
-  if (!repoFullName || args.verification?.status !== "verified") {
-    return {
-      ...blockedBase,
-      status: "blocked",
-      reason: "GitHub repository access has not been verified for this run."
-    };
-  }
-  if (args.actionType === "check") {
-    return {
-      ...blockedBase,
-      status: "blocked",
-      reason: "GitHub check delivery is not yet supported by the OSS harness."
-    };
-  }
-
-  let path = "";
-  let method = "POST";
-  let body: Record<string, unknown> | null = null;
-  if (args.actionType === "issue_create") {
-    path = `/repos/${repoFullName}/issues`;
-    body = {
-      title: args.payloadPreview?.title ?? "[AI Security Audit]",
-      body: args.payloadPreview?.body ?? ""
-    };
-  } else if (args.actionType === "pr_comment") {
-    if (!args.targetNumber) {
-      return {
-        ...blockedBase,
-        status: "blocked",
-        reason: "A pull request or issue number is required for GitHub comment delivery."
-      };
-    }
-    path = `/repos/${repoFullName}/issues/${args.targetNumber}/comments`;
-    body = { body: args.payloadPreview?.body ?? "" };
-  } else if (args.actionType === "label") {
-    if (!args.targetNumber) {
-      return {
-        ...blockedBase,
-        status: "blocked",
-        reason: "An issue or pull request number is required for GitHub label delivery."
-      };
-    }
-    path = `/repos/${repoFullName}/issues/${args.targetNumber}/labels`;
-    body = { labels: Array.isArray(args.payloadPreview?.labels) ? args.payloadPreview.labels : [] };
-  }
-
-  try {
-    const response = await fetch(`${args.config.api_base_url}${path}`, {
-      method,
-      headers: {
-        ...createGithubHeaders(args.config.token),
-        "content-type": "application/json"
-      },
-      body: body ? JSON.stringify(body) : undefined
-    });
-    const responseBody = await readResponseBody(response);
-    return {
-      ...blockedBase,
-      status: response.ok ? "sent" : "failed",
-      reason: response.ok ? "GitHub outbound delivery completed." : `GitHub outbound delivery failed with status ${response.status}.`,
-      external_url: safeString(responseBody?.html_url) ?? safeString(responseBody?.url),
-      response_status: response.status,
-      response_body: responseBody
-    };
-  } catch (error) {
-    return {
-      ...blockedBase,
-      status: "failed",
-      reason: error instanceof Error ? error.message : String(error)
-    };
-  }
-}
-
 export function buildGithubOutboundPreview(args: {
   run: {
     target_id: string;
@@ -309,7 +99,7 @@ export function buildGithubOutboundPreview(args: {
   reviewWorkflow: PersistedReviewWorkflowRecord | null;
   reviewSummary: ReviewSummary;
   policy: GithubIntegrationPolicy;
-  executionConfig?: GithubExecutionConfig | null;
+  executionConfig?: GithubPreviewExecutionConfig | null;
   approval?: { approved_by: string; approved_at: string } | null;
   verification?: OutboundVerificationArtifact | null;
 }): Record<string, unknown> {

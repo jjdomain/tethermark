@@ -25,10 +25,12 @@ export * from "./audit-policy.js";
 export * from "./request-scope.js";
 export * from "./review-summary.js";
 export * from "./finding-evaluation.js";
+export * from "./finding-quality.js";
 export * from "./report-exports.js";
 export * from "./webhook-events.js";
 export * from "./review-governance.js";
 export * from "./outbound-integrations.js";
+export * from "./assistant.js";
 export * from "./persistence/finding-dispositions.js";
 
 export * from "./agent-context-builders.js";
@@ -44,12 +46,36 @@ export * from "./persistence/observability.js";
 export * from "./persistence/query.js";
 export * from "./persistence/run-details.js";
 export * from "./persistence/ui-settings.js";
+export * from "./persistence/schema-manifest.js";
+export * from "./persistence/postgres.js";
 export { buildStageExecutions, persistAuditResult, persistPersistenceSummary } from "./persistence/index.js";
 export { backfillLocalPersistence, cleanupLocalJsonMirrors, reconstructLocalRun, reconstructLocalRuns, validateLocalPersistence } from "./persistence/backfill.js";
 export { acknowledgePersistedReviewNotification, deriveInitialReviewWorkflow, listPersistedReviewNotifications, listPersistedReviewWorkflows, submitPersistedReviewAction } from "./persistence/review-workflow.js";
 export { createPersistedReviewComment, readPersistedReviewComments } from "./persistence/review-comments.js";
 export { createPersistedWebhookDelivery, listPersistedWebhookDeliveries } from "./persistence/webhook-deliveries.js";
+export { SqliteAssistantStorage } from "./persistence/assistant.js";
 export { listPersistedRuntimeFollowups, readPersistedRuntimeFollowup, upsertRuntimeFollowupFromReviewAction, markRuntimeFollowupLaunched, markRuntimeFollowupJobTerminal } from "./persistence/runtime-followups.js";
+export { readPersistedRemediationItemsForRun, upsertPersistedRemediationItem, updatePersistedRemediationItem } from "./persistence/remediation-items.js";
+export {
+  createLearningExperiment,
+  extractLearningEventsForRun,
+  extractLearningEventsFromRecords,
+  generateAndPersistLearningCandidates,
+  generateLearningCandidatesFromEvents,
+  listPersistedLearningJobs,
+  listPersistedLearningCandidates,
+  listPersistedLearningEvents,
+  listPersistedLearningExperiments,
+  listPersistedLearningPromotions,
+  normalizeLearningSettings,
+  promoteLearningCandidate,
+  readPersistedLearningCandidate,
+  rejectLearningCandidate,
+  runLearningPipeline,
+  rollbackLearningPromotion,
+  syncLearningEventsForScope,
+  syncLearningEventsForRun
+} from "./persistence/learning.js";
 export { PersistedAsyncJobManager, listPersistedAsyncJobs, readPersistedAsyncJob, readPersistedAsyncJobAttempts } from "./persistence/async-jobs.js";
 export { readLocalPersistenceMetadata, readPersistenceMetadata } from "./persistence/sqlite.js";
 export { computeCommitDiffGate } from "./commit-diff.js";

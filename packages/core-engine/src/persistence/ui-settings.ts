@@ -8,7 +8,7 @@ import type {
   PersistedUiDocumentRecord,
   PersistedUiSettingsRecord
 } from "./contracts.js";
-import { ensureSqliteSchema, openSqliteDatabase, readSqliteTable, saveSqliteDatabase, upsertSqliteRecord } from "./sqlite.js";
+import { deleteSqliteRecord, ensureSqliteSchema, openSqliteDatabase, readSqliteTable, saveSqliteDatabase, upsertSqliteRecord } from "./sqlite.js";
 
 export interface UiSettingsInput {
   providers?: Record<string, unknown>;
@@ -18,6 +18,7 @@ export interface UiSettingsInput {
   review?: Record<string, unknown>;
   integrations?: Record<string, unknown>;
   test_mode?: Record<string, unknown>;
+  learning?: Record<string, unknown>;
 }
 
 export interface UiDocumentInput {
@@ -91,14 +92,15 @@ function defaultUiSettingsForScope(args: {
     providers_json: args.scope === "global" ? {
       default_provider: "mock",
       default_model: "mock-agent-runtime",
+      assistant_inherit_default: true,
+      assistant_provider: "",
+      assistant_model: "",
       mock_mode: false,
       agent_overrides: {}
     } : {},
     credentials_json: args.scope === "global" ? {
       prefer_env_credentials: true,
-      configured_endpoints: [],
-      github_api_base_url: "https://api.github.com",
-      github_token: null
+      configured_endpoints: []
     } : {},
     audit_defaults_json: args.scope === "global" ? {
       audit_package: "agentic-static",
@@ -141,6 +143,25 @@ function defaultUiSettingsForScope(args: {
       deterministic_planning: true,
       fixture_validation_enabled: true,
       reduced_cost_mode: true
+    } : {},
+    learning_json: args.scope === "global" ? {
+      enabled: true,
+      trigger_mode: "hybrid",
+      event_driven_enabled: true,
+      scheduled_enabled: false,
+      scheduled_interval_minutes: 60,
+      sync_limit: 100,
+      llm_synthesis_enabled: true,
+      llm_min_source_signals: 3,
+      llm_min_distinct_runs: 2,
+      llm_always_high_risk: true,
+      llm_always_governance_impacting: true,
+      llm_nightly_consolidation: true,
+      llm_manual_synthesis_enabled: true,
+      llm_max_calls_per_day: 50,
+      llm_send_source_excerpts: true,
+      require_dry_run_before_promotion: true,
+      auto_expire_days: 90
     } : {}
   };
 }
@@ -179,7 +200,8 @@ function mergeSettingsLayers(layers: UiSettingsResolution["layers"]): PersistedU
     preflight_json: mergeJson(layers.global.preflight_json as Record<string, unknown>, layers.project.preflight_json),
     review_json: mergeJson(layers.global.review_json as Record<string, unknown>, layers.project.review_json),
     integrations_json: mergeJson(layers.global.integrations_json as Record<string, unknown>, layers.project.integrations_json),
-    test_mode_json: mergeJson(layers.global.test_mode_json as Record<string, unknown>, layers.project.test_mode_json)
+    test_mode_json: mergeJson(layers.global.test_mode_json as Record<string, unknown>, layers.project.test_mode_json),
+    learning_json: mergeJson(layers.global.learning_json as Record<string, unknown>, layers.project.learning_json)
   };
 }
 
@@ -354,7 +376,8 @@ export async function updatePersistedUiSettings(
       preflight_json: input.preflight ?? current.preflight_json,
       review_json: input.review ?? current.review_json,
       integrations_json: input.integrations ?? current.integrations_json,
-      test_mode_json: input.test_mode ?? current.test_mode_json
+      test_mode_json: input.test_mode ?? current.test_mode_json,
+      learning_json: input.learning ?? current.learning_json
     };
     upsertSqliteRecord({
       db,
@@ -429,10 +452,7 @@ export async function deletePersistedUiDocument(documentId: string, rootDirOrOpt
     const rows = readSqliteTable<PersistedUiDocumentRecord>(db, "ui_documents");
     const record = rows.find((item) => item.id === documentId && item.workspace_id === workspaceId && item.project_id === projectId);
     if (!record) return false;
-    const statement = db.prepare("DELETE FROM records WHERE table_name = ? AND record_key = ?");
-    statement.run(["ui_documents", documentId]);
-    statement.free();
-    const changed = Number(db.exec("SELECT changes() AS count")[0]?.values?.[0]?.[0] ?? 0) > 0;
+    const changed = deleteSqliteRecord({ db, tableName: "ui_documents", recordKey: documentId });
     if (changed) await saveSqliteDatabase(location.rootDir, db, location.mode);
     return changed;
   } finally {

@@ -15,6 +15,26 @@ function normalizePolicyPackId(policyPackId) {
   return policyPackId || "default";
 }
 
+function RunListToggleIcon({ direction = "collapse" }) {
+  const common = {
+    viewBox: "0 0 20 20",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.7",
+    strokeLinecap: "round",
+    strokeLinejoin: "round",
+    className: "h-4 w-4"
+  };
+  const arrowPath = direction === "expand"
+    ? "M9 7L12 10L9 13"
+    : "M12 7L9 10L12 13";
+  return h("svg", common, [
+    h("rect", { key: "frame", x: "3.5", y: "4", width: "13", height: "12", rx: "2" }),
+    h("path", { key: "divider", d: "M7.5 4V16" }),
+    h("path", { key: "arrow", d: arrowPath })
+  ]);
+}
+
 function getPolicyPackLabel(policyPacks, policyPackId) {
   const effectiveId = normalizePolicyPackId(policyPackId);
   const match = (policyPacks || []).find((item) => item.id === effectiveId);
@@ -164,40 +184,44 @@ const agentConfigCatalog = [
 ];
 
 function RunInboxListComponent({ runs, selectedRunId, onSelect, helpers }) {
-  const { cn, Badge, formatDate, runtimeFollowupCount } = helpers;
+  const { cn, formatDate, runtimeFollowupCount } = helpers;
   return runs.length
-    ? h("div", { className: "divide-y divide-slate-200 overflow-hidden rounded-3xl border border-slate-200 bg-white" }, runs.map((run) => {
+    ? h("div", { className: "divide-y divide-slate-200 overflow-hidden border-y border-slate-200 bg-white" }, runs.map((run) => {
       const targetName = run.target?.canonical_name || run.target_summary?.canonical_name || run.target_id;
       const status = run.review_workflow?.status || run.status || "unknown";
+      const followups = runtimeFollowupCount(run);
+      const score = Number.isFinite(Number(run.overall_score)) ? Number(run.overall_score).toFixed(1) : "n/a";
       return h("button", {
         key: run.id,
         type: "button",
         className: cn(
-          "flex w-full items-start justify-between gap-4 px-5 py-4 text-left transition hover:bg-slate-50",
-          selectedRunId === run.id && "bg-slate-50"
+          "grid w-full grid-cols-[minmax(0,1fr)_auto] gap-3 border-l-2 border-transparent px-3 py-2 text-left transition hover:bg-slate-50",
+          selectedRunId === run.id && "border-slate-900 bg-slate-50"
         ),
         onClick: () => onSelect?.(run.id)
       }, [
         h("div", { key: "copy", className: "min-w-0 flex-1" }, [
-          h("div", { key: "title", className: "truncate font-medium text-slate-900" }, targetName),
-          h("div", { key: "meta", className: "mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-slate-500" }, [
-            h("span", { key: "run" }, run.id),
-            h("span", { key: "package" }, run.audit_package || "default package"),
-            h("span", { key: "age" }, formatDate(run.created_at))
+          h("div", { key: "top", className: "flex min-w-0 items-center gap-2" }, [
+            h("div", { key: "title", className: "truncate text-sm font-semibold text-slate-950" }, targetName),
+            h("span", { key: "mode", className: "shrink-0 text-xs text-slate-500" }, run.audit_package || "default")
           ]),
-          h("div", { key: "submeta", className: "mt-2 flex flex-wrap gap-2" }, [
-            h(Badge, { key: "status" }, run.status),
-            h(Badge, { key: "review" }, status),
-            runtimeFollowupCount(run) > 0 ? h(Badge, { key: "followup" }, `follow-up ${runtimeFollowupCount(run)}`) : null
+          h("div", { key: "meta", className: "mt-0.5 flex min-w-0 items-center gap-2 text-xs text-slate-500" }, [
+            h("span", { key: "run", className: "truncate font-mono" }, run.id),
+            h("span", { key: "created", className: "shrink-0" }, formatDate(run.created_at))
+          ]),
+          h("div", { key: "submeta", className: "mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs" }, [
+            h("span", { key: "status", className: "font-medium uppercase tracking-wide text-emerald-700" }, run.status || "unknown"),
+            h("span", { key: "review", className: "font-medium uppercase tracking-wide text-amber-700" }, status),
+            followups > 0 ? h("span", { key: "followup", className: "font-medium uppercase tracking-wide text-slate-500" }, `follow-up ${followups}`) : null
           ].filter(Boolean))
         ]),
-        h("div", { key: "score", className: "shrink-0 text-right" }, [
-          h("div", { key: "value", className: "text-lg font-semibold text-slate-950" }, Number.isFinite(Number(run.overall_score)) ? Number(run.overall_score).toFixed(1) : "n/a"),
-          h("div", { key: "label", className: "mt-1 text-xs uppercase tracking-[0.18em] text-slate-400" }, "Score")
+        h("div", { key: "side", className: "shrink-0 text-right" }, [
+          h("div", { key: "score", className: "text-sm font-semibold text-slate-950" }, score),
+          h("div", { key: "label", className: "mt-0.5 text-xs text-slate-400" }, "score")
         ])
       ]);
     }))
-    : h("div", { className: "rounded-3xl border border-dashed border-slate-200 px-5 py-8 text-sm text-slate-500" }, "No runs available in the current scope.");
+    : h("div", { className: "border-y border-dashed border-slate-200 px-4 py-6 text-sm text-slate-500" }, "No runs available in the current scope.");
 }
 
 function RunsWorkspaceComponent({
@@ -210,68 +234,205 @@ function RunsWorkspaceComponent({
   launchModal,
   helpers
 }) {
-  const { Button, formatDate } = helpers;
+  const React = window.React;
+  const { useEffect, useMemo, useState } = React;
+  const { Button, Input, Select, formatDate } = helpers;
+  const [runSearch, setRunSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [reviewFilter, setReviewFilter] = useState("all");
+  const [sortMode, setSortMode] = useState("newest");
+  const [runListCollapsed, setRunListCollapsed] = useState(false);
+  const normalize = (value) => String(value || "").toLowerCase();
+  const statusOptions = useMemo(() => Array.from(new Set((runs || []).map((run) => run.status || "unknown"))).sort(), [runs]);
+  const reviewOptions = useMemo(() => Array.from(new Set((runs || []).map((run) => run.review_workflow?.status || run.status || "unknown"))).sort(), [runs]);
+  const visibleRuns = useMemo(() => {
+    const query = normalize(runSearch).trim();
+    const filtered = (runs || []).filter((run) => {
+      const targetName = run.target?.canonical_name || run.target_summary?.canonical_name || run.target_id || "";
+      const reviewStatus = run.review_workflow?.status || run.status || "unknown";
+      const searchable = [
+        run.id,
+        targetName,
+        run.audit_package,
+        run.status,
+        reviewStatus,
+        run.target_summary?.latest_target_class
+      ].map(normalize).join(" ");
+      if (query && !searchable.includes(query)) return false;
+      if (statusFilter !== "all" && (run.status || "unknown") !== statusFilter) return false;
+      if (reviewFilter !== "all" && reviewStatus !== reviewFilter) return false;
+      return true;
+    });
+    return filtered.sort((a, b) => {
+      const aTime = Date.parse(a.created_at || "") || 0;
+      const bTime = Date.parse(b.created_at || "") || 0;
+      const aScore = Number.isFinite(Number(a.overall_score)) ? Number(a.overall_score) : -Infinity;
+      const bScore = Number.isFinite(Number(b.overall_score)) ? Number(b.overall_score) : -Infinity;
+      const aTarget = normalize(a.target?.canonical_name || a.target_summary?.canonical_name || a.target_id);
+      const bTarget = normalize(b.target?.canonical_name || b.target_summary?.canonical_name || b.target_id);
+      if (sortMode === "oldest") return aTime - bTime;
+      if (sortMode === "score_desc") return bScore - aScore;
+      if (sortMode === "score_asc") return aScore - bScore;
+      if (sortMode === "target_az") return aTarget.localeCompare(bTarget);
+      return bTime - aTime;
+    });
+  }, [runs, runSearch, statusFilter, reviewFilter, sortMode]);
+  useEffect(() => {
+    if (!selectedRunId) setRunListCollapsed(false);
+  }, [selectedRunId]);
+  const collapseRunList = Boolean(selectedRunId && runListCollapsed);
   return h("div", { className: "h-screen overflow-hidden" }, [
-    h("div", { key: "workspace", className: "grid h-full overflow-hidden border border-slate-200 bg-white xl:grid-cols-[420px_1fr]" }, [
-      h("section", { key: "queue", className: "flex min-h-0 flex-col border-b border-slate-200 xl:border-b-0 xl:border-r" }, [
-        h("div", { key: "queue-header", className: "border-b border-slate-200 px-5 py-5" }, [
-          h("div", { key: "top", className: "flex items-start justify-between gap-4" }, [
+    h("div", {
+      key: "workspace",
+      className: collapseRunList
+        ? "grid h-full grid-cols-[48px_minmax(0,1fr)] overflow-hidden border border-slate-200 bg-white"
+        : "grid h-full overflow-hidden border border-slate-200 bg-white xl:grid-cols-[360px_1fr]"
+    }, [
+      h("section", { key: "queue", className: collapseRunList ? "flex min-h-0 flex-col border-r border-slate-200 bg-slate-50" : "flex min-h-0 flex-col border-b border-slate-200 xl:border-b-0 xl:border-r" }, collapseRunList ? [
+        h("button", {
+          key: "expand",
+          type: "button",
+          "aria-label": "Show run queue",
+          className: "flex h-11 w-11 items-center justify-center text-slate-500 hover:bg-white hover:text-slate-900",
+          onClick: () => setRunListCollapsed(false),
+          title: "Show run queue"
+        }, h(RunListToggleIcon, { direction: "expand" }))
+      ] : [
+        h("div", { key: "queue-header", className: "border-b border-slate-200 px-3 py-3" }, [
+          h("div", { key: "top", className: "flex items-start justify-between gap-3" }, [
             h("div", { key: "copy" }, [
-              h("h2", { key: "title", className: "text-2xl font-semibold tracking-tight text-slate-950" }, "Runs Inbox"),
-              h("p", { key: "desc", className: "mt-2 text-sm leading-6 text-slate-500" }, "Select a run from the queue, inspect the selected run on the right, and launch new audits from a dedicated modal.")
+              h("h2", { key: "title", className: "text-xl font-semibold tracking-tight text-slate-950" }, "Runs"),
+              h("p", { key: "desc", className: "mt-1 text-sm text-slate-500" }, "Audit run queue")
             ]),
-            h("div", { key: "actions", className: "flex shrink-0 flex-wrap gap-3" }, [
-              h(Button, { key: "launch", onClick: onOpenLaunch }, "Launch Audit"),
-              h(Button, { key: "reviews", variant: "outline", onClick: onOpenReviews }, "Open Reviews")
-            ])
+            selectedRunId
+              ? h(Button, {
+                key: "collapse",
+                variant: "outline",
+                "aria-label": "Hide run queue",
+                title: "Hide run queue",
+                className: "h-9 w-9 shrink-0 rounded-md p-0",
+                onClick: () => setRunListCollapsed(true)
+              }, h(RunListToggleIcon, { direction: "collapse" }))
+              : null
           ]),
-          h("div", { key: "queue-meta", className: "mt-4 flex items-center justify-between gap-3 text-sm text-slate-500" }, [
-            h("div", { key: "count" }, `${runs.length} run${runs.length === 1 ? "" : "s"} in current scope`),
+          h("div", { key: "queue-meta", className: "mt-3 flex items-center justify-between gap-3 text-xs text-slate-500" }, [
+            h("div", { key: "count" }, `${visibleRuns.length} of ${runs.length} run${runs.length === 1 ? "" : "s"}`),
             h("div", { key: "latest" }, runs[0]?.created_at ? `Latest ${formatDate(runs[0].created_at)}` : "No recent activity")
+          ]),
+          h("div", { key: "queue-tools", className: "mt-3 grid gap-2" }, [
+            h(Input, {
+              key: "search",
+              value: runSearch,
+              onChange: (event) => setRunSearch(event.target.value),
+              placeholder: "Search runs",
+              className: "h-9 text-sm"
+            }),
+            h("div", { key: "filters", className: "grid grid-cols-3 gap-2" }, [
+              Select({
+                key: "status",
+                value: statusFilter,
+                onChange: (event) => setStatusFilter(event.target.value),
+                className: "h-9 min-w-0 rounded-md px-2 text-xs"
+              }, [
+                h("option", { key: "all", value: "all" }, "All status"),
+                ...statusOptions.map((status) => h("option", { key: status, value: status }, status))
+              ]),
+              Select({
+                key: "review",
+                value: reviewFilter,
+                onChange: (event) => setReviewFilter(event.target.value),
+                className: "h-9 min-w-0 rounded-md px-2 text-xs"
+              }, [
+                h("option", { key: "all", value: "all" }, "All review"),
+                ...reviewOptions.map((status) => h("option", { key: status, value: status }, status))
+              ]),
+              Select({
+                key: "sort",
+                value: sortMode,
+                onChange: (event) => setSortMode(event.target.value),
+                className: "h-9 min-w-0 rounded-md px-2 text-xs"
+              }, [
+                h("option", { key: "newest", value: "newest" }, "Newest"),
+                h("option", { key: "oldest", value: "oldest" }, "Oldest"),
+                h("option", { key: "score_desc", value: "score_desc" }, "Score high"),
+                h("option", { key: "score_asc", value: "score_asc" }, "Score low"),
+                h("option", { key: "target_az", value: "target_az" }, "Target A-Z")
+              ])
+            ])
           ])
         ]),
         h("div", { key: "queue-list", className: "min-h-0 flex-1 overflow-y-auto" }, h(RunInboxListComponent, {
-          runs,
+          runs: visibleRuns,
           selectedRunId,
           onSelect: onSelectRun,
           helpers
         }))
       ]),
-      h("section", { key: "detail-pane", className: "min-w-0 overflow-y-auto bg-slate-50 px-5 py-5" }, detailPane)
+      h("section", { key: "detail-pane", className: "min-w-0 overflow-hidden bg-slate-50" }, detailPane)
     ]),
     launchModal
   ]);
 }
 
-function RunDetailShellComponent({ loading, hasDetail, panels, helpers }) {
+function RunDetailShellComponent({ loading, hasDetail, panels, assistantPanel, helpers }) {
   const React = window.React;
-  const { useEffect, useState } = React;
+  const { useEffect, useRef, useState } = React;
   const { Button, Card } = helpers;
+  const cx = helpers.cn || window.TethermarkUI?.cn || ((...items) => items.filter(Boolean).join(" "));
   const [detailView, setDetailView] = useState("overview");
+  const [assistantOpen, setAssistantOpen] = useState(false);
+  const panelScrollRef = useRef(null);
   const detailTabs = [
     ["overview", "Overview"],
     ["findings", "Findings"],
     ["review", "Review"],
     ["runtime", "Runtime Validation"],
-    ["history", "History / Comparison"],
-    ["exports", "Exports / Integrations"]
+    ["exports", "Exports"],
+    ["advanced", "Advanced"]
   ];
   const panelGroups = {
-    overview: ["overview", "execution-observability", "compare", "intent", "providers"],
-    findings: ["findings", "findings-rollup"],
-    review: ["assignment", "review-decisions", "handoff", "review-activity"],
+    overview: ["overview"],
+    findings: ["findings"],
+    review: [
+      "assignment",
+      "review-decisions",
+      "handoff",
+      "findings-rollup",
+      "evaluation-overview",
+      "disposition-lifecycle",
+      "review-activity",
+      "notes-timeline",
+      "discussion",
+      "timeline"
+    ],
     runtime: ["runtime-followups", "sandbox-execution"],
-    history: ["comparison-preview", "comparison-export"],
-    exports: ["outbound", "report-exports", "indexed-exports", "audit-export", "webhook-deliveries"]
+    exports: ["outbound", "report-exports", "indexed-exports", "audit-export", "webhook-deliveries"],
+    advanced: ["execution-observability", "compare", "intent", "providers", "agentic-signals", "comparison-preview", "comparison-export"]
   };
   const tabDescriptions = {
-    overview: "Run provenance, launch intent, configuration drift, and provider/preflight posture.",
+    overview: "Current run state, score, review posture, and high-level identifiers.",
     findings: "Finding evidence, evaluation, and disposition governance for the selected run.",
-    review: "Assignee, review actions, handoff context, notes, comments, and timeline.",
-    runtime: "Sandbox execution evidence and runtime follow-up work linked to the run.",
-    history: "Run-to-run comparison and prior-run context.",
-    exports: "Outbound sharing, exports, and automation delivery metadata."
+    review: "Assignee, rollups, disposition lifecycle, handoff context, notes, comments, and timeline.",
+    runtime: "Sandbox readiness, runtime execution evidence, and runtime follow-up work linked to the run.",
+    exports: "Outbound sharing, reports, machine-readable exports, and automation delivery metadata.",
+    advanced: "Execution observability, launch configuration, provider readiness, and run-to-run comparison."
   };
+  useEffect(() => {
+    if (panelScrollRef.current) panelScrollRef.current.scrollTop = 0;
+  }, [detailView]);
+  useEffect(() => {
+    window.dispatchEvent(new CustomEvent("tethermark:run-detail-view", { detail: { view: detailView } }));
+  }, [detailView]);
+  useEffect(() => {
+    const openAssistant = () => setAssistantOpen(true);
+    const closeAssistant = () => setAssistantOpen(false);
+    window.addEventListener("tethermark:open-assistant", openAssistant);
+    window.addEventListener("tethermark:close-assistant", closeAssistant);
+    return () => {
+      window.removeEventListener("tethermark:open-assistant", openAssistant);
+      window.removeEventListener("tethermark:close-assistant", closeAssistant);
+    };
+  }, []);
   if (loading) {
     return h(Card, { title: "Run Detail", description: "Loading persisted run detail and planned profile.", className: "border-slate-200 bg-white shadow-sm" }, h("div", { className: "text-sm text-slate-500" }, "Loading run detail..."));
   }
@@ -279,35 +440,89 @@ function RunDetailShellComponent({ loading, hasDetail, panels, helpers }) {
     return h(Card, { title: "Run Detail", description: "Select a run to compare planned launch posture with the executed configuration.", className: "border-slate-200 bg-white shadow-sm" }, h("div", { className: "text-sm text-slate-500" }, "No run selected."));
   }
   const visiblePanels = (panels || []).filter((panel) => panelGroups[detailView]?.includes(panel?.key));
-  return h("div", { className: "space-y-6" }, [
-    h("div", { key: "tabs", className: "sticky top-0 z-10 border border-slate-200 bg-white/95 p-3 backdrop-blur" }, [
-      h("div", { key: "tab-list", className: "flex flex-wrap gap-2" }, detailTabs.map(([id, label]) => h(Button, {
-        key: id,
-        variant: detailView === id ? "secondary" : "outline",
-        onClick: () => setDetailView(id),
-        className: detailView === id ? "bg-slate-900 text-white hover:bg-slate-800" : ""
-      }, label))),
-      h("div", { key: "tab-copy", className: "mt-3 text-sm text-slate-500" }, tabDescriptions[detailView])
+  const findingsWorkbench = detailView === "findings";
+  const flatPanels = visiblePanels.map((panel) => React.isValidElement(panel)
+    ? React.cloneElement(panel, {
+      className: cx(panel.props?.className || "", "rounded-none border-x-0 border-t-0 border-b border-slate-200 shadow-none")
+    })
+    : panel);
+  const drawerVisible = Boolean(assistantPanel && assistantOpen);
+  return h("div", { className: "flex h-full min-h-0 flex-col" }, [
+    h("div", { key: "tabs", className: "sticky top-0 z-30 shrink-0 border-b border-slate-200 bg-white/95 px-3 py-2 backdrop-blur" }, [
+      h("div", { key: "toolbar", className: "flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between" }, [
+        h("div", { key: "tab-list", className: "flex flex-wrap gap-1.5" }, detailTabs.map(([id, label]) => h(Button, {
+          key: id,
+          "data-testid": `run-detail-tab-${id}`,
+          variant: detailView === id ? "secondary" : "outline",
+          onClick: () => setDetailView(id),
+          className: cx("rounded-md px-3 py-2", detailView === id ? "bg-slate-900 text-white hover:bg-slate-800" : "")
+        }, label))),
+        assistantPanel
+          ? h(Button, {
+            key: "assistant-toggle",
+            type: "button",
+            "data-testid": "run-detail-assistant-toggle",
+            variant: drawerVisible ? "secondary" : "outline",
+            className: cx("shrink-0 rounded-md px-3 py-2", drawerVisible ? "bg-slate-900 text-white hover:bg-slate-800" : ""),
+            onClick: () => setAssistantOpen((current) => !current)
+          }, drawerVisible ? "Close AI" : "Ask AI")
+          : null
+      ]),
+      h("div", { key: "tab-copy", className: "mt-2 text-sm text-slate-500" }, tabDescriptions[detailView])
     ]),
-    ...visiblePanels
+    h("div", { key: "workarea", className: "relative flex min-h-0 flex-1 overflow-hidden" }, [
+      h("div", { key: "panels", ref: panelScrollRef, className: cx("min-w-0 flex-1", findingsWorkbench ? "min-h-0 overflow-hidden" : "min-h-0 overflow-y-auto") }, [
+        h("div", { key: "panel-inner", className: findingsWorkbench ? "h-full min-h-0" : "pb-3" }, flatPanels)
+      ]),
+      drawerVisible
+        ? h("aside", {
+          key: "assistant-drawer",
+          "data-testid": "run-detail-assistant-drawer",
+          className: "absolute inset-y-0 right-0 z-40 w-full max-w-[420px] overflow-hidden border-l border-slate-200 bg-white shadow-2xl 2xl:static 2xl:z-auto 2xl:w-[380px] 2xl:max-w-none 2xl:shrink-0 2xl:shadow-none"
+        }, assistantPanel)
+        : null
+    ])
   ]);
 }
 
-function FindingDetailShellComponent({ tabs, renderContent, helpers }) {
+function FindingDetailShellComponent({ tabs, detailHeader, renderContent, helpers, view, onViewChange, notice }) {
   const React = window.React;
-  const { useEffect, useState } = React;
   const { Button } = helpers;
-  const [view, setView] = useState("summary");
-  return h("div", { className: "space-y-4" }, [
-    h("div", { key: "finding-tabs", className: "rounded-2xl border border-slate-200 bg-white p-3" }, [
-      h("div", { key: "tab-list", className: "flex flex-wrap gap-2" }, (tabs || []).map(([id, label]) => h(Button, {
-        key: id,
-        variant: view === id ? "secondary" : "outline",
-        onClick: () => setView(id),
-        className: view === id ? "bg-slate-900 text-white hover:bg-slate-800" : ""
-      }, label)))
+  const cx = helpers.cn || window.TethermarkUI?.cn || ((...items) => items.filter(Boolean).join(" "));
+  const firstTabId = tabs?.[0]?.[0] || "evidence";
+  const currentView = tabs?.some(([id]) => id === view) ? view : firstTabId;
+  const setView = (nextView) => onViewChange?.(nextView, currentView);
+  const content = renderContent ? renderContent({ view: currentView, setView }) : null;
+  const flatContent = React.isValidElement(content) && Array.isArray(content.props?.children)
+    ? React.cloneElement(content, {
+      className: "pb-3"
+    }, content.props.children.map((child) => React.isValidElement(child)
+      ? React.cloneElement(child, {
+        className: cx(child.props?.className || "", "rounded-none border-x-0 border-t-0 border-b border-slate-200 shadow-none")
+      })
+      : child))
+    : content;
+  return h("div", { className: "min-h-0" }, [
+    h("div", { key: "finding-detail-sticky", className: "sticky top-0 z-20 border-b border-slate-200 bg-white" }, [
+      detailHeader,
+      h("div", { key: "finding-tabs", className: "p-2" }, [
+        h("div", { key: "tab-list", className: "flex flex-wrap gap-1.5" }, (tabs || []).map(([id, label]) => h(Button, {
+          key: id,
+          "data-testid": `finding-detail-tab-${id}`,
+          variant: view === id ? "secondary" : "outline",
+          onClick: () => {
+            if (id === currentView) return;
+            onViewChange?.(id, view);
+          },
+          className: cx("rounded-md px-3 py-2", currentView === id ? "bg-slate-900 text-white hover:bg-slate-800" : "")
+        }, label)))
+      ]),
+      notice ? h("div", {
+        key: "finding-notice",
+        className: "mx-2 mb-2 rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm text-emerald-700"
+      }, notice) : null
     ]),
-    renderContent ? renderContent({ view, setView }) : null
+    flatContent
   ]);
 }
 
@@ -319,17 +534,59 @@ function FindingsWorkspaceComponent({
   detailTabs,
   renderDetailContent,
   emptyDetail,
+  detailNotice,
+  detailKey = "default",
   helpers
 }) {
-  return h("div", { className: "grid gap-6 xl:grid-cols-[0.95fr_1.05fr]" }, [
-    h("div", { key: "finding-list", className: "space-y-4" }, listPane),
+  const React = window.React;
+  const { useEffect, useRef, useState } = React;
+  const detailScrollRef = useRef(null);
+  const firstDetailTabId = detailTabs?.[0]?.[0] || "evidence";
+  const [activeView, setActiveView] = useState(firstDetailTabId);
+  const activeViewRef = useRef(firstDetailTabId);
+  const activeDetailKeyRef = useRef(detailKey || "default");
+  const scrollPositionsRef = useRef({});
+  const scrollKey = (key, view) => `${key || "default"}:${view || detailTabs?.[0]?.[0] || "evidence"}`;
+  const saveScrollPosition = (key = activeDetailKeyRef.current, view = activeViewRef.current) => {
+    if (!detailScrollRef.current) return;
+    scrollPositionsRef.current[scrollKey(key, view)] = detailScrollRef.current.scrollTop;
+  };
+  const restoreScrollPosition = (key = activeDetailKeyRef.current, view = activeViewRef.current) => {
+    window.requestAnimationFrame(() => {
+      if (!detailScrollRef.current) return;
+      detailScrollRef.current.scrollTop = scrollPositionsRef.current[scrollKey(key, view)] || 0;
+    });
+  };
+  const handleFindingDetailViewChange = (nextView, previousView) => {
+    saveScrollPosition(activeDetailKeyRef.current, previousView);
+    activeViewRef.current = nextView || firstDetailTabId;
+    setActiveView(activeViewRef.current);
+    restoreScrollPosition(activeDetailKeyRef.current, activeViewRef.current);
+  };
+  useEffect(() => {
+    if (detailTabs?.some(([id]) => id === activeViewRef.current)) return;
+    handleFindingDetailViewChange(firstDetailTabId, activeViewRef.current);
+  }, [firstDetailTabId, detailTabs]);
+  useEffect(() => {
+    const nextDetailKey = detailKey || "default";
+    if (activeDetailKeyRef.current !== nextDetailKey) {
+      saveScrollPosition(activeDetailKeyRef.current, activeViewRef.current);
+      activeDetailKeyRef.current = nextDetailKey;
+      restoreScrollPosition(activeDetailKeyRef.current, activeViewRef.current);
+    }
+  }, [detailKey]);
+  return h("div", { className: "grid min-h-0 flex-1 xl:grid-cols-[300px_minmax(0,1fr)] 2xl:grid-cols-[340px_minmax(0,1fr)]" }, [
+    h("div", { key: "finding-list", "data-testid": "finding-list-pane", className: "min-h-0 min-w-0 overflow-y-auto" }, listPane),
     hasSelectedFinding
-      ? h("div", { key: "finding-detail", className: "space-y-4" }, [
-        detailHeader,
+      ? h("div", { key: "finding-detail", "data-testid": "finding-detail-pane", ref: detailScrollRef, className: "min-h-0 min-w-0 overflow-y-auto border-l border-slate-200" }, [
         h(FindingDetailShellComponent, {
           key: "finding-shell",
           tabs: detailTabs,
+          detailHeader,
           helpers,
+          view: activeView,
+          onViewChange: handleFindingDetailViewChange,
+          notice: detailNotice,
           renderContent: renderDetailContent
         }),
         comparisonContext

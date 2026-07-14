@@ -1,7 +1,7 @@
 import process from "node:process";
 
 import { loadEnvironment } from "../../../packages/core-engine/src/env.js";
-import { backfillLocalPersistence, cleanupLocalJsonMirrors, compactBundleExports, createEngine, listPersistedReviewNotifications, listPersistedReviewWorkflows, pruneArtifacts, readPersistedReviewActions, readPersistedReviewWorkflow, reconstructLocalRun, reconstructLocalRuns, submitPersistedReviewAction, validateLocalPersistence, type ArtifactRetentionKind } from "../../../packages/core-engine/src/index.js";
+import { backfillLocalPersistence, cleanupLocalJsonMirrors, compactBundleExports, createEngine, getPersistedRun, listPersistedReviewNotifications, listPersistedReviewWorkflows, normalizeLearningSettings, normalizeProjectId, normalizeWorkspaceId, pruneArtifacts, readPersistedReviewActions, readPersistedReviewWorkflow, reconstructLocalRun, reconstructLocalRuns, resolvePersistedUiSettings, runLearningPipeline, runPostgresMigration, submitPersistedReviewAction, validateLocalPersistence, type ArtifactRetentionKind } from "../../../packages/core-engine/src/index.js";
 import { buildScanRequest, readBooleanFlag, readFlag, readNumberFlag } from "./args.js";
 import { buildDoctorReport, printDoctorReport, runOnboarding } from "./doctor.js";
 import { validateFixtures } from "./fixture-validation.js";
@@ -13,24 +13,26 @@ function usage(): void {
   console.log(`Tethermark CLI
 
 Usage:
-npm run scan -- scan path <local-path> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|build|runtime|validate] [--package <id>] [--db-mode local] [--llm-provider openai|mock] [--llm-model <id>] [--llm-api-key <value>]
-npm run scan -- scan repo <repo-url> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|build|runtime|validate] [--package <id>] [--db-mode local] [--llm-provider openai|mock] [--llm-model <id>] [--llm-api-key <value>]
-npm run scan -- scan endpoint <url> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|runtime|validate] [--package <id>] [--db-mode local] [--llm-provider openai|mock] [--llm-model <id>] [--llm-api-key <value>]
+npm run scan -- scan path <local-path> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|build|runtime|validate] [--package <id>] [--db-mode local|postgres|supabase] [--llm-provider openai|mock] [--llm-model <id>] [--llm-api-key <value>]
+npm run scan -- scan repo <repo-url> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|build|runtime|validate] [--package <id>] [--db-mode local|postgres|supabase] [--llm-provider openai|mock] [--llm-model <id>] [--llm-api-key <value>]
+npm run scan -- scan endpoint <url> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|runtime|validate] [--package <id>] [--db-mode local|postgres|supabase] [--llm-provider openai|mock] [--llm-model <id>] [--llm-api-key <value>]
 npm run scan -- doctor [--json]
 npm run scan -- onboard [--dry-run] [--skip-doctor] [--skip-fixtures]
 npm run scan -- setup-tools [--dry-run] [--yes] [--tool scorecard,semgrep,trivy]
   npm run scan -- migrate local-db [--root <dir>] [--dry-run]
+  npm run scan -- migrate postgres [--database-url <url>] [--output <file.sql>] [--psql-command <path>] [--dry-run]
+  npm run scan -- migrate supabase [--database-url <url>] [--output <file.sql>] [--psql-command <path>] [--dry-run]
   npm run scan -- migrate cleanup-json-mirrors [--root <dir>] [--dry-run]
   npm run scan -- migrate compact-bundle-exports [--root <dir>] [--retention-days <n>] [--dry-run]
   npm run scan -- reconstruct run <run-id> [--root <dir>] [--dry-run]
   npm run scan -- reconstruct runs [--root <dir>] [--target-id <id>] [--status <status>] [--audit-package <id>] [--run-mode <mode>] [--target-class <class>] [--rating <rating>] [--publishability-status <status>] [--policy-pack-id <id>] [--since <iso>] [--until <iso>] [--requires-human-review true|false] [--has-findings true|false] [--limit <n>] [--dry-run]
   npm run scan -- validate-persistence [--root <dir>] [--target-id <id>] [--status <status>] [--audit-package <id>] [--run-mode <mode>] [--target-class <class>] [--rating <rating>] [--publishability-status <status>] [--policy-pack-id <id>] [--since <iso>] [--until <iso>] [--requires-human-review true|false] [--has-findings true|false] [--limit <n>]
 npm run scan -- artifacts prune [--root <dir>] [--kind runs|sandboxes|all] [--older-than <days|30d>] [--retention-days <n>] [--max-gb <n>] [--dry-run]
-npm run scan -- validate-fixtures [--root <dir>] [--fixture <id>] [--package <id>] [--db-mode local] [--persistence-root <dir>] [--llm-provider openai|mock] [--llm-model <id>]
-npm run scan -- review queue [--root <dir>] [--db-mode local] [--status <review-status>] [--limit <n>]
-npm run scan -- review status <run-id> [--root <dir>] [--db-mode local]
-npm run scan -- review action <run-id> --reviewer <id> --action <type> [--assigned-reviewer <id>] [--finding-id <id>] [--previous-severity <level>] [--updated-severity <level>] [--visibility public|internal] [--notes <text>] [--root <dir>] [--db-mode local]
-npm run scan -- review notifications [--reviewer <id>] [--status unread|acknowledged] [--root <dir>] [--db-mode local]
+npm run scan -- validate-fixtures [--root <dir>] [--fixture <id>] [--package <id>] [--db-mode local|postgres|supabase] [--persistence-root <dir>] [--llm-provider openai|mock] [--llm-model <id>]
+npm run scan -- review queue [--root <dir>] [--db-mode local|postgres|supabase] [--status <review-status>] [--limit <n>]
+npm run scan -- review status <run-id> [--root <dir>] [--db-mode local|postgres|supabase]
+npm run scan -- review action <run-id> --reviewer <id> --action <type> [--assigned-reviewer <id>] [--finding-id <id>] [--previous-severity <level>] [--updated-severity <level>] [--visibility public|internal] [--notes <text>] [--root <dir>] [--db-mode local|postgres|supabase]
+npm run scan -- review notifications [--reviewer <id>] [--status unread|acknowledged] [--root <dir>] [--db-mode local|postgres|supabase]
 `);
 }
 
@@ -144,6 +146,34 @@ async function runScan(args: string[]): Promise<void> {
 }
 
 async function runMigration(args: string[]): Promise<void> {
+  if (args[1] === "postgres" || args[1] === "supabase") {
+    try {
+      const result = await runPostgresMigration({
+        databaseUrl: readFlag(args, "--database-url"),
+        outputFile: readFlag(args, "--output"),
+        psqlCommand: readFlag(args, "--psql-command"),
+        dryRun: args.includes("--dry-run")
+      });
+      console.log(`Mode: ${args[1]}`);
+      console.log(`Dry run: ${result.dry_run ? "yes" : "no"}`);
+      console.log(`Applied: ${result.applied ? "yes" : "no"}`);
+      console.log(`Migration file: ${result.migration_file}`);
+      console.log(`Database URL source: ${result.database_url_source ?? "not configured"}`);
+      if (result.command) console.log(`Command: ${result.command}`);
+      if (result.stdout.trim()) console.log(result.stdout.trim());
+      if (result.stderr.trim()) console.error(result.stderr.trim());
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message === "postgres_database_url_required") {
+        console.error("Postgres/Supabase database URL required. Set HARNESS_POSTGRES_URL, SUPABASE_DB_URL, DATABASE_URL, or pass --database-url.");
+      } else {
+        console.error(message);
+      }
+      process.exitCode = 1;
+    }
+    return;
+  }
+
   if (args[1] === "local-db") {
     const summary = await backfillLocalPersistence({ rootDir: readFlag(args, "--root"), dryRun: args.includes("--dry-run") });
     console.log(`Root: ${summary.root}`);
@@ -330,6 +360,37 @@ async function runValidatePersistence(args: string[]): Promise<void> {
   }
 }
 
+async function triggerLearningForCliReviewAction(args: {
+  runId: string;
+  rootDir?: string;
+  dbMode?: any;
+  actorId: string;
+}): Promise<void> {
+  try {
+    const rootDirOrOptions = { rootDir: args.rootDir, dbMode: args.dbMode };
+    const run = await getPersistedRun(args.runId, rootDirOrOptions);
+    if (!run) return;
+    const workspaceId = normalizeWorkspaceId(run.workspace_id);
+    const projectId = normalizeProjectId(run.project_id);
+    const settingsResolution = await resolvePersistedUiSettings(rootDirOrOptions, { workspaceId, projectId });
+    const learningSettings = normalizeLearningSettings(settingsResolution.effective.learning_json);
+    if (!learningSettings.enabled || !learningSettings.event_driven_enabled) return;
+    await runLearningPipeline({
+      rootDir: args.rootDir,
+      dbMode: args.dbMode,
+      workspaceId,
+      projectId,
+      runId: args.runId,
+      trigger: "review_action",
+      actorId: args.actorId,
+      settings: settingsResolution.effective.learning_json,
+      providers: settingsResolution.effective.providers_json
+    });
+  } catch (error) {
+    console.error(`Learning review_action trigger failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 async function runValidateFixtures(args: string[]): Promise<void> {
   const summary = await validateFixtures({
     rootDir: readFlag(args, "--root"),
@@ -443,6 +504,12 @@ async function runReview(args: string[]): Promise<void> {
         visibility_override: readFlag(args, "--visibility") as any,
         notes: readFlag(args, "--notes") ?? null
       }
+    });
+    await triggerLearningForCliReviewAction({
+      runId: args[2],
+      rootDir,
+      dbMode,
+      actorId: reviewerId
     });
 
     console.log(`Run: ${args[2]}`);

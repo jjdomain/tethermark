@@ -14,6 +14,7 @@ import type {
   PersistedPersistenceSummaryRecord,
   PersistedStageArtifactRecord,
   PersistedEvidenceRecord,
+  PersistedFindingQualityRecord,
   PersistedFindingDispositionRecord,
   PersistedFindingRecord,
   PersistedLanePlanRecord,
@@ -109,6 +110,12 @@ export async function readPersistedReviewDecision(runId: string, rootDirOrOption
 export async function readPersistedSupervisorReview(runId: string, rootDirOrOptions?: string | PersistenceReadOptions): Promise<PersistedSupervisorReviewRecord | null> {
   const rows = await readRecordsByRun<PersistedSupervisorReviewRecord & { run_id: string }>("supervisor_reviews", runId, rootDirOrOptions);
   return rows[0] ?? null;
+}
+
+export async function readPersistedFindingQuality(runId: string, rootDirOrOptions?: string | PersistenceReadOptions): Promise<PersistedFindingQualityRecord | null> {
+  const rows = await readRecordsByRun<PersistedFindingQualityRecord & { run_id: string }>("finding_quality", runId, rootDirOrOptions);
+  if (rows[0]) return rows[0];
+  return readPersistedStageArtifact<PersistedFindingQualityRecord>(runId, "finding-quality", rootDirOrOptions);
 }
 
 export async function readPersistedRemediationMemo(runId: string, rootDirOrOptions?: string | PersistenceReadOptions): Promise<PersistedRemediationMemoRecord | null> {

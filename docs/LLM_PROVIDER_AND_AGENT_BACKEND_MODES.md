@@ -124,6 +124,16 @@ The OSS web UI exposes this mode under Settings -> Agent Configuration as an acc
 
 Do not make non-technical users copy CLI commands in the primary path. Keep the Codex command path as an advanced optional setting for custom installs only. In `auth=none` local mode the connection action is enabled by default. In an authenticated deployment, set `HARNESS_ENABLE_LOCAL_OAUTH_CONNECT=1` before exposing that action, because it launches a local process on the API host.
 
+The OpenAI Codex status endpoint checks local Codex auth metadata before falling back to the CLI:
+
+1. `CODEX_HOME/auth.json`, when `CODEX_HOME` is set.
+2. The default Codex home, such as `%USERPROFILE%\.codex\auth.json` on Windows or `~/.codex/auth.json` on Unix-like systems.
+3. `codex login status`, or the configured `AUDIT_LLM_CODEX_COMMAND`, only when no usable local auth file signal is available.
+
+The status response must not expose access tokens, refresh tokens, ID tokens, or API keys. It may expose non-secret readiness metadata such as `connected`, `auth_mode`, `credential_source`, expiry, and ChatGPT plan type.
+
+For first-run machines, `npm run smoke:openai-codex-oauth` isolates `CODEX_HOME` and verifies the disconnected state is clean and actionable. For already-authenticated workstations, `npm run smoke:openai-codex-oauth:real` verifies that the local Codex OAuth session is detected without invoking a live model call.
+
 ## Product Boundary
 
 Tethermark owns:

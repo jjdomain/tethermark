@@ -1,0 +1,52 @@
+{
+  "type": "object",
+  "required": ["schema_name", "schema_version", "generated_at", "tethermark_version", "payload"],
+  "properties": {
+    "schema_name": { "const": "finding_quality.v1" },
+    "schema_version": { "type": "string" },
+    "generated_at": { "type": "string" },
+    "tethermark_version": { "type": "string" },
+    "payload": {
+      "type": "object",
+      "required": ["run_id", "overall_verdict", "findings"],
+      "properties": {
+        "run_id": { "type": "string" },
+        "generated_at": { "type": "string" },
+        "overall_verdict": { "type": "string" },
+        "validated_count": { "type": "number" },
+        "plausible_count": { "type": "number" },
+        "weak_count": { "type": "number" },
+        "unsupported_count": { "type": "number" },
+        "wrong_control_count": { "type": "number" },
+        "missing_control_count": { "type": "number" },
+        "blocking_count": { "type": "number" },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["finding_id", "evidence_support_verdict", "control_mapping_verdict", "qa_blocking", "next_action"],
+            "properties": {
+              "finding_id": { "type": "string" },
+              "title": { "type": "string" },
+              "evidence_support_verdict": { "type": "string" },
+              "control_mapping_verdict": { "type": "string" },
+              "qa_blocking": { "type": "boolean" },
+              "quality_score": { "type": "number" },
+              "matched_evidence_ids": { "type": "array", "items": { "type": "string" } },
+              "missing_evidence_refs": { "type": "array", "items": { "type": "string" } },
+              "unsupported_claims": { "type": "array", "items": { "type": "string" } },
+              "claimed_control_ids": { "type": "array", "items": { "type": "string" } },
+              "recommended_control_ids": { "type": "array", "items": { "type": "string" } },
+              "control_mappings": { "type": "array" },
+              "reasons": { "type": "array", "items": { "type": "string" } },
+              "next_action": { "type": "string" }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

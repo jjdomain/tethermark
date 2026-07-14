@@ -1,6 +1,8 @@
 const { Component, createElement: createReactElement, isValidElement, useEffect, useMemo, useRef, useState } = window.React;
 const { createRoot } = window.ReactDOM;
 const appConfig = window.HARNESS_WEB_UI_CONFIG || { apiBaseUrl: "/api" };
+const publisherModeEnabled = Boolean(appConfig.publisher?.enabled || appConfig.publisherMode);
+const publisherModeLabel = appConfig.publisher?.label || "Publisher";
 
 function sanitizeChild(child) {
   if (child == null || typeof child === "string" || typeof child === "number" || typeof child === "boolean") {
@@ -29,6 +31,7 @@ const navItems = [
   ["runs", "Runs"],
   ["jobs", "Async Jobs"],
   ["followups", "Runtime Follow-ups"],
+  ["learning", "Learning"],
   ["reviews", "Reviews"],
   ["admin", "Admin"],
   ["settings", "Settings"]
@@ -40,6 +43,7 @@ const pageDescriptions = {
   runs: "Launch new scans and inspect persisted run details.",
   jobs: "Track durable background work and retry or cancel jobs.",
   followups: "Manage runtime follow-up reruns and adoption decisions.",
+  learning: "Review governed self-learning candidates, dry-run experiments, promotions, and rollback history.",
   reviews: "Work the review inbox, assignments, and queued decisions.",
   admin: "Operator controls for local app state, smoke tests, benchmarks, tooling, and observability.",
   settings: "Configure agent models, Audit Type, governance, and integrations."
@@ -55,6 +59,7 @@ const navGroups = [
       ["reviews", "Reviews", "users"],
       ["jobs", "Jobs", "bars"],
       ["followups", "Follow-ups", "spark"],
+      ["learning", "Learning", "spark"],
       ["admin", "Admin", "gear"],
       ["settings", "Settings", "gear"]
     ]
@@ -68,7 +73,8 @@ const emptySettings = {
   preflight_json: {},
   review_json: {},
   integrations_json: {},
-  test_mode_json: {}
+  test_mode_json: {},
+  learning_json: {}
 };
 const contextStorageKey = "harness-ui-context";
 const defaultRequestContext = {
@@ -106,8 +112,15 @@ const emptyStaticToolsReadiness = {
   warnings: [],
   blockers: []
 };
+const emptyMethodology = {
+  methodology: null,
+  static_baseline: null,
+  audit_packages: [],
+  control_catalog: [],
+  management: {}
+};
 const defaultExternalAuditToolIds = ["scorecard", "semgrep", "trivy", "inspect", "garak", "pyrit"];
-const mandatoryExternalAuditToolIds = ["scorecard"];
+const mandatoryExternalAuditToolIds = ["scorecard", "semgrep", "trivy"];
 const diagnosticsPiRepoUrl = "https://github.com/earendil-works/pi.git";
 const diagnosticsPiCommit = "3d9e14d7482f4a99d5224926099bec0d17ff86fd";
 const diagnosticsOpenClawRepoUrl = "https://github.com/openclaw/openclaw.git";
@@ -128,7 +141,8 @@ const agentConfigCatalog = [
   { id: "eval_selection_agent", title: "Evidence Selection Agent", env_prefix: "AUDIT_LLM_EVIDENCE_SELECTION" },
   { id: "lane_specialist_agent", title: "Audit Area Review Agent", env_prefix: "AUDIT_LLM_AREA_REVIEW" },
   { id: "audit_supervisor_agent", title: "Supervisor Agent", env_prefix: "AUDIT_LLM_SUPERVISOR" },
-  { id: "remediation_agent", title: "Remediation Agent", env_prefix: "AUDIT_LLM_REMEDIATION" }
+  { id: "remediation_agent", title: "Remediation Agent", env_prefix: "AUDIT_LLM_REMEDIATION" },
+  { id: "learning_synthesizer_agent", title: "Learning Synthesizer Agent", env_prefix: "AUDIT_LLM_LEARNING_SYNTHESIZER", learning_synthesis: true }
 ];
 const builtinPackageConfig = {
   "baseline-static": {
@@ -175,6 +189,71 @@ const builtinPackageConfig = {
 const auditPackageDisplayOrder = ["baseline-static", "agentic-static", "deep-static", "runtime-validated"];
 const hiddenOssAuditPackages = new Set(["premium-comprehensive"]);
 
+const learningCandidateTypeLabels = {
+  scoped_suppression_suggestion: "Disposition review",
+  severity_calibration_suggestion: "Severity calibration",
+  evidence_requirement_adjustment: "Evidence requirements",
+  prompt_improvement_candidate: "Prompt improvement",
+  eval_fixture_candidate: "Eval fixture",
+  runtime_followup_heuristic: "Runtime follow-up",
+  duplicate_grouping_signature: "Duplicate grouping"
+};
+
+const learningEventLabels = {
+  review_false_positive: "false-positive review",
+  review_out_of_scope: "out-of-scope review",
+  review_accepted_risk: "accepted-risk review",
+  review_needs_validation: "validation request",
+  finding_disposition: "active disposition",
+  finding_quality_gap: "finding quality gap",
+  runtime_followup_outcome: "runtime follow-up outcome",
+  remediation_state: "remediation status change",
+  duplicate_or_conflict: "duplicate or conflict signal",
+  assistant_confirmed_action: "assistant-confirmed action"
+};
+
+const defaultLearningSettings = {
+  enabled: true,
+  trigger_mode: "hybrid",
+  event_driven_enabled: true,
+  scheduled_enabled: false,
+  scheduled_interval_minutes: 60,
+  sync_limit: 100,
+  llm_synthesis_enabled: true,
+  llm_min_source_signals: 3,
+  llm_min_distinct_runs: 2,
+  llm_always_high_risk: true,
+  llm_always_governance_impacting: true,
+  llm_nightly_consolidation: true,
+  llm_manual_synthesis_enabled: true,
+  llm_max_calls_per_day: 50,
+  llm_send_source_excerpts: true,
+  require_dry_run_before_promotion: true,
+  auto_expire_days: 90
+};
+
+function getLearningSettings(settingsLike) {
+  return {
+    ...defaultLearningSettings,
+    ...((settingsLike?.learning_json && typeof settingsLike.learning_json === "object") ? settingsLike.learning_json : {})
+  };
+}
+
+function getCandidateSynthesisStatus(candidate) {
+  const synthesis = candidate?.metadata_json?.llm_synthesis || null;
+  if (!synthesis) return { label: "Synthesis pending", detail: "LLM synthesis has not run for this candidate yet." };
+  if (synthesis.status === "completed") {
+    return {
+      label: "LLM synthesized",
+      detail: `${synthesis.provider || "provider"}${synthesis.model ? ` / ${synthesis.model}` : ""}${synthesis.reason ? ` / ${humanizeLearningIdentifier(synthesis.reason)}` : ""}`
+    };
+  }
+  if (synthesis.status === "inactive") {
+    return { label: "Synthesis inactive", detail: humanizeLearningIdentifier(synthesis.reason || "provider not configured") };
+  }
+  return { label: humanizeLearningIdentifier(synthesis.status || "Synthesis status"), detail: humanizeLearningIdentifier(synthesis.reason || "") };
+}
+
 function getVisibleAuditPackages(auditPackages) {
   const visible = (auditPackages || []).filter((item) => item?.id && !hiddenOssAuditPackages.has(item.id));
   return [...visible].sort((a, b) => {
@@ -185,6 +264,351 @@ function getVisibleAuditPackages(auditPackages) {
     if (normalizedA !== normalizedB) return normalizedA - normalizedB;
     return String(a.title || a.id).localeCompare(String(b.title || b.id));
   });
+}
+
+function sentenceCase(value) {
+  const trimmed = String(value || "").trim();
+  return trimmed ? trimmed.slice(0, 1).toUpperCase() + trimmed.slice(1) : "";
+}
+
+function humanizeLearningIdentifier(value) {
+  return sentenceCase(String(value || "").replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim());
+}
+
+function asLearningArray(value) {
+  return Array.isArray(value) ? value.map((item) => String(item)).filter(Boolean) : [];
+}
+
+function getLearningSignatureLabel(candidate) {
+  const raw = asLearningArray(candidate?.affected_finding_signatures_json)[0]
+    || String(candidate?.proposed_change_json?.finding_signature || "");
+  const normalized = raw.trim();
+  if (!normalized || normalized === "run-level-signal") return "Run-level review activity";
+  const parts = normalized.includes("::") ? normalized.split("::") : ["", normalized];
+  return humanizeLearningIdentifier(parts[1] || parts[0] || normalized);
+}
+
+function getLearningScopeLabel(candidate) {
+  if (candidate?.scope_type === "run") return "this run";
+  if (candidate?.scope_type === "target") return "this target";
+  return candidate?.scope_id && candidate.scope_id !== "default" ? `project ${candidate.scope_id}` : "project-wide scope";
+}
+
+function getLearningSentenceScopeLabel(candidate) {
+  if (candidate?.scope_type === "run") return "this run";
+  if (candidate?.scope_type === "target") return "this target";
+  return candidate?.scope_id && candidate.scope_id !== "default" ? `project ${candidate.scope_id}` : "the project";
+}
+
+function getLearningSourceCount(candidate) {
+  const expected = Number(candidate?.expected_effect_json?.source_event_count);
+  if (Number.isFinite(expected) && expected > 0) return expected;
+  const ids = asLearningArray(candidate?.source_event_ids_json);
+  if (ids.length) return ids.length;
+  const match = String(candidate?.summary || "").match(/\b(\d+)\s+learning signal/i);
+  return match ? Number(match[1]) : 1;
+}
+
+function getLearningEventTypeLabels(candidate) {
+  const types = asLearningArray(candidate?.metadata_json?.event_types);
+  return types.map((type) => learningEventLabels[type] || humanizeLearningIdentifier(type)).filter(Boolean);
+}
+
+function getLearningSourceEvents(candidate, events) {
+  const sourceIds = new Set(asLearningArray(candidate?.source_event_ids_json));
+  return (events || []).filter((event) => sourceIds.has(event.id));
+}
+
+function getLearningSourceRunCount(candidate, sourceEvents = []) {
+  const sourceRunIds = asLearningArray(candidate?.expected_effect_json?.source_run_ids);
+  if (sourceRunIds.length) return sourceRunIds.length;
+  return new Set(sourceEvents.map((event) => event.run_id).filter(Boolean)).size;
+}
+
+function getLearningDispositionTypes(sourceEvents = []) {
+  return [...new Set(sourceEvents
+    .filter((event) => event.event_type === "finding_disposition")
+    .map((event) => String(event.payload_json?.disposition_type || "").trim())
+    .filter(Boolean))];
+}
+
+function getLearningSourceLabels(candidate, sourceEvents = []) {
+  if (sourceEvents.length) {
+    const labels = sourceEvents.map((event) => {
+      if (event.event_type === "finding_disposition") {
+        const dispositionType = String(event.payload_json?.disposition_type || "").trim();
+        if (dispositionType === "waiver") return "accepted-risk waiver";
+        if (dispositionType === "suppression") return "suppression";
+      }
+      return learningEventLabels[event.event_type] || humanizeLearningIdentifier(event.event_type);
+    });
+    return [...new Set(labels)].filter(Boolean);
+  }
+  return getLearningEventTypeLabels(candidate);
+}
+
+function getLearningCandidateDecisionLabel(candidate, sourceEvents = []) {
+  const kind = String(candidate?.candidate_type || "");
+  const dispositionTypes = getLearningDispositionTypes(sourceEvents);
+  if (kind === "severity_calibration_suggestion" && dispositionTypes.includes("waiver")) return "Accepted-risk pattern";
+  if (kind === "severity_calibration_suggestion") return "Severity calibration pattern";
+  if (kind === "scoped_suppression_suggestion" && dispositionTypes.includes("suppression")) return "Suppression pattern";
+  if (kind === "scoped_suppression_suggestion") return "Disposition pattern";
+  if (kind === "evidence_requirement_adjustment") return "Evidence requirement pattern";
+  if (kind === "runtime_followup_heuristic") return "Runtime follow-up pattern";
+  if (kind === "duplicate_grouping_signature") return "Duplicate grouping pattern";
+  if (kind === "prompt_improvement_candidate") return "Prompt guidance pattern";
+  return learningCandidateTypeLabels[kind] || humanizeLearningIdentifier(kind || "learning candidate");
+}
+
+function getLearningRiskExplanation(candidate) {
+  const kind = String(candidate?.candidate_type || "");
+  if (kind === "scoped_suppression_suggestion") return "High: promotion can make future suppression decisions easier to approve.";
+  if (kind === "severity_calibration_suggestion") return "High: promotion can influence accepted-risk or severity review guidance.";
+  if (kind === "evidence_requirement_adjustment") return "Medium: promotion changes review guidance, not finding suppression.";
+  return `${humanizeLearningIdentifier(candidate?.risk_level || "medium")}: promotion remains approval-gated.`;
+}
+
+function getLearningPromotionImpact(candidate, sourceEvents = []) {
+  const kind = String(candidate?.candidate_type || "");
+  const scope = getLearningSentenceScopeLabel(candidate);
+  const dispositionTypes = getLearningDispositionTypes(sourceEvents);
+  if (kind === "severity_calibration_suggestion" && dispositionTypes.includes("waiver")) {
+    return `Would record an approval-gated accepted-risk learning pattern for ${scope}; it does not automatically waive findings.`;
+  }
+  if (kind === "severity_calibration_suggestion") {
+    return `Would record severity calibration guidance for ${scope}; it does not automatically lower severity.`;
+  }
+  if (kind === "scoped_suppression_suggestion") {
+    return `Would record suppression guidance for ${scope}; it does not automatically suppress findings.`;
+  }
+  if (kind === "evidence_requirement_adjustment") {
+    return `Would record evidence guidance for ${scope}; reviewers still decide whether a finding is valid.`;
+  }
+  return String(candidate?.expected_effect_json?.expected_operator_value || "Would record an approval-gated learning artifact.");
+}
+
+function getLearningEventActionLabel(event) {
+  const payload = event?.payload_json || {};
+  if (event?.event_type === "finding_disposition") {
+    const dispositionType = String(payload.disposition_type || "").trim();
+    const typeLabel = dispositionType === "waiver" ? "Accepted-risk waiver" : dispositionType === "suppression" ? "Suppression" : "Disposition";
+    const scope = payload.scope_level ? `${humanizeLearningIdentifier(payload.scope_level)} scope` : "";
+    const reason = String(payload.reason || "").trim();
+    return `${typeLabel}${scope ? ` (${scope})` : ""}${reason ? `: ${reason}` : ""}`;
+  }
+  if (event?.event_type === "review_needs_validation") {
+    const intent = String(payload.validation_intent || "").trim();
+    if (intent === "rerun_required") return "Reviewer requested a capable-environment rerun.";
+    if (intent === "runtime_validation") return "Reviewer asked for runtime validation before publication.";
+    if (intent === "manual_review") return "Reviewer requested manual validation.";
+    return "Reviewer requested more validation.";
+  }
+  if (event?.event_type === "review_accepted_risk") {
+    const previousSeverity = String(payload.previous_severity || "").trim();
+    const updatedSeverity = String(payload.updated_severity || "").trim();
+    if (previousSeverity && updatedSeverity) return `Reviewer changed severity from ${previousSeverity} to ${updatedSeverity}.`;
+    return "Reviewer accepted risk or calibrated severity.";
+  }
+  return event?.signal_summary || humanizeLearningIdentifier(event?.event_type || "learning signal");
+}
+
+function compactLearningEventActions(sourceEvents = [], fallback = "") {
+  const seen = new Set();
+  const items = [];
+  for (const event of sourceEvents) {
+    const label = getLearningEventActionLabel(event).replace(/\s+/g, " ").trim();
+    const key = label.toLowerCase();
+    if (!label || seen.has(key)) continue;
+    seen.add(key);
+    items.push(label.endsWith(".") ? label : `${label}.`);
+    if (items.length >= 3) break;
+  }
+  if (items.length) return items;
+  const compact = compactLearningRationale(fallback);
+  return compact ? [compact] : [];
+}
+
+function compactLearningRationale(value) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  const sentences = text.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [text];
+  const seen = new Set();
+  const compact = [];
+  for (const sentence of sentences) {
+    const cleaned = sentenceCase(sentence.trim());
+    const normalized = cleaned.toLowerCase();
+    if (!cleaned || seen.has(normalized)) continue;
+    seen.add(normalized);
+    compact.push(/[.!?]$/.test(cleaned) ? cleaned : `${cleaned}.`);
+    if (compact.length >= 3) break;
+  }
+  return compact.join(" ");
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeLearningCandidateRationale(value, sourcePhrase) {
+  let rationale = compactLearningRationale(value);
+  if (!rationale) return `${sourcePhrase} support this candidate.`;
+  const sourceLead = `${sourcePhrase} support this candidate:`;
+  const duplicateLead = new RegExp(`^(${escapeRegExp(sourceLead)}\\s*){2,}`, "i");
+  rationale = rationale.replace(duplicateLead, `${sourceLead} `).replace(/\s+/g, " ").trim();
+  if (rationale.toLowerCase().startsWith(sourceLead.toLowerCase())) return rationale;
+  return `${sourceLead} ${rationale}`;
+}
+
+function getLearningCandidateDisplay(candidate, sourceEvents = []) {
+  const subject = getLearningSignatureLabel(candidate);
+  const scope = getLearningScopeLabel(candidate);
+  const sentenceScope = getLearningSentenceScopeLabel(candidate);
+  const count = getLearningSourceCount(candidate);
+  const runCount = getLearningSourceRunCount(candidate, sourceEvents);
+  const signalPhrase = `${count} ${count === 1 ? "signal" : "signals"}`;
+  const typeLabels = getLearningSourceLabels(candidate, sourceEvents);
+  const sourcePhrase = typeLabels.length ? `${signalPhrase} from ${typeLabels.join(", ")}` : signalPhrase;
+  const kind = String(candidate?.candidate_type || "");
+  const decisionLabel = getLearningCandidateDecisionLabel(candidate, sourceEvents);
+  const recurrence = runCount > 1 ? `across ${runCount} runs` : "in this run";
+  const evidenceItems = compactLearningEventActions(sourceEvents, candidate?.rationale);
+  const rationale = evidenceItems.length ? evidenceItems.join(" ") : normalizeLearningCandidateRationale(candidate?.rationale, sourcePhrase);
+  const promotionImpact = getLearningPromotionImpact(candidate, sourceEvents);
+  const riskExplanation = getLearningRiskExplanation(candidate);
+
+  if (kind === "scoped_suppression_suggestion") {
+    return {
+      typeLabel: decisionLabel,
+      title: `${decisionLabel}: ${subject}`,
+      summary: `${sourcePhrase} ${recurrence} indicate reviewers may be suppressing this pattern for ${sentenceScope}.`,
+      rationale,
+      scopeLabel: scope,
+      evidenceLabel: `${count} source ${count === 1 ? "signal" : "signals"} in ${runCount || 1} ${runCount === 1 ? "run" : "runs"}`,
+      promotionImpact,
+      riskExplanation
+    };
+  }
+  if (kind === "evidence_requirement_adjustment") {
+    return {
+      typeLabel: decisionLabel,
+      title: `${decisionLabel}: ${subject}`,
+      summary: `${sourcePhrase} ${recurrence} indicate this pattern needs stronger evidence before review.`,
+      rationale,
+      scopeLabel: scope,
+      evidenceLabel: `${count} source ${count === 1 ? "signal" : "signals"} in ${runCount || 1} ${runCount === 1 ? "run" : "runs"}`,
+      promotionImpact,
+      riskExplanation
+    };
+  }
+  if (kind === "runtime_followup_heuristic") {
+    return {
+      typeLabel: learningCandidateTypeLabels[kind],
+      title: `Tune runtime follow-up handling: ${subject}`,
+      summary: `${sourcePhrase} can guide future runtime validation decisions for similar findings.`,
+      rationale,
+      scopeLabel: scope,
+      evidenceLabel: `${count} source ${count === 1 ? "signal" : "signals"} in ${runCount || 1} ${runCount === 1 ? "run" : "runs"}`,
+      promotionImpact,
+      riskExplanation
+    };
+  }
+  if (kind === "duplicate_grouping_signature") {
+    return {
+      typeLabel: learningCandidateTypeLabels[kind],
+      title: `Improve duplicate grouping: ${subject}`,
+      summary: `${sourcePhrase} show similar findings may need stronger duplicate or conflict grouping.`,
+      rationale,
+      scopeLabel: scope,
+      evidenceLabel: `${count} source ${count === 1 ? "signal" : "signals"} in ${runCount || 1} ${runCount === 1 ? "run" : "runs"}`,
+      promotionImpact,
+      riskExplanation
+    };
+  }
+  if (kind === "severity_calibration_suggestion") {
+    const hasWaiver = getLearningDispositionTypes(sourceEvents).includes("waiver");
+    return {
+      typeLabel: decisionLabel,
+      title: `${decisionLabel}: ${subject}`,
+      summary: hasWaiver
+        ? `${sourcePhrase} ${recurrence} indicate reviewers accepted this pattern as risk for ${sentenceScope}.`
+        : `${sourcePhrase} ${recurrence} indicate reviewers may be lowering severity for this pattern in ${sentenceScope}.`,
+      rationale,
+      scopeLabel: scope,
+      evidenceLabel: `${count} source ${count === 1 ? "signal" : "signals"} in ${runCount || 1} ${runCount === 1 ? "run" : "runs"}`,
+      promotionImpact,
+      riskExplanation
+    };
+  }
+  if (kind === "prompt_improvement_candidate") {
+    return {
+      typeLabel: learningCandidateTypeLabels[kind],
+      title: `Review prompt improvement: ${subject}`,
+      summary: `${sourcePhrase} suggest audit guidance may need clarification for this pattern.`,
+      rationale,
+      scopeLabel: scope,
+      evidenceLabel: `${count} source ${count === 1 ? "signal" : "signals"} in ${runCount || 1} ${runCount === 1 ? "run" : "runs"}`,
+      promotionImpact,
+      riskExplanation
+    };
+  }
+  return {
+    typeLabel: learningCandidateTypeLabels[kind] || humanizeLearningIdentifier(kind || "learning candidate"),
+    title: `Add eval fixture: ${subject}`,
+    summary: `${sourcePhrase} are suitable for a governed regression fixture.`,
+    rationale,
+    scopeLabel: scope,
+    evidenceLabel: `${count} source ${count === 1 ? "signal" : "signals"} in ${runCount || 1} ${runCount === 1 ? "run" : "runs"}`,
+    promotionImpact,
+    riskExplanation
+  };
+}
+
+function isGenericLearningCandidate(candidate) {
+  const signature = asLearningArray(candidate?.affected_finding_signatures_json)[0]
+    || String(candidate?.proposed_change_json?.finding_signature || "");
+  const eventTypes = getLearningEventTypeLabels(candidate);
+  return candidate?.candidate_type === "scoped_suppression_suggestion"
+    && (!signature || signature === "run-level-signal")
+    && (eventTypes.length === 0 || eventTypes.every((label) => label === "active disposition"));
+}
+
+function isUnderSupportedLearningCandidate(candidate) {
+  const sourceRunIds = asLearningArray(candidate?.expected_effect_json?.source_run_ids);
+  const sourceEventCount = Number(candidate?.expected_effect_json?.source_event_count || asLearningArray(candidate?.source_event_ids_json).length);
+  const highRiskBehaviorChange = ["scoped_suppression_suggestion", "severity_calibration_suggestion"].includes(String(candidate?.candidate_type || ""));
+  if (highRiskBehaviorChange) return sourceRunIds.length < 2;
+  return !Number.isFinite(sourceEventCount) || sourceEventCount < 2;
+}
+
+function isMismatchedDispositionLearningCandidate(candidate, sourceEvents = []) {
+  const dispositionTypes = getLearningDispositionTypes(sourceEvents);
+  if (!dispositionTypes.length) return false;
+  const kind = String(candidate?.candidate_type || "");
+  if (kind === "scoped_suppression_suggestion") return dispositionTypes.includes("waiver");
+  if (kind === "severity_calibration_suggestion") return dispositionTypes.includes("suppression");
+  return false;
+}
+
+function isMixedKindLearningCandidate(candidate, sourceEvents = []) {
+  if (isMismatchedDispositionLearningCandidate(candidate, sourceEvents)) return true;
+  const rawEventTypes = asLearningArray(candidate?.metadata_json?.event_types);
+  if (!rawEventTypes.length) return false;
+  const allowedByKind = {
+    scoped_suppression_suggestion: ["review_false_positive", "review_out_of_scope", "finding_disposition"],
+    severity_calibration_suggestion: ["review_accepted_risk", "finding_disposition"],
+    evidence_requirement_adjustment: ["finding_quality_gap", "review_needs_validation"],
+    prompt_improvement_candidate: ["assistant_confirmed_action"],
+    eval_fixture_candidate: ["remediation_state", "assistant_confirmed_action"],
+    runtime_followup_heuristic: ["runtime_followup_outcome"],
+    duplicate_grouping_signature: ["duplicate_or_conflict"]
+  };
+  const allowed = new Set(allowedByKind[String(candidate?.candidate_type || "")] || []);
+  return rawEventTypes.some((eventType) => !allowed.has(eventType));
+}
+
+function isInvalidLearningCandidate(candidate, sourceEvents = []) {
+  return isGenericLearningCandidate(candidate) || isUnderSupportedLearningCandidate(candidate) || isMixedKindLearningCandidate(candidate, sourceEvents);
 }
 
 function defaultLanesForRunMode(value) {
@@ -711,12 +1135,17 @@ function applyEnvironmentDefaultsToSettings(settings, environmentDefaults) {
   }
   const defaultProviderCanUseEnv = !providers.default_provider || providers.default_provider === "mock";
   const defaultModelCanUseEnv = !providers.default_model || providers.default_model === "mock-agent-runtime";
+  const assistantCanUseEnv = providers.assistant_inherit_default !== false && !providers.assistant_provider && !providers.assistant_model;
+  const hasAssistantEnv = Boolean(environmentDefaults?.assistant_provider || environmentDefaults?.assistant_model);
   return {
     ...settings,
     providers_json: {
       ...providers,
       default_provider: defaultProviderCanUseEnv ? (environmentDefaults?.default_provider || providers.default_provider || "") : providers.default_provider,
       default_model: defaultModelCanUseEnv ? (environmentDefaults?.default_model || providers.default_model || "") : providers.default_model,
+      assistant_inherit_default: assistantCanUseEnv && hasAssistantEnv ? false : providers.assistant_inherit_default !== false,
+      assistant_provider: assistantCanUseEnv && hasAssistantEnv ? (environmentDefaults?.assistant_provider || "") : (providers.assistant_provider || ""),
+      assistant_model: assistantCanUseEnv && hasAssistantEnv ? (environmentDefaults?.assistant_model || "") : (providers.assistant_model || ""),
       agent_overrides: nextOverrides
     }
   };
@@ -900,6 +1329,28 @@ function addDaysIso(baseValue, days) {
   return new Date(baseTime + (days * 24 * 36e5)).toISOString();
 }
 
+function normalizeDateInputIso(value) {
+  if (!String(value || "").trim()) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString();
+}
+
+function validateFutureDateInput(value, label) {
+  if (!String(value || "").trim()) return { value: null, error: "" };
+  const normalized = normalizeDateInputIso(value);
+  if (!normalized) return { value: null, error: `Enter a valid ${label}.` };
+  if (new Date(normalized).getTime() <= Date.now()) return { value: normalized, error: `Choose a future ${label}.` };
+  return { value: normalized, error: "" };
+}
+
+function validateDateInput(value, label) {
+  if (!String(value || "").trim()) return { value: null, error: "" };
+  const normalized = normalizeDateInputIso(value);
+  if (!normalized) return { value: null, error: `Enter a valid ${label}.` };
+  return { value: normalized, error: "" };
+}
+
 function normalizePolicyPackId(policyPackId) {
   return policyPackId || "default";
 }
@@ -920,7 +1371,7 @@ function validateRunForm(form) {
   const targetValue = getRunTargetValue(form).trim();
   if (!targetValue) {
     issues.push("A target is required before launch.");
-  } else if (form.target_kind === "repo" && !/^https?:\/\/|^git@/i.test(targetValue)) {
+  } else if (form.target_kind === "repo" && !/^(https?:\/\/|git@|ssh:\/\/git@)/i.test(targetValue)) {
     issues.push("Repository targets should use an HTTPS or SSH Git URL.");
   }
   if (form.use_audit_presets && !form.audit_package) issues.push("Select an audit package.");
@@ -984,7 +1435,7 @@ function deriveLaunchReadiness(form, preflightSummary, preflightAcceptedAt, pref
 }
 
 function cn(...items) {
-  return items.filter(Boolean).join(" ");
+  return window.TethermarkUI?.cn ? window.TethermarkUI.cn(...items) : items.filter(Boolean).join(" ");
 }
 
 function badgeTone(status) {
@@ -1043,6 +1494,24 @@ function asyncJobTypeLabel(type) {
   }[type] || type;
 }
 
+function getAsyncJobDiagnosticTarget(job) {
+  const target = job?.request_json?.hints?.diagnostic_run?.target;
+  if (typeof target === "string" && target) return target;
+  const repoUrl = job?.request_json?.repo_url || "";
+  if (/openclaw/i.test(repoUrl)) return "openclaw";
+  if (/earendil-works\/pi/i.test(repoUrl)) return "pi";
+  return "";
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function isNetworkFetchFailure(error) {
+  const message = error?.message || String(error || "");
+  return message === "fetch failed" || /failed to fetch|networkerror|load failed/i.test(message);
+}
+
 function api(path, init, requestContext = defaultRequestContext) {
   const headers = {
     "content-type": "application/json",
@@ -1052,24 +1521,67 @@ function api(path, init, requestContext = defaultRequestContext) {
     ...(requestContext.apiKey ? { "x-api-key": requestContext.apiKey } : {}),
     ...(init?.headers || {})
   };
-  return fetch(appConfig.apiBaseUrl.replace(/\/$/, "") + path, {
-    headers,
-    ...init
-  }).then(async (response) => {
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({ error: response.statusText }));
-      const rawError = payload.error || response.statusText;
-      if (rawError === "not_found") {
-        throw new Error(`API route not found: ${path}. Restart the Tethermark API server so it picks up the latest backend routes.`);
+  const requestUrl = appConfig.apiBaseUrl.replace(/\/$/, "") + path;
+  const method = String(init?.method || "GET").toUpperCase();
+  const canRetry = method === "GET";
+  const fetchOnce = () => fetch(requestUrl, {
+      headers,
+      ...init
+    }).then(async (response) => {
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({ error: response.statusText }));
+        const rawError = payload.error || response.statusText;
+        if (rawError === "not_found") {
+          throw new Error(`API route not found: ${path}. Restart the Tethermark API server so it picks up the latest backend routes.`);
+        }
+        throw new Error(`API request failed for ${path}: ${rawError}`);
       }
-      throw new Error(rawError);
+      return response.status === 204 ? null : response.json();
+    });
+  return fetchOnce().catch((requestError) => {
+      if (canRetry && isNetworkFetchFailure(requestError)) {
+        return sleep(350).then(fetchOnce);
+      }
+      throw requestError;
+    }).catch((requestError) => {
+      const message = requestError instanceof Error ? requestError.message : String(requestError);
+      if (message.startsWith("API request failed for ") || message.startsWith("API route not found: ")) {
+        throw requestError;
+      }
+      throw new Error(`API request failed for ${path}: ${message}`);
+    });
+}
+
+function formatUiError(error) {
+  const message = error?.message || String(error || "Unknown error");
+  if (/^API route not found: \/assistant\//i.test(message)) {
+    return "Assistant API routes are not available from the running backend. Rebuild and restart the Tethermark API server with HARNESS_ENABLE_ASSISTANT=1.";
+  }
+  if (isNetworkFetchFailure({ message })) {
+    return "API request failed. Check that the Tethermark API is running and reachable, then retry.";
+  }
+  const requestFailure = message.match(/^API request failed for ([^:]+):\s*(.+)$/i);
+  if (requestFailure) {
+    const endpoint = requestFailure[1] || "unknown endpoint";
+    const reason = requestFailure[2] || "request failed";
+    if (endpoint.startsWith("/assistant/") && reason === "assistant_disabled") {
+      return "Assistant is disabled on the API server. Restart it with HARNESS_ENABLE_ASSISTANT=1 to enable OSS assistant routes.";
     }
-    return response.status === 204 ? null : response.json();
-  });
+    if (isNetworkFetchFailure({ message: reason })) {
+      return `API request failed for ${endpoint}. Check that the Tethermark API and web UI proxy are reachable, then retry.`;
+    }
+  }
+  return message;
 }
 
 function formatDate(value) {
   return value ? new Date(value).toLocaleString() : "n/a";
+}
+
+function formatShortReference(value) {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text) return "n/a";
+  return /^[0-9a-f]{40}$/i.test(text) ? text.slice(0, 8) : text;
 }
 
 function formatBytes(value) {
@@ -1312,7 +1824,16 @@ function runtimeArtifactDetailItems(artifact) {
 }
 
 function Badge({ children }) {
+  if (window.TethermarkUI?.Badge) {
+    return h(window.TethermarkUI.Badge, null, children || "none");
+  }
   return h("span", { className: cn("inline-flex rounded-full border px-2.5 py-1 text-xs uppercase tracking-[0.18em]", badgeTone(String(children))) }, children || "none");
+}
+
+function CompactTag({ children }) {
+  return h("span", {
+    className: "inline-flex shrink-0 self-start whitespace-nowrap rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs font-medium uppercase leading-none tracking-[0.12em] text-slate-600"
+  }, children || "none");
 }
 
 function SidebarIcon({ kind }) {
@@ -1365,6 +1886,13 @@ function SidebarIcon({ kind }) {
     h("rect", { key: "a", x: "3", y: "4.5", width: "14", height: "11", rx: "2" }),
     h("path", { key: "b", d: "M4.5 6L10 10.2L15.5 6" })
   ]);
+  if (kind === "moon") return h("svg", common, [
+    h("path", { key: "a", d: "M14.5 15.8A7 7 0 0 1 8.2 3.5 7 7 0 1 0 16.5 11.8 5.5 5.5 0 0 1 14.5 15.8Z" })
+  ]);
+  if (kind === "sun") return h("svg", common, [
+    h("circle", { key: "a", cx: "10", cy: "10", r: "3" }),
+    h("path", { key: "b", d: "M10 2.5V4M10 16V17.5M17.5 10H16M4 10H2.5M15.3 4.7L14.2 5.8M5.8 14.2L4.7 15.3M15.3 15.3L14.2 14.2M5.8 5.8L4.7 4.7" })
+  ]);
   return h("span", { className: "inline-block h-4 w-4" });
 }
 
@@ -1393,12 +1921,13 @@ function Button({ children, variant = "default", className = "", ...props }) {
     "button",
     {
       className: cn(
-        "inline-flex items-center justify-center rounded-2xl px-4 py-2.5 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-60",
+        "inline-flex items-center justify-center rounded-md px-4 py-2.5 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-60",
         variant === "default" && "bg-slate-900 text-white hover:bg-slate-800",
         variant === "secondary" && "bg-secondary text-foreground hover:bg-slate-200",
         variant === "outline" && "border border-border bg-white text-slate-700 hover:bg-slate-50",
         className
       ),
+      type: "button",
       ...props
     },
     children
@@ -1406,7 +1935,10 @@ function Button({ children, variant = "default", className = "", ...props }) {
 }
 
 function Card({ title, description, children, className = "" }) {
-  return h("section", { className: cn("rounded-[28px] border border-border bg-card p-6 shadow-soft", className) }, [
+  if (window.TethermarkUI?.Card) {
+    return h(window.TethermarkUI.Card, { title, description, className }, children);
+  }
+  return h("section", { className: cn("rounded-xl border border-border bg-card p-6 shadow-soft", className) }, [
     title ? h("h3", { key: "t", className: "text-xl font-semibold tracking-tight text-slate-900" }, title) : null,
     description ? h("p", { key: "d", className: "mt-2 text-sm leading-6 text-muted" }, description) : null,
     h("div", { key: "c", className: title || description ? "mt-5" : "" }, children)
@@ -1484,7 +2016,7 @@ function Input({ className = "", ...props }) {
   if (window.TethermarkUI?.Input) {
     return h(window.TethermarkUI.Input, { className, ...props });
   }
-  return h("input", { className: cn("flex h-10 w-full min-w-0 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-slate-500 focus-visible:border-slate-400 focus-visible:ring-2 focus-visible:ring-slate-200 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500 disabled:opacity-50 aria-invalid:border-red-500 aria-invalid:ring-red-100", className), ...props });
+  return h("input", { className: cn("flex h-10 w-full min-w-0 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-slate-500 focus-visible:border-slate-400 focus-visible:ring-2 focus-visible:ring-slate-200 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-500 disabled:opacity-100 aria-invalid:border-red-500 aria-invalid:ring-red-100", className), ...props });
 }
 
 function PasswordInput({ shown = false, onToggleShown, className = "", ...props }) {
@@ -1507,18 +2039,19 @@ function PasswordInput({ shown = false, onToggleShown, className = "", ...props 
   ]);
 }
 
-function Select({ className = "", ...props }, children) {
+function Select({ className = "", children: propChildren, ...props }, children) {
+  const selectChildren = propChildren !== undefined ? propChildren : children;
   if (window.TethermarkUI?.Select) {
-    return h(window.TethermarkUI.Select, { className, ...props }, children);
+    return h(window.TethermarkUI.Select, { className, ...props }, selectChildren);
   }
-  return h("select", { className: cn("w-full rounded-2xl border border-border bg-white px-4 py-2.5 text-sm text-slate-900 outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-200 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400 disabled:opacity-100", className), ...props }, children);
+  return h("select", { className: cn("flex h-10 w-full rounded-md border border-border bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-200 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-500 disabled:opacity-100", className), ...props }, selectChildren);
 }
 
 function Textarea({ className = "", ...props }) {
   if (window.TethermarkUI?.Textarea) {
     return h(window.TethermarkUI.Textarea, { className, ...props });
   }
-  return h("textarea", { className: cn("min-h-[110px] w-full rounded-2xl border border-border bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-200 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400 disabled:opacity-100", className), ...props });
+  return h("textarea", { className: cn("min-h-[110px] w-full rounded-md border border-border bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-200 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-500 disabled:opacity-100", className), ...props });
 }
 
 function DashboardKpiCard({ label, value, hint, tone = "slate" }) {
@@ -1976,6 +2509,17 @@ function LaunchAuditModal({
 }
 
 function DetailList({ items }) {
+  function renderHelp(label, help) {
+    if (!help) return null;
+    return h(HoverCard, {
+      trigger: h("button", {
+        type: "button",
+        className: "inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-300 bg-white text-[10px] font-semibold leading-none text-slate-500 hover:border-slate-400 hover:text-slate-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-200",
+        "aria-label": `${label} help`,
+        title: `${label} help`
+      }, "?")
+    }, h("div", { className: "text-sm leading-6 text-slate-600" }, help));
+  }
   function renderDetailValue(value) {
     if (isValidElement(value)) return value;
     if (value == null || value === "") return "n/a";
@@ -1999,10 +2543,13 @@ function DetailList({ items }) {
   }
   return h("dl", { className: "grid gap-3 md:grid-cols-2" }, items.map((item) => h("div", {
     key: item.label,
-    className: "rounded-2xl border border-border bg-white/70 px-4 py-3"
+    className: "min-w-0 rounded-2xl border border-border bg-white/70 px-4 py-3"
   }, [
-    h("dt", { key: "label", className: "text-xs font-mono uppercase tracking-[0.18em] text-muted" }, item.label),
-    h("dd", { key: "value", className: "mt-2 text-sm font-medium text-foreground" }, renderDetailValue(item.value))
+    h("dt", { key: "label", className: "flex items-center gap-1.5 text-xs font-mono uppercase tracking-[0.18em] text-muted" }, [
+      h("span", { key: "text" }, item.label),
+      renderHelp(item.label, item.help)
+    ]),
+    h("dd", { key: "value", className: "mt-2 min-w-0 break-words text-sm font-medium text-foreground" }, renderDetailValue(item.value))
   ])));
 }
 
@@ -2028,7 +2575,7 @@ function ReviewQueueList({ runs, selectedRunId, onSelect, actorId }) {
             isOverdueReview(run) ? h(Badge, { key: "overdue" }, "overdue") : null,
             assignedToMe ? h(Badge, { key: "mine" }, "mine") : null,
             dueSoonDispositionCount > 0 ? h(Badge, { key: "disposition-due-soon" }, `due soon ${dueSoonDispositionCount}`) : null,
-            needsDispositionReview ? h(Badge, { key: "disposition-review" }, `disposition re-review ${dispositionCounts.findings_needing_disposition_review_count}`) : null
+            needsDispositionReview ? h(Badge, { key: "disposition-review" }, `exception re-review ${dispositionCounts.findings_needing_disposition_review_count}`) : null
           ].filter(Boolean))
         ]),
         h("div", { key: "details", className: "mt-3 grid gap-3 md:grid-cols-3 text-sm text-slate-500" }, [
@@ -2042,7 +2589,7 @@ function ReviewQueueList({ runs, selectedRunId, onSelect, actorId }) {
           h("div", { key: "reopened" }, `Reopened ${dispositionCounts.reopened_disposition_count || 0}`)
         ]) : null,
         dueSoonDispositionCount > 0 ? h("div", { key: "due-soon-meta", className: "mt-3 grid gap-3 md:grid-cols-2 text-sm text-amber-900" }, [
-          h("div", { key: "count" }, `Due soon ${dueSoonDispositionCount}`),
+        h("div", { key: "count" }, `Exceptions due soon ${dueSoonDispositionCount}`),
           h("div", { key: "next" }, `Next review due ${nextDispositionReviewDueAt(run) ? formatDate(nextDispositionReviewDueAt(run)) : "n/a"}`)
         ]) : null
       ]);
@@ -2063,7 +2610,7 @@ function ReviewActionTimeline({ actions }) {
       h("div", { key: "meta", className: "mt-2 text-sm text-muted" }, `${action.reviewer_id}${action.assigned_reviewer_id ? ` -> ${action.assigned_reviewer_id}` : ""} - ${formatDate(action.created_at)}`),
       action.finding_id ? h("div", { key: "finding", className: "mt-1 text-sm text-muted" }, `Finding: ${action.finding_id}`) : null,
       action.updated_severity ? h("div", { key: "severity", className: "mt-1 text-sm text-muted" }, `Updated severity: ${action.updated_severity}`) : null,
-      action.visibility_override ? h("div", { key: "visibility", className: "mt-1 text-sm text-muted" }, `Visibility override: ${action.visibility_override}`) : null,
+      publisherModeEnabled && action.visibility_override ? h("div", { key: "visibility", className: "mt-1 text-sm text-muted" }, `Publication safety override: ${action.visibility_override}`) : null,
       action.notes ? h("div", { key: "notes", className: "mt-2 text-sm" }, action.notes) : null
     ])))
     : h("div", { className: "text-sm text-muted" }, "No persisted review actions yet.");
@@ -2427,6 +2974,7 @@ function ReviewCommentsPanel({ comments, commentBody, commentFindingId, findings
   return h("div", { className: "space-y-4" }, [
     h("div", { key: "composer", className: "grid gap-4 md:grid-cols-[0.4fr_1fr_auto]" }, [
       h(Field, { key: "finding", label: "Comment Scope" }, h(Select, {
+        "data-testid": "review-comment-finding-select",
         value: commentFindingId || "",
         onChange: (event) => onCommentFindingChange?.(event.target.value)
       }, [
@@ -2434,11 +2982,13 @@ function ReviewCommentsPanel({ comments, commentBody, commentFindingId, findings
         ...(findings || []).map((finding) => h("option", { key: finding.id, value: finding.id }, finding.title || finding.id))
       ])),
       h(Field, { key: "body", label: "Comment" }, h(Input, {
+        "data-testid": "review-comment-input",
         value: commentBody || "",
         onChange: (event) => onCommentBodyChange?.(event.target.value),
         placeholder: "add reviewer discussion or handoff context"
       })),
       h("div", { key: "submit-wrap", className: "flex items-end" }, h(Button, {
+        "data-testid": "post-review-comment-button",
         onClick: onSubmitComment,
         disabled: !commentBody?.trim()
       }, "Post Comment"))
@@ -2499,6 +3049,7 @@ function RunDetailPanel({
   onEditFindingDisposition,
   onSaveFindingDispositionEdit,
   onRevokeFindingDisposition,
+  onSaveRemediationItem,
   reviewComments,
   commentBody,
   commentFindingId,
@@ -2526,7 +3077,26 @@ function RunDetailPanel({
   outboundActionType,
   outboundTargetNumber,
   onOutboundActionTypeChange,
-  onOutboundTargetNumberChange
+  onOutboundTargetNumberChange,
+  publisherMode,
+  assistantState,
+  assistantSessions,
+  assistantSessionsLoading,
+  assistantSessionsError,
+  assistantInput,
+  assistantScopeType,
+  onAssistantInputChange,
+  onAssistantSend,
+  onAssistantPrompt,
+  onAssistantScopeChange,
+  onAssistantConfirmAction,
+  onAssistantRejectAction,
+  onAssistantNewSession,
+  onAssistantOpenSession,
+  onAssistantRenameSession,
+  onAssistantArchiveSession,
+  onAssistantDeleteSession,
+  notice
 }) {
   if (!window.TethermarkFeatures?.RunDetailPanel) {
     return h(Card, { title: "Run Detail", description: "Run detail module is unavailable.", className: "border-slate-200 bg-white shadow-sm" }, h("div", { className: "text-sm text-slate-500" }, "The extracted Run detail module failed to load."));
@@ -2550,6 +3120,7 @@ function RunDetailPanel({
     onEditFindingDisposition,
     onSaveFindingDispositionEdit,
     onRevokeFindingDisposition,
+    onSaveRemediationItem,
     reviewComments,
     commentBody,
     commentFindingId,
@@ -2578,11 +3149,31 @@ function RunDetailPanel({
     outboundTargetNumber,
     onOutboundActionTypeChange,
     onOutboundTargetNumberChange,
+    publisherMode,
+    assistantState,
+    assistantSessions,
+    assistantSessionsLoading,
+    assistantSessionsError,
+    assistantInput,
+    assistantScopeType,
+    onAssistantInputChange,
+    onAssistantSend,
+    onAssistantPrompt,
+    onAssistantScopeChange,
+    onAssistantConfirmAction,
+    onAssistantRejectAction,
+    onAssistantNewSession,
+    onAssistantOpenSession,
+    onAssistantRenameSession,
+    onAssistantArchiveSession,
+    onAssistantDeleteSession,
+    notice,
     helpers: {
       Button,
       Card,
       Badge,
       Field,
+      HoverCard,
       Input,
       Select,
       Textarea,
@@ -2607,6 +3198,14 @@ function RunDetailPanel({
 }
 
 function App() {
+  const [theme, setTheme] = useState(() => {
+    try {
+      const stored = window.localStorage.getItem("tethermark-theme");
+      return stored === "light" || stored === "dark" ? stored : "dark";
+    } catch {
+      return "dark";
+    }
+  });
   const [view, setView] = useState("dashboard");
   const [runs, setRuns] = useState([]);
   const [jobs, setJobs] = useState([]);
@@ -2614,6 +3213,12 @@ function App() {
   const [jobTypeFilter, setJobTypeFilter] = useState("all");
   const [jobSearch, setJobSearch] = useState("");
   const [runtimeFollowups, setRuntimeFollowups] = useState([]);
+  const [learningEvents, setLearningEvents] = useState([]);
+  const [learningCandidates, setLearningCandidates] = useState([]);
+  const [learningPromotions, setLearningPromotions] = useState([]);
+  const [learningJobs, setLearningJobs] = useState([]);
+  const [learningLoading, setLearningLoading] = useState(false);
+  const [learningFilter, setLearningFilter] = useState("open");
   const [settings, setSettings] = useState(emptySettings);
   const [effectiveSettings, setEffectiveSettings] = useState(emptyEffectiveSettings);
   const [providerCredentialDrafts, setProviderCredentialDrafts] = useState({});
@@ -2626,19 +3231,30 @@ function App() {
   const [projectDetailRuns, setProjectDetailRuns] = useState([]);
   const [projectDetailLoading, setProjectDetailLoading] = useState(false);
   const [auditPackages, setAuditPackages] = useState([]);
+  const [methodologyCatalog, setMethodologyCatalog] = useState(emptyMethodology);
   const [policyPacks, setPolicyPacks] = useState([]);
   const [llmRegistry, setLlmRegistry] = useState(emptyLlmRegistry);
   const [oauthConnectionState, setOauthConnectionState] = useState(null);
   const oauthStatusRequestId = useRef(0);
   const oauthStatusPollTimer = useRef(null);
+  const runDetailRequestId = useRef(0);
   const [integrationRegistry, setIntegrationRegistry] = useState(emptyIntegrationRegistry);
   const [staticToolsReadiness, setStaticToolsReadiness] = useState(emptyStaticToolsReadiness);
   const [stats, setStats] = useState({ runs: {}, targets: {} });
+  const [observabilityHistory, setObservabilityHistory] = useState(null);
+  const [observabilityTraceRunId, setObservabilityTraceRunId] = useState("");
+  const [observabilityTrace, setObservabilityTrace] = useState(null);
+  const [observabilityTraceLoading, setObservabilityTraceLoading] = useState(false);
+  const [observabilityTraceError, setObservabilityTraceError] = useState("");
   const [authInfo, setAuthInfo] = useState(defaultAuthInfo);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [runNotice, setRunNotice] = useState("");
   const [lastGlobalSyncAt, setLastGlobalSyncAt] = useState("");
+  const [globalSyncLoading, setGlobalSyncLoading] = useState(false);
   const [adminSubpage, setAdminSubpage] = useState("system");
+  const [validationScenarioIds, setValidationScenarioIds] = useState(["system_check"]);
+  const [validationLaunching, setValidationLaunching] = useState(false);
   const [settingsSubpage, setSettingsSubpage] = useState("audit");
   const [governanceTab, setGovernanceTab] = useState("gates");
   const [artifactRetentionForm, setArtifactRetentionForm] = useState({
@@ -2709,6 +3325,12 @@ function App() {
   const [selectedRunId, setSelectedRunId] = useState("");
   const [selectedRunDetail, setSelectedRunDetail] = useState(null);
   const [selectedRunLoading, setSelectedRunLoading] = useState(false);
+  const [assistantState, setAssistantState] = useState({ enabled: null, loading: false, session: null, contextKey: null, messages: [], error: "", lastActions: [] });
+  const [assistantSessions, setAssistantSessions] = useState([]);
+  const [assistantSessionsLoading, setAssistantSessionsLoading] = useState(false);
+  const [assistantSessionsError, setAssistantSessionsError] = useState("");
+  const [assistantInput, setAssistantInput] = useState("");
+  const [assistantScopeType, setAssistantScopeType] = useState("run");
   const [compareRunId, setCompareRunId] = useState("");
   const [selectedRunComparison, setSelectedRunComparison] = useState(null);
   const [selectedRunComparisonLoading, setSelectedRunComparisonLoading] = useState(false);
@@ -2879,6 +3501,13 @@ function App() {
     if (!modelId || providerId === "mock") return "";
     return `${providerId}:${modelId}`;
   }, [settings.providers_json.default_provider, settings.providers_json.default_model]);
+  const settingsAssistantInheritsDefault = settings.providers_json.assistant_inherit_default !== false;
+  const settingsAssistantModelValue = useMemo(() => {
+    const providerId = settings.providers_json.assistant_provider || "";
+    const modelId = settings.providers_json.assistant_model || "";
+    if (!modelId || providerId === "mock") return "";
+    return `${providerId}:${modelId}`;
+  }, [settings.providers_json.assistant_provider, settings.providers_json.assistant_model]);
   const settingsDefaultApiFieldId = useMemo(
     () => getProviderApiFieldId(llmRegistry, settings.providers_json.default_provider || ""),
     [llmRegistry, settings.providers_json.default_provider]
@@ -3120,8 +3749,19 @@ function App() {
       endpoint_url: "",
       audit_policy_pack: "default",
       audit_package: editor.audit_package || effectiveSettings.effective.audit_defaults_json?.audit_package || "baseline-static"
-    };
-  }
+  };
+}
+
+function triageDecisionFromReviewSummary(summary) {
+  const disposition = String(summary?.disposition || "").toLowerCase();
+  if (summary?.triage_decision) return summary.triage_decision;
+  if (disposition === "confirmed" || disposition === "downgraded") return "confirmed";
+  if (disposition === "needs_validation") return "needs_validation";
+  if (disposition === "waived" || summary?.active_disposition_type === "waiver") return "accepted_risk";
+  if (disposition === "suppressed" && summary?.active_disposition_type === "suppression") return "out_of_scope";
+  if (disposition === "suppressed") return "false_positive";
+  return "";
+}
 
   function buildProjectTargetDefaultsFromCreateForm(form) {
     return {
@@ -3175,30 +3815,30 @@ function App() {
 
   const currentSettingsScopeLevel = "global";
 
-  function load() {
+  function load(options = {}) {
     setError("");
-    return Promise.all([
+    const criticalLoad = Promise.all([
       api("/auth/info", undefined, requestContext),
       api("/runs?limit=25", undefined, requestContext),
       api("/runs/async", undefined, requestContext),
-      api("/stats/runs", undefined, requestContext),
-      api("/stats/targets", undefined, requestContext),
       api("/ui/settings?scope_level=effective", undefined, requestContext),
       api("/ui/settings?scope_level=" + encodeURIComponent(currentSettingsScopeLevel), undefined, requestContext),
       api("/ui/documents", undefined, requestContext),
       api("/ui/projects?workspace_id=" + encodeURIComponent(requestContext.workspaceId), undefined, requestContext),
       api("/audit-packages", undefined, requestContext),
+      api("/methodology", undefined, requestContext),
       api("/policy-packs", undefined, requestContext),
       api("/llm-providers", undefined, requestContext),
-      api("/integrations", undefined, requestContext),
-      api("/static-tools", undefined, requestContext),
       api("/review-notifications?reviewer_id=" + encodeURIComponent(requestContext.actorId || "anonymous"), undefined, requestContext),
-      api("/runtime-followups", undefined, requestContext)
-    ]).then(([authInfoPayload, runsPayload, jobsPayload, runStatsPayload, targetStatsPayload, effectiveSettingsPayload, settingsPayload, documentsPayload, projectsPayload, auditPackagesPayload, policyPacksPayload, llmProvidersPayload, integrationsPayload, staticToolsPayload, notificationsPayload, runtimeFollowupsPayload]) => {
+      api("/runtime-followups", undefined, requestContext),
+      api("/learning/events?limit=50", undefined, requestContext),
+      api("/learning/candidates?limit=50&trigger=page_load", undefined, requestContext),
+      api("/learning/promotions?limit=50", undefined, requestContext),
+      api("/learning/jobs?limit=25", undefined, requestContext)
+    ]).then(([authInfoPayload, runsPayload, jobsPayload, effectiveSettingsPayload, settingsPayload, documentsPayload, projectsPayload, auditPackagesPayload, methodologyPayload, policyPacksPayload, llmProvidersPayload, notificationsPayload, runtimeFollowupsPayload, learningEventsPayload, learningCandidatesPayload, learningPromotionsPayload, learningJobsPayload]) => {
       setAuthInfo(authInfoPayload || defaultAuthInfo);
       setRuns(runsPayload.runs || []);
       setJobs(jobsPayload.jobs || []);
-      setStats({ runs: runStatsPayload.stats || {}, targets: targetStatsPayload.stats || {} });
       setEffectiveSettings(applyEnvironmentDefaultsToEffectiveSettings({
         effective: effectiveSettingsPayload.settings || emptySettings,
         layers: effectiveSettingsPayload.layers || emptyEffectiveSettings.layers
@@ -3210,18 +3850,49 @@ function App() {
       setDocuments(documentsPayload.documents || []);
       setProjects(projectsPayload.projects || []);
       setAuditPackages(auditPackagesPayload.audit_packages || []);
+      setMethodologyCatalog(methodologyPayload || emptyMethodology);
       setPolicyPacks((policyPacksPayload.policy_packs || []).filter((item) => item.id === "default"));
       setLlmRegistry({
         providers: llmProvidersPayload.providers || [],
         presets: llmProvidersPayload.presets || [],
         environment_defaults: llmProvidersPayload.environment_defaults || {}
       });
-      setIntegrationRegistry(integrationsPayload.integrations || []);
-      setStaticToolsReadiness(staticToolsPayload.static_tools || emptyStaticToolsReadiness);
       setReviewNotifications(notificationsPayload.review_notifications || []);
       setRuntimeFollowups(runtimeFollowupsPayload.runtime_followups || []);
+      setLearningEvents(learningEventsPayload.learning_events || []);
+      setLearningCandidates(learningCandidatesPayload.learning_candidates || []);
+      setLearningPromotions(learningPromotionsPayload.learning_promotions || []);
+      setLearningJobs(learningJobsPayload.learning_jobs || []);
       setLastGlobalSyncAt(new Date().toISOString());
-    }).catch((loadError) => setError(loadError.message || String(loadError)));
+      const deferredLoad = Promise.allSettled([
+        api("/stats/runs", undefined, requestContext),
+        api("/stats/targets", undefined, requestContext),
+        api("/integrations", undefined, requestContext),
+        api("/stats/observability?limit=25", undefined, requestContext)
+      ]).then(([runStatsResult, targetStatsResult, integrationsResult, observabilityResult]) => {
+        if (runStatsResult.status === "fulfilled" || targetStatsResult.status === "fulfilled") {
+          setStats((current) => ({
+            runs: runStatsResult.status === "fulfilled" ? runStatsResult.value.stats || {} : current.runs || {},
+            targets: targetStatsResult.status === "fulfilled" ? targetStatsResult.value.stats || {} : current.targets || {}
+          }));
+        }
+        if (integrationsResult.status === "fulfilled") {
+          setIntegrationRegistry(integrationsResult.value.integrations || []);
+        }
+        if (observabilityResult.status === "fulfilled") {
+          setObservabilityHistory(observabilityResult.value || null);
+        }
+        const firstFailure = [runStatsResult, targetStatsResult, integrationsResult, observabilityResult].find((result) => result.status === "rejected");
+        if (firstFailure && options.throwOnError) throw firstFailure.reason;
+        return null;
+      });
+      return options.includeDeferred ? deferredLoad : null;
+    }).catch((loadError) => {
+      setError(formatUiError(loadError));
+      if (options.throwOnError) throw loadError;
+      return null;
+    });
+    return criticalLoad;
   }
 
   function loadProjectRuns(projectId) {
@@ -3239,9 +3910,76 @@ function App() {
           setProjectDetailRuns([]);
           return;
         }
-        setError(message);
+        setError(formatUiError(message));
       })
       .finally(() => setProjectDetailLoading(false));
+  }
+
+  function loadLearningData(message = "") {
+    setLearningLoading(true);
+    return Promise.all([
+      api("/learning/events?limit=100", undefined, requestContext),
+      api("/learning/candidates?limit=100&trigger=manual_refresh", undefined, requestContext),
+      api("/learning/promotions?limit=100", undefined, requestContext),
+      api("/learning/jobs?limit=25", undefined, requestContext)
+    ]).then(([eventsPayload, candidatesPayload, promotionsPayload, jobsPayload]) => {
+      setLearningEvents(eventsPayload.learning_events || []);
+      setLearningCandidates(candidatesPayload.learning_candidates || []);
+      setLearningPromotions(promotionsPayload.learning_promotions || []);
+      setLearningJobs(jobsPayload.learning_jobs || []);
+      if (message) setNotice(message);
+    }).catch((loadError) => {
+      setError(formatUiError(loadError));
+    }).finally(() => setLearningLoading(false));
+  }
+
+  function runLearningCandidateAction(candidate, action) {
+    if (!candidate?.id) return Promise.resolve();
+    const path = `/learning/candidates/${encodeURIComponent(candidate.id)}/${action}`;
+    const body = action === "reject" ? { reason: "Rejected from Learning workspace." } : {};
+    setLearningLoading(true);
+    return act(
+      () => api(path, {
+        method: "POST",
+        body: JSON.stringify(body)
+      }, requestContext).then(() => loadLearningData(action === "experiment" ? "Learning experiment recorded." : action === "promote" ? "Learning candidate promoted." : "Learning candidate rejected.")),
+      ""
+    ).finally(() => setLearningLoading(false));
+  }
+
+  function rollbackLearningPromotionUi(promotion) {
+    if (!promotion?.id) return Promise.resolve();
+    setLearningLoading(true);
+    return act(
+      () => api(`/learning/promotions/${encodeURIComponent(promotion.id)}/rollback`, {
+        method: "POST",
+        body: JSON.stringify({ reason: "Rolled back from Learning workspace." })
+      }, requestContext).then(() => loadLearningData("Learning promotion rolled back.")),
+      ""
+    ).finally(() => setLearningLoading(false));
+  }
+
+  function loadObservabilityTrace(runId) {
+    if (!runId) {
+      setObservabilityTraceRunId("");
+      setObservabilityTrace(null);
+      setObservabilityTraceError("");
+      return Promise.resolve(null);
+    }
+    setObservabilityTraceRunId(runId);
+    setObservabilityTraceLoading(true);
+    setObservabilityTraceError("");
+    return api(`/runs/${encodeURIComponent(runId)}/agent-trace`, undefined, requestContext)
+      .then((payload) => {
+        setObservabilityTrace(payload || null);
+        return payload;
+      })
+      .catch((traceError) => {
+        setObservabilityTrace(null);
+        setObservabilityTraceError(formatUiError(traceError));
+        return null;
+      })
+      .finally(() => setObservabilityTraceLoading(false));
   }
 
   function refreshJobsQueue(message = "Queue refreshed.") {
@@ -3251,13 +3989,26 @@ function App() {
         setJobs(payload.jobs || []);
         if (message) setNotice(message);
       })
-      .catch((loadError) => setError(loadError.message || String(loadError)));
+      .catch((loadError) => {
+        if (message) setError(formatUiError(loadError));
+      });
   }
 
   function syncAllAppData() {
+    if (globalSyncLoading) return Promise.resolve();
     setError("");
     setNotice("");
-    return load().then(() => setNotice("All app data synced."));
+    setGlobalSyncLoading(true);
+    return load({ throwOnError: true, includeDeferred: true })
+      .then(() => {
+        setError("");
+        setNotice("All app data synced.");
+      })
+      .catch((loadError) => {
+        setNotice("");
+        setError(formatUiError(loadError));
+      })
+      .finally(() => setGlobalSyncLoading(false));
   }
 
   function artifactRetentionPayload() {
@@ -3273,7 +4024,7 @@ function App() {
     const kind = encodeURIComponent(artifactRetentionForm.kind || "runs");
     return api(`/artifacts/retention/summary?kind=${kind}&include_size=${includeSize ? "true" : "false"}`, undefined, requestContext)
       .then((payload) => setArtifactRetentionSummary(payload.artifact_retention_summary || null))
-      .catch((loadError) => setError(loadError.message || String(loadError)))
+      .catch((loadError) => setError(formatUiError(loadError)))
       .finally(() => setArtifactRetentionLoading(false));
   }
 
@@ -3287,7 +4038,7 @@ function App() {
         setArtifactRetentionPreview(payload.artifact_retention || null);
         setNotice("Artifact retention preview updated.");
       })
-      .catch((loadError) => setError(loadError.message || String(loadError)))
+      .catch((loadError) => setError(formatUiError(loadError)))
       .finally(() => setArtifactRetentionLoading(false));
   }
 
@@ -3308,111 +4059,366 @@ function App() {
         setNotice("Artifact pruning completed.");
         return loadArtifactRetentionSummary(false);
       })
-      .catch((loadError) => setError(loadError.message || String(loadError)))
+      .catch((loadError) => setError(formatUiError(loadError)))
       .finally(() => setArtifactRetentionLoading(false));
   }
 
   function loadRunDetail(runId) {
     if (!runId) {
       setSelectedRunDetail(null);
+      setAssistantState({ enabled: null, loading: false, session: null, contextKey: null, messages: [], error: "", lastActions: [] });
+      setAssistantScopeType("run");
       return Promise.resolve();
     }
+    setAssistantState({ enabled: null, loading: false, session: null, contextKey: null, messages: [], error: "", lastActions: [] });
+    setAssistantInput("");
+    setAssistantScopeType("run");
+    const requestId = runDetailRequestId.current + 1;
+    runDetailRequestId.current = requestId;
     setSelectedRunLoading(true);
-    return Promise.all([
-      api("/runs/" + encodeURIComponent(runId), undefined, requestContext),
-      api("/runs/" + encodeURIComponent(runId) + "/summary", undefined, requestContext),
-      api(`/runs/${encodeURIComponent(runId)}/exports${compareRunId ? `?compare_to=${encodeURIComponent(compareRunId)}` : ""}`, undefined, requestContext),
-      api("/runs/" + encodeURIComponent(runId) + "/resolved-config", undefined, requestContext),
-      api("/runs/" + encodeURIComponent(runId) + "/preflight", undefined, requestContext),
-      api("/runs/" + encodeURIComponent(runId) + "/launch-intent", undefined, requestContext),
-      api("/runs/" + encodeURIComponent(runId) + "/sandbox-execution", undefined, requestContext),
-      api("/runs/" + encodeURIComponent(runId) + "/findings", undefined, requestContext),
-      api("/runs/" + encodeURIComponent(runId) + "/evidence-records", undefined, requestContext),
-      api("/runs/" + encodeURIComponent(runId) + "/control-results", undefined, requestContext),
-      api("/runs/" + encodeURIComponent(runId) + "/observations", undefined, requestContext),
-      api("/runs/" + encodeURIComponent(runId) + "/supervisor-review", undefined, requestContext),
-      api("/runs/" + encodeURIComponent(runId) + "/remediation", undefined, requestContext),
-      api("/runs/" + encodeURIComponent(runId) + "/finding-evaluations", undefined, requestContext),
-      api("/runs/" + encodeURIComponent(runId) + "/webhook-deliveries", undefined, requestContext),
-      api("/runs/" + encodeURIComponent(runId) + "/review-actions", undefined, requestContext),
-      api("/runs/" + encodeURIComponent(runId) + "/review-summary", undefined, requestContext),
-      api("/runs/" + encodeURIComponent(runId) + "/review-comments", undefined, requestContext),
-      api("/runs/" + encodeURIComponent(runId) + "/runtime-followups", undefined, requestContext),
-      api("/runs/" + encodeURIComponent(runId) + "/finding-dispositions", undefined, requestContext),
-      api("/runs/" + encodeURIComponent(runId) + "/agent-invocations", undefined, requestContext),
-      api("/runs/" + encodeURIComponent(runId) + "/metrics", undefined, requestContext),
-      api("/runs/" + encodeURIComponent(runId) + "/observability-summary", undefined, requestContext),
-      api("/runs/" + encodeURIComponent(runId) + "/tool-adapters", undefined, requestContext),
-      api("/runs/" + encodeURIComponent(runId) + "/outbound-preview", undefined, requestContext),
-      api("/runs/" + encodeURIComponent(runId) + "/outbound-approval", undefined, requestContext),
-      api("/runs/" + encodeURIComponent(runId) + "/outbound-send", undefined, requestContext),
-      api("/runs/" + encodeURIComponent(runId) + "/outbound-verification", undefined, requestContext),
-      api("/runs/" + encodeURIComponent(runId) + "/outbound-delivery", undefined, requestContext)
-    ]).then(([runPayload, summaryPayload, exportsIndexPayload, resolvedPayload, preflightPayload, launchIntentPayload, sandboxExecutionPayload, findingsPayload, evidenceRecordsPayload, controlResultsPayload, observationsPayload, supervisorReviewPayload, remediationPayload, findingEvaluationsPayload, webhookDeliveriesPayload, reviewActionsPayload, reviewSummaryPayload, reviewCommentsPayload, runtimeFollowupsPayload, findingDispositionsPayload, agentInvocationsPayload, metricsPayload, observabilitySummaryPayload, toolAdaptersPayload, outboundPreviewPayload, outboundApprovalPayload, outboundSendPayload, outboundVerificationPayload, outboundDeliveryPayload]) => {
-      setSelectedRunDetail({
-        run: runPayload,
-        summary: summaryPayload,
-        exportsIndex: exportsIndexPayload,
-        resolvedConfig: resolvedPayload,
-        preflight: preflightPayload,
-        launchIntent: launchIntentPayload,
-        sandboxExecution: sandboxExecutionPayload,
-        findings: findingsPayload,
-        evidenceRecords: evidenceRecordsPayload,
-        controlResults: controlResultsPayload,
-        observations: observationsPayload,
-        supervisorReview: supervisorReviewPayload,
-        remediation: remediationPayload,
-        findingEvaluations: findingEvaluationsPayload,
-        webhookDeliveries: webhookDeliveriesPayload,
-        reviewActions: reviewActionsPayload,
-        reviewSummary: reviewSummaryPayload,
-        reviewComments: reviewCommentsPayload,
-        runtimeFollowups: runtimeFollowupsPayload,
-        findingDispositions: findingDispositionsPayload,
-        agentInvocations: agentInvocationsPayload,
-        metrics: metricsPayload,
-        observabilitySummary: observabilitySummaryPayload,
-        toolAdapters: toolAdaptersPayload,
-        outboundPreview: outboundPreviewPayload,
-        outboundApproval: outboundApprovalPayload,
-        outboundSend: outboundSendPayload,
-        outboundVerification: outboundVerificationPayload,
-        outboundDelivery: outboundDeliveryPayload
-      });
-      const reviewFindingSummaries = reviewSummaryPayload.review_summary?.finding_summaries || [];
+    const encodedRunId = encodeURIComponent(runId);
+    const loadResourceGroup = async (resources, batchSize = 4) => {
+      const results = [];
+      for (let index = 0; index < resources.length; index += batchSize) {
+        const batch = resources.slice(index, index + batchSize);
+        const batchResults = await Promise.allSettled(batch.map((resource) => api(resource.path, undefined, requestContext)));
+        results.push(...batchResults);
+      }
+        const payloads = {};
+        const failures = [];
+        results.forEach((result, index) => {
+          const resource = resources[index];
+          if (!resource) return;
+          if (result.status === "fulfilled") {
+            payloads[resource.key] = result.value;
+          } else {
+            failures.push({ key: resource.key, path: resource.path, reason: result.reason });
+            payloads[resource.key] = resource.fallback || null;
+          }
+        });
+        return { payloads, failures };
+    };
+    const criticalResources = [
+      { key: "run", path: "/runs/" + encodedRunId, fallback: {} },
+      { key: "summary", path: "/runs/" + encodedRunId + "/summary", fallback: { summary: {} } },
+      { key: "exportsIndex", path: `/runs/${encodedRunId}/exports${compareRunId ? `?compare_to=${encodeURIComponent(compareRunId)}` : ""}`, fallback: { export_index: { exports: [] } } },
+      { key: "resolvedConfig", path: "/runs/" + encodedRunId + "/resolved-config", fallback: { resolved_configuration: {} } },
+      { key: "preflight", path: "/runs/" + encodedRunId + "/preflight", fallback: { preflight: null } },
+      { key: "launchIntent", path: "/runs/" + encodedRunId + "/launch-intent", fallback: { launch_intent: null } },
+      { key: "sandboxExecution", path: "/runs/" + encodedRunId + "/sandbox-execution", fallback: { sandbox_execution: null } },
+      { key: "findings", path: "/runs/" + encodedRunId + "/findings", fallback: { findings: [] } },
+      { key: "evidenceRecords", path: "/runs/" + encodedRunId + "/evidence-records", fallback: { evidence_records: [] } },
+      { key: "controlResults", path: "/runs/" + encodedRunId + "/control-results", fallback: { control_results: [] } },
+      { key: "reviewSummary", path: "/runs/" + encodedRunId + "/review-summary", fallback: { review_summary: { finding_summaries: [] } } },
+      { key: "findingDispositions", path: "/runs/" + encodedRunId + "/finding-dispositions", fallback: { finding_dispositions: [], resolved_finding_dispositions: [] } }
+    ];
+    const optionalResources = [
+      { key: "observations", path: "/runs/" + encodedRunId + "/observations", fallback: { observations: [] } },
+      { key: "supervisorReview", path: "/runs/" + encodedRunId + "/supervisor-review", fallback: { supervisor_review: null } },
+      { key: "remediation", path: "/runs/" + encodedRunId + "/remediation", fallback: { remediation_memo: null } },
+      { key: "remediationItems", path: "/runs/" + encodedRunId + "/remediation-items", fallback: { remediation_items: [] } },
+      { key: "findingEvaluations", path: "/runs/" + encodedRunId + "/finding-evaluations", fallback: { finding_evaluations: { evaluations: [] } } },
+      { key: "findingQuality", path: "/runs/" + encodedRunId + "/finding-quality", fallback: { finding_quality: { findings: [] } } },
+      { key: "webhookDeliveries", path: "/runs/" + encodedRunId + "/webhook-deliveries", fallback: { webhook_deliveries: [] } },
+      { key: "reviewActions", path: "/runs/" + encodedRunId + "/review-actions", fallback: { review_actions: [] } },
+      { key: "reviewComments", path: "/runs/" + encodedRunId + "/review-comments", fallback: { review_comments: [] } },
+      { key: "runtimeFollowups", path: "/runs/" + encodedRunId + "/runtime-followups", fallback: { runtime_followups: [] } },
+      { key: "learning", path: "/runs/" + encodedRunId + "/learning", fallback: { learning_events: [], learning_candidates: [] } },
+      { key: "agentInvocations", path: "/runs/" + encodedRunId + "/agent-invocations", fallback: { agent_invocations: [] } },
+      { key: "metrics", path: "/runs/" + encodedRunId + "/metrics", fallback: { metrics: [] } },
+      { key: "observabilitySummary", path: "/runs/" + encodedRunId + "/observability-summary", fallback: null },
+      { key: "toolAdapters", path: "/runs/" + encodedRunId + "/tool-adapters", fallback: { buckets: [] } },
+      { key: "outboundPreview", path: "/runs/" + encodedRunId + "/outbound-preview", fallback: { outbound_preview: { proposed_actions: [] } } },
+      { key: "outboundApproval", path: "/runs/" + encodedRunId + "/outbound-approval", fallback: { outbound_approval: null } },
+      { key: "outboundSend", path: "/runs/" + encodedRunId + "/outbound-send", fallback: { outbound_send: null } },
+      { key: "outboundVerification", path: "/runs/" + encodedRunId + "/outbound-verification", fallback: { outbound_verification: null } },
+      { key: "outboundDelivery", path: "/runs/" + encodedRunId + "/outbound-delivery", fallback: { outbound_delivery: null } }
+    ];
+    return loadResourceGroup(criticalResources).then(({ payloads: criticalPayloads, failures: criticalFailures }) => {
+      if (runDetailRequestId.current !== requestId) return null;
+      const detail = {
+        ...Object.fromEntries([...criticalResources, ...optionalResources].map((resource) => [resource.key, resource.fallback || null])),
+        ...criticalPayloads
+      };
+      setSelectedRunDetail(detail);
       setFindingReviewState((current) => {
         const next = {};
+        const findingsPayload = detail.findings || { findings: [] };
+        const reviewSummaryPayload = detail.reviewSummary || { review_summary: { finding_summaries: [] } };
+        const findingDispositionsPayload = detail.findingDispositions || { resolved_finding_dispositions: [] };
+        const reviewFindingSummaries = reviewSummaryPayload.review_summary?.finding_summaries || [];
         for (const finding of findingsPayload.findings || []) {
           const existingSummary = reviewFindingSummaries.find((item) => item.finding_id === finding.id) || null;
           const existingResolvedDisposition = (findingDispositionsPayload.resolved_finding_dispositions || []).find((item) => item.finding_id === finding.id) || null;
           const activeDispositionIds = new Set((existingResolvedDisposition?.active_dispositions || []).map((item) => item.id));
           const currentState = current[finding.id] || {};
+          const persistedTriageDecision = triageDecisionFromReviewSummary(existingSummary);
+          const persistedSeverityOverride = existingSummary?.current_severity && existingSummary.current_severity !== finding.severity ? existingSummary.current_severity : "";
+          const persistedNotes = Array.isArray(existingSummary?.notes) && existingSummary.notes.length ? existingSummary.notes[existingSummary.notes.length - 1] : "";
+          const hasActiveDisposition = existingSummary?.disposition_status === "active";
           next[finding.id] = {
-            updated_severity: currentState.updated_severity || "medium",
-            visibility_override: currentState.visibility_override || "internal",
-            notes: currentState.notes || "",
-            disposition_reason: currentState.disposition_reason || "",
-            disposition_expires_at: currentState.disposition_expires_at || "",
-            disposition_owner_id: currentState.disposition_owner_id || existingSummary?.active_disposition_owner_id || requestContext.actorId || "",
-            disposition_reviewed_at: currentState.disposition_reviewed_at || existingSummary?.active_disposition_reviewed_at || new Date().toISOString(),
-            disposition_review_due_by: currentState.disposition_review_due_by || existingSummary?.active_disposition_review_due_by || "",
+            triage_decision: currentState.triage_decision || persistedTriageDecision || "",
+            updated_severity: currentState.updated_severity || persistedSeverityOverride || "",
+            visibility_override: currentState.visibility_override || "",
+            review_priority: currentState.review_priority || existingSummary?.review_priority || "",
+            validation_intent: currentState.validation_intent || existingSummary?.validation_intent || (persistedTriageDecision === "needs_validation" ? "manual_review" : "not_required"),
+            notes: currentState.notes || persistedNotes || "",
+            disposition_reason: currentState.disposition_reason || (hasActiveDisposition ? existingSummary?.active_disposition_reason : "") || "",
+            disposition_expires_at: currentState.disposition_expires_at || (hasActiveDisposition ? existingSummary?.active_disposition_expires_at : "") || "",
+            disposition_owner_id: currentState.disposition_owner_id || (hasActiveDisposition ? existingSummary?.active_disposition_owner_id : "") || requestContext.actorId || "",
+            disposition_reviewed_at: currentState.disposition_reviewed_at || (hasActiveDisposition ? existingSummary?.active_disposition_reviewed_at : "") || new Date().toISOString(),
+            disposition_review_due_by: currentState.disposition_review_due_by || (hasActiveDisposition ? existingSummary?.active_disposition_review_due_by : "") || "",
+            exception_scope: currentState.exception_scope || (hasActiveDisposition && existingSummary?.active_disposition_scope === "project" ? "future_repo" : "") || "",
             editing_disposition_id: activeDispositionIds.has(currentState.editing_disposition_id) ? currentState.editing_disposition_id : ""
           };
         }
         return next;
       });
-      setReviewAssignee(summaryPayload.summary?.current_reviewer_id || runPayload.run?.review_workflow?.current_reviewer_id || requestContext.actorId || "");
+      setReviewAssignee(detail.summary?.summary?.current_reviewer_id || detail.run?.run?.review_workflow?.current_reviewer_id || requestContext.actorId || "");
       setReviewCommentBody("");
       setReviewCommentFindingId("");
-      setSelectedFindingId((current) => current && (findingsPayload.findings || []).some((finding) => finding.id === current) ? current : (findingsPayload.findings || [])[0]?.id || "");
+      setSelectedFindingId((current) => current && (detail.findings?.findings || []).some((finding) => finding.id === current) ? current : (detail.findings?.findings || [])[0]?.id || "");
       setCompareRunId((current) => current || "");
-      setOutboundActionType((outboundPreviewPayload.outbound_preview?.proposed_actions || [])[0]?.action_type || "pr_comment");
+      setOutboundActionType((detail.outboundPreview?.outbound_preview?.proposed_actions || [])[0]?.action_type || "pr_comment");
       setOutboundTargetNumber("");
+      setSelectedRunLoading(false);
+      if (criticalFailures.length) {
+        setError(`Run detail loaded with ${criticalFailures.length} missing section${criticalFailures.length === 1 ? "" : "s"}. ${formatUiError(criticalFailures[0].reason)}`);
+      }
+      return loadResourceGroup(optionalResources).then(({ payloads: optionalPayloads }) => {
+        if (runDetailRequestId.current !== requestId) return null;
+        setSelectedRunDetail((current) => current ? { ...current, ...optionalPayloads } : current);
+        return optionalPayloads;
+      });
     }).catch((loadError) => {
+      if (runDetailRequestId.current !== requestId) return null;
       setSelectedRunDetail(null);
-      setError(loadError.message || String(loadError));
-    }).finally(() => setSelectedRunLoading(false));
+      setError(formatUiError(loadError));
+      setSelectedRunLoading(false);
+      return null;
+      });
+  }
+
+  function getAssistantScopeContext() {
+    const runRecord = selectedRunDetail?.run?.run || selectedRunDetail?.summary?.summary || null;
+    const targetId = runRecord?.canonical_target_id || runRecord?.target_id || selectedRunDetail?.run?.run?.target?.id || "";
+    const scopeType = assistantScopeType === "target" ? "target" : "run";
+    const scopeId = scopeType === "target" ? targetId : selectedRunId;
+    const contextKey = `${requestContext.workspaceId || "default"}:${requestContext.projectId || "default"}:${scopeType}:${scopeId}:${scopeType === "run" ? (selectedFindingId || "run") : "target"}`;
+    return { scopeType, scopeId, contextKey };
+  }
+
+  function loadAssistantSessions() {
+    const { scopeType, scopeId, contextKey } = getAssistantScopeContext();
+    if (!scopeId) {
+      setAssistantSessions([]);
+      setAssistantSessionsError("");
+      return Promise.resolve([]);
+    }
+    setAssistantSessionsLoading(true);
+    setAssistantSessionsError("");
+    const query = new URLSearchParams({ scope_type: scopeType, scope_id: scopeId, context_key: contextKey });
+    return api(`/assistant/sessions?${query.toString()}`, undefined, requestContext)
+      .then((payload) => {
+        const sessions = payload.assistant_sessions || [];
+        setAssistantSessions(sessions);
+        setAssistantSessionsError("");
+        return sessions;
+      })
+      .catch((assistantError) => {
+        setAssistantSessions([]);
+        setAssistantSessionsError(formatUiError(assistantError));
+        return [];
+      })
+      .finally(() => setAssistantSessionsLoading(false));
+  }
+
+  function ensureAssistantSession() {
+    const { scopeType, scopeId, contextKey } = getAssistantScopeContext();
+    if (!scopeId) return Promise.reject(new Error(scopeType === "target" ? "Target history is not available for this run yet." : "Select a run before asking the assistant."));
+    if (assistantState.session?.scope_type === scopeType && assistantState.session?.scope_id === scopeId && assistantState.contextKey === contextKey) return Promise.resolve(assistantState.session);
+    setAssistantState((current) => ({ ...current, loading: true, error: "" }));
+    return api("/assistant/capabilities", undefined, requestContext)
+      .then((capabilities) => {
+        if (!capabilities.enabled) throw new Error("Assistant is disabled. Set HARNESS_ENABLE_ASSISTANT=1 on the API server.");
+        return api("/assistant/sessions", {
+          method: "POST",
+          body: JSON.stringify({ scope_type: scopeType, scope_id: scopeId, context_key: contextKey })
+        }, requestContext);
+      })
+      .then((payload) => {
+        const session = payload.assistant_session || null;
+        setAssistantState((current) => ({ ...current, enabled: true, loading: false, session, contextKey, messages: [], error: "", lastActions: [] }));
+        loadAssistantSessions();
+        return session;
+      })
+      .catch((assistantError) => {
+        setAssistantState((current) => ({ ...current, enabled: false, loading: false, error: formatUiError(assistantError) }));
+        throw assistantError;
+      });
+  }
+
+  function sendAssistantMessage(message) {
+    const prompt = String(message ?? assistantInput).trim();
+    if (!prompt) return;
+    setAssistantInput("");
+    setAssistantState((current) => ({ ...current, loading: true, error: "" }));
+    ensureAssistantSession()
+      .then((session) => api(`/assistant/sessions/${encodeURIComponent(session.id)}/messages`, {
+        method: "POST",
+        body: JSON.stringify({ message: prompt })
+      }, requestContext))
+      .then((payload) => {
+        setAssistantState((current) => ({
+          ...current,
+          enabled: true,
+          loading: false,
+          session: payload.assistant_session || current.session,
+          contextKey: current.contextKey,
+          messages: [...current.messages, payload.user_message, payload.assistant_message].filter(Boolean),
+          lastActions: payload.proposed_actions || [],
+          error: ""
+        }));
+        loadAssistantSessions();
+      })
+      .catch((assistantError) => {
+        setAssistantState((current) => ({ ...current, loading: false, error: formatUiError(assistantError) }));
+      });
+  }
+
+  function changeAssistantScope(nextScope) {
+    const normalized = nextScope === "target" ? "target" : "run";
+    setAssistantScopeType(normalized);
+    setAssistantState((current) => current.session?.scope_type === normalized
+      ? current
+      : { ...current, session: null, contextKey: null, messages: [], lastActions: [], error: "" });
+  }
+
+  function startNewAssistantSession() {
+    setAssistantState((current) => ({ ...current, session: null, contextKey: null, messages: [], lastActions: [], error: "" }));
+    setAssistantInput("");
+  }
+
+  function openAssistantSession(session) {
+    if (!session?.id) return;
+    setAssistantState((current) => ({ ...current, loading: true, error: "" }));
+    api(`/assistant/sessions/${encodeURIComponent(session.id)}/messages`, undefined, requestContext)
+      .then((payload) => {
+        setAssistantState((current) => ({
+          ...current,
+          enabled: true,
+          loading: false,
+          session: payload.assistant_session || session,
+          contextKey: session.metadata_json?.context_key || getAssistantScopeContext().contextKey,
+          messages: payload.messages || [],
+          lastActions: [],
+          error: ""
+        }));
+      })
+      .catch((assistantError) => {
+        setAssistantState((current) => ({ ...current, loading: false, error: formatUiError(assistantError) }));
+      });
+  }
+
+  function renameAssistantSession(session) {
+    if (!session?.id) return;
+    const currentTitle = session.title || session.metadata_json?.title || "";
+    const nextTitle = window.prompt("Rename chat", currentTitle);
+    if (nextTitle === null) return;
+    api(`/assistant/sessions/${encodeURIComponent(session.id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ title: nextTitle })
+    }, requestContext)
+      .then((payload) => {
+        const updated = payload.assistant_session || session;
+        setAssistantSessions((current) => current.map((item) => item.id === updated.id ? { ...item, ...updated, title: updated.metadata_json?.title || item.title } : item));
+        setAssistantState((current) => current.session?.id === updated.id
+          ? { ...current, session: updated }
+          : current);
+        loadAssistantSessions();
+      })
+      .catch((assistantError) => {
+        setAssistantState((current) => ({ ...current, error: formatUiError(assistantError) }));
+      });
+  }
+
+  function archiveAssistantSession(session) {
+    if (!session?.id) return;
+    const confirmed = window.confirm("Archive this chat? It will be hidden from Recent chats but kept in local assistant records.");
+    if (!confirmed) return;
+    api(`/assistant/sessions/${encodeURIComponent(session.id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "archived" })
+    }, requestContext)
+      .then(() => {
+        setAssistantSessions((current) => current.filter((item) => item.id !== session.id));
+        setAssistantState((current) => current.session?.id === session.id
+          ? { ...current, session: null, contextKey: null, messages: [], lastActions: [], error: "" }
+          : current);
+        setNotice("Assistant chat archived.");
+      })
+      .catch((assistantError) => {
+        setAssistantState((current) => ({ ...current, error: formatUiError(assistantError) }));
+      });
+  }
+
+  function deleteAssistantSession(session) {
+    if (!session?.id) return;
+    const confirmed = window.confirm("Delete this chat from active history? The local audit records remain soft-deleted for traceability.");
+    if (!confirmed) return;
+    api(`/assistant/sessions/${encodeURIComponent(session.id)}`, {
+      method: "DELETE"
+    }, requestContext)
+      .then(() => {
+        setAssistantSessions((current) => current.filter((item) => item.id !== session.id));
+        setAssistantState((current) => current.session?.id === session.id
+          ? { ...current, session: null, contextKey: null, messages: [], lastActions: [], error: "" }
+          : current);
+        setNotice("Assistant chat deleted from active history.");
+      })
+      .catch((assistantError) => {
+        setAssistantState((current) => ({ ...current, error: formatUiError(assistantError) }));
+      });
+  }
+
+  useEffect(() => {
+    loadAssistantSessions();
+  }, [selectedRunId, selectedFindingId, assistantScopeType, requestContext.workspaceId, requestContext.projectId]);
+
+  useEffect(() => {
+    document.documentElement.classList.toggle("theme-dark", theme === "dark");
+    document.documentElement.dataset.theme = theme;
+    try {
+      window.localStorage.setItem("tethermark-theme", theme);
+    } catch {
+      // Theme persistence is best-effort; the UI still updates for this session.
+    }
+  }, [theme]);
+
+  function resolveAssistantAction(action, decision) {
+    const session = assistantState.session;
+    if (!session || !action?.id) return;
+    setAssistantState((current) => ({ ...current, loading: true, error: "" }));
+    api(`/assistant/sessions/${encodeURIComponent(session.id)}/actions/${encodeURIComponent(action.id)}/${decision}`, {
+      method: "POST",
+      body: JSON.stringify({})
+    }, requestContext)
+      .then(() => {
+        setAssistantState((current) => ({
+          ...current,
+          loading: false,
+          lastActions: (current.lastActions || []).map((item) => item.id === action.id ? { ...item, status: decision === "confirm" ? "confirmed" : "rejected" } : item)
+        }));
+        if (decision === "confirm") {
+          setNotice("Assistant action confirmed.");
+          return loadRunDetail(selectedRunId);
+        }
+        setNotice("Assistant action rejected.");
+        return null;
+      })
+      .catch((assistantError) => {
+        setAssistantState((current) => ({ ...current, loading: false, error: formatUiError(assistantError) }));
+      });
   }
 
   function loadRunComparison(runId, compareToRunId) {
@@ -3426,7 +4432,7 @@ function App() {
       .then((payload) => setSelectedRunComparison(payload))
       .catch((loadError) => {
         setSelectedRunComparison(null);
-        setError(loadError.message || String(loadError));
+        setError(formatUiError(loadError));
       })
       .finally(() => setSelectedRunComparisonLoading(false));
   }
@@ -3453,7 +4459,7 @@ function App() {
         : "");
     }).catch((loadError) => {
       setComparisonRunDetail(null);
-      setError(loadError.message || String(loadError));
+      setError(formatUiError(loadError));
     }).finally(() => setComparisonRunLoading(false));
   }
 
@@ -3480,7 +4486,7 @@ function App() {
       });
     }).catch((loadError) => {
       setLinkedRuntimeRerunDetail(null);
-      setError(loadError.message || String(loadError));
+      setError(formatUiError(loadError));
     }).finally(() => setLinkedRuntimeRerunLoading(false));
   }
 
@@ -3546,6 +4552,14 @@ function App() {
   }, [view, settingsSubpage, artifactRetentionForm.kind, requestContext.workspaceId, requestContext.actorId, requestContext.apiKey]);
 
   useEffect(() => {
+    const needsToolReadiness = (view === "admin" && adminSubpage === "tooling") || (view === "settings" && settingsSubpage === "static-tools");
+    if (!needsToolReadiness) return;
+    api("/static-tools", undefined, requestContext)
+      .then((payload) => setStaticToolsReadiness(payload.static_tools || emptyStaticToolsReadiness))
+      .catch((loadError) => setError(formatUiError(loadError)));
+  }, [view, adminSubpage, settingsSubpage, requestContext.workspaceId, requestContext.actorId, requestContext.apiKey]);
+
+  useEffect(() => {
     if (settings.providers_json.default_provider !== "openai_codex") {
       oauthStatusRequestId.current += 1;
       clearOAuthStatusPoll();
@@ -3577,8 +4591,13 @@ function App() {
   }, [runs, selectedRunId]);
 
   useEffect(() => {
+    if (view !== "runs" && view !== "reviews") return;
     loadRunDetail(selectedRunId);
-  }, [selectedRunId, requestContext.workspaceId, requestContext.projectId, requestContext.actorId, requestContext.apiKey]);
+  }, [view, selectedRunId, requestContext.workspaceId, requestContext.projectId, requestContext.actorId, requestContext.apiKey]);
+
+  useEffect(() => {
+    setRunNotice("");
+  }, [selectedRunId]);
 
   useEffect(() => {
     loadRunComparison(selectedRunId, compareRunId);
@@ -3589,13 +4608,13 @@ function App() {
   }, [compareRunId, requestContext.workspaceId, requestContext.projectId, requestContext.actorId, requestContext.apiKey]);
 
   useEffect(() => {
-    if (!selectedRunId) return;
+    if ((view !== "runs" && view !== "reviews") || !selectedRunId || !compareRunId) return;
     api(`/runs/${encodeURIComponent(selectedRunId)}/exports${compareRunId ? `?compare_to=${encodeURIComponent(compareRunId)}` : ""}`, undefined, requestContext)
       .then((payload) => {
         setSelectedRunDetail((current) => current ? { ...current, exportsIndex: payload } : current);
       })
-      .catch((loadError) => setError(loadError.message || String(loadError)));
-  }, [selectedRunId, compareRunId, requestContext.workspaceId, requestContext.projectId, requestContext.actorId, requestContext.apiKey]);
+      .catch(() => {});
+  }, [view, selectedRunId, compareRunId, requestContext.workspaceId, requestContext.projectId, requestContext.actorId, requestContext.apiKey]);
 
   useEffect(() => {
     if (!runtimeFollowups.length) {
@@ -3692,13 +4711,25 @@ function App() {
     window.localStorage.setItem(contextStorageKey, JSON.stringify(requestContext));
   }, [requestContext]);
 
-  function act(task, message) {
+  function act(task, message, options = {}) {
     setError("");
-    setNotice("");
+    if (options.scope === "run") {
+      setRunNotice("");
+      setNotice("");
+    } else {
+      setNotice("");
+    }
     task().then(() => {
-      setNotice(message);
+      if (message) {
+        if (options.scope === "run") {
+          setRunNotice(message);
+          setNotice("");
+        } else {
+          setNotice(message);
+        }
+      }
       return load();
-    }).catch((taskError) => setError(taskError.message || String(taskError)));
+    }).catch((taskError) => setError(formatUiError(taskError)));
   }
 
   function runPreflight() {
@@ -3712,7 +4743,7 @@ function App() {
         setPreflightCheckedAt(new Date().toISOString());
         setPreflightAcceptedAt(null);
       })
-      .catch((taskError) => setError(taskError.message || String(taskError)))
+      .catch((taskError) => setError(formatUiError(taskError)))
       .finally(() => setPreflightLoading(false));
   }
 
@@ -3825,15 +4856,68 @@ function App() {
     );
   }
 
+  function toggleValidationScenario(scenarioId, checked) {
+    setValidationScenarioIds((current) => {
+      const next = checked
+        ? [...new Set([...current, scenarioId])]
+        : current.filter((item) => item !== scenarioId);
+      return next.length ? next : current;
+    });
+  }
+
+  function launchValidationScenarios(scenarios) {
+    if (validationLaunching) return;
+    const selectedScenarios = scenarios.filter((scenario) => validationScenarioIds.includes(scenario.id));
+    if (!selectedScenarios.length) {
+      setError("Select at least one validation scenario.");
+      return;
+    }
+    const activeMatches = selectedScenarios
+      .map((scenario) => ({
+        scenario,
+        job: jobs.find((job) => isActiveAsyncJob(job) && getAsyncJobType(job) === (scenario.id === "system_check" ? "system_check" : scenario.id === "static_smoke" ? "static_smoke" : "benchmark") && getAsyncJobDiagnosticTarget(job) === scenario.target)
+      }))
+      .filter((item) => item.job);
+    if (activeMatches.length) {
+      setError(`${activeMatches.map((item) => item.scenario.title).join(", ")} already has an active validation job. Open Jobs to monitor it.`);
+      return;
+    }
+    const providerRequired = selectedScenarios.some((scenario) => scenario.kind !== "plumbing");
+    if (providerRequired && !diagnosticDefaultProvider) {
+      setError("Configure a real LLM provider in Settings before launching static audit smoke or benchmark validations.");
+      return;
+    }
+    setValidationLaunching(true);
+    act(
+      () => Promise.all(selectedScenarios.map((scenario) => api("/runs/async", {
+        method: "POST",
+        body: JSON.stringify({
+          request: buildDiagnosticsRunRequest({
+            kind: scenario.kind,
+            target: scenario.target,
+            effectiveSettings,
+            auditPackages
+          }),
+          start_immediately: true
+        })
+      }, requestContext))).then((payloads) => {
+        const queuedRunIds = payloads.map((payload) => payload?.job?.current_run_id).filter(Boolean);
+        const lastRunId = queuedRunIds[queuedRunIds.length - 1];
+        if (lastRunId) setSelectedRunId(lastRunId);
+        setView("jobs");
+        return payloads;
+      }).finally(() => setValidationLaunching(false)),
+      `${selectedScenarios.length} validation job${selectedScenarios.length === 1 ? "" : "s"} queued.`
+    );
+  }
+
   function openAsyncJobRun(job) {
     if (!job?.current_run_id) return;
-    act(
-      () => load().then(() => {
-        setSelectedRunId(job.current_run_id);
-        setView("runs");
-      }),
-      "Run opened."
-    );
+    setError("");
+    setNotice("");
+    setRunNotice("");
+    setSelectedRunId(job.current_run_id);
+    setView("runs");
   }
 
   function refreshDiagnosticTools() {
@@ -3875,7 +4959,10 @@ function App() {
       ...current,
       [findingId]: {
         ...(current[findingId] || {}),
-        [field]: value
+        [field]: value,
+        ...(field === "triage_decision" && (value === "accepted_risk" || value === "out_of_scope" || value === "false_positive")
+          ? { exception_scope: value === "out_of_scope" ? "this_run" : "future_repo" }
+          : {})
       }
     }));
   }
@@ -3890,10 +4977,12 @@ function App() {
         disposition_owner_id: disposition.metadata_json?.owner_id || requestContext.actorId || "",
         disposition_reviewed_at: disposition.metadata_json?.reviewed_at || new Date().toISOString(),
         disposition_review_due_by: disposition.metadata_json?.review_due_by || "",
+        exception_scope: disposition.scope_level === "project" ? "future_repo" : "this_run",
         editing_disposition_id: disposition.id
       }
     }));
-    setNotice(`Loaded ${disposition.disposition_type} for editing.`);
+    setRunNotice("Loaded exception for editing.");
+    setNotice("");
     setError("");
   }
 
@@ -3904,7 +4993,8 @@ function App() {
         method: "POST",
         body: JSON.stringify(payload)
       }, requestContext).then(() => loadRunDetail(selectedRunId)),
-      successMessage
+      successMessage,
+      { scope: "run" }
     );
   }
 
@@ -3924,37 +5014,62 @@ function App() {
 
   function findingReviewAction(finding, actionType) {
     const state = findingReviewState[finding.id] || {};
-    const evaluation = (findingEvaluations?.evaluations || []).find((item) => item.finding_id === finding.id) || null;
+    const evaluationRecords = selectedRunDetail?.findingEvaluations?.finding_evaluations?.evaluations || [];
+    const evaluation = evaluationRecords.find((item) => item.finding_id === finding.id) || null;
+    const triageDecision = state.triage_decision || (actionType === "request_validation" ? "needs_validation" : actionType === "suppress_finding" ? "false_positive" : actionType === "confirm_finding" ? "confirmed" : null);
     submitReviewAction({
       action_type: actionType,
       finding_id: finding.id,
-      updated_severity: actionType === "downgrade_severity" ? (state.updated_severity || null) : null,
-      visibility_override: state.visibility_override || null,
+      updated_severity: state.updated_severity || null,
+      visibility_override: publisherModeEnabled ? state.visibility_override || null : null,
+      triage_decision: triageDecision,
+      review_priority: state.review_priority || null,
+      validation_intent: state.validation_intent || null,
       notes: state.notes || `submitted from web ui by ${requestContext.actorId || "anonymous"}`,
-      metadata: actionType === "adopt_rerun_outcome"
-        ? {
-            adopted_outcome: evaluation?.runtime_followup_outcome || "none",
-            linked_run_id: evaluation?.runtime_followup_linked_run_id || null
-          }
-        : null
-    }, `Finding action recorded: ${actionType}.`);
+      metadata: {
+        triage_decision: triageDecision,
+        review_priority: state.review_priority || null,
+        validation_intent: state.validation_intent || null,
+        adopted_outcome: actionType === "adopt_rerun_outcome" ? evaluation?.runtime_followup_outcome || "none" : null,
+        linked_run_id: actionType === "adopt_rerun_outcome" ? evaluation?.runtime_followup_linked_run_id || null : null
+      }
+    }, triageDecision === "needs_validation"
+      ? "Finding marked for validation."
+      : triageDecision === "false_positive"
+        ? "False positive decision saved."
+        : "Finding decision saved.");
   }
 
   function findingDispositionAction(finding, dispositionType, scopeLevel) {
     if (!selectedRunId) return;
     const state = findingReviewState[finding.id] || {};
     const reviewCadence = getReviewCadenceDefaults(effectiveSettings);
+    const expiry = validateFutureDateInput(state.disposition_expires_at, "expiration time");
+    const reviewedAt = validateDateInput(state.disposition_reviewed_at, "review timestamp");
+    const reviewDueBy = validateFutureDateInput(state.disposition_review_due_by, "review due time");
     if (!(state.disposition_reason || "").trim()) {
-      setError("A suppression or waiver reason is required.");
+      setError("A reason is required.");
       return;
     }
-    if (dispositionType === "waiver" && scopeLevel === "project") {
+    if (expiry.error) {
+      setError(expiry.error);
+      return;
+    }
+    if (reviewedAt.error) {
+      setError(reviewedAt.error);
+      return;
+    }
+    if (reviewDueBy.error) {
+      setError(reviewDueBy.error);
+      return;
+    }
+    if (dispositionType === "waiver") {
       if (!(state.disposition_owner_id || "").trim()) {
-        setError("A project waiver owner is required.");
+        setError("A risk owner is required.");
         return;
       }
-      if (!(state.disposition_reviewed_at || "").trim()) {
-        setError("A project waiver review timestamp is required.");
+      if (!reviewedAt.value) {
+        setError("A review timestamp is required.");
         return;
       }
     }
@@ -3967,15 +5082,19 @@ function App() {
           scope_level: scopeLevel,
           reason: state.disposition_reason,
           notes: state.notes || null,
-          expires_at: state.disposition_expires_at || null,
-          owner_id: dispositionType === "waiver" && scopeLevel === "project" ? state.disposition_owner_id || null : null,
-          reviewed_at: dispositionType === "waiver" && scopeLevel === "project" ? state.disposition_reviewed_at || null : null,
-          review_due_by: dispositionType === "waiver" && scopeLevel === "project"
-            ? (state.disposition_review_due_by || addDaysIso(state.disposition_reviewed_at || new Date().toISOString(), reviewCadence.reviewWindowDays))
-            : null
+          expires_at: expiry.value,
+          owner_id: dispositionType === "waiver" ? state.disposition_owner_id || null : null,
+          reviewed_at: dispositionType === "waiver" ? reviewedAt.value : null,
+          review_due_by: dispositionType === "waiver"
+            ? (reviewDueBy.value || addDaysIso(reviewedAt.value || new Date().toISOString(), reviewCadence.reviewWindowDays))
+            : null,
+          triage_decision: state.triage_decision || (dispositionType === "waiver" ? "accepted_risk" : "out_of_scope"),
+          review_priority: state.review_priority || null,
+          validation_intent: state.validation_intent || null
         })
       }, requestContext).then(() => loadRunDetail(selectedRunId)),
-      `${dispositionType} recorded for ${finding.title}.`
+      `${dispositionType === "waiver" ? "Risk acceptance" : state.triage_decision === "false_positive" ? "False positive exception" : "Exception"} recorded for ${finding.title}.`,
+      { scope: "run" }
     );
   }
 
@@ -3983,23 +5102,38 @@ function App() {
     if (!selectedRunId) return;
     const state = findingReviewState[finding.id] || {};
     const reviewCadence = getReviewCadenceDefaults(effectiveSettings);
+    const expiry = validateFutureDateInput(state.disposition_expires_at, "expiration time");
+    const reviewedAt = validateDateInput(state.disposition_reviewed_at, "review timestamp");
+    const reviewDueBy = validateFutureDateInput(state.disposition_review_due_by, "review due time");
     if (!(state.editing_disposition_id || "").trim()) {
-      setError("Choose an active suppression or waiver to edit first.");
+      setError("Choose an active exception to edit first.");
       return;
     }
     if (!(state.disposition_reason || "").trim()) {
-      setError("A suppression or waiver reason is required.");
+      setError("A reason is required.");
+      return;
+    }
+    if (expiry.error) {
+      setError(expiry.error);
+      return;
+    }
+    if (reviewedAt.error) {
+      setError(reviewedAt.error);
+      return;
+    }
+    if (reviewDueBy.error) {
+      setError(reviewDueBy.error);
       return;
     }
     const selectedFindingDisposition = selectedRunDetail?.findingDispositions?.resolved_finding_dispositions?.find((item) => item.finding_id === finding.id) || null;
     const existing = (selectedFindingDisposition?.active_dispositions || []).find((item) => item.id === state.editing_disposition_id) || null;
-    if (existing?.disposition_type === "waiver" && existing.scope_level === "project") {
+    if (existing?.disposition_type === "waiver") {
       if (!(state.disposition_owner_id || "").trim()) {
-        setError("A project waiver owner is required.");
+        setError("A risk owner is required.");
         return;
       }
-      if (!(state.disposition_reviewed_at || "").trim()) {
-        setError("A project waiver review timestamp is required.");
+      if (!reviewedAt.value) {
+        setError("A review timestamp is required.");
         return;
       }
     }
@@ -4009,15 +5143,19 @@ function App() {
         body: JSON.stringify({
           reason: state.disposition_reason,
           notes: state.notes || null,
-          expires_at: state.disposition_expires_at || null,
-          owner_id: existing?.disposition_type === "waiver" && existing.scope_level === "project" ? state.disposition_owner_id || null : null,
-          reviewed_at: existing?.disposition_type === "waiver" && existing.scope_level === "project" ? state.disposition_reviewed_at || null : null,
-          review_due_by: existing?.disposition_type === "waiver" && existing.scope_level === "project"
-            ? (state.disposition_review_due_by || addDaysIso(state.disposition_reviewed_at || new Date().toISOString(), reviewCadence.reviewWindowDays))
-            : null
+          expires_at: expiry.value,
+          owner_id: existing?.disposition_type === "waiver" ? state.disposition_owner_id || null : null,
+          reviewed_at: existing?.disposition_type === "waiver" ? reviewedAt.value : null,
+          review_due_by: existing?.disposition_type === "waiver"
+            ? (reviewDueBy.value || addDaysIso(reviewedAt.value || new Date().toISOString(), reviewCadence.reviewWindowDays))
+            : null,
+          triage_decision: state.triage_decision || (existing?.disposition_type === "waiver" ? "accepted_risk" : "out_of_scope"),
+          review_priority: state.review_priority || null,
+          validation_intent: state.validation_intent || null
         })
       }, requestContext).then(() => loadRunDetail(selectedRunId)),
-      "Disposition updated."
+      "Exception updated.",
+      { scope: "run" }
     );
   }
 
@@ -4030,7 +5168,29 @@ function App() {
           notes: `revoked from web ui by ${requestContext.actorId || "anonymous"}`
         })
       }, requestContext).then(() => loadRunDetail(selectedRunId)),
-      `${disposition.disposition_type} revoked.`
+      "Exception revoked.",
+      { scope: "run" }
+    );
+  }
+
+  function saveRemediationItem(finding, payload = {}) {
+    if (!selectedRunId || !finding?.id) return;
+    const existing = selectedRunDetail?.remediationItems?.remediation_items?.find((item) => item.finding_id === finding.id) || null;
+    const method = existing ? "PATCH" : "POST";
+    const path = existing
+      ? "/runs/" + encodeURIComponent(selectedRunId) + "/remediation-items/" + encodeURIComponent(existing.id)
+      : "/runs/" + encodeURIComponent(selectedRunId) + "/remediation-items";
+    const body = {
+      ...payload,
+      finding_id: finding.id
+    };
+    act(
+      () => api(path, {
+        method,
+        body: JSON.stringify(body)
+      }, requestContext).then(() => loadRunDetail(selectedRunId)),
+      existing ? "Remediation item updated." : "Remediation item opened.",
+      { scope: "run" }
     );
   }
 
@@ -4068,7 +5228,7 @@ function App() {
           })
         }, requestContext);
       })).then(() => loadRunDetail(selectedRunId)),
-      action === "renew" ? "Due-soon dispositions renewed." : "Due-soon dispositions revoked."
+      action === "renew" ? "Due-soon exceptions renewed." : "Due-soon exceptions revoked."
     );
   }
 
@@ -4101,7 +5261,7 @@ function App() {
         window.URL.revokeObjectURL(url);
         setNotice("Review audit exported.");
       })
-      .catch((taskError) => setError(taskError.message || String(taskError)));
+      .catch((taskError) => setError(formatUiError(taskError)));
   }
 
   function exportExecutiveReport(format) {
@@ -4123,7 +5283,7 @@ function App() {
         window.URL.revokeObjectURL(url);
         setNotice(`Executive summary exported as ${isMarkdown ? "Markdown" : "JSON"}.`);
       })
-      .catch((taskError) => setError(taskError.message || String(taskError)));
+      .catch((taskError) => setError(formatUiError(taskError)));
   }
 
   function exportMarkdownReport() {
@@ -4141,7 +5301,7 @@ function App() {
         window.URL.revokeObjectURL(url);
         setNotice("Markdown report exported.");
       })
-      .catch((taskError) => setError(taskError.message || String(taskError)));
+      .catch((taskError) => setError(formatUiError(taskError)));
   }
 
   function exportSarifReport() {
@@ -4159,7 +5319,7 @@ function App() {
         window.URL.revokeObjectURL(url);
         setNotice("SARIF report exported.");
       })
-      .catch((taskError) => setError(taskError.message || String(taskError)));
+      .catch((taskError) => setError(formatUiError(taskError)));
   }
 
   function exportComparisonReport(format) {
@@ -4181,7 +5341,7 @@ function App() {
         window.URL.revokeObjectURL(url);
         setNotice(`Run comparison exported as ${isMarkdown ? "Markdown" : "JSON"}.`);
       })
-      .catch((taskError) => setError(taskError.message || String(taskError)));
+      .catch((taskError) => setError(formatUiError(taskError)));
   }
 
   function downloadIndexedRunExport(exportItem) {
@@ -4210,7 +5370,7 @@ function App() {
         window.URL.revokeObjectURL(url);
         setNotice(`${exportItem.export_type.replace(/_/g, " ")} exported as ${exportItem.format.toUpperCase()}.`);
       })
-      .catch((taskError) => setError(taskError.message || String(taskError)));
+      .catch((taskError) => setError(formatUiError(taskError)));
   }
 
   function exportRuntimeFollowupQueue(format) {
@@ -4234,7 +5394,7 @@ function App() {
         window.URL.revokeObjectURL(url);
         setNotice(`Runtime follow-up queue exported as ${isCsv ? "CSV" : "JSON"}.`);
       })
-      .catch((taskError) => setError(taskError.message || String(taskError)));
+      .catch((taskError) => setError(formatUiError(taskError)));
   }
 
   function exportRuntimeFollowupBundle(followupId) {
@@ -4252,7 +5412,7 @@ function App() {
         window.URL.revokeObjectURL(url);
         setNotice("Runtime follow-up bundle exported.");
       })
-      .catch((taskError) => setError(taskError.message || String(taskError)));
+      .catch((taskError) => setError(formatUiError(taskError)));
   }
 
   function approveOutboundSharing() {
@@ -4286,7 +5446,7 @@ function App() {
         method: "POST",
         body: "{}"
       }, requestContext).then(() => loadRunDetail(selectedRunId)),
-      "GitHub repository access verified."
+      "GitHub verification is hosted-only."
     );
   }
 
@@ -4300,7 +5460,7 @@ function App() {
           target_number: outboundTargetNumber ? Number(outboundTargetNumber) : null
         })
       }, requestContext).then(() => loadRunDetail(selectedRunId)),
-      "Outbound delivery sent to GitHub."
+      "GitHub delivery is hosted-only."
     );
   }
 
@@ -4450,12 +5610,14 @@ function App() {
             h("option", { key: "medium", value: "medium" }, "medium"),
             h("option", { key: "low", value: "low" }, "low")
           ])),
-          h(Field, { key: "review-visibility", label: "Default Visibility" }, Select({ value: runForm.review_visibility, onChange: (event) => updateRunForm("review_visibility", event.target.value) }, [
-            h("option", { key: "public", value: "public" }, "public"),
-            h("option", { key: "internal", value: "internal" }, "internal"),
-            h("option", { key: "internal-only", value: "internal-only" }, "internal-only")
-          ]))
-        ]),
+          publisherModeEnabled
+            ? h(Field, { key: "review-visibility", label: "Publication Safety Default" }, Select({ value: runForm.review_visibility, onChange: (event) => updateRunForm("review_visibility", event.target.value) }, [
+                h("option", { key: "public", value: "public" }, "public"),
+                h("option", { key: "internal", value: "internal" }, "internal"),
+                h("option", { key: "internal-only", value: "internal-only" }, "internal-only")
+              ]))
+            : null
+        ].filter(Boolean)),
         h("div", { key: "provider-presets", className: "mt-4 flex flex-wrap gap-3" }, (llmRegistry.presets || []).map((preset) => h(Button, {
           key: preset.id,
           variant: preset.provider_id === runForm.llm_provider && (preset.model || "") === (runForm.llm_model || "") ? "secondary" : "outline",
@@ -4485,7 +5647,7 @@ function App() {
             h("div", { key: "policy" }, "policy pack: " + (runForm.audit_policy_pack || "default")),
             h("div", { key: "provider" }, "provider/model: " + runForm.llm_provider + (runForm.llm_model ? "/" + runForm.llm_model : "") + (selectedProvider ? ` (${selectedProvider.mode === "local_mock" ? "local mock" : "live api"})` : "")),
             h("div", { key: "preflight" }, "preflight: " + runForm.preflight_strictness + ", runtime " + runForm.runtime_allowed),
-            h("div", { key: "review" }, "review: " + runForm.review_severity + " and above, " + runForm.review_visibility),
+            h("div", { key: "review" }, "review: " + runForm.review_severity + " and above" + (publisherModeEnabled ? ", publication " + runForm.review_visibility : "")),
             h("div", { key: "cred" }, "provider credentials: " + (launchReadiness.providerCredential.configured ? "configured" : "not in persisted settings"))
           ])
         ]),
@@ -4847,118 +6009,676 @@ function App() {
   const diagnosticTools = staticToolsReadiness.tools || [];
   const diagnosticMandatoryTools = diagnosticTools.filter((tool) => tool.mandatory);
   const diagnosticDefaultTools = diagnosticTools.filter((tool) => tool.default_enabled);
+  const diagnosticStaticTools = diagnosticDefaultTools.filter((tool) => (tool.run_modes || []).includes("static"));
+  const diagnosticRuntimeTools = diagnosticDefaultTools.filter((tool) => (tool.run_modes || []).includes("runtime") && !(tool.run_modes || []).includes("static"));
+  const diagnosticStaticMissing = diagnosticStaticTools.filter((tool) => !tool.installed);
+  const diagnosticRuntimeMissing = diagnosticRuntimeTools.filter((tool) => !tool.installed);
+  const diagnosticStaticStatus = diagnosticStaticTools.length
+    ? diagnosticStaticMissing.some((tool) => tool.mandatory)
+      ? "blocked"
+      : diagnosticStaticMissing.length
+        ? "ready_with_warnings"
+        : "ready"
+    : "unknown";
+  const diagnosticRuntimeStatus = diagnosticRuntimeTools.length
+    ? diagnosticRuntimeMissing.length
+      ? "deferred"
+      : "ready"
+    : "unknown";
+  function renderToolCards(tools, emptyText) {
+    return tools.length
+      ? h("div", { className: "grid gap-3 md:grid-cols-3" }, tools.map((tool) => h("div", { key: tool.id, className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+        h("div", { key: "head", className: "flex items-start justify-between gap-3" }, [
+          h("div", { key: "copy" }, [
+            h("div", { key: "label", className: "font-medium text-slate-900" }, tool.label),
+            h("div", { key: "cmd", className: "mt-1 text-xs text-slate-500" }, tool.command || "internal")
+          ]),
+          h(Badge, { key: "status" }, tool.status)
+        ]),
+        h("div", { key: "summary", className: "mt-2 text-sm text-slate-500" }, tool.summary),
+        h("div", { key: "modes", className: "mt-2 text-xs text-slate-500" }, `modes: ${(tool.run_modes || []).join(", ") || "n/a"}`),
+        tool.version ? h("div", { key: "version", className: "mt-2 text-xs text-slate-500" }, tool.version) : null
+      ])))
+      : h("div", { className: "rounded-2xl border border-dashed border-slate-200 px-4 py-6 text-sm text-slate-500" }, emptyText);
+  }
+  const observabilityTotals = observabilityHistory?.totals || {};
+  const rawObservabilityLearning = observabilityHistory?.learning || {};
+  const latestUiLearningJob = learningJobs[0] || null;
+  const observabilityLearning = {
+    ...rawObservabilityLearning,
+    event_count: Math.max(Number(rawObservabilityLearning.event_count || 0), learningEvents.length),
+    candidate_count: Math.max(Number(rawObservabilityLearning.candidate_count || 0), learningCandidates.length),
+    open_candidate_count: Math.max(Number(rawObservabilityLearning.open_candidate_count || 0), learningCandidates.filter((item) => ["proposed", "experimented"].includes(item.status)).length),
+    promotion_count: Math.max(Number(rawObservabilityLearning.promotion_count || 0), learningPromotions.length),
+    rollback_count: Math.max(Number(rawObservabilityLearning.rollback_count || 0), learningPromotions.filter((item) => item.status === "rolled_back").length),
+    job_count: Math.max(Number(rawObservabilityLearning.job_count || 0), learningJobs.length),
+    synthesized_candidate_count: Math.max(Number(rawObservabilityLearning.synthesized_candidate_count || 0), learningCandidates.filter((item) => item.metadata_json?.llm_synthesis?.status === "completed").length),
+    latest_job: rawObservabilityLearning.latest_job || (latestUiLearningJob ? {
+      id: latestUiLearningJob.id,
+      trigger: latestUiLearningJob.trigger,
+      status: latestUiLearningJob.status,
+      candidates_generated: latestUiLearningJob.candidates_generated,
+      candidates_synthesized: latestUiLearningJob.candidates_synthesized,
+      synthesis_skipped: latestUiLearningJob.synthesis_skipped,
+      completed_at: latestUiLearningJob.completed_at
+    } : null)
+  };
+  const observabilityRetention = observabilityHistory?.retention_policy || {};
+  const observabilityRuns = observabilityHistory?.runs || [];
+  const formatCount = (value) => Number(value || 0).toLocaleString();
+  const formatCost = (value) => `$${Number(value || 0).toFixed(6)}`;
+  function observabilityScopeCard(scope) {
+    return h("div", { key: scope.id, className: cn("rounded-2xl border px-4 py-4", scope.enabled ? "border-slate-200 bg-white" : "border-slate-200 bg-slate-50") }, [
+      h("div", { key: "head", className: "flex flex-wrap items-start justify-between gap-3" }, [
+        h("div", { key: "copy" }, [
+          h("h4", { key: "title", className: "text-base font-semibold text-slate-950" }, scope.title),
+          h("p", { key: "desc", className: "mt-1 text-sm leading-6 text-slate-500" }, scope.description)
+        ]),
+        h(Badge, { key: "status" }, scope.badge)
+      ]),
+      h("div", { key: "items", className: "mt-4 grid gap-2" }, scope.items.map((item) => h("div", { key: item, className: "rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700" }, item))),
+      scope.note ? h("div", { key: "note", className: "mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900" }, scope.note) : null
+    ]);
+  }
+  function traceJsonDetails(label, value, defaultOpen = false) {
+    const empty = value == null || (Array.isArray(value) && value.length === 0);
+    return h("details", { key: label, open: defaultOpen, className: "rounded-2xl border border-slate-200 bg-white px-4 py-3" }, [
+      h("summary", { key: "summary", className: "cursor-pointer text-sm font-semibold text-slate-900" }, `${label}${empty ? " (empty)" : ""}`),
+      h("pre", { key: "json", className: "mt-3 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-slate-950 p-3 text-xs leading-5 text-slate-100" }, JSON.stringify(value ?? null, null, 2))
+    ]);
+  }
+  function renderTracePanel() {
+    if (!observabilityTraceRunId) {
+      return h("div", { className: "rounded-2xl border border-dashed border-slate-200 px-4 py-6 text-sm text-slate-500" }, "Select Trace on a recent run to inspect agent handoffs, structured outputs, QA decisions, and persisted troubleshooting artifacts.");
+    }
+    if (observabilityTraceLoading) {
+      return h("div", { className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-500" }, `Loading trace for ${observabilityTraceRunId}...`);
+    }
+    if (observabilityTraceError) {
+      return h("div", { className: "rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700" }, observabilityTraceError);
+    }
+    if (!observabilityTrace) {
+      return h("div", { className: "rounded-2xl border border-dashed border-slate-200 px-4 py-6 text-sm text-slate-500" }, "Trace data is not loaded.");
+    }
+    const traceSummary = observabilityTrace.summary || {};
+    const timeline = observabilityTrace.timeline || [];
+    const qaBlockers = observabilityTrace.finding_quality?.findings?.filter((item) => item.qa_blocking) || [];
+    return h("div", { className: "space-y-4" }, [
+      h("div", { key: "policy", className: "rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900" }, observabilityTrace.trace_policy?.note || "Structured trace only. Hidden model chain-of-thought is not stored."),
+      h("div", { key: "summary", className: "grid gap-3 md:grid-cols-5" }, [
+        { label: "Stages", value: traceSummary.stage_execution_count },
+        { label: "Agents", value: traceSummary.agent_invocation_count },
+        { label: "Handoffs", value: traceSummary.handoff_count },
+        { label: "QA Verdict", value: traceSummary.finding_quality_verdict || "n/a" },
+        { label: "QA Blockers", value: traceSummary.finding_quality_blocking_count }
+      ].map((item) => h("div", { key: item.label, className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+        h("div", { key: "label", className: "text-xs font-mono uppercase tracking-[0.18em] text-slate-500" }, item.label),
+        h("div", { key: "value", className: "mt-2 text-lg font-semibold text-slate-950" }, String(item.value ?? "n/a"))
+      ]))),
+      qaBlockers.length
+        ? h("div", { key: "qa-blockers", className: "rounded-2xl border border-red-200 bg-red-50 px-4 py-3" }, [
+          h("div", { key: "title", className: "text-sm font-semibold text-red-950" }, "Finding QA Blockers"),
+          h("ul", { key: "list", className: "mt-2 space-y-1 text-sm text-red-900" }, qaBlockers.map((item) => h("li", { key: item.finding_id }, `${item.finding_id}: evidence ${item.evidence_support_verdict}, controls ${item.control_mapping_verdict}`)))
+        ])
+        : null,
+      h("div", { key: "timeline", className: "rounded-2xl border border-slate-200 bg-white" }, [
+        h("div", { key: "header", className: "border-b border-slate-200 px-4 py-3" }, [
+          h("div", { key: "title", className: "font-semibold text-slate-950" }, "Agent And Stage Timeline"),
+          h("div", { key: "desc", className: "mt-1 text-sm text-slate-500" }, "Ordered persisted stages, agent invocations, and handoff records.")
+        ]),
+        timeline.length
+          ? h("div", { key: "list", className: "max-h-96 overflow-y-auto" }, timeline.map((item, index) => h("details", { key: `${item.kind}:${item.id}:${index}`, className: "border-b border-slate-100 px-4 py-3 last:border-b-0" }, [
+            h("summary", { key: "summary", className: "cursor-pointer text-sm" }, [
+              h("span", { key: "kind", className: "mr-2 rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500" }, item.kind),
+              h("span", { key: "text", className: "font-medium text-slate-900" }, item.summary || item.stage_name || item.id),
+              h("span", { key: "time", className: "ml-3 text-xs text-slate-500" }, formatDate(item.at))
+            ]),
+            h("pre", { key: "details", className: "mt-3 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-slate-950 p-3 text-xs leading-5 text-slate-100" }, JSON.stringify(item.details ?? item, null, 2))
+          ])))
+          : h("div", { key: "empty", className: "px-4 py-6 text-sm text-slate-500" }, "No timeline records are available.")
+      ]),
+      h("div", { key: "details", className: "grid gap-3 xl:grid-cols-2" }, [
+        traceJsonDetails("Supervisor Review", observabilityTrace.supervisor_review),
+        traceJsonDetails("Correction Plan", observabilityTrace.correction_plan),
+        traceJsonDetails("Correction Result", observabilityTrace.correction_result),
+        traceJsonDetails("Finding Quality", observabilityTrace.finding_quality),
+        traceJsonDetails("Agent Invocations", observabilityTrace.agent_invocations),
+        traceJsonDetails("Handoffs", observabilityTrace.handoffs),
+        traceJsonDetails("Intermediate Outputs", observabilityTrace.intermediate_outputs),
+        traceJsonDetails("Tool Executions", observabilityTrace.tool_executions)
+      ])
+    ]);
+  }
   const adminNavItems = [
     { id: "system", label: "System" },
-    { id: "smoke", label: "Smoke Tests" },
-    { id: "benchmarks", label: "Benchmarks" },
+    { id: "methodology", label: "Methodology" },
+    { id: "validation", label: "Validation" },
     { id: "tooling", label: "Tooling" },
     { id: "observability", label: "Observability" }
   ];
+  const apiHealthLabel = authInfo.trusted_mode ? "API reachable" : authInfo.auth_mode === "none" ? "Local API reachable" : "Authenticated API reachable";
+  const apiHealthNote = authInfo.trusted_mode
+    ? "The local API is responding in trusted local mode. If page data looks stale, sync all app data."
+    : authInfo.auth_mode === "none"
+      ? "The API is responding without authentication. Use only in trusted local environments."
+      : "The API is responding with authentication enabled.";
   const adminSystemPanel = h("div", { className: "space-y-6" }, [
-    h(Card, { key: "app-state", title: "App State", description: "Admin sync and local API context for development or stale UI recovery.", className: "border-slate-200 bg-white shadow-sm" }, [
-      h("div", { key: "top", className: "flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between" }, [
-        h(DetailList, { key: "details", items: [
-          { label: "API Health", value: authInfo.trusted_mode ? "trusted_local" : authInfo.auth_mode || "authenticated" },
-          { label: "Workspace", value: requestContext.workspaceId || "default" },
-          { label: "Project", value: requestContext.projectId || "default" },
-          { label: "Last Global Sync", value: lastGlobalSyncAt ? formatDate(lastGlobalSyncAt) : "not synced" }
-        ] }),
-        h("div", { key: "actions", className: "flex flex-wrap gap-3 lg:justify-end" }, [
-          h(Button, { key: "sync", onClick: syncAllAppData }, "Sync All App Data")
-        ])
+    h(Card, { key: "app-state", title: "System Sync", description: "Manual recovery control for local UI state after external changes.", className: "border-slate-200 bg-white shadow-sm" }, [
+      h("div", { key: "top", className: "space-y-3" }, [
+          h("div", { key: "status", className: "flex flex-wrap gap-2" }, [
+            h(Badge, { key: "api" }, apiHealthLabel),
+            h(Badge, { key: "sync" }, globalSyncLoading ? "syncing" : `last sync: ${lastGlobalSyncAt ? formatDate(lastGlobalSyncAt) : "not synced"}`)
+          ]),
+          h("div", { key: "api-note", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600" }, apiHealthNote),
+          h("div", { key: "sync-note", className: "rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600" }, "Use Sync All App Data after another tab, CLI command, server restart, or environment change may have made the local UI stale. Normal pages use scoped refreshes where possible.")
       ]),
-      h("div", { key: "note", className: "mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600" }, "Use this when another tab, CLI command, server restart, or environment change may have made the local UI stale. Normal pages use scoped refreshes where possible.")
+      h("div", { key: "actions", className: "mt-5 flex flex-wrap justify-end gap-3 border-t border-slate-200 pt-4" }, [
+        h(Button, { key: "sync", onClick: syncAllAppData, disabled: globalSyncLoading, "aria-busy": globalSyncLoading ? "true" : "false" }, globalSyncLoading ? "Syncing..." : "Sync All App Data")
+      ])
     ])
   ]);
-  const adminSmokePanel = h("div", { className: "grid gap-4 xl:grid-cols-2" }, [
-      h(Card, { key: "system", title: "System Check", description: "Mock-provider plumbing check for installation and artifact flow. This is not an audit-quality result.", className: "border-slate-200 bg-white shadow-sm" }, [
-        h(DetailList, { key: "details", items: [
-          { label: "Provider", value: "mock" },
-          { label: "Target", value: "Pi public repo" },
-          { label: "Validates", value: "clone, tools, persistence, reports, UI" },
-          { label: "Audit Quality", value: "none" }
-        ] }),
-        h("div", { key: "actions", className: "mt-4 flex flex-wrap gap-3" }, [
-          h(Button, { key: "launch", onClick: () => launchDiagnosticRun("plumbing", "pi") }, "Run System Check")
+  const methodology = methodologyCatalog.methodology || {};
+  const staticBaseline = methodologyCatalog.static_baseline || {};
+  const methodologyControls = methodologyCatalog.control_catalog || [];
+  const methodologyPackages = methodologyCatalog.audit_packages?.length ? methodologyCatalog.audit_packages : auditPackages;
+  const methodologyFrameworkGroups = Object.entries(methodologyControls.reduce((groups, control) => {
+    const key = control.framework || "Unmapped";
+    groups[key] = groups[key] || [];
+    groups[key].push(control);
+    return groups;
+  }, {})).sort(([left], [right]) => left.localeCompare(right));
+  const methodologyProviderGroups = Object.entries(methodologyControls.reduce((groups, control) => {
+    const providers = control.crosswalk?.evidence_providers?.length ? control.crosswalk.evidence_providers : ["repo_analysis"];
+    for (const provider of providers) {
+      groups[provider] = groups[provider] || [];
+      groups[provider].push(control);
+    }
+    return groups;
+  }, {})).sort(([left], [right]) => left.localeCompare(right));
+  const methodologyBasisCounts = methodologyControls.reduce((counts, control) => {
+    const basis = control.crosswalk?.mapping_basis || "unknown";
+    counts[basis] = Number(counts[basis] || 0) + 1;
+    return counts;
+  }, {});
+  const methodologyBasisLabel = (basis) => String(basis || "unknown").replace(/_/g, " ");
+  const methodologyAdminPanel = h("div", { className: "space-y-6" }, [
+    h(Card, { key: "overview", title: "Audit Methodology", description: "Built-in standards crosswalk and evidence mapping used by audit planning and control assessment.", className: "border-slate-200 bg-white shadow-sm" }, [
+      h("div", { key: "summary", className: "grid gap-3 md:grid-cols-4" }, [
+        h("div", { key: "version", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-slate-500" }, "Methodology"),
+          h("div", { key: "value", className: "mt-1 font-semibold text-slate-950" }, methodology.version || "not loaded")
+        ]),
+        h("div", { key: "controls", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-slate-500" }, "Controls"),
+          h("div", { key: "value", className: "mt-1 text-2xl font-semibold text-slate-950" }, String(methodologyControls.length))
+        ]),
+        h("div", { key: "frameworks", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-slate-500" }, "Frameworks"),
+          h("div", { key: "value", className: "mt-1 text-2xl font-semibold text-slate-950" }, String(methodologyFrameworkGroups.length))
+        ]),
+        h("div", { key: "packages", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-slate-500" }, "Audit Types"),
+          h("div", { key: "value", className: "mt-1 text-2xl font-semibold text-slate-950" }, String(methodologyPackages.length))
         ])
       ]),
-      h(Card, { key: "static-audit", title: "Static Audit Smoke", description: "Real-provider static audit check for agent, lane, token, and model orchestration.", className: "border-slate-200 bg-white shadow-sm" }, [
-        h(DetailList, { key: "details", items: [
-          { label: "Provider", value: diagnosticDefaultProvider || "not configured" },
-          { label: "Model", value: diagnosticDefaultModel || "provider default" },
-          { label: "Target", value: "Pi public repo" },
-          { label: "Validates", value: "real LLM agents and static lanes" }
-        ] }),
-        h("div", { key: "actions", className: "mt-4 flex flex-wrap gap-3" }, [
-          h(Button, { key: "launch", onClick: () => launchDiagnosticRun("static_audit", "pi"), disabled: !diagnosticDefaultProvider }, "Run Static Audit Smoke"),
-          !diagnosticDefaultProvider ? h(Button, { key: "settings", variant: "outline", onClick: () => { setView("settings"); setSettingsSubpage("llm"); } }, "Configure Provider") : null
-        ].filter(Boolean))
+      h("div", { key: "copy", className: "mt-4 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm leading-6 text-slate-600" }, methodology.summary || "Methodology metadata has not loaded yet."),
+      h("div", { key: "rules", className: "mt-4 grid gap-4 lg:grid-cols-2" }, [
+        h("div", { key: "assessment", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "title", className: "font-medium text-slate-950" }, "Control Assessment Model"),
+          h("ul", { key: "list", className: "mt-2 list-disc space-y-1 pl-5 text-sm leading-6 text-slate-600" }, [
+            h("li", { key: "determination" }, "Controls are evidence determinations, separate from finding severity."),
+            h("li", { key: "scope" }, "Applicability and assessability are tracked separately from pass/fail outcomes."),
+            h("li", { key: "ui" }, "Finding-level affected controls hide not-applicable states unless there is a scope mismatch.")
+          ])
+        ]),
+        h("div", { key: "risk", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "title", className: "font-medium text-slate-950" }, "Finding Risk Model"),
+          h("ul", { key: "list", className: "mt-2 list-disc space-y-1 pl-5 text-sm leading-6 text-slate-600" }, [
+            h("li", { key: "levels" }, "Findings use normalized low, medium, high, and critical severity."),
+            h("li", { key: "exports" }, "NIST-style reporting can render medium as moderate while preserving normalized severity."),
+            h("li", { key: "tools" }, "Tool-native severities are normalized before they affect run review and reporting.")
+          ])
+        ])
       ])
+    ]),
+    h(Card, { key: "packages", title: "Audit Types And Lanes", description: "Preset run shapes that constrain planning, budget, runtime allowance, and audit area coverage.", className: "border-slate-200 bg-white shadow-sm" }, [
+      h("div", { key: "grid", className: "grid gap-3 lg:grid-cols-2" }, methodologyPackages.map((item) => h("div", {
+        key: item.id,
+        className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"
+      }, [
+        h("div", { key: "head", className: "flex flex-wrap items-center justify-between gap-2" }, [
+          h("div", { key: "title", className: "font-medium text-slate-950" }, item.title || item.id),
+          h(Badge, { key: "mode" }, item.run_mode || "unknown")
+        ]),
+        h("div", { key: "id", className: "mt-1 font-mono text-xs text-slate-500" }, item.id),
+        h("div", { key: "lanes", className: "mt-3 flex flex-wrap gap-1.5" }, (item.enabled_lanes || []).map((lane) => h(CompactTag, { key: lane }, lane))),
+        h("div", { key: "meta", className: "mt-3 text-xs text-slate-500" }, `agent calls ${item.max_agent_calls || "n/a"} / tokens ${item.max_total_tokens || "n/a"} / publishability ${item.publishability_threshold || "n/a"}`)
+      ])))
+    ]),
+    h(Card, { key: "dimensions", title: "Baseline Dimensions", description: "Posture dimensions used for the static score rollup.", className: "border-slate-200 bg-white shadow-sm" }, [
+      h("div", { key: "grid", className: "grid gap-3 lg:grid-cols-2" }, (staticBaseline.dimensions || []).map((dimension) => h("div", {
+        key: dimension.dimension,
+        className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"
+      }, [
+        h("div", { key: "head", className: "flex flex-wrap items-center justify-between gap-2" }, [
+          h("div", { key: "title", className: "font-medium text-slate-950" }, dimension.title || dimension.dimension),
+          h(Badge, { key: "weight" }, `${Math.round(Number(dimension.weight || 0) * 100)}%`)
+        ]),
+        h("div", { key: "summary", className: "mt-2 text-sm leading-6 text-slate-600" }, dimension.summary),
+        h("div", { key: "frameworks", className: "mt-3 flex flex-wrap gap-1.5" }, (dimension.frameworks || []).map((framework) => h(CompactTag, { key: framework }, framework)))
+      ])))
+    ]),
+    h(Card, { key: "crosswalk", title: "Standards Crosswalk", description: "Built-in controls grouped by source framework, including tool providers and mapping basis.", className: "border-slate-200 bg-white shadow-sm" }, [
+      h("div", { key: "counts", className: "mb-4 flex flex-wrap gap-2" }, Object.entries(methodologyBasisCounts).map(([basis, count]) => h(Badge, { key: basis }, `${methodologyBasisLabel(basis)}: ${count}`))),
+      h("div", { key: "frameworks", className: "space-y-4" }, methodologyFrameworkGroups.map(([framework, controls]) => h("details", {
+        key: framework,
+        className: "rounded-2xl border border-slate-200 bg-white"
+      }, [
+        h("summary", { key: "summary", className: "cursor-pointer px-4 py-3 font-medium text-slate-950" }, `${framework} (${controls.length})`),
+        h("div", { key: "controls", className: "border-t border-slate-200" }, controls.map((control) => h("div", {
+          key: control.control_id,
+          className: "border-b border-slate-200 px-4 py-3 last:border-b-0"
+        }, [
+          h("div", { key: "top", className: "flex flex-wrap items-start justify-between gap-3" }, [
+            h("div", { key: "copy", className: "min-w-0" }, [
+              h("div", { key: "title", className: "font-medium text-slate-950" }, control.title || control.control_id),
+              h("div", { key: "id", className: "mt-1 font-mono text-xs text-slate-500" }, `${control.control_id} / ${control.standard_ref || "no standard ref"}`)
+            ]),
+            h(Badge, { key: "basis" }, methodologyBasisLabel(control.crosswalk?.mapping_basis))
+          ]),
+          h("div", { key: "desc", className: "mt-2 text-sm leading-6 text-slate-600" }, control.description),
+          h("div", { key: "chips", className: "mt-3 flex flex-wrap gap-1.5" }, [
+            h(CompactTag, { key: "dimension" }, control.baseline_dimension || "no dimension"),
+            h(CompactTag, { key: "catalog" }, control.catalog || "catalog"),
+            h(CompactTag, { key: "weight" }, `weight ${control.weight}`),
+            h(CompactTag, { key: "assessable" }, control.static_assessable ? "static assessable" : "deferred in static")
+          ]),
+          h("div", { key: "providers", className: "mt-3 text-xs text-slate-500" }, `providers: ${(control.crosswalk?.evidence_providers || []).join(", ") || "repo_analysis"}`),
+          control.crosswalk?.mapped_frameworks?.length
+            ? h("div", { key: "mapped", className: "mt-1 text-xs text-slate-500" }, `mapped frameworks: ${control.crosswalk.mapped_frameworks.join(", ")}`)
+            : null,
+          h("div", { key: "note", className: "mt-1 text-xs text-slate-500" }, control.crosswalk?.methodology_note || "")
+        ])))
+      ])))
+    ]),
+    h(Card, { key: "providers", title: "Tool-To-Control Mapping", description: "Evidence providers are tool-native sources; Tethermark maps their output into the standards crosswalk.", className: "border-slate-200 bg-white shadow-sm" }, [
+      h("div", { key: "grid", className: "grid gap-3 lg:grid-cols-2" }, methodologyProviderGroups.map(([provider, controls]) => h("div", {
+        key: provider,
+        className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"
+      }, [
+        h("div", { key: "head", className: "flex flex-wrap items-center justify-between gap-2" }, [
+          h("div", { key: "title", className: "font-medium text-slate-950" }, provider),
+          h(Badge, { key: "count" }, `${controls.length} controls`)
+        ]),
+        h("div", { key: "list", className: "mt-3 max-h-44 overflow-y-auto text-sm leading-6 text-slate-600" }, controls.map((control) => h("div", { key: control.control_id }, `${control.control_id} - ${control.title}`)))
+      ])))
+    ]),
+    h(Card, { key: "management", title: "Methodology Management", description: "Governance controls for custom methodology overlays.", className: "border-slate-200 bg-white shadow-sm" }, [
+      h("div", { key: "state", className: "grid gap-3 md:grid-cols-3" }, [
+        h("div", { key: "builtin", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-slate-500" }, "Built-in Catalog"),
+          h("div", { key: "value", className: "mt-1 font-semibold text-slate-950" }, methodologyCatalog.management?.builtin_catalog_editable ? "editable" : "read-only")
+        ]),
+        h("div", { key: "overlays", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-slate-500" }, "Custom Overlays"),
+          h("div", { key: "value", className: "mt-1 font-semibold text-slate-950" }, methodologyCatalog.management?.custom_overlays_supported ? "enabled" : "not enabled")
+        ]),
+        h("div", { key: "scope", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-slate-500" }, "Current Scope"),
+          h("div", { key: "value", className: "mt-1 font-semibold text-slate-950" }, currentSettingsScopeLevel)
+        ])
+      ]),
+      h("div", { key: "note", className: "mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-900" }, methodologyCatalog.management?.note || "Built-in methodology is read-only. Custom overlays require validation, versioning, and audit history before edits are enabled."),
+      h("div", { key: "actions", className: "mt-4 flex flex-wrap gap-3" }, [
+        h(Button, { key: "export", variant: "outline", disabled: true }, "Export Methodology JSON"),
+        h(Button, { key: "new", variant: "outline", disabled: true }, "Create Custom Overlay"),
+        h(Button, { key: "validate", variant: "outline", disabled: true }, "Validate Overlay")
+      ])
+    ])
   ]);
-  const adminBenchmarksPanel = h("div", { className: "space-y-6" }, [
-      h(Card, { key: "benchmark", title: "Benchmark Runs", description: "Controlled public-repo benchmark jobs. Use after smoke checks pass.", className: "border-slate-200 bg-white shadow-sm" }, [
-        h(DetailList, { key: "details", items: [
-          { label: "Pi Reference", value: diagnosticsPiCommit },
-          { label: "OpenClaw", value: "heavier benchmark target" },
-          { label: "Provider", value: diagnosticDefaultProvider || "not configured" },
-          { label: "Purpose", value: "repeatable comparison inputs" }
-        ] }),
-        h("div", { key: "actions", className: "mt-4 flex flex-wrap gap-3" }, [
-          h(Button, { key: "pi", onClick: () => launchDiagnosticRun("benchmark", "pi"), disabled: !diagnosticDefaultProvider }, "Benchmark Pi"),
-          h(Button, { key: "openclaw", variant: "outline", onClick: () => launchDiagnosticRun("benchmark", "openclaw"), disabled: !diagnosticDefaultProvider }, "Benchmark OpenClaw")
+  const validationScenarios = [
+    {
+      id: "system_check",
+      title: "System Check",
+      kind: "plumbing",
+      target: "pi",
+      category: "plumbing only",
+      provider: "mock",
+      targetLabel: "Pi public repo",
+      summary: "Clone, external tools, persistence, report export, and UI handoff. This is not an audit-quality result.",
+      reference: diagnosticsPiCommit,
+      referenceLabel: "Pi pinned commit",
+      recommended: true,
+      requiresProvider: false
+    },
+    {
+      id: "static_smoke",
+      title: "Static Audit Smoke",
+      kind: "static_audit",
+      target: "pi",
+      category: "audit-quality",
+      provider: diagnosticDefaultProvider || "not configured",
+      targetLabel: "Pi public repo",
+      summary: "Real-provider static audit check for agent, lane, token, and model orchestration.",
+      reference: diagnosticsPiCommit,
+      referenceLabel: "Pi pinned commit",
+      recommended: true,
+      requiresProvider: true
+    },
+    {
+      id: "benchmark_pi",
+      title: "Benchmark Pi",
+      kind: "benchmark",
+      target: "pi",
+      category: "benchmark",
+      provider: diagnosticDefaultProvider || "not configured",
+      targetLabel: "Pi public repo",
+      summary: "Repeatable lightweight benchmark anchored to the pinned Pi commit.",
+      reference: diagnosticsPiCommit,
+      referenceLabel: "Pi pinned commit",
+      recommended: false,
+      requiresProvider: true
+    },
+    {
+      id: "benchmark_openclaw",
+      title: "Benchmark OpenClaw",
+      kind: "benchmark",
+      target: "openclaw",
+      category: "benchmark",
+      provider: diagnosticDefaultProvider || "not configured",
+      targetLabel: "OpenClaw public repo",
+      summary: "Heavier public benchmark target for broader framework and repo-shape coverage.",
+      reference: "latest remote checkout",
+      referenceLabel: "moving reference",
+      recommended: false,
+      requiresProvider: true
+    }
+  ];
+  const selectedValidationScenarios = validationScenarios.filter((scenario) => validationScenarioIds.includes(scenario.id));
+  const selectedValidationRequiresProvider = selectedValidationScenarios.some((scenario) => scenario.requiresProvider);
+  const scenarioActiveJobs = Object.fromEntries(validationScenarios.map((scenario) => {
+    const expectedType = scenario.id === "system_check" ? "system_check" : scenario.id === "static_smoke" ? "static_smoke" : "benchmark";
+    return [
+      scenario.id,
+      jobs.find((job) => isActiveAsyncJob(job) && getAsyncJobType(job) === expectedType && getAsyncJobDiagnosticTarget(job) === scenario.target) || null
+    ];
+  }));
+  const selectedValidationActiveJobs = selectedValidationScenarios.map((scenario) => scenarioActiveJobs[scenario.id]).filter(Boolean);
+  const validationCanRun = !validationLaunching && selectedValidationScenarios.length > 0 && selectedValidationActiveJobs.length === 0 && (!selectedValidationRequiresProvider || Boolean(diagnosticDefaultProvider));
+  const adminValidationPanel = h("div", { className: "space-y-6" }, [
+    h(Card, { key: "plan", title: "Validation Suite", description: "Choose one or more installation, static audit, or benchmark scenarios and launch them as tracked async jobs.", className: "border-slate-200 bg-white shadow-sm" }, [
+      h("div", { key: "summary", className: "grid gap-3 md:grid-cols-4" }, [
+        h("div", { key: "selected", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-slate-500" }, "Selected"),
+          h("div", { key: "value", className: "mt-1 text-2xl font-semibold text-slate-950" }, String(selectedValidationScenarios.length))
+        ]),
+        h("div", { key: "provider", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-slate-500" }, "Provider"),
+          h("div", { key: "value", className: "mt-1 font-semibold text-slate-950" }, diagnosticDefaultProvider || "not configured")
+        ]),
+        h("div", { key: "model", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-slate-500" }, "Model"),
+          h("div", { key: "value", className: "mt-1 font-semibold text-slate-950" }, diagnosticDefaultModel || "provider default")
+        ]),
+        h("div", { key: "target", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-slate-500" }, "Pinned Pi"),
+          h("div", { key: "value", className: "mt-1 font-mono text-sm font-semibold text-slate-950" }, formatShortReference(diagnosticsPiCommit))
         ])
       ]),
-      h(Card, { key: "pinning", title: "Smoke Target Pinning", description: "Pi should be pinned by reference for diagnostics, but not vendored into Tethermark.", className: "border-slate-200 bg-white shadow-sm" }, [
-        h("div", { key: "copy", className: "space-y-3 text-sm leading-6 text-slate-600" }, [
-          h("p", { key: "p1" }, `Use Pi as the default smoke target at commit ${diagnosticsPiCommit}.`),
-          h("p", { key: "p2" }, "Do not preinstall or vendor the Pi repository into Tethermark. A pinned remote reference keeps the install smaller, avoids redistributing third-party code, and still gives deterministic expected behavior when the target is cloned for diagnostics."),
-          h("p", { key: "p3" }, "For offline diagnostics, keep an optional local fixture separately from the public benchmark path.")
-        ])
+      h("div", { key: "actions", className: "mt-5 flex flex-wrap items-center gap-3" }, [
+        h(Button, { key: "run", onClick: () => launchValidationScenarios(validationScenarios), disabled: !validationCanRun }, validationLaunching ? "Starting..." : "Run Selected"),
+        h(Button, { key: "jobs", variant: "outline", onClick: () => setView("jobs") }, "Open Jobs"),
+        selectedValidationRequiresProvider && !diagnosticDefaultProvider ? h(Button, { key: "settings", variant: "outline", onClick: () => { setView("settings"); setSettingsSubpage("llm"); } }, "Configure Provider") : null
+      ].filter(Boolean)),
+      !validationCanRun ? h("div", { key: "blocker", className: "mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800" }, selectedValidationRequiresProvider && !diagnosticDefaultProvider
+        ? "Selected audit-quality or benchmark scenarios require a configured real LLM provider."
+        : selectedValidationActiveJobs.length
+          ? "One or more selected validation scenarios already has an active job. Open Jobs to monitor progress before launching again."
+        : "Select at least one validation scenario.") : null
+    ]),
+    h("div", { key: "scenarios", className: "grid gap-4" }, validationScenarios.map((scenario) => {
+      const selected = validationScenarioIds.includes(scenario.id);
+      const blocked = scenario.requiresProvider && !diagnosticDefaultProvider;
+      const activeJob = scenarioActiveJobs[scenario.id];
+      const referenceDisplay = scenario.reference === diagnosticsPiCommit
+        ? `${scenario.referenceLabel} (${formatShortReference(scenario.reference)})`
+        : scenario.reference;
+      return h("label", {
+        key: scenario.id,
+        className: cn(
+          "block min-w-0 rounded-2xl border bg-white p-4 transition-colors",
+          selected ? "border-slate-900" : "border-slate-200",
+          blocked ? "opacity-70" : ""
+        )
+      }, [
+        h("div", { key: "head", className: "space-y-3" }, [
+          h("div", { key: "choice", className: "flex min-w-0 items-start gap-3" }, [
+            h("input", {
+              key: "check",
+              type: "checkbox",
+              className: "mt-1",
+              checked: selected,
+              onChange: (event) => toggleValidationScenario(scenario.id, event.target.checked)
+            }),
+            h("div", { key: "copy", className: "min-w-0" }, [
+              h("div", { key: "title", className: "font-semibold text-slate-950" }, scenario.title),
+              h("div", { key: "summary", className: "mt-1 text-sm leading-6 text-slate-600" }, scenario.summary)
+            ])
+          ]),
+          h("div", { key: "badges", className: "ml-7 flex flex-wrap items-start gap-2" }, [
+            h(CompactTag, { key: "category" }, scenario.category),
+            scenario.recommended ? h(CompactTag, { key: "recommended" }, "recommended") : null,
+            activeJob ? h(CompactTag, { key: "active" }, "active job") : null,
+            blocked ? h(CompactTag, { key: "blocked" }, "provider required") : null
+          ].filter(Boolean))
+        ]),
+        activeJob ? h("div", { key: "active-note", className: "mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800" }, [
+          h("div", { key: "copy" }, `Active job ${activeJob.job_id} is already running for this scenario.`),
+          h(Button, { key: "open", variant: "outline", className: "mt-3", onClick: (event) => { event.preventDefault(); setView("jobs"); } }, "Open Jobs")
+        ]) : null,
+        h("div", { key: "details", className: "mt-4" }, h(DetailList, { items: [
+          { label: "Provider", value: scenario.provider },
+          { label: "Target", value: scenario.targetLabel },
+          { label: "Reference", value: referenceDisplay },
+          { label: "Result", value: scenario.kind === "plumbing" ? "job/run handoff only" : scenario.category }
+        ] }))
+      ]);
+    })),
+    h(Card, { key: "pinning", title: "Pinned Smoke Test Target", description: "Pi Agent is the default public smoke-test repository for repeatable local validation.", className: "border-slate-200 bg-white shadow-sm" }, [
+      h("div", { key: "copy", className: "space-y-3 text-sm leading-6 text-slate-600" }, [
+        h("p", { key: "p1" }, `Tethermark uses Pi Agent as the lightweight smoke-test target because it is small enough for quick validation while still exercising agent-style repository detection and static controls.`),
+        h("p", { key: "p2" }, `The smoke scenarios clone Pi from its public repository and check out pinned commit ${diagnosticsPiCommit}. This keeps expected behavior repeatable without bundling third-party source code in Tethermark.`),
+        h("p", { key: "p3" }, "OpenClaw remains a heavier moving benchmark target. Use it after the Pi smoke path is working.")
       ])
+    ])
   ]);
   const adminToolingPanel = h("div", { className: "space-y-6" }, [
-    h(Card, { key: "tool-doctor", title: "External Tool Doctor", description: "Local scanner readiness for static checks and fallback planning.", className: "border-slate-200 bg-white shadow-sm" }, [
+    h(Card, { key: "tool-doctor", title: "External Tool Doctor", description: "Local scanner readiness grouped by audit mode.", className: "border-slate-200 bg-white shadow-sm" }, [
       h("div", { key: "top", className: "mb-4 flex flex-wrap items-center justify-between gap-3" }, [
         h("div", { key: "status", className: "flex flex-wrap gap-2" }, [
-          h(Badge, { key: "overall" }, staticToolsReadiness.status || "unknown"),
+          h(Badge, { key: "static" }, `static:${diagnosticStaticStatus}`),
+          h(Badge, { key: "runtime" }, `runtime:${diagnosticRuntimeStatus}`),
           h(Badge, { key: "gate" }, staticToolsReadiness.gate_policy || "warn"),
           h(Badge, { key: "path" }, staticToolsReadiness.tool_path?.env_var || "HARNESS_STATIC_TOOLS_PATH")
         ]),
         h(Button, { key: "refresh", variant: "outline", onClick: refreshDiagnosticTools }, "Refresh Tools")
       ]),
-      diagnosticDefaultTools.length
-        ? h("div", { key: "tools", className: "grid gap-3 md:grid-cols-3" }, diagnosticDefaultTools.map((tool) => h("div", { key: tool.id, className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
-          h("div", { key: "head", className: "flex items-start justify-between gap-3" }, [
-            h("div", { key: "copy" }, [
-              h("div", { key: "label", className: "font-medium text-slate-900" }, tool.label),
-              h("div", { key: "cmd", className: "mt-1 text-xs text-slate-500" }, tool.command || "internal")
-            ]),
-            h(Badge, { key: "status" }, tool.status)
+      h("div", { key: "summary", className: "mb-5 grid gap-3 md:grid-cols-2" }, [
+        h("div", { key: "static", className: "rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-emerald-700" }, "Static Repo Testing"),
+          h("div", { key: "status", className: "mt-1 text-xl font-semibold text-emerald-950" }, diagnosticStaticStatus),
+          h("div", { key: "detail", className: "mt-1 text-sm text-emerald-900" }, !diagnosticStaticTools.length
+            ? "Static tool readiness has not loaded yet."
+            : diagnosticStaticMissing.length
+            ? `${diagnosticStaticMissing.length} selected static tool${diagnosticStaticMissing.length === 1 ? "" : "s"} missing.`
+            : "Scorecard, Semgrep, and Trivy are available for static runs.")
+        ]),
+        h("div", { key: "runtime", className: "rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-medium uppercase tracking-wide text-amber-700" }, "Runtime Eval Tooling"),
+          h("div", { key: "status", className: "mt-1 text-xl font-semibold text-amber-950" }, diagnosticRuntimeStatus),
+          h("div", { key: "detail", className: "mt-1 text-sm text-amber-900" }, !diagnosticRuntimeTools.length
+            ? "Runtime eval tool readiness has not loaded yet."
+            : diagnosticRuntimeMissing.length
+            ? `${diagnosticRuntimeMissing.length} runtime eval adapter${diagnosticRuntimeMissing.length === 1 ? "" : "s"} missing or deferred.`
+            : "Runtime eval adapters are available.")
+        ])
+      ]),
+      h("div", { key: "static-tools", className: "space-y-3" }, [
+        h("div", { key: "heading", className: "flex flex-wrap items-center justify-between gap-3" }, [
+          h("div", { key: "copy" }, [
+            h("h4", { key: "title", className: "text-lg font-semibold text-slate-950" }, "Static Tools"),
+            h("p", { key: "desc", className: "mt-1 text-sm text-slate-500" }, "Used by static repository audits and validation smoke tests.")
           ]),
-          h("div", { key: "summary", className: "mt-2 text-sm text-slate-500" }, tool.summary),
-          tool.version ? h("div", { key: "version", className: "mt-2 text-xs text-slate-500" }, tool.version) : null
-        ])))
-        : h("div", { key: "empty", className: "text-sm text-slate-500" }, "No external tool readiness data is available.")
-    ])
-  ]);
-  const adminObservabilityPanel = h("div", { className: "space-y-6" }, [
-    h(Card, { key: "observability", title: "Observability Inspector", description: "Open a run to inspect agent calls, tokens, tool rollups, stage timings, reuse, and fallback status.", className: "border-slate-200 bg-white shadow-sm" }, [
-      h(DetailList, { key: "summary", items: [
-        { label: "Current Runs", value: String(runs.length) },
-        { label: "Async Jobs", value: String(jobs.length) },
-        { label: "Mandatory Tools", value: diagnosticMandatoryTools.map((tool) => `${tool.id}:${tool.status}`).join(", ") || "none" },
-        { label: "Inspect Path", value: "Runs -> selected run -> Overview -> Execution Observability" }
-      ] }),
-      h("div", { key: "actions", className: "mt-4 flex flex-wrap gap-3" }, [
-        h(Button, { key: "runs", onClick: () => setView("runs") }, "Open Runs"),
-        h(Button, { key: "jobs", variant: "outline", onClick: () => setView("jobs") }, "Open Jobs")
+          h(Badge, { key: "status" }, diagnosticStaticStatus)
+        ]),
+        renderToolCards(diagnosticStaticTools, "No static tool readiness data is available.")
+      ]),
+      h("div", { key: "runtime-tools", className: "mt-6 space-y-3" }, [
+        h("div", { key: "heading", className: "flex flex-wrap items-center justify-between gap-3" }, [
+          h("div", { key: "copy" }, [
+            h("h4", { key: "title", className: "text-lg font-semibold text-slate-950" }, "Runtime Eval Tools"),
+            h("p", { key: "desc", className: "mt-1 text-sm text-slate-500" }, "Deferred until runtime validation is enabled; missing items do not block static repo testing.")
+          ]),
+          h(Badge, { key: "status" }, diagnosticRuntimeStatus)
+        ]),
+        renderToolCards(diagnosticRuntimeTools, "No runtime eval tool readiness data is available.")
       ])
     ])
   ]);
+  const adminObservabilityPanel = h("div", { className: "space-y-6" }, [
+    h(Card, { key: "observability", title: "Observability", description: "Proof and troubleshooting data for agent, LLM, tool, stage, and queue behavior.", className: "border-slate-200 bg-white shadow-sm" }, [
+      h("div", { key: "summary", className: "grid gap-3 md:grid-cols-4" }, [
+        h("div", { key: "runs", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-mono uppercase tracking-[0.18em] text-slate-500" }, "Observed Runs"),
+          h("div", { key: "value", className: "mt-2 text-xl font-semibold text-slate-950" }, formatCount(observabilityTotals.run_count || runs.length))
+        ]),
+        h("div", { key: "tokens", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-mono uppercase tracking-[0.18em] text-slate-500" }, "Tokens"),
+          h("div", { key: "value", className: "mt-2 text-xl font-semibold text-slate-950" }, formatCount(observabilityTotals.total_tokens))
+        ]),
+        h("div", { key: "events", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-mono uppercase tracking-[0.18em] text-slate-500" }, "Events / Metrics"),
+          h("div", { key: "value", className: "mt-2 text-xl font-semibold text-slate-950" }, `${formatCount(observabilityTotals.event_count)} / ${formatCount(observabilityTotals.metric_count)}`)
+        ]),
+        h("div", { key: "cost", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+          h("div", { key: "label", className: "text-xs font-mono uppercase tracking-[0.18em] text-slate-500" }, "Est. Cost"),
+          h("div", { key: "value", className: "mt-2 text-xl font-semibold text-slate-950" }, formatCost(observabilityTotals.estimated_cost_usd))
+        ])
+      ]),
+      h("div", { key: "retention", className: "mt-4 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600" },
+        `Retention: raw events ${observabilityRetention.raw_event_retention_days || "n/a"}d, raw metrics ${observabilityRetention.raw_metric_retention_days || "n/a"}d, rollups ${observabilityRetention.rollup_retention_days || "n/a"}d.`
+      ),
+      h("div", { key: "actions", className: "mt-4 flex flex-wrap gap-3" }, [
+        h(Button, { key: "runs", onClick: () => setView("runs") }, "Open Runs"),
+        h(Button, { key: "jobs", variant: "outline", onClick: () => setView("jobs") }, "Open Jobs"),
+        h(Button, { key: "refresh", variant: "outline", onClick: () => load({ includeDeferred: true }) }, "Refresh Observability")
+      ])
+    ]),
+    h(Card, { key: "learning-observability", title: "Self-Learning Observability", description: "Learning trigger, candidate, synthesis, promotion, and rollback health.", className: "border-slate-200 bg-white shadow-sm" }, [
+      h("div", { key: "summary", className: "grid gap-3 md:grid-cols-4" }, [
+        { label: "Learning Events", value: observabilityLearning.event_count },
+        { label: "Open Candidates", value: observabilityLearning.open_candidate_count },
+        { label: "Synthesized", value: observabilityLearning.synthesized_candidate_count },
+        { label: "Learning Jobs", value: observabilityLearning.job_count }
+      ].map((item) => h("div", { key: item.label, className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" }, [
+        h("div", { key: "label", className: "text-xs font-mono uppercase tracking-[0.18em] text-slate-500" }, item.label),
+        h("div", { key: "value", className: "mt-2 text-xl font-semibold text-slate-950" }, formatCount(item.value))
+      ]))),
+      h("div", { key: "detail", className: "mt-4 grid gap-3 md:grid-cols-2" }, [
+        h("div", { key: "status", className: "rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600" }, [
+          h("div", { key: "title", className: "font-medium text-slate-950" }, "Promotion State"),
+          h("div", { key: "copy", className: "mt-1" }, `${formatCount(observabilityLearning.promotion_count)} promotions, ${formatCount(observabilityLearning.rollback_count)} rollbacks, ${formatCount(observabilityLearning.rejected_candidate_count)} rejected candidates.`)
+        ]),
+        h("div", { key: "job", className: "rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600" }, [
+          h("div", { key: "title", className: "font-medium text-slate-950" }, "Latest Learning Job"),
+          h("div", { key: "copy", className: "mt-1" }, observabilityLearning.latest_job
+            ? `${humanizeLearningIdentifier(observabilityLearning.latest_job.trigger)} ${observabilityLearning.latest_job.status} at ${formatDate(observabilityLearning.latest_job.completed_at)}; ${formatCount(observabilityLearning.latest_job.candidates_synthesized)} synthesized, ${formatCount(observabilityLearning.latest_job.synthesis_skipped)} skipped.`
+            : "No learning job has been recorded yet.")
+        ])
+      ]),
+      h("div", { key: "actions", className: "mt-4 flex flex-wrap gap-3" }, [
+        h(Button, { key: "learning", variant: "outline", onClick: () => setView("learning") }, "Open Learning"),
+        h(Button, { key: "settings", variant: "outline", onClick: () => { setView("settings"); setSettingsSubpage("learning-settings"); } }, "Learning Settings")
+      ])
+    ]),
+    h(Card, { key: "modules", title: "Observability Modules", description: "OSS shows proof data. Hosted and operator modules expand scope and require stronger permissions.", className: "border-slate-200 bg-white shadow-sm" }, [
+      h("div", { key: "grid", className: "grid gap-4 xl:grid-cols-3" }, [
+        observabilityScopeCard({
+          id: "oss",
+          title: "OSS Observability",
+          badge: "included",
+          enabled: true,
+          description: "Local per-run proof that the harness executed the expected agents, tools, and stages.",
+          items: [
+            "Run observability summary: agent calls, tokens, cost estimate, context/prompt bytes",
+            "Tool execution rollups: completed, skipped, failed, fallback used",
+            "Stage timing and reuse rollups",
+            "Evidence/provenance links and exported SARIF/JSON",
+            "No raw hidden chain-of-thought; show structured rationale and tool evidence"
+          ]
+        }),
+        observabilityScopeCard({
+          id: "hosted",
+          title: "Hosted Observability",
+          badge: "requires hosted auth",
+          enabled: false,
+          description: "Organization-level monitoring across projects, users, providers, and audit history.",
+          items: [
+            "Cross-project dashboards, trends, and benchmark comparisons",
+            "Provider/model cost, latency, token, retry, and failure analytics",
+            "Policy drift, skipped-control trends, and review SLA queues",
+            "Role-based access for security reviewers, project owners, and auditors",
+            "Longer retention, exports, alerts, and scheduled reports"
+          ],
+          note: "Requires authenticated hosted deployment and tenant-scoped permissions."
+        }),
+        observabilityScopeCard({
+          id: "operator",
+          title: "Operator Observability",
+          badge: "operator only",
+          enabled: authInfo.trusted_mode,
+          description: "Deep troubleshooting for the harness creator/operator to verify agent logic and performance.",
+          items: [
+            "Agent/lane traces, evaluator decisions, prompt templates, and model routing",
+            "Raw tool inputs/outputs, adapter stderr/stdout, and retry/fallback paths",
+            "Redacted prompt/response captures where retention policy allows",
+            "Debug bundles for reproducing failed runs and validating agent behavior",
+            "Permission-gated access separate from normal reviewer workflows"
+          ],
+          note: authInfo.trusted_mode
+            ? "Trusted local mode can expose operator diagnostics. Hosted operator access should require explicit elevated permission."
+            : "Requires elevated operator permission."
+        })
+      ])
+    ]),
+    h(Card, { key: "recent", title: "Recent Observed Runs", description: "Latest runs with persisted observability rollups.", className: "border-slate-200 bg-white shadow-sm" }, observabilityRuns.length
+      ? h("div", { className: "max-h-80 overflow-y-auto rounded-2xl border border-slate-200 bg-white" }, observabilityRuns.map((run) => h("div", {
+        key: run.run_id,
+        className: "grid gap-3 border-b border-slate-200 px-4 py-3 text-sm last:border-b-0 md:grid-cols-[minmax(0,1fr)_repeat(5,auto)]"
+      }, [
+        h("div", { key: "id", className: "min-w-0" }, [
+          h("div", { key: "run", className: "truncate font-medium text-slate-950" }, run.run_id),
+          h("div", { key: "target", className: "mt-1 text-slate-500" }, `${run.target_id || "target n/a"} / ${formatDate(run.created_at)}`)
+        ]),
+        h("div", { key: "stages", className: "text-slate-700" }, `${formatCount(run.stage_execution_count)} stages`),
+        h("div", { key: "events", className: "text-slate-700" }, `${formatCount(run.event_count)} events`),
+        h("div", { key: "tokens", className: "text-slate-700" }, `${formatCount(run.total_tokens)} tokens`),
+        h("div", { key: "cost", className: "text-slate-700" }, formatCost(run.estimated_cost_usd)),
+        h(Button, {
+          key: "trace",
+          variant: observabilityTraceRunId === run.run_id ? "default" : "outline",
+          className: "px-3 py-1.5 text-xs",
+          disabled: observabilityTraceLoading && observabilityTraceRunId === run.run_id,
+          onClick: () => loadObservabilityTrace(run.run_id)
+        }, observabilityTraceRunId === run.run_id ? "Trace Open" : "Trace")
+      ])))
+      : h("div", { className: "rounded-2xl border border-dashed border-slate-200 px-4 py-6 text-sm text-slate-500" }, "No observability rollups are available yet. Run an audit, then refresh observability.")),
+    h(Card, { key: "agent-trace", title: "Agent Trace", description: "Structured agent logic, handoffs, intermediate outputs, QA checks, and correction records for troubleshooting a selected run.", className: "border-slate-200 bg-white shadow-sm" }, renderTracePanel())
+  ]);
   const adminSubpageContent = {
     system: adminSystemPanel,
-    smoke: adminSmokePanel,
-    benchmarks: adminBenchmarksPanel,
+    methodology: methodologyAdminPanel,
+    validation: adminValidationPanel,
     tooling: adminToolingPanel,
     observability: adminObservabilityPanel
   }[adminSubpage] || adminSystemPanel;
@@ -5008,6 +6728,7 @@ function App() {
     onEditFindingDisposition: beginDispositionEdit,
     onSaveFindingDispositionEdit: saveDispositionEdit,
     onRevokeFindingDisposition: revokeDisposition,
+    onSaveRemediationItem: saveRemediationItem,
     reviewComments: selectedRunDetail?.reviewComments?.review_comments || [],
     commentBody: reviewCommentBody,
     commentFindingId: reviewCommentFindingId,
@@ -5030,7 +6751,25 @@ function App() {
     outboundActionType,
     outboundTargetNumber,
     onOutboundActionTypeChange: setOutboundActionType,
-    onOutboundTargetNumberChange: setOutboundTargetNumber
+    onOutboundTargetNumberChange: setOutboundTargetNumber,
+    assistantState,
+    assistantSessions,
+    assistantSessionsLoading,
+    assistantSessionsError,
+    assistantInput,
+    assistantScopeType,
+    onAssistantInputChange: setAssistantInput,
+    onAssistantSend: () => sendAssistantMessage(),
+    onAssistantPrompt: sendAssistantMessage,
+    onAssistantScopeChange: changeAssistantScope,
+    onAssistantConfirmAction: (action) => resolveAssistantAction(action, "confirm"),
+    onAssistantRejectAction: (action) => resolveAssistantAction(action, "reject"),
+    onAssistantNewSession: startNewAssistantSession,
+    onAssistantOpenSession: openAssistantSession,
+    onAssistantRenameSession: renameAssistantSession,
+    onAssistantArchiveSession: archiveAssistantSession,
+    onAssistantDeleteSession: deleteAssistantSession,
+    notice: runNotice
   });
 
   const runsLaunchModal = h(LaunchAuditModal, {
@@ -5074,6 +6813,8 @@ function App() {
       launchModal: runsLaunchModal,
       helpers: {
         Button,
+        Input,
+        Select,
         formatDate,
         cn,
         Badge,
@@ -5142,7 +6883,7 @@ function App() {
             h("option", { key: "overdue", value: "overdue" }, "overdue"),
             h("option", { key: "due-soon", value: "due_soon" }, "due soon"),
             h("option", { key: "runtime-followup", value: "runtime_followup" }, "runtime follow-up"),
-            h("option", { key: "disposition", value: "needs_disposition_review" }, "needs disposition re-review"),
+            h("option", { key: "disposition", value: "needs_disposition_review" }, "needs exception re-review"),
             h("option", { key: "rerun", value: "needs_rerun" }, "needs rerun"),
             h("option", { key: "all", value: "all" }, "all open reviews")
           ])),
@@ -5226,6 +6967,7 @@ function App() {
       onEditFindingDisposition: beginDispositionEdit,
       onSaveFindingDispositionEdit: saveDispositionEdit,
       onRevokeFindingDisposition: revokeDisposition,
+      onSaveRemediationItem: saveRemediationItem,
       reviewComments: selectedRunDetail?.reviewComments?.review_comments || [],
       commentBody: reviewCommentBody,
       commentFindingId: reviewCommentFindingId,
@@ -5248,7 +6990,26 @@ function App() {
         outboundActionType,
       outboundTargetNumber,
       onOutboundActionTypeChange: setOutboundActionType,
-      onOutboundTargetNumberChange: setOutboundTargetNumber
+      onOutboundTargetNumberChange: setOutboundTargetNumber,
+      publisherMode: publisherModeEnabled,
+      assistantState,
+      assistantSessions,
+      assistantSessionsLoading,
+      assistantSessionsError,
+      assistantInput,
+      assistantScopeType,
+      onAssistantInputChange: setAssistantInput,
+      onAssistantSend: () => sendAssistantMessage(),
+      onAssistantPrompt: sendAssistantMessage,
+      onAssistantScopeChange: changeAssistantScope,
+      onAssistantConfirmAction: (action) => resolveAssistantAction(action, "confirm"),
+      onAssistantRejectAction: (action) => resolveAssistantAction(action, "reject"),
+      onAssistantNewSession: startNewAssistantSession,
+      onAssistantOpenSession: openAssistantSession,
+      onAssistantRenameSession: renameAssistantSession,
+      onAssistantArchiveSession: archiveAssistantSession,
+      onAssistantDeleteSession: deleteAssistantSession,
+      notice: runNotice
     })
   ]);
 
@@ -5275,6 +7036,133 @@ function App() {
     onBulkAcceptWithoutRuntimeValidation: (items) => bulkRuntimeFollowupAction(items, "accept_without_runtime_validation")
   });
 
+  const visibleLearningCandidates = learningCandidates.filter((candidate) => !isInvalidLearningCandidate(candidate, getLearningSourceEvents(candidate, learningEvents)));
+  const filteredLearningCandidates = visibleLearningCandidates.filter((candidate) => {
+    if (learningFilter === "open") return ["proposed", "experimented"].includes(candidate.status);
+    if (learningFilter === "promoted") return candidate.status === "promoted";
+    if (learningFilter === "closed") return ["rejected", "rolled_back", "expired"].includes(candidate.status);
+    return true;
+  });
+  const learningStats = [
+    { label: "Signals", value: learningEvents.length },
+    { label: "Open Candidates", value: visibleLearningCandidates.filter((item) => ["proposed", "experimented"].includes(item.status)).length },
+    { label: "Synthesized", value: visibleLearningCandidates.filter((item) => item.metadata_json?.llm_synthesis?.status === "completed").length },
+    { label: "Learning Jobs", value: learningJobs.length }
+  ];
+  const learningView = h("div", { className: "space-y-6" }, [
+    h("div", { key: "stats", className: "grid gap-4 md:grid-cols-4" }, learningStats.map((item) => h("div", {
+      key: item.label,
+      className: "rounded-3xl border border-slate-200 bg-white p-5 shadow-sm"
+    }, [
+      h("div", { key: "label", className: "text-xs uppercase tracking-[0.18em] text-slate-400" }, item.label),
+      h("div", { key: "value", className: "mt-3 text-3xl font-semibold tracking-tight text-slate-950" }, String(item.value))
+    ]))),
+    h(Card, { key: "candidates", title: "Learning Candidates", description: "Governed self-learning proposals. V1 candidates do not change audit behavior until explicitly promoted.", className: "border-slate-200 bg-white shadow-sm" }, [
+      h("div", { key: "toolbar", className: "mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between" }, [
+        h("div", { key: "filter", className: "w-full md:w-56" }, h(Select, {
+          value: learningFilter,
+          onChange: (event) => setLearningFilter(event.target.value)
+        }, [
+          h("option", { key: "open", value: "open" }, "Open candidates"),
+          h("option", { key: "promoted", value: "promoted" }, "Promoted"),
+          h("option", { key: "closed", value: "closed" }, "Closed"),
+          h("option", { key: "all", value: "all" }, "All candidates")
+        ])),
+        h(Button, { key: "refresh", variant: "outline", disabled: learningLoading, onClick: () => loadLearningData("Learning refreshed.") }, learningLoading ? "Refreshing..." : "Refresh")
+      ]),
+      filteredLearningCandidates.length
+        ? h("div", { key: "list", className: "space-y-3" }, filteredLearningCandidates.map((candidate) => {
+          const sourceEvents = getLearningSourceEvents(candidate, learningEvents);
+          const display = getLearningCandidateDisplay(candidate, sourceEvents);
+          const synthesisStatus = getCandidateSynthesisStatus(candidate);
+          const detailFields = [
+            { label: "Recommendation", value: display.typeLabel },
+            { label: "Scope", value: display.scopeLabel },
+            { label: "Evidence", value: display.evidenceLabel },
+            { label: "LLM synthesis", value: `${synthesisStatus.label}${synthesisStatus.detail ? `: ${synthesisStatus.detail}` : ""}` },
+            { label: "Promotion impact", value: display.promotionImpact },
+            { label: "Review risk", value: display.riskExplanation }
+          ].filter((item) => item.value);
+          return h("div", {
+            key: candidate.id,
+            className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4"
+          }, [
+            h("div", { key: "head", className: "flex flex-col gap-3 md:flex-row md:items-start md:justify-between" }, [
+              h("div", { key: "copy", className: "min-w-0" }, [
+                h("div", { key: "title", className: "font-semibold text-slate-950" }, display.title || candidate.title || candidate.id),
+                h("div", { key: "summary", className: "mt-1 text-sm text-slate-600" }, display.summary || candidate.summary || ""),
+                h("dl", { key: "details", className: "mt-3 grid gap-x-5 gap-y-2 text-sm md:grid-cols-2 xl:grid-cols-3" }, detailFields.map((item) => h("div", { key: item.label, className: "min-w-0" }, [
+                  h("dt", { key: "label", className: "text-xs uppercase tracking-[0.16em] text-slate-400" }, item.label),
+                  h("dd", { key: "value", className: "mt-1 text-slate-700" }, item.value)
+                ])))
+              ]),
+              h("div", { key: "badges", className: "flex flex-wrap gap-2" }, [
+                h(Badge, { key: "status" }, candidate.status),
+                h(Badge, { key: "synthesis" }, synthesisStatus.label),
+                candidate.requires_human_approval ? h(Badge, { key: "approval" }, "approval required") : null
+              ].filter(Boolean))
+            ]),
+            h("div", { key: "rationale", className: "mt-3 text-sm text-slate-600" }, [
+              h("div", { key: "label", className: "text-xs uppercase tracking-[0.16em] text-slate-400" }, "Observed reviewer decisions"),
+              h("div", { key: "copy", className: "mt-1" }, display.rationale || "No source decision summary recorded.")
+            ]),
+            h("div", { key: "actions", className: "mt-3 flex flex-wrap gap-2" }, [
+              h(Button, { key: "experiment", variant: "outline", disabled: learningLoading || candidate.status === "rejected" || candidate.status === "rolled_back", onClick: () => runLearningCandidateAction(candidate, "experiment") }, "Dry Run"),
+              h(Button, { key: "promote", disabled: learningLoading || candidate.status === "promoted" || candidate.status === "rejected" || candidate.status === "rolled_back", onClick: () => runLearningCandidateAction(candidate, "promote") }, "Approve"),
+              h(Button, { key: "reject", variant: "outline", disabled: learningLoading || candidate.status === "promoted" || candidate.status === "rejected" || candidate.status === "rolled_back", onClick: () => runLearningCandidateAction(candidate, "reject") }, "Reject")
+            ])
+          ]);
+        }))
+        : h("div", { key: "empty", className: "rounded-2xl border border-dashed border-slate-200 px-4 py-6 text-sm text-slate-500" }, "No learning candidates in the current filter.")
+    ]),
+    h(Card, { key: "jobs", title: "Learning Jobs", description: "Recent trigger outcomes for signal sync, candidate generation, and LLM synthesis.", className: "border-slate-200 bg-white shadow-sm" }, learningJobs.length
+      ? h("div", { className: "max-h-72 overflow-y-auto rounded-2xl border border-slate-200 bg-white" }, learningJobs.slice(0, 10).map((job) => h("div", {
+        key: job.id,
+        className: "grid gap-3 border-b border-slate-200 px-4 py-3 text-sm last:border-b-0 md:grid-cols-[minmax(0,1fr)_repeat(4,auto)]"
+      }, [
+        h("div", { key: "id", className: "min-w-0" }, [
+          h("div", { key: "trigger", className: "font-medium text-slate-950" }, humanizeLearningIdentifier(job.trigger || "learning job")),
+          h("div", { key: "meta", className: "mt-1 text-xs text-slate-500" }, `${job.status || "unknown"} / ${formatDate(job.completed_at || job.started_at)}`)
+        ]),
+        h("div", { key: "events", className: "text-slate-700" }, `${job.events_synced || 0} synced`),
+        h("div", { key: "generated", className: "text-slate-700" }, `${job.candidates_generated || 0} generated`),
+        h("div", { key: "synth", className: "text-slate-700" }, `${job.candidates_synthesized || 0} synthesized`),
+        h("div", { key: "skipped", className: "text-slate-700" }, `${job.synthesis_skipped || 0} skipped`)
+      ])))
+      : h("div", { className: "rounded-2xl border border-dashed border-slate-200 px-4 py-6 text-sm text-slate-500" }, "No learning jobs have run yet.")),
+    h(Card, { key: "promotions", title: "Promotion History", description: "Approved learning overlays and rollback state. V1 promotions are auditable records, not hidden prompt or policy mutations.", className: "border-slate-200 bg-white shadow-sm" }, learningPromotions.length
+      ? h("div", { className: "space-y-3" }, learningPromotions.map((promotion) => h("div", {
+        key: promotion.id,
+        className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"
+      }, [
+        h("div", { key: "row", className: "flex flex-col gap-3 md:flex-row md:items-center md:justify-between" }, [
+          h("div", { key: "copy" }, [
+            h("div", { key: "title", className: "font-medium text-slate-900" }, promotion.promoted_artifact_type),
+            h("div", { key: "meta", className: "mt-1 text-sm text-slate-500" }, `${promotion.scope_type}:${promotion.scope_id} / ${formatDate(promotion.promoted_at)} / ${promotion.promoted_by}`)
+          ]),
+          h("div", { key: "actions", className: "flex flex-wrap items-center gap-2" }, [
+            h(Badge, { key: "status" }, promotion.status),
+            promotion.status === "active" ? h(Button, { key: "rollback", variant: "outline", disabled: learningLoading, onClick: () => rollbackLearningPromotionUi(promotion) }, "Rollback") : null
+          ].filter(Boolean))
+        ])
+      ])))
+      : h("div", { className: "text-sm text-muted" }, "No learning promotions have been recorded.")),
+    h(Card, { key: "events", title: "Recent Learning Signals", description: "Immutable signals extracted from review, disposition, finding quality, runtime follow-up, remediation, and assistant activity.", className: "border-slate-200 bg-white shadow-sm" }, learningEvents.length
+      ? h("div", { className: "space-y-2" }, learningEvents.slice(0, 20).map((event) => h("div", {
+        key: event.id,
+        className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm"
+      }, [
+        h("div", { key: "row", className: "flex flex-col gap-2 md:flex-row md:items-center md:justify-between" }, [
+          h("div", { key: "copy" }, [
+            h("div", { key: "summary", className: "font-medium text-slate-900" }, event.signal_summary),
+            h("div", { key: "meta", className: "mt-1 text-slate-500" }, `${event.event_type} / ${event.run_id || "scope"} / ${event.finding_signature || "run-level"}`)
+          ]),
+          h(Badge, { key: "confidence" }, `confidence ${Math.round(Number(event.confidence || 0) * 100)}%`)
+        ])
+      ])))
+      : h("div", { className: "text-sm text-muted" }, "No learning events have been extracted for this project yet. Review findings or runtime follow-ups, then refresh."))
+  ]);
+
   const defaultPolicyPack = policyPacks.find((item) => item.id === "default") || null;
   const defaultPolicyName = getPolicyPackDisplayLabel(policyPacks, "default");
   const defaultPolicyObjectives = defaultPolicyPack?.policy?.objectives || [];
@@ -5284,8 +7172,9 @@ function App() {
   const settingsNavItems = [
     { id: "audit", label: "Audit Type", description: "Audit methodology, scope, and run-shape defaults." },
     { id: "llm", label: "Agent Configuration", description: "Default models, credentials, and agent routing." },
+    { id: "learning-settings", label: "Self-Learning", description: "Learning triggers, thresholds, synthesis, and promotion guardrails." },
     { id: "static-tools", label: "External Tools", description: "External audit tool readiness and inclusion defaults." },
-    { id: "governance", label: "Governance", description: "Gates, policy packs, and reference documents." },
+    { id: "governance", label: "Policy", description: "Review gates, policy packs, and reference documents." },
     { id: "integrations", label: "Integrations", description: "Outbound delivery and repository integration settings." },
     { id: "artifacts", label: "Artifacts", description: "Debug artifact retention and pruning." }
   ];
@@ -5308,7 +7197,8 @@ function App() {
             ...settings.integrations_json,
             ...integrationPayload.integrations
           },
-          test_mode: settings.test_mode_json
+          test_mode: settings.test_mode_json,
+          learning: getLearningSettings(settings)
         };
       })())
     }, requestContext).then((payload) => Promise.all([
@@ -5345,6 +7235,25 @@ function App() {
     const selectedModel = settingsModelCatalog.find((item) => item.value === selectionValue);
     updateSettings("providers_json", "default_provider", selectedModel?.provider_id || "");
     updateSettings("providers_json", "default_model", selectedModel?.id || "");
+  };
+
+  const applySettingsAssistantModelSelection = (selectionValue) => {
+    const selectedModel = settingsAgentRoutingModelCatalog.find((item) => item.value === selectionValue);
+    updateSettings("providers_json", "assistant_provider", selectedModel?.provider_id || "");
+    updateSettings("providers_json", "assistant_model", selectedModel?.id || "");
+  };
+
+  const applySettingsAssistantRoutingMode = (mode) => {
+    const inheritDefault = mode !== "override";
+    setSettings((current) => ({
+      ...current,
+      providers_json: {
+        ...(current.providers_json || {}),
+        assistant_inherit_default: inheritDefault,
+        assistant_provider: inheritDefault ? "" : ((current.providers_json || {}).assistant_provider || ""),
+        assistant_model: inheritDefault ? "" : ((current.providers_json || {}).assistant_model || "")
+      }
+    }));
   };
 
   const connectSelectedOAuthProvider = () => {
@@ -5464,6 +7373,8 @@ function App() {
     || (settingsProviderCredentialStatus.configured
       ? "Codex is configured for local runs. Check the connection if this is the first time using it on this machine."
       : "Connect your ChatGPT account once on this machine. Tethermark will use that local Codex session for manual runtime audits.");
+  const learningSettings = getLearningSettings(settings);
+  const learningSynthesisEnabled = learningSettings.enabled !== false && learningSettings.llm_synthesis_enabled !== false;
 
   const settingsLlmPanel = h("div", { className: "space-y-6" }, [
     h(Card, { key: "llm-defaults", title: "Agent Configuration" }, [
@@ -5524,6 +7435,38 @@ function App() {
                 : "The selected provider does not use an API key.")
           ]))
       ]),
+      h("div", { key: "assistant-routing", className: "mt-8 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4" }, [
+        h("div", { key: "header", className: "mb-4 flex flex-col gap-2 md:flex-row md:items-start md:justify-between" }, [
+          h("div", { key: "copy" }, [
+            h("div", { key: "title", className: "font-medium text-slate-900" }, "Assistant Model"),
+            h("div", { key: "body", className: "mt-1 text-sm text-slate-500" }, "Used by the Ask This Audit assistant. OSS keeps deterministic evidence-grounding available when no assistant model is configured.")
+          ]),
+          h("div", { key: "resolved", className: "rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600" }, settingsAssistantInheritsDefault
+            ? `inherits ${settings.providers_json.default_model || "global default"}`
+            : (settings.providers_json.assistant_model || "override not selected"))
+        ]),
+        h("div", { key: "fields", className: "grid gap-4 md:grid-cols-[0.45fr_1fr]" }, [
+          h(Field, { key: "mode", label: "Routing" }, Select({
+            value: settingsAssistantInheritsDefault ? "inherit" : "override",
+            onChange: (event) => applySettingsAssistantRoutingMode(event.target.value)
+          }, [
+            h("option", { key: "inherit", value: "inherit" }, "inherit global default"),
+            h("option", { key: "override", value: "override" }, "use assistant-specific model")
+          ])),
+          h(Field, { key: "model", label: "Assistant Model" }, Select({
+            value: settingsAssistantInheritsDefault ? "" : settingsAssistantModelValue,
+            disabled: settingsAssistantInheritsDefault,
+            onChange: (event) => applySettingsAssistantModelSelection(event.target.value)
+          }, [
+            h("option", { key: "placeholder", value: "" }, settingsAssistantInheritsDefault ? "inherits global default" : "select assistant model"),
+            ...(llmRegistry.providers || [])
+              .filter((provider) => provider.id !== "mock")
+              .map((provider) => h("optgroup", { key: provider.id, label: provider.name }, settingsAgentRoutingModelCatalog
+                .filter((item) => item.provider_id === provider.id)
+                .map((item) => h("option", { key: `assistant:${item.value}`, value: item.value }, item.label))))
+          ]))
+        ])
+      ]),
       h("div", { key: "agent-routing", className: "mt-8 space-y-4 border-t border-slate-200 pt-6" }, [
         h("div", { key: "title" }, [
           h("div", { key: "heading", className: "font-medium text-slate-900" }, "Individual Agent Overrides"),
@@ -5532,6 +7475,7 @@ function App() {
         h("div", { key: "rows", className: "space-y-3" }, agentConfigCatalog.map((agent) => {
           const override = settingsAgentOverrides[agent.id] || {};
           const envOverride = llmRegistry.environment_defaults?.agent_overrides?.[agent.id] || {};
+          const agentInactive = Boolean(agent.learning_synthesis && !learningSynthesisEnabled);
           const agentDraftPresent = Object.prototype.hasOwnProperty.call(agentCredentialDrafts, agent.id);
           const agentEnvApiConfigured = !agentDraftPresent && !override.api_key && envOverride.api_key_configured;
           const agentApiDisplayValue = agentDraftPresent
@@ -5543,21 +7487,25 @@ function App() {
           return h("div", { key: agent.id, className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4" }, [
             h("div", { key: "meta", className: "mb-3 flex flex-wrap items-center justify-between gap-3" }, [
               h("div", { key: "copy" }, [
-                h("div", { key: "name", className: "font-medium text-slate-900" }, agent.title),
+                h("div", { key: "name", className: "flex flex-wrap items-center gap-2 font-medium text-slate-900" }, [
+                  h("span", { key: "title" }, agent.title),
+                  agent.learning_synthesis ? h(Badge, { key: "learning" }, agentInactive ? "inactive" : "learning synthesis") : null
+                ]),
                 h("div", { key: "inherit", className: "mt-1 text-sm text-slate-500" }, providerId
-                  ? "Uses this provider and model by default unless a run overrides it."
-                  : "Inherits the global provider and model by default.")
+                  ? (agentInactive ? "Configured but inactive because Self-Learning LLM synthesis is disabled." : "Uses this provider and model by default unless a run overrides it.")
+                  : (agentInactive ? "Visible for governance, but inactive because Self-Learning LLM synthesis is disabled." : "Inherits the global provider and model by default."))
               ]),
               h(Button, {
                 key: "clear",
                 variant: "outline",
                 onClick: () => updateSettingsAgentOverride(agent.id, { provider: "", model: "", api_key: "" }),
-                disabled: !providerId && !(override.model || "") && !(override.api_key || "")
+                disabled: agentInactive || (!providerId && !(override.model || "") && !(override.api_key || ""))
               }, "Inherit Global")
             ]),
             h("div", { key: "fields", className: "grid gap-4 md:grid-cols-2" }, [
               h(Field, { key: "model", label: "Model" }, Select({
                 value: modelValue,
+                disabled: agentInactive,
                 onChange: (event) => {
                   const selectedModel = settingsAgentRoutingModelCatalog.find((item) => item.value === event.target.value);
                   updateSettingsAgentOverride(agent.id, {
@@ -5582,7 +7530,8 @@ function App() {
                     value: agentApiDisplayValue,
                     onFocus: (event) => agentEnvApiConfigured && event.target.select(),
                     onChange: (event) => updateAgentCredentialDraft(agent.id, event.target.value),
-                    placeholder: envOverride.api_key_configured ? `configured via ${envOverride.api_key_env_var}` : `uses ${agent.env_prefix}_API_KEY`
+                    placeholder: envOverride.api_key_configured ? `configured via ${envOverride.api_key_env_var}` : `uses ${agent.env_prefix}_API_KEY`,
+                    disabled: agentInactive
                   }),
                   h("div", { className: "text-xs text-slate-500" }, envOverride.api_key_configured
                     ? `Environment key is configured via ${envOverride.api_key_env_var}. Leave blank to keep using it.`
@@ -5592,6 +7541,111 @@ function App() {
           ]);
         }))
       ]),
+    ])
+  ]);
+
+  const updateLearningSetting = (key, value) => updateSettings("learning_json", key, value);
+  const settingsLearningPanel = h("div", { className: "space-y-6" }, [
+    h(Card, { key: "learning-triggers", title: "Self-Learning Triggers", description: "Controls when reviewer signals become governed improvement candidates." }, [
+      h("div", { key: "summary", className: "mb-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-600" }, "Signal extraction and rule-based candidate generation remain deterministic. LLM synthesis enriches eligible candidate copy and review guidance, but cannot promote candidates or change audit behavior."),
+      h("div", { key: "fields", className: "grid gap-4 md:grid-cols-2 xl:grid-cols-4" }, [
+        h(Field, { key: "enabled", label: "Learning" }, Select({
+          value: String(learningSettings.enabled !== false),
+          onChange: (event) => updateLearningSetting("enabled", event.target.value === "true")
+        }, [
+          h("option", { key: "on", value: "true" }, "enabled"),
+          h("option", { key: "off", value: "false" }, "disabled")
+        ])),
+        h(Field, { key: "trigger-mode", label: "Trigger Mode" }, Select({
+          value: learningSettings.trigger_mode || "hybrid",
+          onChange: (event) => updateLearningSetting("trigger_mode", event.target.value)
+        }, [
+          h("option", { key: "hybrid", value: "hybrid" }, "hybrid"),
+          h("option", { key: "event", value: "event_driven" }, "event driven"),
+          h("option", { key: "scheduled", value: "scheduled" }, "scheduled"),
+          h("option", { key: "manual", value: "manual" }, "manual")
+        ])),
+        h(Field, { key: "sync-limit", label: "Sync Limit" }, h(Input, {
+          type: "number",
+          min: 1,
+          value: learningSettings.sync_limit || 100,
+          onChange: (event) => updateLearningSetting("sync_limit", Math.max(1, Number(event.target.value || 100)))
+        })),
+        h(Field, { key: "schedule", label: "Batch Interval Minutes" }, h(Input, {
+          type: "number",
+          min: 5,
+          value: learningSettings.scheduled_interval_minutes || 60,
+          onChange: (event) => updateLearningSetting("scheduled_interval_minutes", Math.max(5, Number(event.target.value || 60)))
+        }))
+      ]),
+      h("div", { key: "checks", className: "mt-5 grid gap-3 md:grid-cols-2" }, [
+        ["event_driven_enabled", "Run after completed audits and reviewer actions"],
+        ["scheduled_enabled", "Enable scheduled batch trigger"],
+        ["llm_nightly_consolidation", "Enable nightly LLM consolidation metadata"],
+        ["require_dry_run_before_promotion", "Require dry run before approval"]
+      ].map(([key, label]) => h("label", {
+        key,
+        className: "flex items-start gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700"
+      }, [
+        h("input", {
+          key: "check",
+          type: "checkbox",
+          className: "mt-1",
+          checked: learningSettings[key] !== false,
+          onChange: (event) => updateLearningSetting(key, event.target.checked)
+        }),
+        h("span", { key: "label" }, label)
+      ])))
+    ]),
+    h(Card, { key: "learning-llm", title: "LLM Synthesis", description: "Controls when the learning synthesizer agent enriches candidate titles, summaries, rationale, and review guidance." }, [
+      h("div", { key: "fields", className: "grid gap-4 md:grid-cols-2 xl:grid-cols-4" }, [
+        h(Field, { key: "enabled", label: "LLM Synthesis" }, Select({
+          value: String(learningSettings.llm_synthesis_enabled !== false),
+          onChange: (event) => updateLearningSetting("llm_synthesis_enabled", event.target.value === "true")
+        }, [
+          h("option", { key: "on", value: "true" }, "on by default"),
+          h("option", { key: "off", value: "false" }, "disabled")
+        ])),
+        h(Field, { key: "signals", label: "Minimum Signals" }, h(Input, {
+          type: "number",
+          min: 1,
+          value: learningSettings.llm_min_source_signals || 3,
+          onChange: (event) => updateLearningSetting("llm_min_source_signals", Math.max(1, Number(event.target.value || 3)))
+        })),
+        h(Field, { key: "runs", label: "Minimum Runs" }, h(Input, {
+          type: "number",
+          min: 1,
+          value: learningSettings.llm_min_distinct_runs || 2,
+          onChange: (event) => updateLearningSetting("llm_min_distinct_runs", Math.max(1, Number(event.target.value || 2)))
+        })),
+        h(Field, { key: "budget", label: "Max Calls Per Day" }, h(Input, {
+          type: "number",
+          min: 1,
+          value: learningSettings.llm_max_calls_per_day || 50,
+          onChange: (event) => updateLearningSetting("llm_max_calls_per_day", Math.max(1, Number(event.target.value || 50)))
+        }))
+      ]),
+      h("div", { key: "checks", className: "mt-5 grid gap-3 md:grid-cols-2" }, [
+        ["llm_always_high_risk", "Always synthesize high-risk candidates at 2 signals across 2 runs"],
+        ["llm_always_governance_impacting", "Always synthesize accepted-risk, waiver, suppression, and severity candidates"],
+        ["llm_manual_synthesis_enabled", "Allow manual synthesis from the Learning page"],
+        ["llm_send_source_excerpts", "Send source excerpts to the synthesizer"]
+      ].map(([key, label]) => h("label", {
+        key,
+        className: "flex items-start gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700"
+      }, [
+        h("input", {
+          key: "check",
+          type: "checkbox",
+          className: "mt-1",
+          checked: learningSettings[key] !== false,
+          onChange: (event) => updateLearningSetting(key, event.target.checked)
+        }),
+        h("span", { key: "label" }, label)
+      ]))),
+      h("div", { key: "agent-note", className: "mt-5 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600" }, learningSettings.llm_synthesis_enabled === false
+        ? "The Learning Synthesizer Agent remains visible in Agent Configuration, but is inactive while LLM synthesis is disabled here."
+        : "Configure the Learning Synthesizer Agent model in Agent Configuration. If it inherits a mock or missing provider, candidates will show synthesis inactive.")
     ])
   ]);
 
@@ -5711,14 +7765,16 @@ function App() {
           h("option", { key: "medium", value: "medium" }, "medium"),
           h("option", { key: "high", value: "high" }, "high")
         ])),
-        h(Field, { key: "default-visibility", label: "Default Visibility" }, Select({
-          value: settings.review_json.default_visibility || "internal",
-          onChange: (event) => updateSettings("review_json", "default_visibility", event.target.value)
-        }, [
-          h("option", { key: "public", value: "public" }, "public"),
-          h("option", { key: "internal", value: "internal" }, "internal"),
-          h("option", { key: "internal-only", value: "internal-only" }, "internal-only")
-        ])),
+        publisherModeEnabled
+          ? h(Field, { key: "default-visibility", label: "Publication Safety Default" }, Select({
+              value: settings.review_json.default_visibility || "internal",
+              onChange: (event) => updateSettings("review_json", "default_visibility", event.target.value)
+            }, [
+              h("option", { key: "public", value: "public" }, "public"),
+              h("option", { key: "internal", value: "internal" }, "internal"),
+              h("option", { key: "internal-only", value: "internal-only" }, "internal-only")
+            ]))
+          : null,
         h(Field, { key: "readiness-gate", label: "Audit Readiness Gate" }, Select({
           value: settings.preflight_json.readiness_gate_policy || "risk_or_drift",
           onChange: (event) => updateSettings("preflight_json", "readiness_gate_policy", event.target.value)
@@ -5729,19 +7785,19 @@ function App() {
         ]))
       ]),
       h("div", { key: "cadence", className: "mt-5 grid gap-4 md:grid-cols-2" }, [
-        h(Field, { key: "review-renewal", label: "Disposition Renewal Days" }, h(Input, {
+        h(Field, { key: "review-renewal", label: "Exception Renewal Days" }, h(Input, {
           type: "number",
           min: 1,
           value: settings.review_json.disposition_renewal_days || 30,
           onChange: (event) => updateSettings("review_json", "disposition_renewal_days", Math.max(1, Number(event.target.value || 30)))
         })),
-        h(Field, { key: "review-window", label: "Waiver Review Window Days" }, h(Input, {
+        h(Field, { key: "review-window", label: "Risk Acceptance Review Window Days" }, h(Input, {
           type: "number",
           min: 1,
           value: settings.review_json.disposition_review_window_days || 30,
           onChange: (event) => updateSettings("review_json", "disposition_review_window_days", Math.max(1, Number(event.target.value || 30)))
         }))
-      ])
+      ].filter(Boolean))
     ])
   ]);
 
@@ -5823,7 +7879,7 @@ function App() {
   ]);
 
   const settingsIntegrationsPanel = h("div", { className: "space-y-6" }, [
-    h(Card, { key: "integration-cards", title: "Integrations", description: "Configure outbound delivery and repository integration defaults." }, [
+    h(Card, { key: "integration-cards", title: "Integrations", description: "Configure draft exports and local automation hooks. Hosted owns connector execution." }, [
       h("div", { key: "cards", className: "grid gap-4 lg:grid-cols-2" }, [githubIntegration, genericWebhookIntegration].filter(Boolean).map((integration) => {
         const integrationStatus = getIntegrationCredentialStatus(integrationRegistry, integration.id);
         return h("div", {
@@ -5888,13 +7944,13 @@ function App() {
           value: (settings.integrations_json.generic_webhook_events || []).join("\n"),
           onChange: (event) => updateSettings("integrations_json", "generic_webhook_events", event.target.value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean))
         })),
-        h(Field, { key: "github-mode", label: "GitHub Outbound Mode" }, Select({ value: settings.integrations_json.github_mode || "disabled", onChange: (event) => updateSettings("integrations_json", "github_mode", event.target.value) }, [
+        h(Field, { key: "github-mode", label: "GitHub Draft Export Mode" }, Select({ value: settings.integrations_json.github_mode || "disabled", onChange: (event) => updateSettings("integrations_json", "github_mode", event.target.value) }, [
           h("option", { key: "disabled", value: "disabled" }, "disabled"),
           h("option", { key: "manual", value: "manual" }, "manual"),
           h("option", { key: "project_opt_in", value: "project_opt_in" }, "project_opt_in"),
           h("option", { key: "workspace_default", value: "workspace_default" }, "workspace_default")
         ])),
-        h(Field, { key: "github-actions", label: "GitHub Allowed Actions" }, h(Textarea, {
+        h(Field, { key: "github-actions", label: "GitHub Draft Actions" }, h(Textarea, {
           value: (settings.integrations_json.github_allowed_actions || []).join("\n"),
           onChange: (event) => updateSettings("integrations_json", "github_allowed_actions", event.target.value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean))
         })),
@@ -6320,6 +8376,7 @@ function App() {
 
   const settingsSubpageContent = {
     llm: settingsLlmPanel,
+    "learning-settings": settingsLearningPanel,
     "static-tools": settingsStaticToolsPanel,
     audit: settingsAuditPanel,
     governance: settingsGovernancePanel,
@@ -6378,7 +8435,16 @@ function App() {
           type: "button",
           onClick: () => setView("reviews"),
           className: "flex h-11 w-11 items-center justify-center rounded-2xl border border-border bg-white text-slate-700 hover:bg-slate-50"
-        }, h(SidebarIcon, { kind: "mail" }))
+        }, h(SidebarIcon, { kind: "mail" })),
+        h("button", {
+          key: "theme",
+          type: "button",
+          onClick: () => setTheme((current) => current === "dark" ? "light" : "dark"),
+          className: "flex h-11 w-11 items-center justify-center rounded-2xl border border-border bg-white text-slate-700 hover:bg-slate-50",
+          title: theme === "dark" ? "Switch to light mode" : "Switch to dark mode",
+          "aria-label": theme === "dark" ? "Switch to light mode" : "Switch to dark mode",
+          "data-testid": "theme-toggle"
+        }, h(SidebarIcon, { kind: theme === "dark" ? "sun" : "moon" }))
       ]),
       h("div", { key: "groups", className: "mt-6 space-y-6" }, navGroups.map((group) => h("div", { key: group.label }, [
         h("div", { key: "label", className: "px-2 text-xs font-medium text-slate-400" }, group.label),
@@ -6430,6 +8496,8 @@ function App() {
             ? jobsView
             : view === "followups"
               ? runtimeFollowupsView
+              : view === "learning"
+                ? learningView
               : view === "reviews"
                 ? reviewsView
                 : view === "admin"

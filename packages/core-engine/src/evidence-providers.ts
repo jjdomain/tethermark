@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -20,6 +21,28 @@ type CapabilityStatus = NonNullable<EvidenceExecutionRecord["capability_status"]
 type ProviderFailure = { category: ProviderFailureCategory; capability: CapabilityStatus; message: string };
 
 let localBinaryExecutionProbe: Promise<ProviderFailure | null> | null = null;
+let bundledSemgrepConfigPath: Promise<string> | null = null;
+
+const BUNDLED_SEMGREP_RULESET = `rules:
+  - id: tethermark.generic.hardcoded-secret
+    message: Potential hardcoded secret or token material in source.
+    severity: WARNING
+    languages:
+      - generic
+    pattern-regex: (?i)(api[_-]?key|secret|token|password)\\s*[:=]\\s*['\\"][A-Za-z0-9_./+=-]{16,}['\\"]
+  - id: tethermark.generic.prompt-injection-surface
+    message: Prompt injection handling is referenced and should have an explicit control.
+    severity: INFO
+    languages:
+      - generic
+    pattern-regex: (?i)prompt\\s+injection
+  - id: tethermark.generic.shell-execution-surface
+    message: Shell or subprocess execution surface should be reviewed for static audit controls.
+    severity: INFO
+    languages:
+      - generic
+    pattern-regex: (?i)(child_process|subprocess|exec\\(|spawn\\(|shell=True)
+`;
 
 function emptyNormalized(resultType: NormalizedEvidenceSummary["result_type"], extra?: Partial<NormalizedEvidenceSummary>): NormalizedEvidenceSummary {
   return {
@@ -171,7 +194,27 @@ function classifyCommandFailure(stdout: string, stderr: string): ProviderFailure
   if (/timed out after \d+ms/i.test(combined)) {
     return { category: "runtime_error", capability: "available", message };
   }
+  if (/semgrep\.dev|SSLCertVerificationError|CERTIFICATE_VERIFY_FAILED|certificate verify failed|HTTPSConnectionPool/i.test(combined)) {
+    return {
+      category: "api_unavailable",
+      capability: "unavailable",
+      message: `Remote ruleset download failed (${message}). Configure Semgrep TLS trust or provide a local ruleset.`
+    };
+  }
   return null;
+}
+
+async function resolveSemgrepConfigPath(): Promise<string> {
+  const configured = process.env.HARNESS_SEMGREP_CONFIG?.trim();
+  if (configured) return configured;
+  if (!bundledSemgrepConfigPath) {
+    bundledSemgrepConfigPath = (async () => {
+      const configPath = path.join(os.tmpdir(), "tethermark-semgrep-rules.yml");
+      await fs.writeFile(configPath, BUNDLED_SEMGREP_RULESET, "utf8");
+      return configPath;
+    })();
+  }
+  return bundledSemgrepConfigPath;
 }
 
 async function detectLocalBinaryExecutionBlocked(): Promise<ProviderFailure | null> {
@@ -801,7 +844,8 @@ export async function executeEvidenceProvider(args: {
       }
     }
     case "semgrep": {
-      const command = ["scan", "--config", "auto", "--json", "--quiet", args.rootPath];
+      const semgrepConfig = await resolveSemgrepConfigPath();
+      const command = ["scan", "--config", semgrepConfig, "--json", "--metrics", "off", args.rootPath];
       if (localBinaryBlocked) {
         return skippedUnavailableRecord({
           provider_id: "semgrep",

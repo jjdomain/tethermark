@@ -132,6 +132,9 @@ async function deriveStageArtifacts(result: AuditResult): Promise<PersistedStage
     "eval-selection",
     "run-plan",
     "findings-pre-skeptic",
+    "finding-quality-pre-skeptic",
+    "finding-quality",
+    "handoffs",
     "score-summary",
     "observations"
   ];
@@ -492,6 +495,7 @@ export async function persistAuditResult(args: {
       notes_json: args.result.skeptic_review.notes,
       final_review: !!args.result.correction_result?.correction_pass_completed
     },
+    finding_quality: args.result.finding_quality,
     remediation_memo: remediationMemo,
     review_workflow: deriveInitialReviewWorkflow({
       run: {
