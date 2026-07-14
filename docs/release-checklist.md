@@ -1,6 +1,6 @@
-# Tethermark OSS Release Checklist
+# Tethermark Community Edition Release Checklist
 
-Use this checklist before tagging or publicly announcing an OSS release.
+Use this checklist before tagging or publicly announcing a Tethermark Community Edition release.
 
 ## 1. Verification Commands
 
@@ -40,11 +40,11 @@ Confirm:
 - auth info responds on `http://127.0.0.1:8787/auth/info`
 - web UI loads on `http://127.0.0.1:8788`
 - the web UI can fetch runs, settings, and auth metadata
-- when `HARNESS_ENABLE_ASSISTANT=1` is set, `GET /assistant/capabilities` returns enabled OSS capabilities
+- `GET /assistant/capabilities` returns enabled Community Edition capabilities by default, unless an explicit disable override is set
 
-## 3. End-to-End OSS Workflow Smoke Test
+## 3. End-To-End Community Edition Workflow Smoke Test
 
-Verify one full OSS operator path:
+Verify one full Community Edition operator path:
 
 1. Launch a local scan with the mock provider or a configured live provider.
 2. Run preflight and confirm the launch profile.
@@ -53,7 +53,7 @@ Verify one full OSS operator path:
 5. For a confirmed finding, open a remediation item, add a manual external issue/PR link, advance it to resolved with evidence, and verify the finding status updates without a separate manual status change.
 6. Download at least one executive summary and one SARIF or JSON export. Verify the SARIF can be used with the documented GitHub code scanning upload workflow.
 7. Confirm `GET /runs/:runId/exports` returns the documented export catalog.
-8. Open the run assistant, ask a run-level remediation question, verify citations/limitations render, and confirm that hosted-only connector actions are blocked in OSS.
+8. Open the run assistant, ask a run-level remediation question, verify citations/limitations render, and confirm that automatic Cloud connector actions are unavailable in Community Edition.
 9. Toggle dark/light mode once and verify the selected theme is persisted after reload.
 
 ## 4. Documentation Review
@@ -71,21 +71,21 @@ Specifically re-check:
 - auth mode/trust model wording
 - supported persistence modes
 - runtime limitations
-- assistant feature flag, model routing, fallback, and OSS/hosted boundaries
-- remediation workflow, manual OSS external links, and hosted connector/webhook boundary
+- assistant default-on behavior, explicit disable override, model routing, fallback, and Community Edition/Cloud boundaries
+- remediation workflow, manual Community Edition external links, and Cloud connector/webhook boundary
 - dark/light theme default and persistence
 - release verification commands
 - public API/export routes
 
-## 5. OSS Scope Check
+## 5. Community Edition Scope Check
 
 Before release, confirm the public docs still present these boundaries accurately:
 
-- OSS defaults to trusted self-hosting, not enterprise identity
+- Community Edition defaults to trusted self-hosting, not enterprise identity
 - `auth=none` is advisory governance only
-- `auth=api_key` is the enforced OSS auth mode
-- non-SQLite persistence is not yet part of the OSS release
-- OSS does not create GitHub issues or receive GitHub webhooks; hosted connector automation is documented separately
+- `auth=api_key` is the enforced Community Edition auth mode
+- non-SQLite persistence is not yet part of the Community Edition release
+- Community Edition does not create GitHub issues or receive GitHub webhooks; Tethermark Cloud connector automation is documented separately
 
 ## 6. Release Hygiene
 

@@ -1,32 +1,33 @@
-# Tethermark
+# Tethermark Community Edition
 
-An open, headless AI security audit harness for repositories and local AI/agent codebases.
+Tethermark Community Edition is the free, self-hosted edition of Tethermark: an open AI security audit harness for repositories and local AI/agent codebases.
 
 The harness combines deterministic evidence collection, LLM-guided planning and review, standards-based scoring, normalized persistence, and artifact export so runs are both queryable and debuggable.
 
 ## What It Does
 
 - Audits `path` and `repo` targets as the primary supported surfaces, with endpoint metadata reserved for reduced-confidence follow-up context.
-- Uses a staged workflow: target prep, planning, threat modeling, eval/tool selection, lane analysis, supervisor review, selective corrections, scoring, remediation, and human review workflow.
+- Uses a staged workflow: target prep, planning, threat modeling, eval/tool selection, lane analysis, pre-supervisor integrity packet, supervisor review, policy enforcement, post-supervisor integrity gate, scoring, remediation, and human review workflow.
 - Treats runtime validation as isolated AI/agent behavior testing against established controls, not broad production endpoint pentesting.
 - Supports synchronous runs plus queued async execution with polling, cancel/retry, and optional completion webhooks.
 - Persists normalized run data for querying while still exporting raw artifacts for audit debugging.
-- Supports OSS `local` persistence with SQLite-backed roots and metadata.
+- Supports Community Edition `local` persistence with SQLite-backed roots and metadata.
 - Exposes stable query APIs and separate best-effort artifact/debug APIs.
-- Includes a self-hostable OSS web UI for runs, jobs, reviews, artifacts, and persisted settings.
+- Includes a self-hostable Community Edition web UI for audits, findings, remediation, jobs, artifacts, and persisted settings.
 - Adds a governed self-learning loop for review-derived improvement candidates, dry-run experiments, explicit promotion, and rollback history. See [`docs/self-learning-governed-improvement-loop.md`](docs/self-learning-governed-improvement-loop.md).
+- Includes a product benchmark suite for Tethermark release validation against pinned public AI-agent and LLM-app repositories. See [`docs/product-benchmark-suite.md`](docs/product-benchmark-suite.md).
 
 ## Current Status
 
-Tethermark is in public OSS release-candidate shape for local and trusted-team self-hosting.
+Tethermark Community Edition is in public release-candidate shape for local and trusted-team self-hosting.
 
-- `local` is the OSS SQLite storage mode.
-- Hosted production storage is not an OSS database mode; the hosted product provides its own Supabase/Postgres adapter around the shared persistence contracts.
+- `local` is the Community Edition SQLite storage mode.
+- Tethermark Cloud production storage is not a Community Edition database mode; the Cloud product provides its own Supabase/Postgres adapter around the shared persistence contracts.
 - The default `.env.example` configuration uses the mock LLM runtime, so the repo can build and run without live model credentials.
-- OSS auth defaults to `none`, which is appropriate for solo operators and trusted internal teams. In that mode, review roles and assignments are advisory governance rather than hard identity enforcement.
-- The supported OSS path is end-to-end for repository and local-path audits: preflight, run execution, findings, review workflow, runtime follow-up, exports, SARIF upload, and manual external remediation links.
-- Runtime validation is intended for cloned or local targets that can be built and run in an isolated local/container/microVM environment with synthetic credentials and controlled tool backends.
-- The main remaining non-goals for OSS are enterprise identity, hosted notification infrastructure, and non-SQLite persistence backends.
+- Community Edition auth defaults to `none`, which is appropriate for solo operators and trusted internal teams. In that mode, review roles and assignments are advisory governance rather than hard identity enforcement.
+- The supported Community Edition path is end-to-end for repository and local-path audits: preflight, run execution, findings, review workflow, runtime follow-up, exports, SARIF upload, and manual external remediation links.
+- Runtime validation is a primary Community Edition capability for cloned or local targets through one user-facing **Local Runtime Sandbox**. Admin settings auto-resolve the strongest allowed local backend and gate runtime launch on readiness.
+- The main remaining non-goals for Community Edition are enterprise identity, Cloud notification infrastructure, and non-SQLite persistence backends.
 
 ## Target Scope
 
@@ -38,9 +39,11 @@ Primary targets:
 - private repositories or local clones that the operator is authorized to audit
 - local filesystem paths used for CI, internal review, or self-hosted assessment
 
-Runtime validation should run against isolated copies of those targets. The preferred path is to clone or mirror the target, build it inside a controlled container or microVM, inject fake secrets and simulated external services, execute AI-security eval packs, capture transcripts and tool-call evidence, and tear the environment down.
+Runtime validation should run against isolated copies of those targets. The preferred path is to clone or mirror the target, build it inside the Local Runtime Sandbox, inject fake secrets and simulated external services, execute AI-security eval packs, capture transcripts and tool-call evidence, and tear the environment down.
 
-Hosted or production endpoints are not a primary OSS claim. When an endpoint URL is supplied, it should be treated as scope/context or used only for explicitly allowed, non-destructive, reduced-confidence behavioral checks.
+Tethermark owns sandbox orchestration, readiness, policy snapshots, evidence, observability, and remediation linkage. It does not build a custom low-level isolation runtime. The Community Edition resolver uses gVisor, rootless Podman, Podman, Docker, Docker Desktop, or future lightweight process wrapping when available and allowed by Admin policy. Tethermark Cloud third-party sandbox providers are metered Cloud features and live outside this repository. See [`docs/runtime-sandbox-architecture.md`](docs/runtime-sandbox-architecture.md).
+
+Production endpoint testing is not a primary Community Edition claim. When an endpoint URL is supplied, it should be treated as scope/context or used only for explicitly allowed, non-destructive, reduced-confidence behavioral checks.
 
 ## Architecture
 
@@ -69,12 +72,18 @@ flowchart TD
     EVAL --> LANES["Lane Execution: repo posture, dependencies, code, agent/tool risks"]
     LANES --> TOOLS["Deterministic Evidence Providers: static tools, manifests, runtime probes"]
     TOOLS --> EVIDENCE["Normalized Evidence: locations, symbols, tool outputs, transcripts"]
-    EVIDENCE --> SUP["Supervisor / Skeptic Review: dedupe, confidence, conflicts"]
-    SUP --> CORR["Selective Corrections / Reuse Invalidation"]
-    CORR --> SCORE["Scoring, Finding Evaluation, Publishability"]
+    EVIDENCE --> CANDIDATES["Candidate Findings And Control Results"]
+    CANDIDATES --> PREQA["Pre-Supervisor Integrity Packet: evidence links, control hints, unsupported-claim flags"]
+    PREQA --> SUP["Supervisor Review: final semantic QA, dedupe, severity, control judgment"]
+    SUP --> CORR{"Selective Correction Needed?"}
+    CORR -->|"Yes"| REWORK["Selective Rerun / Reuse Invalidation"]
+    REWORK --> LANES
+    CORR -->|"No"| POLICY["Deterministic Policy Enforcement: hard overrides and release rules"]
+    POLICY --> POSTQA["Post-Supervisor Integrity Gate: hard evidence/control/runtime invariants"]
+    POSTQA --> SCORE["Scoring, Finding Evaluation, Publishability"]
     SCORE --> REMMEMO["Remediation Agent: memo, checklist, prioritized work"]
     SCORE --> PERSIST["Normalized Persistence: runs, findings, evidence, review, remediation"]
-    SCORE --> ART["Artifact Store: raw/debug artifacts"]
+    POSTQA --> ART["Artifact Store: raw/debug artifacts"]
 
     PERSIST --> APIQ["Stable Query APIs"]
     ART --> DEBUG["Artifact / Debug APIs"]
@@ -103,14 +112,14 @@ flowchart TD
     PERSIST --> HISTORY
 
     UIREVIEW --> EXPORTS["Exports: executive summary, review bundle, JSON, Markdown, SARIF"]
-    EXPORTS --> SARIF["OSS GitHub Code Scanning via SARIF upload"]
-    API --> GENERICWEBHOOK["OSS Generic Completion Webhooks"]
+    EXPORTS --> SARIF["Community GitHub Code Scanning via SARIF upload"]
+    API --> GENERICWEBHOOK["Community Completion Webhooks"]
 
-    REMITEM -.->|Hosted-only connector path| HOSTED["Hosted Control Plane (`D:/ai-security-audit-engine-hosted`)"]
+    REMITEM -.->|Cloud connector path| HOSTED["Tethermark Cloud Control Plane (`D:/ai-security-audit-engine-hosted`)"]
     HOSTED --> GHVERIFY["GitHub/Jira/Slack verification and RBAC policy"]
     GHVERIFY --> GHISSUE["Create issue, comment, label, or notification"]
     GHISSUE --> GHEVENT["Signed webhook ingestion"]
-    GHEVENT --> SYNC["Hosted remediation external-link sync"]
+    GHEVENT --> SYNC["Cloud remediation external-link sync"]
     SYNC --> READY
 ```
 
@@ -119,8 +128,9 @@ flowchart TD
 - `apps/cli`: command-line entrypoint for scans, reconstruction, and maintenance workflows
 - `apps/api-server`: HTTP API for runs, targets, stats, observability, and artifact access
 - `apps/mcp-server`: minimal MCP bridge for audit execution
-- `apps/web-ui`: self-hostable OSS web interface for dashboard, runs, reviews, jobs, artifacts, and settings
+- `apps/web-ui`: self-hostable Community Edition web interface for dashboard, audits, findings, remediation, jobs, artifacts, and settings
 - `packages/core-engine`: orchestration, stages, standards audit, persistence, sandboxing, and contracts
+- `packages/validation-runner`: Local Runtime Sandbox provider contracts, backend resolution, launch gating, and runtime policy construction
 - `packages/agent-runtime`: agent execution wrapper
 - `packages/llm-provider`: provider abstraction and mock/live model routing
 - `packages/prompt-registry`: structured prompts and schemas for planner, eval selection, supervisor, and remediation
@@ -145,6 +155,16 @@ npm run scan -- onboard
 ```
 
 Onboarding creates/checks `.env`, runs `doctor`, explains external tool readiness, and prints the next `setup-tools`, fixture validation, and UI commands.
+
+Runtime readiness is part of onboarding. Use:
+
+```bash
+npm run scan -- setup-runtime --dry-run
+npm run scan -- runtime-doctor
+npm run scan -- validate-runtime-fixtures
+```
+
+The web UI exposes Admin -> Runtime Sandbox for selected backend, candidate probes, warning/blocker status, network/resource defaults, and setup guidance.
 
 Future public one-line installers:
 
@@ -176,6 +196,15 @@ For a release-candidate verification pass, run:
 ```bash
 npm run release:check
 ```
+
+Runtime-specific release gates:
+
+```bash
+npm run production:runtime-readiness
+npm run production:harness-readiness
+```
+
+`production:runtime-readiness` requires a launchable Local Runtime Sandbox backend. Static audits are still valid when runtime readiness is blocked, but runtime-validated audits are not launchable.
 
 ### 3. Run a Local Static Audit
 
@@ -308,23 +337,37 @@ Example consumers for executive summaries, run comparisons, runtime follow-up qu
 
 Export maintenance is explicit too: run `npm run exports:check` to validate the current golden fixtures and `npm run exports:refresh` when intentionally updating the checked-in export snapshots.
 
-## OSS Support Boundary
+Product benchmark validation is separate from user target history. List or dry-run the default public benchmark cases with:
 
-Tethermark OSS is intended for:
+```bash
+npm run benchmark:product
+```
+
+Execute the default pinned public benchmark suite with:
+
+```bash
+npm run benchmark:product:execute
+```
+
+See [`docs/product-benchmark-suite.md`](docs/product-benchmark-suite.md) for suite design, pass/fail semantics, and baseline comparison.
+
+## Community Edition Support Boundary
+
+Tethermark Community Edition is intended for:
 
 - solo developers
 - trusted internal security engineers or small teams
 - self-hosted API and web UI deployments
 - manual or guarded outbound GitHub sharing
 
-Tethermark OSS is not claiming:
+Tethermark Community Edition is not claiming:
 
 - enterprise SSO or user lifecycle management
 - internet-grade multi-user security when `auth=none`
-- hosted notification routing or managed ops workflows
+- Cloud notification routing or managed ops workflows
 - non-SQLite production persistence backends
 
-If you need enforced auth in OSS, use `HARNESS_API_AUTH_MODE=api_key` and put the service behind your own trusted network or reverse proxy controls.
+If you need enforced auth in Community Edition, use `HARNESS_API_AUTH_MODE=api_key` and put the service behind your own trusted network or reverse proxy controls.
 
 ## Release Checklist
 
@@ -334,11 +377,11 @@ The maintainer release checklist lives at [`docs/release-checklist.md`](docs/rel
 2. `npm run api`
 3. `npm run web`
 4. complete one local scan plus one web-UI review/export smoke path
-5. confirm the documented OSS limitations still match reality
+5. confirm the documented Community Edition limitations still match reality
 
-## OSS Auth Model
+## Community Edition Auth Model
 
-The OSS stack supports practical self-hosting modes rather than full enterprise identity.
+Community Edition supports practical self-hosting modes rather than full enterprise identity.
 
 - `auth=none`: default local/trusted mode for solo users and trusted internal teams
 - `auth=api_key`: simple enforced service/API authentication for self-hosted automation and internal deployments
@@ -372,14 +415,16 @@ The current runtime follows this high-level sequence:
 3. Run planner, threat-model, and eval-selection agents.
 4. Allocate audit lanes and execute deterministic evidence providers.
 5. Normalize evidence into findings, control results, lane outputs, and scores.
-6. Run the supervisor agent for QA and optionally trigger selective reruns.
-7. Generate publishability decisions and remediation guidance.
-8. Persist normalized records and export raw artifacts.
-9. Accept reviewer actions and track explicit review state transitions when human review is required.
+6. Build the pre-supervisor integrity packet with deterministic evidence-link checks, control-mapping hints, and unsupported-claim flags.
+7. Run the supervisor agent as the final semantic QA reviewer; it can approve findings, drop/downgrade findings, or trigger selective reruns.
+8. Enforce deterministic policy rules and run the post-supervisor integrity gate for hard invariants such as missing evidence, unknown controls, and static/runtime overclaims.
+9. Generate publishability decisions and remediation guidance.
+10. Persist normalized records and export raw artifacts.
+11. Accept reviewer actions and track explicit review state transitions when human review is required.
 
 ### Publisher Module
 
-The OSS UI keeps public publishing controls disabled by default. Normal users see finding triage, reports, and local exports, but not publication-safety overrides intended for downstream editorial workflows.
+Community Edition keeps public publishing controls disabled by default. Normal users see finding triage, reports, and local exports, but not publication-safety overrides intended for downstream editorial workflows.
 
 The optional publisher module is reserved for AI Security Base-style operation, where audit results are reviewed for public website/newsletter use. To enable those UI controls in a private deployment, set `window.HARNESS_WEB_UI_CONFIG.publisher.enabled` to `true` in `apps/web-ui/static/config.js`.
 
@@ -403,16 +448,18 @@ The harness now has an explicit boundary between queryable state and archival de
 
 ## Runtime Limitations
 
-The OSS build has meaningful runtime validation support, but it is intentionally constrained:
+Community Edition has meaningful runtime validation support, but it is intentionally constrained:
 
-- bounded host execution is opt-in via `HARNESS_ENABLE_HOST_SANDBOX_EXECUTION=1`
+- runtime launch is gated by Local Runtime Sandbox readiness
+- internal backend choice is automatic and admin-configurable; normal launch flows show only Local Runtime Sandbox
+- Docker Desktop on Windows/macOS is a warning backend with weaker isolation claims than Linux gVisor/rootless Podman
 - local tool execution depends on installed binaries and host child-process permission
 - Python worker-backed evidence depends on a working local Python runtime
 - runtime probing is framework-aware for common Node and Python patterns, but not every stack is covered
 - runtime checks should use isolated cloned/local targets, fake credentials, and simulated service/tool backends where possible
 - production endpoint testing is out of scope except for explicitly authorized, non-destructive, reduced-confidence probes
 - runtime evidence should map back to AI-security controls such as OWASP LLM, MITRE ATLAS, NIST AI RMF, and Tethermark eval-pack controls
-- OSS database mode is limited to SQLite-backed `local`; hosted production storage belongs in the hosted Supabase/Postgres adapter.
+- Community Edition database mode is limited to SQLite-backed `local`; Cloud production storage belongs in the Tethermark Cloud Supabase/Postgres adapter.
 
 ## LLM Configuration
 
@@ -446,7 +493,7 @@ Agent-specific overrides are supported for planner, threat model, eval selection
 
 ## Web UI Settings
 
-The OSS web UI persists operator settings and attached policy/reference documents through the same local SQLite persistence layer used by the engine.
+The Community Edition web UI persists operator settings and attached policy/reference documents through the same local SQLite persistence layer used by the engine.
 
 Current settings sections:
 
@@ -457,17 +504,17 @@ Current settings sections:
 - integrations
 - test-mode presets
 
-The OSS audit engine treats governance settings as local execution policy. The `Gates` tab decides when an audit launch, finding, disposition, or output requires human control. The `Policy Packs` tab manages the portable rule/control contract used by audit runs. The `Reference Documents` tab attaches contextual policy, standard, runbook, and exception material for audits and reviewers. In integrated deployments, an external assurance control plane can become the authoritative system for policy lifecycle, evidence retention, accepted risk, recertification, and audit packets while the OSS engine continues to persist the resolved policy and document snapshots used by each run.
+The Community Edition audit engine treats governance settings as local execution policy. The `Gates` tab decides when an audit launch, finding, disposition, or output requires human control. The `Policy Packs` tab manages the portable rule/control contract used by audit runs. The `Reference Documents` tab attaches contextual policy, standard, runbook, and exception material for audits and reviewers. In integrated deployments, an external assurance control plane can become the authoritative system for policy lifecycle, evidence retention, accepted risk, recertification, and audit packets while Community Edition continues to persist the resolved policy and document snapshots used by each run.
 
-The integrations section now supports safe outbound preview settings for GitHub-style workflows. The OSS surface prepares preview payloads through `/runs/:runId/outbound-preview`, records explicit per-run approval through `/runs/:runId/outbound-approval`, and stores a manual-send handoff through `/runs/:runId/outbound-send`. Token-backed repository verification and external GitHub/Jira/Slack/email delivery are hosted-only; OSS `/runs/:runId/outbound-verification` and `/runs/:runId/outbound-delivery` return `hosted_only` guidance instead of sending data externally.
+The integrations section now supports safe outbound preview settings for GitHub-style workflows. Community Edition prepares preview payloads through `/runs/:runId/outbound-preview`, records explicit per-run approval through `/runs/:runId/outbound-approval`, and stores a manual-send handoff through `/runs/:runId/outbound-send`. Token-backed repository verification and external GitHub/Jira/Slack/email delivery are Tethermark Cloud features; Community Edition `/runs/:runId/outbound-verification` and `/runs/:runId/outbound-delivery` return guidance instead of sending data externally.
 
 These records are available through the `/ui/settings` and `/ui/documents` API routes and are intended to back self-hosted operator preferences rather than browser-local-only state.
 
 ## Known Gaps
 
-- Hosted Supabase/Postgres storage is implemented outside the OSS repo and should not be configured through OSS `HARNESS_DB_MODE`.
+- Tethermark Cloud Supabase/Postgres storage is implemented outside this repository and should not be configured through Community Edition `HARNESS_DB_MODE`.
 - The current implementation has eval selection, runtime validation candidates, and tool/evidence selection, but not a dedicated standalone `eval-runner` package.
-- The OSS product has trusted-mode governance for review roles and assignments, but it does not yet include full built-in user login/session management for untrusted multi-user deployments.
+- Community Edition has trusted-mode governance for review roles and assignments, but it does not yet include full built-in user login/session management for untrusted multi-user deployments.
 
 ## Docs
 

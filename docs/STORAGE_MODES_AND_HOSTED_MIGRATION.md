@@ -1,6 +1,6 @@
-# Storage and Hosted Migration
+# Storage And Tethermark Cloud Migration
 
-The OSS repository defaults to one zero-config runtime persistence mode:
+The Community Edition repository defaults to one zero-config runtime persistence mode:
 
 - `local`
 
@@ -9,7 +9,7 @@ It also supports remote logical-record persistence through Postgres-compatible d
 - `postgres`
 - `supabase`
 
-## OSS Local Storage
+## Community Edition Local Storage
 
 - SQLite files under `.artifacts/state/local-db` by default.
 - `HARNESS_LOCAL_DB_ROOT` can point the SQLite store at an operator-managed directory.
@@ -37,7 +37,7 @@ The apply path shells out to `psql`; install PostgreSQL client tools or set `HAR
 
 The bootstrap creates:
 
-- generic `records` and `record_schemas` tables compatible with the OSS logical-record model
+- generic `records` and `record_schemas` tables compatible with the Community Edition logical-record model
 - relational self-learning tables from the shared manifest
 - `ui_settings` with `learning_json`
 
@@ -58,11 +58,11 @@ npm run scan -- scan path . --mode static --db-mode supabase
 
 The remote runtime adapter stores the same logical records as local SQLite in `records.payload_json` and keeps the `record_schemas` manifest synchronized. If a remote mode is selected without a configured database URL, the app fails fast with `postgres_database_url_required`.
 
-## Hosted Storage Path
+## Tethermark Cloud Storage Path
 
-The hosted product owns Supabase/PostgREST or another Postgres-backed service for production tenant storage. Hosted should import the shared OSS engine contracts, preserve the core audit records, run the shared bootstrap migration, and add hosted-only tenancy, identity, governance, billing, and operations tables.
+Tethermark Cloud owns Supabase/PostgREST or another Postgres-backed service for production tenant storage. Tethermark Cloud should import the shared Community Edition engine contracts, preserve the core audit records, run the shared bootstrap migration, and add Cloud-only tenancy, identity, governance, billing, and operations tables.
 
-The shared core exports `SELF_LEARNING_TABLE_DEFINITIONS` and `SELF_LEARNING_POSTGRES_DDL` from `packages/core-engine/src/persistence/schema-manifest.ts`. Hosted Postgres migrations should use those definitions for:
+The shared core exports `SELF_LEARNING_TABLE_DEFINITIONS` and `SELF_LEARNING_POSTGRES_DDL` from `packages/core-engine/src/persistence/schema-manifest.ts`. Tethermark Cloud Postgres migrations should use those definitions for:
 
 - `learning_events`
 - `learning_candidates`

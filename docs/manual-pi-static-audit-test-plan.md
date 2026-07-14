@@ -1,6 +1,6 @@
 # Manual Pi Static Audit Test Plan
 
-Use this plan to manually validate the OSS static audit workflow before implementing or releasing local runtime sandbox support. The goal is to confirm that Tethermark behaves like a credible standalone AI security harness: findings are evidence-grounded, mapped to controls, reviewable, remediable, exportable, and explainable through the assistant.
+Use this plan to manually validate the Tethermark Community Edition static audit workflow before implementing or releasing local runtime sandbox support. The goal is to confirm that Tethermark behaves like a credible standalone AI security harness: findings are evidence-grounded, mapped to controls, reviewable, remediable, exportable, and explainable through the assistant.
 
 Automated Pi E2E scripts remain useful smoke/regression checks. This manual plan validates agent judgment quality, evidence quality, control mapping quality, and end-to-end remediation workflow quality.
 
@@ -17,17 +17,18 @@ The first manual validation should use the mock provider so behavior is determin
 
 ## 1. Pre-Test Setup
 
-Start from a clean local OSS environment.
+Start from a clean local Community Edition environment.
 
 Set:
 
 ```powershell
-$env:HARNESS_ENABLE_ASSISTANT = "1"
 $env:HARNESS_API_AUTH_MODE = "none"
 $env:HARNESS_LOCAL_DB_ROOT = "<manual-test-work-root>\\local-db"
 ```
 
-Build and start the OSS API and web UI.
+The Community Edition assistant is enabled by default. If no usable assistant/global LLM is configured, validate that the assistant drawer remains available and reports deterministic evidence-grounded fallback limitations instead of failing closed.
+
+Build and start the Community Edition API and web UI.
 
 Verify:
 
@@ -76,12 +77,16 @@ Validate:
 - Runtime probes are not executed.
 - Agent stages explain what they assessed and what they could not assess.
 - The audit records limitations when evidence is missing.
+- The pre-supervisor integrity packet records evidence-link status, control-mapping hints, and unsupported-claim flags before supervisor review.
+- The supervisor review records whether findings were approved, downgraded, dropped, or sent through selective correction.
+- The post-supervisor integrity gate records only hard blockers after supervisor review, not a second semantic override of supervisor judgment.
 
 Pass criteria:
 
 - The plan matches static audit intent.
 - Agent reasoning is specific to the repo and does not invent runtime behavior.
 - Limitations are visible and understandable.
+- Supervisor decisions can be traced back to the pre-supervisor packet, evidence, and corrected artifacts where applicable.
 
 ## 4. Validate Findings
 
@@ -214,7 +219,7 @@ For a needs-validation finding:
 
 - Trigger a capable-environment follow-up or rerun request.
 - Confirm that the follow-up is linked to the finding.
-- Confirm that OSS does not falsely claim runtime validation completed if no runtime sandbox exists.
+- Confirm that Community Edition does not falsely claim runtime validation completed if no runtime sandbox exists.
 - Start a follow-up static rerun if appropriate.
 - Compare current run vs prior run for recurring, resolved, and new findings.
 
@@ -245,7 +250,7 @@ Expected behavior:
 - Low-evidence answers state limitations.
 - Draft actions are separated from confirmed actions.
 - Internal state-changing actions require confirmation.
-- GitHub/Jira/Slack/email execution remains unavailable in OSS and is presented as draft/manual only.
+- GitHub/Jira/Slack/email execution remains unavailable in Community Edition and is presented as draft/manual only.
 - Assistant history is scoped to the selected run or target, not one unbounded global chat.
 
 Pass criteria:
@@ -284,12 +289,13 @@ The Pi manual static audit passes only if all of these are true:
 - Pinned commit provenance is recorded.
 - Findings are evidence-grounded.
 - Findings map to controls.
+- Pre-supervisor integrity, supervisor review, policy enforcement, and post-supervisor integrity are all visible in observability or artifacts.
 - Tool failures/skips are visible and not treated as passes.
 - Review decisions persist and are auditable.
 - Confirmed findings can move into remediation.
 - Remediation actions update finding/remediation state automatically where applicable.
 - Follow-up and rerun history links back to findings.
-- Assistant answers cite evidence and respect OSS/hosted boundaries.
+- Assistant answers cite evidence and respect Community Edition/Cloud boundaries.
 - Exports accurately reflect the run, findings, review, remediation, and limitations.
 
 Critical failure conditions:
@@ -298,7 +304,7 @@ Critical failure conditions:
 - Any finding without evidence or control mapping.
 - Static audit executing target code.
 - Runtime validation presented as complete without runtime execution.
-- Assistant executing external hosted-only actions in OSS.
+- Assistant executing automatic external Cloud-only actions in Community Edition.
 - Remediation closure without any documented verification or closure evidence.
 
 ## Test Record Template

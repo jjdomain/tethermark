@@ -1,6 +1,6 @@
 # Upload Tethermark SARIF To GitHub Code Scanning
 
-OSS Tethermark can export SARIF so GitHub can display audit findings in the repository Security tab. This is the recommended OSS GitHub path because it does not require Tethermark to hold a GitHub token or post issues/comments directly.
+Tethermark Community Edition can export SARIF so GitHub can display audit findings in the repository Security tab. This is the recommended Community Edition GitHub path because it does not require Tethermark to hold a GitHub token or post issues/comments directly.
 
 GitHub's supported integration path for third-party scanners is SARIF upload through code scanning. See GitHub's official guide: https://docs.github.com/en/code-security/code-scanning/integrating-with-code-scanning/uploading-a-sarif-file-to-github
 
@@ -53,6 +53,6 @@ If the SARIF is produced outside the workflow, place it in the repository worksp
 
 ## Product Boundary
 
-OSS does not create GitHub issues, post PR comments, or listen for GitHub webhooks. Use SARIF upload, manual issue/PR links in remediation items, and assistant-drafted payloads for local workflows.
+Community Edition does not create GitHub issues, post PR comments, or listen for GitHub webhooks. Use SARIF upload, manual issue/PR links in remediation items, and assistant-drafted payloads for local workflows.
 
-Hosted Tethermark owns GitHub App installation, repository verification, issue/comment/label/check delivery, webhook sync, and automatic remediation state transitions from GitHub events.
+Tethermark Cloud owns GitHub App installation, repository verification, issue/comment/label/check delivery, webhook sync, and automatic remediation state transitions from GitHub events.

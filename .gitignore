@@ -5,6 +5,7 @@ dist/
 .npm-cache/
 .tmp/
 .git-home/
+.codex/status.*
 
 .env
 .env.local

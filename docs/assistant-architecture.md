@@ -1,36 +1,28 @@
 # AI Audit Assistant Architecture
 
-Tethermark's assistant is split between the OSS engine layer and hosted platform extensions.
+Tethermark's assistant is split between the Community Edition engine layer and Tethermark Cloud platform extensions.
 
-## Enabling OSS Assistant
+## Community Edition Assistant Availability
 
-The OSS assistant is feature-flagged. Start the local stack with:
+The Community Edition assistant is enabled by default, like the other local audit agents. It uses persisted Tethermark audit data and the configured assistant/global LLM settings.
 
-```bash
-HARNESS_ENABLE_ASSISTANT=1 npm run oss
-```
+If no usable assistant LLM is configured or the configured model cannot be reached, the chat drawer remains available and returns deterministic evidence-grounded fallback answers with limitations. Operators should see this as a model-configuration warning inside the assistant, not as a disabled feature.
 
-Windows PowerShell:
+Administrators can explicitly disable assistant routes by setting `HARNESS_DISABLE_ASSISTANT=1` or `HARNESS_ENABLE_ASSISTANT=0`. When disabled this way, `/assistant/*` routes return `assistant_disabled`. If the web UI reports that assistant routes are missing, rebuild and restart the API server so it picks up the latest backend routes.
 
-```powershell
-$env:HARNESS_ENABLE_ASSISTANT='1'; npm run oss
-```
+## Community Edition Boundary
 
-When the flag is off, `/assistant/*` routes return `assistant_disabled`. If the web UI reports that assistant routes are missing, rebuild and restart the API server so it picks up the latest backend routes and environment.
+Community Edition ships the assistant as a local, evidence-grounded interface over one self-hosted installation. It can audit many repos or paths, but assistant sessions are scoped to a selected run or target.
 
-## OSS Boundary
-
-OSS ships the assistant as a local, evidence-grounded interface over one self-hosted installation. It can audit many repos or paths, but assistant sessions are scoped to a selected run or target.
-
-Enabled OSS capabilities:
+Enabled Community Edition capabilities:
 
 - read audit evidence, findings, review state, exports, and target history
 - draft reviewer-facing rationale, remediation guidance, and outbound payloads
 - confirm bounded internal actions, such as preparing exports, saving finding dispositions, adding comments, launching runs, retrying or canceling jobs, and queueing runtime follow-ups when existing backend rules allow it
 
-External connector execution remains draft-only in OSS. The assistant may prepare a payload, but it does not create GitHub issues, post PR comments, listen for GitHub webhooks, or send Jira, Slack, or email actions. For GitHub code scanning, OSS uses SARIF export and upload rather than connector execution.
+External connector execution remains draft-only in Community Edition. The assistant may prepare a payload, but it does not create GitHub issues, post PR comments, listen for GitHub webhooks, or send Jira, Slack, or email actions. For GitHub code scanning, Community Edition uses SARIF export and upload rather than connector execution.
 
-## OSS Model Routing And Fallback
+## Community Edition Model Routing And Fallback
 
 The assistant uses the same persisted audit data as the run detail UI. It does not ask the model to invent audit state.
 
@@ -39,7 +31,7 @@ Model selection order:
 1. If Settings -> LLM -> Assistant Model is set to inherit, the assistant uses the global default provider/model.
 2. If an assistant-specific provider/model is configured, the assistant uses that override.
 3. Environment defaults can prefill assistant settings through `ASSISTANT_LLM_PROVIDER` and `ASSISTANT_LLM_MODEL`.
-4. If no usable assistant LLM is available, OSS returns deterministic evidence-grounded fallback answers.
+4. If no usable assistant LLM is available, Community Edition returns deterministic evidence-grounded fallback answers.
 
 The deterministic fallback is intentional. It can summarize the selected run, cite findings and evidence, and explain limits without relying on model inference. It should be treated as lower fluency but safer than returning unsupported claims.
 
@@ -51,7 +43,7 @@ Assistant responses include:
 - `proposed_actions`: typed actions requiring confirmation
 - `limitations`: explicit gaps when evidence is missing or the selected scope is too narrow
 
-## OSS UI Behavior
+## Community Edition UI Behavior
 
 The run detail assistant opens as a right-side drawer. The drawer intentionally stays secondary to the canonical audit UI:
 
@@ -61,13 +53,13 @@ The run detail assistant opens as a right-side drawer. The drawer intentionally 
 - suggested prompts appear only as starting points
 - mutating proposals require explicit confirmation before execution
 
-The composer does not expose attachment or permission icons in OSS. File attachment should wait for a real ingestion path that can persist, scan, and cite uploaded context. Permissions belong in Settings/Admin and backend action checks, not in per-message UI controls.
+The composer does not expose attachment or permission icons in Community Edition. File attachment should wait for a real ingestion path that can persist, scan, and cite uploaded context. Permissions belong in Settings/Admin and backend action checks, not in per-message UI controls.
 
-Dark mode is app-level, not assistant-specific. The default OSS web UI theme is dark, with a sidebar toggle for light mode. The theme preference is stored in local browser storage.
+Dark mode is app-level, not assistant-specific. The default Community Edition web UI theme is dark, with a sidebar toggle for light mode. The theme preference is stored in local browser storage.
 
 ## Confirmed Internal Actions
 
-OSS assistant actions are intentionally bounded to local Tethermark operations. Supported confirmed actions include:
+Community Edition assistant actions are intentionally bounded to local Tethermark operations. Supported confirmed actions include:
 
 - adding review comments
 - saving finding dispositions when backend validation allows it
@@ -79,9 +71,9 @@ OSS assistant actions are intentionally bounded to local Tethermark operations. 
 
 Every confirmed or rejected proposal writes an assistant action execution record. The audit trail includes actor, timestamp, original request, proposed payload, confirmation result, and before/after state when applicable.
 
-## OSS Limitations
+## Community Edition Limitations
 
-OSS must not:
+Community Edition must not:
 
 - execute external GitHub/Jira/Slack/email/webhook sends
 - create GitHub issues or update Tethermark from GitHub webhook state
@@ -91,30 +83,30 @@ OSS must not:
 - use assistant memory across projects or organizations
 - run autonomous scheduled assistant workflows
 
-Hosted-only scope requests return `hosted_only`.
+Cloud-only scope requests return the stable `hosted_only` compatibility code.
 
-## Hosted Extension Boundary
+## Tethermark Cloud Extension Boundary
 
-Hosted implementations should import the shared assistant interfaces from `packages/core-engine/src/assistant.ts` and add platform-specific adapters outside the OSS repo.
+Cloud implementations should import the shared assistant interfaces from `packages/core-engine/src/assistant.ts` and add platform-specific adapters outside the Community Edition repository.
 
-Hosted should replace or extend:
+Tethermark Cloud should replace or extend:
 
 - `AssistantStorage` with a Supabase/Postgres implementation
 - `AssistantContextBuilder` with project, workspace, organization, owner, SLA, connector-health, and historical trend context
 - `AssistantToolRegistry` with RBAC-aware external and autonomous tools
 - `AssistantProvider` with hosted model/provider routing and policy-aware memory
 
-Hosted remediation should add a GitHub/Jira connector layer outside OSS. The hosted layer should create issues only after user confirmation and permission checks, subscribe to signed GitHub App webhooks, record issue/PR/merge events, and queue validation audits. GitHub issue closure or PR merge should move a remediation item to `fix_merged` or `verification_pending`, not directly to `resolved`. Tethermark should mark `resolved` only after a validation run no longer reproduces the finding, or after an explicit accepted-risk/suppression path.
+Tethermark Cloud remediation should add a GitHub/Jira connector layer outside Community Edition. The Cloud layer should create issues only after user confirmation and permission checks, subscribe to signed GitHub App webhooks, record issue/PR/merge events, and queue validation audits. GitHub issue closure or PR merge should move a remediation item to `fix_merged` or `verification_pending`, not directly to `resolved`. Tethermark should mark `resolved` only after a validation run no longer reproduces the finding, or after an explicit accepted-risk/suppression path.
 
-The OSS API and UI must stay wired only to the shared interfaces. Hosted-only tools are added through `AssistantToolRegistryExtension` so the private hosted layer can register connector and autonomous tools without scattering `hosted` conditionals through OSS handlers.
+The Community Edition API and UI must stay wired only to the shared interfaces. Cloud-only tools are added through `AssistantToolRegistryExtension` so the private Cloud layer can register connector and autonomous tools without scattering Cloud conditionals through Community Edition handlers.
 
 ## Capability Matrix
 
-| Capability | OSS | Hosted |
+| Capability | Community Edition | Tethermark Cloud |
 | --- | --- | --- |
 | Run Q&A | yes | yes |
 | Target-history Q&A | yes | yes |
-| Project/workspace/org Q&A | no, returns `hosted_only` | yes, RBAC scoped |
+| Project/workspace/org Q&A | no, returns `hosted_only` compatibility code | yes, RBAC scoped |
 | Draft triage/remediation/export text | yes | yes |
 | Confirm internal actions | yes | yes |
 | Create/update GitHub/Jira issues | no, draft/manual link only | yes, permission and connector gated |
@@ -130,7 +122,7 @@ Assistant-confirmed actions can feed the governed self-learning loop only when t
 
 ## Supabase Tables
 
-Hosted Supabase should mirror the OSS assistant records:
+Tethermark Cloud Supabase should mirror the Community Edition assistant records:
 
 - `assistant_sessions`
 - `assistant_messages`
@@ -138,7 +130,7 @@ Hosted Supabase should mirror the OSS assistant records:
 - `assistant_action_proposals`
 - `assistant_action_executions`
 
-Hosted-only tables can add:
+Cloud-only tables can add:
 
 - `assistant_memories`
 - `assistant_schedules`
@@ -147,7 +139,7 @@ Hosted-only tables can add:
 - `connector_delivery_attempts`
 - `hosted_remediation_links`
 
-Hosted rows should include tenant fields such as `organization_id`, `workspace_id`, `project_id`, and `actor_id`, with RLS policies enforcing scoped read/write access. Confirmed assistant actions must go through the same backend permission checks as normal UI/API actions.
+Cloud rows should include tenant fields such as `organization_id`, `workspace_id`, `project_id`, and `actor_id`, with RLS policies enforcing scoped read/write access. Confirmed assistant actions must go through the same backend permission checks as normal UI/API actions.
 
 Minimum hosted column contract:
 

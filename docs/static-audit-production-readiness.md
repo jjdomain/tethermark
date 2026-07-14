@@ -19,7 +19,11 @@ That command covers:
 - Pi Agent static API E2E at commit `3d9e14d7482f4a99d5224926099bec0d17ff86fd`
 - Pi Agent browser/UI E2E with review, triage, disposition, remediation, and approval workflow coverage
 
-The automated release gate is necessary but not sufficient for final OSS static-audit release approval. Before promoting a production release, run the manual Pi Agent validation plan in [Manual Pi Static Audit Test Plan](./manual-pi-static-audit-test-plan.md). The manual plan checks agent judgment quality, evidence grounding, control mapping, remediation closure, follow-up behavior, exports, and assistant answers.
+The automated release gate is necessary but not sufficient for final Community Edition static-audit release approval. Before promoting a production release, run the manual Pi Agent validation plan in [Manual Pi Static Audit Test Plan](./manual-pi-static-audit-test-plan.md). The manual plan checks agent judgment quality, evidence grounding, control mapping, remediation closure, follow-up behavior, exports, and assistant answers.
+
+Finding integrity and supervisor QA are documented in [Finding Integrity And Supervisor QA Workflow](./finding-qa-validator.md). That document explains the pre-supervisor evidence packet, supervisor authority, deterministic policy enforcement, post-supervisor integrity gate, duplicate/conflict handling, and benchmark regression role.
+
+The product benchmark suite is documented in [Tethermark Product Benchmark Suite](./product-benchmark-suite.md). It is not required for normal user repo audits; it is a maintainer/release validation suite for pinned public AI-agent and LLM-app targets.
 
 Run this separately on a workstation that has completed Codex ChatGPT sign-in:
 
@@ -82,7 +86,7 @@ The UI E2E must cover:
 - request capable-environment follow-up when validation is useful
 - create and update finding disposition
 - open a local remediation item for a finding
-- record manual external issue or PR links without sending to GitHub from OSS
+- record manual external issue or PR links without sending to GitHub from Community Edition
 - advance remediation to fix-in-progress and resolved-with-evidence, verifying that review status updates automatically
 - add review comment
 - inspect remediation memo
@@ -102,7 +106,7 @@ Record the following before promotion:
 - Pi UI E2E run ID
 - static tool readiness summary
 - export schema/snapshot status
-- assistant route/capability status when `HARNESS_ENABLE_ASSISTANT=1`
+- assistant route/capability status with default-on Community Edition assistant behavior
 - remediation item lifecycle status, including automatic review action updates
 - theme smoke result for dark and light mode
 - any explicit skipped tool state and its reason

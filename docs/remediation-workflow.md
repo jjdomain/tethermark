@@ -2,11 +2,11 @@
 
 Tethermark separates finding review from remediation closure.
 
-## OSS Workflow
+## Community Edition Workflow
 
-OSS does not have automatic GitHub integration. Confirmed findings can create local remediation items, and operators can paste manual external issue, PR, commit, and validation-run links. OSS can also export SARIF for GitHub code scanning upload; see [GitHub SARIF Upload](./github-sarif-upload.md).
+Community Edition does not have automatic GitHub integration. Confirmed findings can create local remediation items, and operators can paste manual external issue, PR, commit, and validation-run links. Community Edition can also export SARIF for GitHub code scanning upload; see [GitHub SARIF Upload](./github-sarif-upload.md).
 
-Recommended OSS flow:
+Recommended Community Edition flow:
 
 1. Triage the finding.
 2. For real issues, choose `Confirmed`.
@@ -28,9 +28,9 @@ Remediation item actions write review actions automatically so users do not have
 
 False positives and not-applicable findings use suppressions. Accepted risk uses waivers. These are exception paths, not remediation closure paths.
 
-## Hosted Workflow
+## Tethermark Cloud Workflow
 
-Hosted should add connector automation outside OSS:
+Tethermark Cloud should add connector automation outside Community Edition:
 
 - create GitHub/Jira issues after confirmation and RBAC checks
 - record issue IDs, URLs, labels, owner/team mappings, and SLA state
@@ -43,14 +43,14 @@ GitHub issue closure or PR merge should not directly mark a Tethermark finding a
 
 ## Assistant Behavior
 
-OSS assistant:
+Community Edition assistant:
 
 - explains current remediation status from local remediation items
 - drafts issue text, PR comments, acceptance criteria, and closure notes
 - can point users to the Remediation tab for local updates
 - must not create GitHub/Jira issues or claim webhook-driven status updates exist
 
-Hosted assistant:
+Tethermark Cloud assistant:
 
 - may create issues, update tickets, post comments, schedule verification, and summarize cross-project remediation state
 - must use backend RBAC and connector permission checks

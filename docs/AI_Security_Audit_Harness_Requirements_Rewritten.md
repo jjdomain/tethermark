@@ -15,7 +15,7 @@ It replaces the earlier framing of separate v1/v2/v3 conceptual products with:
 - a clear public thesis centered on **harness engineering**, not just scanner orchestration
 
 The harness is intended to power:
-- recurring OSS case-file audits
+- recurring open repository case-file audits
 - local and CI security review of AI/agent repos
 - MCP/API/CLI/worker-based audit workflows
 - future commercial developer tooling
@@ -216,7 +216,7 @@ How the audit system itself operates:
 ### Primary users
 - AI security researchers
 - security engineers auditing AI/agent repos
-- OSS maintainers who want structured AI/agent security review
+- Community Edition maintainers who want structured AI/agent security review
 - practitioners building internal security pipelines around AI systems
 - employers evaluating agent-security systems thinking
 
@@ -360,7 +360,7 @@ Typical outputs:
 - validation evidence
 - deeper threat model with execution paths
 
-### Class 3 — Hosted endpoint / black-box
+### Class 3 — Deployed endpoint / black-box
 Use when:
 - explicitly authorized non-production demo/API exists
 - repo unavailable or incomplete
@@ -936,39 +936,78 @@ tethermark/
 
 This roadmap is **phase-based implementation of one complete architecture**, not a sequence of conceptually different products.
 
-### OSS static-audit production release gate
+### Community Edition static-audit production release gate
 
-Before local runtime sandbox implementation becomes the primary release focus, the OSS static audit path must pass an end-to-end production gate against a real AI-agent repository.
+Before local runtime sandbox implementation becomes the primary release focus, the Community Edition static audit path must pass an end-to-end production gate against a real AI-agent repository.
 
 Required production behavior:
 - static audits complete without requiring target build, install, runtime server, browser, container, or endpoint execution
 - source provenance records the audited repo and pinned commit
 - every finding includes evidence, observations or tool output, confidence rationale, control mappings, and actionable remediation guidance
 - skipped, unavailable, blocked, or failed static tools are represented as evidence/limitations and are never converted into a clean pass
-- review, disposition, suppression/waiver, remediation, follow-up, export, and assistant workflows are usable from the OSS UI
+- candidate findings pass through a pre-supervisor integrity packet before supervisor review, giving the supervisor deterministic evidence-link facts, control-mapping hints, and unsupported-claim flags without replacing semantic judgment
+- the supervisor agent is the final semantic QA reviewer for finding relevance, severity, false-positive risk, and control-fit judgment
+- deterministic policy enforcement and post-supervisor integrity checks run after supervisor review, but only to enforce hard invariants such as missing evidence, unknown controls, required product policy overrides, and static/runtime overclaims
+- review, disposition, suppression/waiver, remediation, follow-up, export, and assistant workflows are usable from the Community Edition UI
 - confirmed findings can move into remediation, and remediation actions write audit history automatically so users do not need to update disconnected states by hand
-- assistant answers cite persisted run/finding/evidence/review/remediation records and respect OSS/hosted capability boundaries
+- assistant answers cite persisted run/finding/evidence/review/remediation records and respect Community Edition/Cloud capability boundaries
 
 Manual release validation should use the Pi Agent static audit plan in `docs/manual-pi-static-audit-test-plan.md`. Automated API/UI E2E tests remain required smoke/regression coverage, but the manual Pi plan is the release gate for agent judgment quality, control mapping quality, and remediation workflow quality.
 
+Product benchmark validation should use the pinned suite in `benchmarks/suites/ai-agent-static-v1.json`, documented in `docs/product-benchmark-suite.md`. This suite is for Tethermark release/regression validation against representative public AI-agent and LLM-app repositories; it is not a required baseline step for normal user audits.
+
 ### Runtime validation production boundary
 
-Runtime validation is not production-ready simply because the UI can request it. If runtime audit modes are visible to production users, they must either be fully implemented and release-gated or clearly marked experimental/queued follow-up.
+Runtime validation is a primary Community Edition capability for the agentic harness. The product presents one user-facing concept: **Local Runtime Sandbox**. It must not expose separate local backend choices in normal launch flows.
 
-Until the OSS runtime sandbox is implemented:
-- runtime validation actions must be framed as follow-up planning or queued capable-environment validation
-- OSS must not claim runtime proof, exploit reproduction, or behavioral validation when only static evidence exists
-- runtime findings must carry reduced confidence unless supported by actual runtime evidence
+The Local Runtime Sandbox owns orchestration, readiness, policy, evidence, observability, and remediation linkage. Tethermark does not build a custom low-level isolation runtime. It auto-resolves the strongest allowed local backend in this order:
+- `gvisor_container`
+- `rootless_podman`
+- `podman`
+- `docker`
+- `docker_desktop`
+- `landlock_process`
+- `unavailable`
 
-Before OSS local runtime sandbox release, the implementation must document and test:
+Admin settings control backend policy:
+- resolution mode: `auto`, `prefer`, or `pinned`
+- preferred backend
+- allowed backend list
+- whether warning backends may launch with explicit acceptance
+- whether hardened backends are required for untrusted repositories
+- network policy, command limits, stdout/stderr caps, memory limits, process limits, and timeouts
+
+Runtime audit launch requirements:
+- runtime/build/validate modes must pass Local Runtime Sandbox readiness
+- blocked readiness returns `runtime_sandbox_not_ready`
+- warning readiness requires explicit operator preflight acceptance
+- Cloud provider IDs are Community Edition/Cloud boundaries and must return the stable `hosted_only` compatibility code
+- static mode must never execute target code
+- runtime evidence must be available before standards/control assessment claims runtime proof
+
+Every runtime execution records:
+- provider id and selected backend
+- full backend candidate resolution
+- readiness snapshot
+- policy snapshot
+- plan steps and command arrays
+- stdout/stderr excerpts, exit code, duration, and timeout state
+- artifacts, generated evidence ids, linked findings, and linked controls
+
+Local sandbox security requirements:
 - process and filesystem isolation
 - command allow/deny policy
 - network egress policy
 - CPU, memory, process, and wall-clock limits
+- target mounted read-only where supported
+- artifacts written only to per-run artifact directories
+- symlinks skipped during staging
 - synthetic credentials and simulated service backends
 - artifact capture, audit logging, cleanup, and failure reporting
 
-Third-party on-demand sandbox execution remains a valid hosted or paid usage-based architecture option. Hosted sandbox execution must preserve the same evidence, policy, and confirmation semantics as local execution.
+Docker Desktop on Windows/macOS has weaker local isolation claims because it runs through a shared VM boundary. It is acceptable for operator-controlled local validation with warnings, not for strong untrusted multi-tenant claims. gVisor and rootless Podman are preferred where available.
+
+Third-party on-demand sandbox execution remains a Tethermark Cloud usage-metered capability. Cloud sandbox execution must preserve the same evidence, policy, confirmation, and observability semantics as local execution, but Cloud provider adapters live outside the Community Edition repository.
 
 ### Phase 1 — Complete harness, narrow scope
 
@@ -996,13 +1035,13 @@ Supported target classes at minimum:
 
 Success criteria:
 - clearly looks like an agentic harness, not just scanner glue
-- can analyze a real OSS repo
+- can analyze a real open repository
 - produces a coherent threat model
 - surfaces meaningful agent-specific findings, not only generic SAST output
 - emits planner decisions and traces
 - can feed downstream case-file workflows
 - can run from CLI by one operator on KVM2
-- passes the OSS static-audit production release gate, including the manual Pi Agent validation plan
+- passes the Community Edition static-audit production release gate, including the manual Pi Agent validation plan
 
 ### Phase 2 — Broader runtime coverage
 
@@ -1011,6 +1050,8 @@ Expand target coverage and deepen isolated AI-security runtime testing/validatio
 
 Adds:
 - validation-runner package
+- Local Runtime Sandbox admin readiness and backend policy UI
+- runtime sandbox API endpoints and CLI onboarding commands
 - promptfoo adapter
 - garak adapter
 - optional PyRIT integration for selected targets
@@ -1118,7 +1159,7 @@ Success criteria:
 
 ## 25. MVP evaluation criteria
 
-The harness is successful if it can do all of the following on at least a few representative OSS repos:
+The harness is successful if it can do all of the following on at least a few representative open repositories:
 
 1. classify the target correctly
 2. generate a useful threat model

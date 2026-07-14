@@ -115,7 +115,7 @@ codex exec --ephemeral --sandbox read-only --output-schema <schema.json> --outpu
 
 Tethermark sends the agent prompt through stdin and parses the final structured JSON artifact from the output file.
 
-The OSS web UI exposes this mode under Settings -> Agent Configuration as an account connection flow:
+The Community Edition web UI exposes this mode under Settings -> Agent Configuration as an account connection flow:
 
 1. Select an OpenAI Codex model.
 2. Choose Connect ChatGPT account.
@@ -168,7 +168,7 @@ Use API mode when:
 
 Use Codex OAuth mode when:
 
-- running local OSS scans as the operator
+- running local Community Edition scans as the operator
 - running manual deep/runtime audits
 - using the user's own ChatGPT/Codex allowance
 - avoiding storage of API keys in Tethermark

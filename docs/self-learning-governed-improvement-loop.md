@@ -67,7 +67,7 @@ V1 persists six record families/settings surfaces:
 - `learning_jobs`: self-learning pipeline runs, including trigger, status, synced event count, generated candidate count, synthesis count, skipped synthesis count, settings snapshot, metadata, and error state
 - `ui_settings.learning_json`: self-learning trigger, frequency, threshold, LLM synthesis, budget, and promotion guardrail configuration
 
-OSS supports local SQLite persistence and `run`, `target`, and `project` scopes. SQLite stores these as logical tables in `records` and stores the field manifest in `record_schemas`. OSS also ships a Postgres/Supabase bootstrap migration command that uses the exported `SELF_LEARNING_POSTGRES_DDL` manifest from the core engine. Hosted can later add organization scope, scheduled workers, RBAC workflows, portfolio analytics, and tenant-level controls.
+Community Edition supports local SQLite persistence and `run`, `target`, and `project` scopes. SQLite stores these as logical tables in `records` and stores the field manifest in `record_schemas`. Community Edition also ships a Postgres/Supabase bootstrap migration command that uses the exported `SELF_LEARNING_POSTGRES_DDL` manifest from the core engine. Tethermark Cloud can later add organization scope, scheduled workers, RBAC workflows, portfolio analytics, and tenant-level controls.
 
 ## Public API
 
