@@ -1009,6 +1009,33 @@ Docker Desktop on Windows/macOS has weaker local isolation claims because it run
 
 Third-party on-demand sandbox execution remains a Tethermark Cloud usage-metered capability. Cloud sandbox execution must preserve the same evidence, policy, confirmation, and observability semantics as local execution, but Cloud provider adapters live outside the Community Edition repository.
 
+Cloud provider requirements:
+- keep the Community Edition engine provider-neutral and keep provider credentials and adapter code in the hosted repository
+- treat provider IDs as compatibility identifiers with explicit readiness and capability state, not as a guarantee of equivalent support
+- require capability negotiation before launch for isolation type, exact command execution, target staging, egress policy, resource limits, output capture, artifact retrieval, lifecycle control, usage reporting, and cleanup verification
+- fail closed before billing when a provider cannot enforce a required policy; a persisted policy snapshot is not proof of enforcement
+- normalize provider-specific status, timeout, resource-exhaustion, cancellation, cleanup, artifact, and usage results into Tethermark records
+- classify provider or resource limits as inconclusive runtime coverage rather than an audit pass or target security failure
+- allow automatic cross-provider failover only before target code executes and after cleanup is confirmed
+- require a new linked attempt from the beginning after any failure that occurs once target code has executed; never merge partial evidence across providers as one runtime
+
+Initial Cloud provider strategy:
+- use `hosted_e2b` first for the AISecurityBase pinned runtime benchmark and the pre-revenue Tethermark Cloud private beta
+- begin on E2B Hobby/usage billing with an operator spending cap; do not incur a fixed Pro subscription until resource requirements, paying usage, or an uptime commitment justifies it
+- verify whether Hobby permits the required custom CPU/RAM template before depending on the hosted default of 4 GiB; if not, restrict eligible targets or route heavy targets through a capability-tested Daytona Linux VM adapter
+- add `hosted_daytona` as the first tested standby/overflow provider, not as untested configuration-only redundancy
+- defer `hosted_modal` to specialized burst/GPU workloads and do not use it as the initial default
+- exclude Perplexity's model-directed Sandbox tool from the general runtime provider set unless it later exposes an exact-command, policy-controlled lifecycle API
+
+Pre-revenue hosted runtime limits:
+- execute AISecurityBase runtime benchmarks serially against pinned commits; the current AgentDojo runtime case is the first release gate
+- keep the current 10-minute default execution budget and 30-minute metered ceiling, with a provider hard cutoff below the E2B Hobby one-hour continuous-runtime limit
+- cap the private beta at three global concurrent runtime executions, one active runtime execution per workspace, and three runtime launches per project per day unless an operator explicitly overrides the quota
+- configure an initial monthly provider spending limit of USD 25 and expose usage against that limit in hosted observability
+- terminate on success, failure, timeout, and cancellation, and run an orphan-sandbox sweeper that reconciles external provider state
+- limit the first beta to small and medium Linux repositories that do not require Docker-in-Docker, GPU, Windows, or unusually large monorepo builds
+- retain static audit as the valid fallback when runtime eligibility, capacity, memory, or provider readiness blocks execution
+
 ### Phase 1 — Complete harness, narrow scope
 
 Goal:

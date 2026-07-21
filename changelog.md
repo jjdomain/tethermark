@@ -1,5 +1,16 @@
 ﻿# Changelog
 
+## 2026-07-20
+
+### Changed
+
+- Defined `hosted_e2b` on E2B Hobby/usage billing as the initial AISecurityBase runtime benchmark and pre-revenue Tethermark Cloud private-beta provider, subject to verification of the required custom memory profile.
+- Defined `hosted_daytona` Linux VM as the first capability-tested standby/overflow provider and deferred `hosted_modal` to demonstrated burst or GPU demand.
+- Added fail-closed Cloud provider capability requirements for exact commands, target staging, network and resource policy, artifact and usage capture, lifecycle control, and cleanup verification.
+- Added reproducible provider-failover rules: automatic failover is limited to pre-execution failures, while post-execution failures restart from the beginning as linked attempts with separate evidence and usage.
+- Added pre-revenue hosted controls for runtime eligibility, concurrency, per-project launch quotas, spending limits, hard timeouts, orphan cleanup, and static fallback.
+- Excluded Perplexity's current model-directed Sandbox tool from the general runtime-audit provider set while leaving room for a future evidence-computation role.
+
 ## 2026-04-18
 
 ### Added

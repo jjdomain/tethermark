@@ -18,6 +18,18 @@ Tethermark Cloud sandbox providers are Cloud-managed and metered:
 
 Cloud provider code belongs in `D:\ai-security-audit-engine-hosted`, not the Community Edition repository. Community Edition API requests for Cloud provider IDs must return the stable `hosted_only` compatibility code with user-facing Cloud guidance.
 
+The Cloud provider IDs are compatibility identifiers, not a claim that all providers are equally ready or interchangeable. The initial hosted rollout uses this order:
+
+1. `hosted_e2b` is the preferred provider for AISecurityBase runtime benchmarks and the pre-revenue Tethermark Cloud private beta. The rollout should begin on E2B's zero-base-price Hobby tier with usage billing and a configured spending limit.
+2. `hosted_daytona` is the first standby/overflow adapter. It becomes eligible when its Linux VM runtime passes the same fixtures and policy-enforcement tests, or earlier if E2B Hobby cannot supply the required memory profile without a fixed subscription.
+3. `hosted_modal` is deferred for specialized burst, GPU, or workload-specific use. It is not an initial automatic failover target.
+
+Perplexity Sandbox is not a general runtime-audit provider because its current Agent API tool is model-directed rather than an exact-command sandbox control plane. It may be evaluated separately for bounded evidence computation, but it must not satisfy a runtime-validation isolation claim.
+
+Cloud provider selection must be capability-gated. A provider adapter must prove that it can create an isolated environment, stage a pinned target, execute exact command arrays, apply the requested network policy, capture bounded output, collect artifacts and usage, report status, cancel, terminate, and verify cleanup. A requested policy that cannot be enforced must block before metered launch; recording policy intent without provider enforcement is insufficient.
+
+Automatic cross-provider failover is allowed only before target code has executed and only after cleanup of the failed provider attempt is confirmed. A failure after target execution begins creates a new linked attempt from the beginning, preserving original/replacement provider IDs, template or image digests, policy translations, external execution IDs, failure reason, cleanup outcome, and duplicate usage. Evidence from partially executed provider attempts must not be merged as though it came from one reproducible environment.
+
 ## Local Backend Resolution
 
 The Local Runtime Sandbox resolver evaluates backends in this order:
