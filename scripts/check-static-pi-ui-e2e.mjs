@@ -159,6 +159,19 @@ async function main() {
       return payload;
     }
 
+    await api("PUT", "/ui/settings", {
+      learning: {
+        operator_consent_version: 1,
+        enabled: true,
+        trigger_mode: "manual",
+        event_driven_enabled: false,
+        scheduled_enabled: false,
+        llm_synthesis_enabled: false,
+        llm_manual_synthesis_enabled: false,
+        llm_send_source_excerpts: false
+      }
+    });
+
     log("creating direct Pi static audit run for UI workflow");
     const directResult = await api("POST", "/runs", buildPiRequest());
     const runId = directResult?.run_id;
@@ -281,20 +294,19 @@ async function main() {
     assert.ok(remediation.remediation_memo?.checklist_json?.length, "UI run remediation memo/checklist is missing.");
     const remediationItems = await api("GET", `/runs/${encodeURIComponent(runId)}/remediation-items`);
     assert.ok(remediationItems.remediation_items.some((item) => item.finding_id === finding.id && item.status === "resolved"), "UI remediation item was not resolved.");
-    const learningEvents = await api("GET", `/learning/events?run_id=${encodeURIComponent(runId)}`);
-    assert.ok(learningEvents.learning_events.some((item) => item.event_type === "review_needs_validation"), "UI review triage did not produce a learning event.");
-    assert.ok(learningEvents.learning_events.some((item) => item.event_type === "remediation_state"), "UI remediation resolution did not produce a learning event.");
-    const learningCandidates = await api("GET", `/learning/candidates?run_id=${encodeURIComponent(runId)}`);
-    assert.ok(learningCandidates.learning_candidates.length > 0, "UI workflow did not produce learning candidates.");
-
-    log("verifying Learning workspace renders generated signals and candidates");
+    log("verifying operator-started Learning workflow renders generated signals and candidates");
     await clickOrExplain(page, page.getByRole("button", { name: "Learning" }).first(), "Learning navigation", pageMessages);
     await page.getByRole("heading", { name: "Learning Candidates" }).waitFor({ state: "visible" });
-    await page.getByRole("button", { name: "Refresh" }).click();
+    await page.getByRole("button", { name: "Run learning now" }).click();
     await pollUntil(async () => {
       const text = await page.locator("main").innerText();
       return /signals\s+[1-9]/i.test(text) && /open candidates\s+[1-9]/i.test(text) && !/No learning candidates in the current filter/i.test(text);
     }, "Learning workspace populated counts");
+    const learningEvents = await api("GET", `/learning/events?run_id=${encodeURIComponent(runId)}`);
+    assert.ok(learningEvents.learning_events.some((item) => item.event_type === "review_needs_validation"), "UI review triage did not produce a learning event.");
+    assert.ok(learningEvents.learning_events.some((item) => item.event_type === "remediation_state"), "UI remediation resolution did not produce a learning event.");
+    const learningCandidates = await api("GET", `/learning/candidates?run_id=${encodeURIComponent(runId)}`);
+    assert.ok(learningCandidates.learning_candidates.length > 0, "Explicit UI learning run did not produce learning candidates.");
 
     log(`passed. Run: ${runId}`);
   } finally {

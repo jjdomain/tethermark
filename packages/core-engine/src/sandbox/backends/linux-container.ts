@@ -83,7 +83,7 @@ function getStepTimeoutMs(phase: SandboxExecutionStep["phase"]): number {
 async function commandExists(command: string): Promise<boolean> {
   try {
     if (process.platform === "win32") {
-      await execFileAsync("where", [command], { maxBuffer: 1024 * 1024, shell: true });
+      await execFileAsync("where.exe", [command], { maxBuffer: 1024 * 1024, shell: false });
     } else {
       await execFileAsync("which", [command], { maxBuffer: 1024 * 1024 });
     }

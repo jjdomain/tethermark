@@ -282,21 +282,22 @@ const learningEventLabels = {
 };
 
 const defaultLearningSettings = {
-  enabled: true,
-  trigger_mode: "hybrid",
-  event_driven_enabled: true,
+  operator_consent_version: 1,
+  enabled: false,
+  trigger_mode: "manual",
+  event_driven_enabled: false,
   scheduled_enabled: false,
   scheduled_interval_minutes: 60,
   sync_limit: 100,
-  llm_synthesis_enabled: true,
+  llm_synthesis_enabled: false,
   llm_min_source_signals: 3,
   llm_min_distinct_runs: 2,
   llm_always_high_risk: true,
   llm_always_governance_impacting: true,
-  llm_nightly_consolidation: true,
-  llm_manual_synthesis_enabled: true,
-  llm_max_calls_per_day: 50,
-  llm_send_source_excerpts: true,
+  llm_nightly_consolidation: false,
+  llm_manual_synthesis_enabled: false,
+  llm_max_calls_per_day: 10,
+  llm_send_source_excerpts: false,
   require_dry_run_before_promotion: true,
   auto_expire_days: 90
 };
@@ -3969,7 +3970,7 @@ function triageDecisionFromReviewSummary(summary) {
       api("/review-notifications?reviewer_id=" + encodeURIComponent(requestContext.actorId || "anonymous"), undefined, requestContext),
       api("/runtime-followups", undefined, requestContext),
       api("/learning/events?limit=50", undefined, requestContext),
-      api("/learning/candidates?limit=50&trigger=page_load", undefined, requestContext),
+      api("/learning/candidates?limit=50", undefined, requestContext),
       api("/learning/promotions?limit=50", undefined, requestContext),
       api("/learning/jobs?limit=25", undefined, requestContext),
       api("/benchmarks/suites", undefined, requestContext),
@@ -4066,7 +4067,7 @@ function triageDecisionFromReviewSummary(summary) {
     setLearningLoading(true);
     return Promise.all([
       api("/learning/events?limit=100", undefined, requestContext),
-      api("/learning/candidates?limit=100&trigger=manual_refresh", undefined, requestContext),
+      api("/learning/candidates?limit=100", undefined, requestContext),
       api("/learning/promotions?limit=100", undefined, requestContext),
       api("/learning/jobs?limit=25", undefined, requestContext)
     ]).then(([eventsPayload, candidatesPayload, promotionsPayload, jobsPayload]) => {
@@ -4078,6 +4079,17 @@ function triageDecisionFromReviewSummary(summary) {
     }).catch((loadError) => {
       setError(formatUiError(loadError));
     }).finally(() => setLearningLoading(false));
+  }
+
+  function runLearningNow() {
+    setLearningLoading(true);
+    return act(
+      () => api("/learning/run", {
+        method: "POST",
+        body: JSON.stringify({})
+      }, requestContext).then(() => loadLearningData("Operator-started learning run completed.")),
+      ""
+    ).finally(() => setLearningLoading(false));
   }
 
   function runLearningCandidateAction(candidate, action) {
@@ -7895,7 +7907,14 @@ function triageDecisionFromReviewSummary(summary) {
           h("option", { key: "closed", value: "closed" }, "Closed"),
           h("option", { key: "all", value: "all" }, "All candidates")
         ])),
-        h(Button, { key: "refresh", variant: "outline", disabled: learningLoading, onClick: () => loadLearningData("Learning refreshed.") }, learningLoading ? "Refreshing..." : "Refresh")
+        h("div", { key: "actions", className: "flex flex-wrap gap-2" }, [
+          h(Button, { key: "refresh", variant: "outline", disabled: learningLoading, onClick: () => loadLearningData("Learning refreshed.") }, "Refresh data"),
+          h(Button, {
+            key: "run",
+            disabled: learningLoading || !getLearningSettings(effectiveSettings?.effective).enabled,
+            onClick: runLearningNow
+          }, learningLoading ? "Running..." : "Run learning now")
+        ])
       ]),
       filteredLearningCandidates.length
         ? h("div", { key: "list", className: "space-y-3" }, filteredLearningCandidates.map((candidate) => {

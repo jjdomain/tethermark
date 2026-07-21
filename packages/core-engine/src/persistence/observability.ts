@@ -134,7 +134,7 @@ export interface PersistedObservabilityHistory {
       candidates_generated: number;
       candidates_synthesized: number;
       synthesis_skipped: number;
-      completed_at: string;
+      completed_at: string | null;
     } | null;
   };
 }

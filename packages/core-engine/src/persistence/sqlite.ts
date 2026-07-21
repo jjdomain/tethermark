@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 
 import type { DatabaseMode } from "../contracts.js";
 import type { BundleExportPolicy } from "./bundle-exports.js";
-import { buildPostgresMigrationSql, resolvePostgresConnectionConfig } from "./postgres.js";
+import { buildPostgresMigrationSql, buildPsqlProcessEnv, resolvePostgresConnectionConfig } from "./postgres.js";
 import { SELF_LEARNING_TABLE_DEFINITIONS } from "./schema-manifest.js";
 
 const require = createRequire(import.meta.url);
@@ -13,6 +13,18 @@ const initSqlJs: any = require("sql.js/dist/sql-wasm.js");
 
 let sqlJsPromise: Promise<any> | null = null;
 const sqliteSaveQueues = new Map<string, Promise<void>>();
+const sqliteOpenSnapshots = new WeakMap<object, Map<string, SqliteRecordRow>>();
+
+interface SqliteRecordRow {
+  table_name: string;
+  record_key: string;
+  run_id: string | null;
+  created_at: string | null;
+  target_id: string | null;
+  target_snapshot_id: string | null;
+  parent_key: string | null;
+  payload_json: string;
+}
 
 interface PendingRecordUpsert {
   tableName: string;
@@ -97,10 +109,11 @@ function fieldSqlLiteral(value: unknown, type: "text" | "integer" | "real" | "bo
 
 function runPostgresSql(sql: string, args: { capture?: boolean } = {}): string {
   const command = process.env.HARNESS_PSQL_COMMAND?.trim() || "psql";
-  const result = spawnSync(command, [postgresUrl(), "-X", "-v", "ON_ERROR_STOP=1", args.capture ? "-t" : "", args.capture ? "-A" : "", "-c", sql].filter(Boolean), {
+  const databaseUrl = postgresUrl();
+  const result = spawnSync(command, ["-X", "-v", "ON_ERROR_STOP=1", args.capture ? "-t" : "", args.capture ? "-A" : "", "-c", sql].filter(Boolean), {
     encoding: "utf8",
-    env: process.env,
-    shell: process.platform === "win32",
+    env: buildPsqlProcessEnv(databaseUrl),
+    shell: false,
     windowsHide: true,
     timeout: 120_000
   });
@@ -195,12 +208,15 @@ export async function openSqliteDatabase(rootDir: string): Promise<any> {
   }
   const SQL = await getSqlJs();
   const dbPath = sqliteDbPath(rootDir);
+  let db: any;
   try {
     const bytes = await fs.readFile(dbPath);
-    return new SQL.Database(bytes);
+    db = new SQL.Database(bytes);
   } catch {
-    return new SQL.Database();
+    db = new SQL.Database();
   }
+  sqliteOpenSnapshots.set(db, readSqliteRecordSnapshot(db));
+  return db;
 }
 
 export async function writePersistenceMetadata(rootDir: string, databaseMode: DatabaseMode, bundleExportPolicy: BundleExportPolicy): Promise<PersistenceMetadata> {
@@ -343,6 +359,106 @@ async function enqueueSqliteSave(dbPath: string, task: () => Promise<void>): Pro
   }
 }
 
+function sqliteRecordKey(row: Pick<SqliteRecordRow, "table_name" | "record_key">): string {
+  return JSON.stringify([row.table_name, row.record_key]);
+}
+
+function readSqliteRecordSnapshot(db: any): Map<string, SqliteRecordRow> {
+  const snapshot = new Map<string, SqliteRecordRow>();
+  let statement: any = null;
+  try {
+    statement = db.prepare(`
+      SELECT table_name, record_key, run_id, created_at, target_id, target_snapshot_id, parent_key, payload_json
+      FROM records
+    `);
+    while (statement.step()) {
+      const raw = statement.getAsObject() as Record<string, unknown>;
+      const row: SqliteRecordRow = {
+        table_name: String(raw.table_name ?? ""),
+        record_key: String(raw.record_key ?? ""),
+        run_id: raw.run_id == null ? null : String(raw.run_id),
+        created_at: raw.created_at == null ? null : String(raw.created_at),
+        target_id: raw.target_id == null ? null : String(raw.target_id),
+        target_snapshot_id: raw.target_snapshot_id == null ? null : String(raw.target_snapshot_id),
+        parent_key: raw.parent_key == null ? null : String(raw.parent_key),
+        payload_json: String(raw.payload_json ?? "null")
+      };
+      snapshot.set(sqliteRecordKey(row), row);
+    }
+  } catch {
+    return snapshot;
+  } finally {
+    statement?.free?.();
+  }
+  return snapshot;
+}
+
+function recordsEqual(left: SqliteRecordRow | undefined, right: SqliteRecordRow): boolean {
+  return Boolean(left)
+    && left!.run_id === right.run_id
+    && left!.created_at === right.created_at
+    && left!.target_id === right.target_id
+    && left!.target_snapshot_id === right.target_snapshot_id
+    && left!.parent_key === right.parent_key
+    && left!.payload_json === right.payload_json;
+}
+
+async function openLatestSqliteDatabase(rootDir: string): Promise<any> {
+  const SQL = await getSqlJs();
+  try {
+    return new SQL.Database(await fs.readFile(sqliteDbPath(rootDir)));
+  } catch {
+    return new SQL.Database();
+  }
+}
+
+function mergeSqliteRecordChanges(args: {
+  latestDb: any;
+  original: Map<string, SqliteRecordRow>;
+  current: Map<string, SqliteRecordRow>;
+}): void {
+  args.latestDb.run("BEGIN");
+  let upsert: any = null;
+  let remove: any = null;
+  try {
+    upsert = args.latestDb.prepare(`
+      INSERT INTO records (table_name, record_key, run_id, created_at, target_id, target_snapshot_id, parent_key, payload_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(table_name, record_key) DO UPDATE SET
+        run_id=excluded.run_id,
+        created_at=excluded.created_at,
+        target_id=excluded.target_id,
+        target_snapshot_id=excluded.target_snapshot_id,
+        parent_key=excluded.parent_key,
+        payload_json=excluded.payload_json
+    `);
+    remove = args.latestDb.prepare("DELETE FROM records WHERE table_name = ? AND record_key = ?");
+    for (const [key, originalRow] of args.original.entries()) {
+      if (!args.current.has(key)) remove.run([originalRow.table_name, originalRow.record_key]);
+    }
+    for (const [key, currentRow] of args.current.entries()) {
+      if (recordsEqual(args.original.get(key), currentRow)) continue;
+      upsert.run([
+        currentRow.table_name,
+        currentRow.record_key,
+        currentRow.run_id,
+        currentRow.created_at,
+        currentRow.target_id,
+        currentRow.target_snapshot_id,
+        currentRow.parent_key,
+        currentRow.payload_json
+      ]);
+    }
+    args.latestDb.run("COMMIT");
+  } catch (error) {
+    try { args.latestDb.run("ROLLBACK"); } catch {}
+    throw error;
+  } finally {
+    upsert?.free?.();
+    remove?.free?.();
+  }
+}
+
 export async function saveSqliteDatabase(rootDir: string, db: any, databaseMode: DatabaseMode = "local", bundleExportPolicy?: BundleExportPolicy): Promise<void> {
   if (isRemoteDatabase(db)) {
     ensureSqliteSchema(db);
@@ -350,18 +466,25 @@ export async function saveSqliteDatabase(rootDir: string, db: any, databaseMode:
     return;
   }
   await fs.mkdir(rootDir, { recursive: true });
-  const bytes = db.export();
+  const original = sqliteOpenSnapshots.get(db) ?? new Map<string, SqliteRecordRow>();
+  const current = readSqliteRecordSnapshot(db);
   const dbPath = sqliteDbPath(rootDir);
   await enqueueSqliteSave(dbPath, async () => {
+    const latestDb = await openLatestSqliteDatabase(rootDir);
     const tempPath = `${dbPath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
     try {
-      await fs.writeFile(tempPath, Buffer.from(bytes));
+      ensureSqliteSchema(latestDb);
+      mergeSqliteRecordChanges({ latestDb, original, current });
+      await fs.writeFile(tempPath, Buffer.from(latestDb.export()));
       await replaceSqliteFile(tempPath, dbPath);
     } catch (error) {
       await fs.rm(tempPath, { force: true }).catch(() => undefined);
       throw error;
+    } finally {
+      latestDb.close();
     }
   });
+  sqliteOpenSnapshots.set(db, current);
   const { resolveBundleExportPolicy } = await import("./bundle-exports.js");
   await writePersistenceMetadata(rootDir, databaseMode, bundleExportPolicy ?? resolveBundleExportPolicy(databaseMode));
 }

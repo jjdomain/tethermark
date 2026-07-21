@@ -32,7 +32,10 @@ import { ensureSqliteSchema, hasSqliteDatabase, openSqliteDatabase, readSqliteTa
 
 type AnyRecord = Record<string, any>;
 
+const learningPipelineQueues = new Map<string, Promise<void>>();
+
 export interface LearningSettings {
+  operator_consent_version: number;
   enabled: boolean;
   trigger_mode: "manual" | "event_driven" | "scheduled" | "hybrid";
   event_driven_enabled: boolean;
@@ -53,6 +56,30 @@ export interface LearningSettings {
 }
 
 export type LearningTrigger = PersistedLearningJobRecord["trigger"];
+
+async function enqueueLearningPipeline<T>(key: string, task: () => Promise<T>): Promise<T> {
+  const previous = learningPipelineQueues.get(key) ?? Promise.resolve();
+  const run = previous.catch(() => undefined).then(task);
+  const tail = run.then(() => undefined, () => undefined);
+  learningPipelineQueues.set(key, tail);
+  try {
+    return await run;
+  } finally {
+    if (learningPipelineQueues.get(key) === tail) learningPipelineQueues.delete(key);
+  }
+}
+
+function learningTriggerEnabled(settings: LearningSettings, trigger: LearningTrigger): boolean {
+  if (!settings.enabled) return false;
+  if (trigger === "api") return true;
+  if (["run_completed", "review_action"].includes(trigger)) {
+    return settings.event_driven_enabled && ["event_driven", "hybrid"].includes(settings.trigger_mode);
+  }
+  if (trigger === "scheduled") {
+    return settings.scheduled_enabled && ["scheduled", "hybrid"].includes(settings.trigger_mode);
+  }
+  return false;
+}
 
 interface LearningSynthesisPayload {
   title?: string;
@@ -103,25 +130,27 @@ function numberSetting(value: unknown, fallback: number, minimum = 1): number {
 
 export function normalizeLearningSettings(value: unknown): LearningSettings {
   const raw = asObject(value);
+  const operatorConsentVersion = Number(raw.operator_consent_version) === 1 ? 1 : 0;
   const triggerMode = ["manual", "event_driven", "scheduled", "hybrid"].includes(String(raw.trigger_mode))
     ? String(raw.trigger_mode) as LearningSettings["trigger_mode"]
-    : "hybrid";
+    : "manual";
   return {
-    enabled: boolSetting(raw.enabled, true),
+    operator_consent_version: operatorConsentVersion,
+    enabled: operatorConsentVersion === 1 && boolSetting(raw.enabled, false),
     trigger_mode: triggerMode,
-    event_driven_enabled: boolSetting(raw.event_driven_enabled, true),
+    event_driven_enabled: boolSetting(raw.event_driven_enabled, false),
     scheduled_enabled: boolSetting(raw.scheduled_enabled, false),
     scheduled_interval_minutes: numberSetting(raw.scheduled_interval_minutes, 60, 5),
     sync_limit: numberSetting(raw.sync_limit, 100, 1),
-    llm_synthesis_enabled: boolSetting(raw.llm_synthesis_enabled, true),
+    llm_synthesis_enabled: boolSetting(raw.llm_synthesis_enabled, false),
     llm_min_source_signals: numberSetting(raw.llm_min_source_signals, 3, 1),
     llm_min_distinct_runs: numberSetting(raw.llm_min_distinct_runs, 2, 1),
     llm_always_high_risk: boolSetting(raw.llm_always_high_risk, true),
     llm_always_governance_impacting: boolSetting(raw.llm_always_governance_impacting, true),
-    llm_nightly_consolidation: boolSetting(raw.llm_nightly_consolidation, true),
-    llm_manual_synthesis_enabled: boolSetting(raw.llm_manual_synthesis_enabled, true),
-    llm_max_calls_per_day: numberSetting(raw.llm_max_calls_per_day, 50, 1),
-    llm_send_source_excerpts: boolSetting(raw.llm_send_source_excerpts, true),
+    llm_nightly_consolidation: boolSetting(raw.llm_nightly_consolidation, false),
+    llm_manual_synthesis_enabled: boolSetting(raw.llm_manual_synthesis_enabled, false),
+    llm_max_calls_per_day: numberSetting(raw.llm_max_calls_per_day, 10, 1),
+    llm_send_source_excerpts: boolSetting(raw.llm_send_source_excerpts, false),
     require_dry_run_before_promotion: boolSetting(raw.require_dry_run_before_promotion, true),
     auto_expire_days: numberSetting(raw.auto_expire_days, 90, 1)
   };
@@ -1044,7 +1073,7 @@ export async function syncLearningEventsForScope(args: {
   return runs.length;
 }
 
-export async function runLearningPipeline(args: {
+async function runLearningPipelineUnlocked(args: {
   rootDir?: string;
   dbMode?: DatabaseMode;
   workspaceId?: string;
@@ -1076,17 +1105,30 @@ export async function runLearningPipeline(args: {
     created_by: args.actorId ?? "system_learning",
     started_at: startedAt
   };
-  if (!settings.enabled) {
+  if (!learningTriggerEnabled(settings, baseJob.trigger)) {
     const completedAt = new Date().toISOString();
     const job: PersistedLearningJobRecord = {
       ...baseJob,
       status: "skipped",
-      error: "learning_disabled",
+      error: settings.enabled ? "learning_trigger_disabled" : "learning_disabled",
       completed_at: completedAt
     };
     await writeLearningJob(job, { rootDir: location.rootDir, dbMode: location.mode });
     return { job, candidates: [] };
   }
+  let synthesisCallsReserved = 0;
+  const writeRunningJob = async (metadata: Record<string, unknown> = {}) => {
+    await writeLearningJob({
+      ...baseJob,
+      status: "running",
+      metadata_json: {
+        synthesis_calls_reserved: synthesisCallsReserved,
+        ...metadata
+      },
+      completed_at: null
+    }, { rootDir: location.rootDir, dbMode: location.mode });
+  };
+  await writeRunningJob();
   try {
     const eventsSynced = args.runId
       ? (await syncLearningEventsForRun(args.runId, { rootDir: location.rootDir, dbMode: location.mode })).length
@@ -1118,6 +1160,15 @@ export async function runLearningPipeline(args: {
       limit: Number.MAX_SAFE_INTEGER
     });
     const providerConfig = providerConfigFromSettings(args.providers);
+    const resolvedSynthesisProvider = resolveAgentProviderConfig("learning_synthesizer_agent", providerConfig);
+    const manualTrigger = baseJob.trigger === "api";
+    const oauthBackgroundBlocked = !manualTrigger && resolvedSynthesisProvider.provider === "openai_codex";
+    const synthesisSettings: LearningSettings = {
+      ...settings,
+      llm_synthesis_enabled: settings.llm_synthesis_enabled
+        && (manualTrigger ? settings.llm_manual_synthesis_enabled : true)
+        && !oauthBackgroundBlocked
+    };
     const today = new Date().toISOString().slice(0, 10);
     const existingJobs = await listPersistedLearningJobs({
       rootDir: location.rootDir,
@@ -1128,27 +1179,38 @@ export async function runLearningPipeline(args: {
     });
     const usedSynthesisCallsToday = existingJobs
       .filter((job) => String(job.completed_at || job.started_at).startsWith(today))
-      .reduce((sum, job) => sum + (job.candidates_synthesized || 0), 0);
+      .reduce((sum, job) => {
+        const metadata = asObject(job.metadata_json);
+        const reserved = Number(metadata.synthesis_calls_reserved);
+        return sum + (Number.isFinite(reserved) ? Math.max(0, Math.trunc(reserved)) : (job.candidates_synthesized || 0));
+      }, 0);
     let remainingSynthesisCalls = Math.max(0, settings.llm_max_calls_per_day - usedSynthesisCallsToday);
     let synthesized = 0;
     let skipped = 0;
     for (const candidate of allCandidates.filter((item) => ["proposed", "experimented"].includes(item.status))) {
       const sourceEvents = sourceEventsForCandidate(candidate, events);
-      const eligibility = shouldRunLlmSynthesis({ candidate, sourceEvents, settings });
+      const eligibility = shouldRunLlmSynthesis({ candidate, sourceEvents, settings: synthesisSettings });
       if (eligibility.eligible && remainingSynthesisCalls <= 0) {
         skipped += 1;
         continue;
       }
+      if (eligibility.eligible && resolvedSynthesisProvider.provider !== "mock") {
+        synthesisCallsReserved += 1;
+        remainingSynthesisCalls -= 1;
+        await writeRunningJob({
+          synthesis_budget_used_before_job: usedSynthesisCallsToday,
+          synthesis_budget_remaining_after_reservation: remainingSynthesisCalls
+        });
+      }
       const result = await synthesizeCandidateWithLlm({
         candidate,
         sourceEvents,
-        settings,
+        settings: synthesisSettings,
         providerConfig,
         rootDirOrOptions: { rootDir: location.rootDir, dbMode: location.mode }
       });
       if (result.synthesized) {
         synthesized += 1;
-        remainingSynthesisCalls -= 1;
       }
       else skipped += 1;
     }
@@ -1163,8 +1225,10 @@ export async function runLearningPipeline(args: {
       completed_at: completedAt
       ,
       metadata_json: {
+        synthesis_calls_reserved: synthesisCallsReserved,
         synthesis_budget_used_today: usedSynthesisCallsToday,
-        synthesis_budget_remaining_after_job: remainingSynthesisCalls
+        synthesis_budget_remaining_after_job: remainingSynthesisCalls,
+        oauth_background_blocked: oauthBackgroundBlocked
       }
     };
     await writeLearningJob(job, { rootDir: location.rootDir, dbMode: location.mode });
@@ -1183,11 +1247,30 @@ export async function runLearningPipeline(args: {
       ...baseJob,
       status: "failed",
       error: error instanceof Error ? error.message : String(error),
+      metadata_json: {
+        synthesis_calls_reserved: synthesisCallsReserved
+      },
       completed_at: completedAt
     };
     await writeLearningJob(job, { rootDir: location.rootDir, dbMode: location.mode });
     throw error;
   }
+}
+
+export async function runLearningPipeline(args: {
+  rootDir?: string;
+  dbMode?: DatabaseMode;
+  workspaceId?: string;
+  projectId?: string;
+  runId?: string | null;
+  trigger?: LearningTrigger;
+  actorId?: string | null;
+  settings?: unknown;
+  providers?: unknown;
+}): Promise<{ job: PersistedLearningJobRecord; candidates: PersistedLearningCandidateRecord[] }> {
+  const location = resolveLocation(args);
+  const key = `${location.mode}:${location.rootDir}:${normalizeWorkspaceId(args.workspaceId)}:${normalizeProjectId(args.projectId)}`;
+  return enqueueLearningPipeline(key, () => runLearningPipelineUnlocked(args));
 }
 
 export async function listPersistedLearningCandidates(args?: {

@@ -65,6 +65,7 @@ Source:
 ### `mock`
 
 Local deterministic provider for tests, fixtures, smoke runs, and offline UI work.
+It is not the Community Edition product default; CI and regression commands select it explicitly.
 
 Configuration:
 
@@ -93,7 +94,7 @@ Fallback API key environment variables are still supported:
 
 ### `openai_codex`
 
-Local OpenAI Codex CLI backend for user-owned OAuth/subscription-backed runs.
+Local OpenAI Codex CLI backend for user-owned OAuth/subscription-backed runs. This is the Community Edition default for operator-started audits.
 
 Configuration:
 
@@ -105,7 +106,7 @@ AUDIT_LLM_CODEX_SANDBOX=read-only
 AUDIT_LLM_CODEX_TIMEOUT_MS=600000
 ```
 
-Before running, the operator must install Codex CLI and sign in through the official Codex/ChatGPT flow. Tethermark does not store OpenAI OAuth tokens for this mode.
+Before running, the operator must install Codex CLI explicitly and sign in through the official Codex/ChatGPT flow. Tethermark does not store OpenAI OAuth tokens for this mode, does not invoke `npx`, and does not download or install Codex during status checks or audits.
 
 The provider invokes:
 
@@ -124,13 +125,15 @@ The Community Edition web UI exposes this mode under Settings -> Agent Configura
 
 Do not make non-technical users copy CLI commands in the primary path. Keep the Codex command path as an advanced optional setting for custom installs only. In `auth=none` local mode the connection action is enabled by default. In an authenticated deployment, set `HARNESS_ENABLE_LOCAL_OAUTH_CONNECT=1` before exposing that action, because it launches a local process on the API host.
 
-The OpenAI Codex status endpoint checks local Codex auth metadata before falling back to the CLI:
+The OpenAI Codex status endpoint only reads local Codex auth metadata:
 
 1. `CODEX_HOME/auth.json`, when `CODEX_HOME` is set.
 2. The default Codex home, such as `%USERPROFILE%\.codex\auth.json` on Windows or `~/.codex/auth.json` on Unix-like systems.
-3. `codex login status`, or the configured `AUDIT_LLM_CODEX_COMMAND`, only when no usable local auth file signal is available.
-
 The status response must not expose access tokens, refresh tokens, ID tokens, or API keys. It may expose non-secret readiness metadata such as `connected`, `auth_mode`, `credential_source`, expiry, and ChatGPT plan type.
+
+OAuth is restricted to explicit operator-started local work. Page loads, read endpoints, scheduled learning, completed-run hooks, and reviewer-action hooks cannot invoke the OAuth provider. Unattended, bulk, hosted, and leaderboard scanning—including AISecurityBase workers—must use an API-key provider behind service quotas, queue concurrency, and audit logs.
+
+Governed learning is disabled by default and requires a versioned operator-consent setting. LLM synthesis requires a separate opt-in, source excerpts are excluded by default, and OAuth synthesis is allowed only from the explicit `Run learning now` action. Existing settings written before this safety boundary do not count as consent until the operator reviews and saves them again.
 
 For first-run machines, `npm run smoke:openai-codex-oauth` isolates `CODEX_HOME` and verifies the disconnected state is clean and actionable. For already-authenticated workstations, `npm run smoke:openai-codex-oauth:real` verifies that the local Codex OAuth session is detected without invoking a live model call.
 

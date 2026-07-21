@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
 import { listenWithFriendlyErrors } from "../../shared/src/listen.js";
@@ -193,7 +193,9 @@ const asyncJobs = new PersistedAsyncJobManager(engine, {
         projectId: job.project_id
       });
       const learningSettings = normalizeLearningSettings(settingsResolution.effective.learning_json);
-      if (learningSettings.enabled && learningSettings.event_driven_enabled) {
+      if (learningSettings.enabled
+        && learningSettings.event_driven_enabled
+        && ["event_driven", "hybrid"].includes(learningSettings.trigger_mode)) {
         await runLearningPipeline({
           rootDir: typeof rootDirOrOptions === "string" ? rootDirOrOptions : rootDirOrOptions?.rootDir,
           dbMode: typeof rootDirOrOptions === "string" ? "local" : rootDirOrOptions?.dbMode ?? "local",
@@ -952,24 +954,12 @@ interface CodexCommandResolution {
 
 function resolveCodexCommand(configuredCommand: string): CodexCommandResolution {
   const command = configuredCommand.trim() || "codex";
-  if (process.platform !== "win32" || command.toLowerCase() !== "codex") {
-    return { command, argsPrefix: [], displayCommand: command };
-  }
-  const probe = spawnSync(command, ["--version"], {
-    encoding: "utf8",
-    shell: true,
-    windowsHide: true,
-    timeout: 10000
-  });
-  const combinedOutput = `${probe.stdout ?? ""}\n${probe.stderr ?? ""}`.toLowerCase();
-  if (probe.status === 0 && !combinedOutput.includes("access is denied")) {
-    return { command, argsPrefix: [], displayCommand: command };
-  }
+  const executable = process.platform === "win32" && command.toLowerCase() === "codex" ? "codex.exe" : command;
   return {
-    command: "npx",
-    argsPrefix: ["-y", "@openai/codex"],
-    displayCommand: "npx -y @openai/codex",
-    note: "The Windows Store Codex command was not executable from Tethermark, so the npm Codex CLI fallback was used."
+    command: executable,
+    argsPrefix: [],
+    displayCommand: executable,
+    note: "Tethermark never downloads or installs Codex during a status check or audit. Install the CLI explicitly if this command is unavailable."
   };
 }
 
@@ -1073,27 +1063,21 @@ async function launchOpenAICodexLogin(context: RequestContext): Promise<Record<s
         : "Dry run only; no local login command was launched."
     };
   }
-  let child;
+  let child: ReturnType<typeof spawn>;
   try {
-    if (process.platform === "win32") {
-      const visibleCommand = [resolvedCommand.command, ...buildCodexArgs(resolvedCommand, ["login"])].map((part) => part.includes(" ") ? `"${part}"` : part).join(" ");
-      child = spawn("cmd.exe", ["/d", "/s", "/c", "start", "Tethermark Codex Login", "cmd.exe", "/k", visibleCommand], {
-        detached: true,
-        stdio: "ignore",
-        windowsHide: false
-      });
-    } else {
-      child = spawn(resolvedCommand.command, buildCodexArgs(resolvedCommand, ["login"]), {
-        detached: true,
-        stdio: "ignore"
-      });
-    }
+    child = spawn(resolvedCommand.command, buildCodexArgs(resolvedCommand, ["login"]), {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: false,
+      shell: false
+    });
+    await new Promise<void>((resolve, reject) => {
+      child.once("spawn", resolve);
+      child.once("error", reject);
+    });
   } catch (error) {
     throw new Error(`Codex could not be opened: ${error instanceof Error ? error.message : String(error)}. Install Codex, then try Connect ChatGPT account again.`);
   }
-  child.on("error", () => {
-    // Detached login failures are surfaced by the explicit status check.
-  });
   child.unref();
   return {
     provider_id: "openai_codex",
@@ -1114,7 +1098,7 @@ async function getOpenAICodexLoginStatus(context: RequestContext): Promise<Recor
     : readEnv("AUDIT_LLM_CODEX_COMMAND") ?? readEnv("CODEX_COMMAND") ?? "codex";
   const resolvedCommand = resolveCodexCommand(configuredCommand);
   const authFileStatus = await readCodexAuthFileStatus();
-  if (authFileStatus?.connected === true) {
+  if (authFileStatus) {
     return {
       provider_id: "openai_codex",
       command: resolvedCommand.displayCommand,
@@ -1122,70 +1106,15 @@ async function getOpenAICodexLoginStatus(context: RequestContext): Promise<Recor
       ...authFileStatus
     };
   }
-  const statusTimeoutMs = readNumberEnv("AUDIT_LLM_CODEX_STATUS_TIMEOUT_MS", 30000);
-  return await new Promise((resolve) => {
-    let output = "";
-    let settled = false;
-    const finish = (payload: Record<string, unknown>) => {
-      if (settled) return;
-      settled = true;
-      resolve({
-        provider_id: "openai_codex",
-        command: resolvedCommand.displayCommand,
-        checked_at: new Date().toISOString(),
-        ...payload
-      });
-    };
-    let child;
-    try {
-      child = spawn(resolvedCommand.command, buildCodexArgs(resolvedCommand, ["login", "status"]), {
-        shell: process.platform === "win32",
-        windowsHide: true
-      });
-    } catch (error) {
-      finish({
-        connected: false,
-        status: "missing",
-        note: `Codex could not be started: ${error instanceof Error ? error.message : String(error)}`
-      });
-      return;
-    }
-    const timer = setTimeout(() => {
-      child.kill();
-      finish({
-        connected: false,
-        status: "timeout",
-        note: `Could not check Codex sign-in status before the request timed out after ${statusTimeoutMs}ms. If the command is npx-based, preinstall @openai/codex and set AUDIT_LLM_CODEX_COMMAND to the installed codex executable so status checks do not depend on package download startup.`
-      });
-    }, statusTimeoutMs);
-    child.stdout?.on("data", (chunk) => {
-      output += chunk.toString();
-    });
-    child.stderr?.on("data", (chunk) => {
-      output += chunk.toString();
-    });
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      finish({
-        connected: false,
-        status: "missing",
-        note: `Codex CLI could not be started: ${error.message}`
-      });
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      const normalized = output.toLowerCase();
-      const connected = code === 0 && (normalized.includes("authenticated") || normalized.includes("chatgpt oauth") || normalized.includes("logged in") || normalized.includes("yes"));
-      finish({
-        connected,
-        status: connected ? "connected" : "not_connected",
-        note: connected
-          ? (resolvedCommand.note ? `Codex is signed in on this machine. ${resolvedCommand.note}` : "Codex is signed in on this machine.")
-          : (resolvedCommand.note ? `${resolvedCommand.note} Choose Connect ChatGPT account and finish the browser prompt.` : "Codex is not signed in yet. Choose Connect ChatGPT account and finish the browser prompt."),
-        detail: output.trim().slice(0, 500)
-      });
-    });
-  });
+  return {
+    provider_id: "openai_codex",
+    command: resolvedCommand.displayCommand,
+    checked_at: new Date().toISOString(),
+    connected: false,
+    status: "not_connected",
+    credential_source: "none",
+    note: "No local Codex OAuth session was found. Install Codex explicitly, choose Connect ChatGPT account, and complete sign-in. Status checks never install or execute packages."
+  };
 }
 
 async function persistLlmEnvironmentSettings(input: UiSettingsBody): Promise<void> {
@@ -2273,7 +2202,9 @@ async function triggerLearningForReviewMutation(args: {
       projectId: args.context.projectId
     });
     const learningSettings = normalizeLearningSettings(settingsResolution.effective.learning_json);
-    if (!learningSettings.enabled || !learningSettings.event_driven_enabled) return;
+    if (!learningSettings.enabled
+      || !learningSettings.event_driven_enabled
+      || !["event_driven", "hybrid"].includes(learningSettings.trigger_mode)) return;
     await runLearningPipeline({
       workspaceId: args.context.workspaceId,
       projectId: args.context.projectId,
@@ -2307,15 +2238,14 @@ function scheduledLearningDue(args: {
   now: Date;
 }): boolean {
   if (!args.settings.enabled) return false;
-  if (args.settings.trigger_mode === "manual") return false;
+  if (!args.settings.scheduled_enabled) return false;
+  if (!["scheduled", "hybrid"].includes(args.settings.trigger_mode)) return false;
   const scheduledJobs = args.jobs.filter((job) => job.trigger === "scheduled");
   const lastScheduled = scheduledJobs[0] ?? null;
-  if (args.settings.scheduled_enabled) {
-    const intervalMs = Math.max(5, args.settings.scheduled_interval_minutes) * 60 * 1000;
-    const lastStarted = lastScheduled ? Date.parse(lastScheduled.started_at) : 0;
-    if (!lastScheduled || !Number.isFinite(lastStarted) || args.now.getTime() - lastStarted >= intervalMs) {
-      return true;
-    }
+  const intervalMs = Math.max(5, args.settings.scheduled_interval_minutes) * 60 * 1000;
+  const lastStarted = lastScheduled ? Date.parse(lastScheduled.started_at) : 0;
+  if (!lastScheduled || !Number.isFinite(lastStarted) || args.now.getTime() - lastStarted >= intervalMs) {
+    return true;
   }
   if (args.settings.llm_nightly_consolidation && args.settings.llm_synthesis_enabled) {
     const today = args.now.toISOString();
@@ -3161,9 +3091,10 @@ export function createApiServer(): http.Server {
     return;
   }
 
-  if (req.method === "GET" && url.pathname === "/learning/candidates") {
+  if (req.method === "POST" && url.pathname === "/learning/run") {
     try {
-      const runId = url.searchParams.get("run_id") || undefined;
+      const body = await readJson<{ run_id?: string; sync_limit?: number }>(req);
+      const runId = typeof body.run_id === "string" && body.run_id.trim() ? body.run_id.trim() : undefined;
       if (runId) {
         const runForSync = await getPersistedRun(runId);
         if (!runMatchesScope(runForSync, context)) {
@@ -3172,17 +3103,18 @@ export function createApiServer(): http.Server {
         }
       }
       const settingsResolution = await resolvePersistedUiSettings(undefined, context);
-      const syncLimit = readNumberParam(url, "sync_limit");
+      const syncLimit = Number.isFinite(Number(body.sync_limit)) && Number(body.sync_limit) > 0
+        ? Math.trunc(Number(body.sync_limit))
+        : undefined;
       const learningSettings = {
         ...((settingsResolution.effective.learning_json && typeof settingsResolution.effective.learning_json === "object") ? settingsResolution.effective.learning_json as Record<string, unknown> : {}),
         ...(syncLimit ? { sync_limit: syncLimit } : {})
       };
-      const trigger = (url.searchParams.get("trigger") || (runId ? "run_detail" : "page_load")) as any;
       const result = await runLearningPipeline({
         workspaceId: context.workspaceId,
         projectId: context.projectId,
         runId,
-        trigger,
+        trigger: "api",
         actorId: context.actorId,
         settings: learningSettings,
         providers: settingsResolution.effective.providers_json
@@ -3198,6 +3130,34 @@ export function createApiServer(): http.Server {
       sendJson(res, 200, {
         generated_count: result.job.candidates_generated,
         learning_job: result.job,
+        export_schema: buildExportEnvelope("learning_candidates.v1", { learning_candidates: candidates }),
+        learning_candidates: candidates
+      });
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/learning/candidates") {
+    try {
+      const runId = url.searchParams.get("run_id") || undefined;
+      if (runId) {
+        const run = await getPersistedRun(runId);
+        if (!runMatchesScope(run, context)) {
+          sendJson(res, 404, { error: "run_not_found", run_id: runId });
+          return;
+        }
+      }
+      const candidates = await listPersistedLearningCandidates({
+        workspaceId: context.workspaceId,
+        projectId: context.projectId,
+        runId,
+        targetId: url.searchParams.get("target_id") || undefined,
+        status: url.searchParams.get("status") || undefined,
+        limit: readNumberParam(url, "limit") ?? 250
+      });
+      sendJson(res, 200, {
         export_schema: buildExportEnvelope("learning_candidates.v1", { learning_candidates: candidates }),
         learning_candidates: candidates
       });
@@ -4922,21 +4882,6 @@ export function createApiServer(): http.Server {
         return;
       }
       if (runSubresource.resource === "learning") {
-        const settingsResolution = await resolvePersistedUiSettings(undefined, context);
-        const syncLimit = readNumberParam(url, "sync_limit");
-        const learningSettings = {
-          ...((settingsResolution.effective.learning_json && typeof settingsResolution.effective.learning_json === "object") ? settingsResolution.effective.learning_json as Record<string, unknown> : {}),
-          ...(syncLimit ? { sync_limit: syncLimit } : {})
-        };
-        const result = await runLearningPipeline({
-          workspaceId: context.workspaceId,
-          projectId: context.projectId,
-          runId: runSubresource.runId,
-          trigger: "run_detail",
-          actorId: context.actorId,
-          settings: learningSettings,
-          providers: settingsResolution.effective.providers_json
-        });
         const [events, candidates] = await Promise.all([
           listPersistedLearningEvents({
             workspaceId: context.workspaceId,
@@ -4953,7 +4898,6 @@ export function createApiServer(): http.Server {
         ]);
         sendJson(res, 200, {
           run_id: runSubresource.runId,
-          learning_job: result.job,
           export_schema: buildExportEnvelope("learning_candidates.v1", { learning_events: events, learning_candidates: candidates }),
           learning_events: events,
           learning_candidates: candidates

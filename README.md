@@ -19,11 +19,11 @@ The harness combines deterministic evidence collection, LLM-guided planning and 
 
 ## Current Status
 
-Tethermark Community Edition is in public release-candidate shape for local and trusted-team self-hosting.
+Tethermark Community Edition is in production stabilization for local and trusted-team self-hosting. The current draft pull request is not a production release until its deterministic release checks and the remaining manual provider/runtime validations are complete.
 
 - `local` is the Community Edition SQLite storage mode.
 - Tethermark Cloud production storage is not a Community Edition database mode; the Cloud product provides its own Supabase/Postgres adapter around the shared persistence contracts.
-- The default `.env.example` configuration uses the mock LLM runtime, so the repo can build and run without live model credentials.
+- Community Edition defaults to the local OpenAI Codex OAuth provider for operator-started audits. The mock provider is selected explicitly by tests and CI only.
 - Community Edition auth defaults to `none`, which is appropriate for solo operators and trusted internal teams. In that mode, review roles and assignments are advisory governance rather than hard identity enforcement.
 - The supported Community Edition path is end-to-end for repository and local-path audits: preflight, run execution, findings, review workflow, runtime follow-up, exports, SARIF upload, and manual external remediation links.
 - Runtime validation is a primary Community Edition capability for cloned or local targets through one user-facing **Local Runtime Sandbox**. Admin settings auto-resolve the strongest allowed local backend and gate runtime launch on readiness.
@@ -188,8 +188,11 @@ The repository CI runs the same core verification path on pushes and pull reques
 ```bash
 npm run build --silent
 npm test --silent
+npm run exports:check --silent
 npm run scan -- validate-fixtures
 ```
+
+The test runner forces `AUDIT_LLM_PROVIDER=mock`, removes live API keys from its process, and disables the learning scheduler. Running `npm test` never consumes OAuth or API-provider quota.
 
 For a release-candidate verification pass, run:
 

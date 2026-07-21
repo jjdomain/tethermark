@@ -107,20 +107,21 @@ export async function writePostgresMigrationFile(outputFile: string): Promise<st
   return resolved;
 }
 
-function runCommand(command: string, args: string[]): Promise<{ stdout: string; stderr: string; status: number | null }> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      env: process.env,
-      windowsHide: true,
-      shell: process.platform === "win32"
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk) => { stdout += String(chunk); });
-    child.stderr.on("data", (chunk) => { stderr += String(chunk); });
-    child.on("error", reject);
-    child.on("close", (status) => resolve({ stdout, stderr, status }));
-  });
+export function buildPsqlProcessEnv(databaseUrl: string, environment: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const parsed = new URL(databaseUrl);
+  if (!["postgres:", "postgresql:"].includes(parsed.protocol)) throw new Error("postgres_database_url_invalid");
+  const database = decodeURIComponent(parsed.pathname.replace(/^\//, ""));
+  if (!parsed.hostname || !database) throw new Error("postgres_database_url_invalid");
+  return {
+    ...environment,
+    PGHOST: parsed.hostname,
+    PGPORT: parsed.port || "5432",
+    PGDATABASE: database,
+    PGUSER: decodeURIComponent(parsed.username),
+    PGPASSWORD: decodeURIComponent(parsed.password),
+    PGSSLMODE: parsed.searchParams.get("sslmode") || (envValue("HARNESS_POSTGRES_SSL") === "false" ? "prefer" : "require"),
+    PGAPPNAME: "tethermark"
+  };
 }
 
 export async function runPostgresMigration(args: {
@@ -147,7 +148,19 @@ export async function runPostgresMigration(args: {
     throw new Error("postgres_database_url_required");
   }
   const command = args.psqlCommand || envValue("HARNESS_PSQL_COMMAND") || "psql";
-  const result = await runCommand(command, [databaseUrl, "-v", "ON_ERROR_STOP=1", "-f", migrationFile]);
+  const result = await new Promise<{ stdout: string; stderr: string; status: number | null }>((resolve, reject) => {
+    const child = spawn(command, ["-X", "-v", "ON_ERROR_STOP=1", "-f", migrationFile], {
+      env: buildPsqlProcessEnv(databaseUrl),
+      windowsHide: true,
+      shell: false
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += String(chunk); });
+    child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+    child.on("error", reject);
+    child.on("close", (status) => resolve({ stdout, stderr, status }));
+  });
   if (result.status !== 0) {
     throw new Error(`postgres_migration_failed:${result.stderr || result.stdout || `exit ${result.status}`}`);
   }

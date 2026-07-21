@@ -753,7 +753,7 @@ export interface PersistedLearningJobRecord {
   project_id: string;
   run_id: string | null;
   trigger: "page_load" | "manual_refresh" | "run_completed" | "review_action" | "run_detail" | "scheduled" | "api";
-  status: "completed" | "failed" | "skipped";
+  status: "running" | "completed" | "failed" | "skipped";
   events_synced: number;
   candidates_generated: number;
   candidates_synthesized: number;
@@ -763,7 +763,7 @@ export interface PersistedLearningJobRecord {
   error: string | null;
   created_by: string;
   started_at: string;
-  completed_at: string;
+  completed_at: string | null;
 }
 
 export interface PersistedAsyncJobAttemptRecord {

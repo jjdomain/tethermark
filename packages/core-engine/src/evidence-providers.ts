@@ -860,7 +860,7 @@ export async function executeEvidenceProvider(args: {
         });
       }
       try {
-        const { exitCode, stdout, stderr } = await runCommand("semgrep", command, { shell: process.platform === "win32" });
+        const { exitCode, stdout, stderr } = await runCommand("semgrep", command, { shell: false });
         const parsed = parseCommandJson(stdout, stderr);
         const failure = classifyCommandFailure(stdout, stderr);
         if (failure) {

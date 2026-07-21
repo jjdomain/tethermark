@@ -382,7 +382,9 @@ async function triggerLearningForCliReviewAction(args: {
     const projectId = normalizeProjectId(run.project_id);
     const settingsResolution = await resolvePersistedUiSettings(rootDirOrOptions, { workspaceId, projectId });
     const learningSettings = normalizeLearningSettings(settingsResolution.effective.learning_json);
-    if (!learningSettings.enabled || !learningSettings.event_driven_enabled) return;
+    if (!learningSettings.enabled
+      || !learningSettings.event_driven_enabled
+      || !["event_driven", "hybrid"].includes(learningSettings.trigger_mode)) return;
     await runLearningPipeline({
       rootDir: args.rootDir,
       dbMode: args.dbMode,

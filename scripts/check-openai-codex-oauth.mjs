@@ -24,10 +24,9 @@ function codexRealModeFixGuide(status) {
     detail,
     "",
     "Fix:",
-    "  1. Install Codex CLI in a stable local path instead of relying on npx startup:",
-    "     npm install --prefix \"$env:USERPROFILE\\.tethermark-codex-cli\" @openai/codex",
-    "  2. Point the audit engine at that executable for this shell:",
-    "     $env:AUDIT_LLM_CODEX_COMMAND=\"$env:USERPROFILE\\.tethermark-codex-cli\\node_modules\\.bin\\codex.cmd\"",
+    "  1. Install the native Codex CLI explicitly through an official distribution channel.",
+    "  2. If Codex is not on PATH, point the audit engine at the native executable for this shell:",
+    "     $env:AUDIT_LLM_CODEX_COMMAND=\"C:\\path\\to\\codex.exe\"",
     "  3. Sign in once from the same user account:",
     "     & $env:AUDIT_LLM_CODEX_COMMAND login",
     "  4. Confirm status returns quickly:",
@@ -239,6 +238,15 @@ async function main() {
 
       process.env.CODEX_HOME = path.join(workRoot, "codex-home");
       process.env.FAKE_CODEX_CONNECTED = "1";
+      await fs.mkdir(process.env.CODEX_HOME, { recursive: true });
+      await fs.writeFile(path.join(process.env.CODEX_HOME, "auth.json"), JSON.stringify({
+        auth_mode: "chatgpt",
+        tokens: {
+          access_token: "fake.access.token",
+          id_token: "fake.id.token",
+          refresh_token: "fake-refresh-token"
+        }
+      }), "utf8");
       const connectedStatus = await api("GET", "/llm-providers/openai_codex/status");
       assert.equal(connectedStatus.connected, true);
       assert.equal(connectedStatus.status, "connected");

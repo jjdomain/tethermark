@@ -63,13 +63,13 @@ Tool absence, blocked execution, TLS failure, or timeout must be represented as 
 
 Set `HARNESS_SEMGREP_CONFIG` only when the deployment intentionally uses a custom organization ruleset. Prefer a local file or directory for release checks. Remote Semgrep configs are allowed for operator-managed environments, but TLS or network failures against `semgrep.dev` are not acceptable for final production readiness.
 
-## Manual Release Workflow
+## Pull Request And Manual Release Workflow
 
-The GitHub workflow `Static Audit Release Gate` provides a manual release gate:
+The GitHub workflow `Static Audit Release Gate` runs deterministic release checks on every pull request and can also be started manually:
 
-- Deterministic checks always run.
-- Pi public-repo API E2E is opt-in with `run_network_e2e=true`.
-- Browser UI E2E is opt-in with `run_ui_e2e=true`.
+- Deterministic checks always run with the mock provider, live keys absent, local binaries disabled, and the learning scheduler disabled.
+- Pi public-repo API E2E is available only on a manual run with `run_network_e2e=true`.
+- Browser UI E2E is available only on a manual run with `run_ui_e2e=true`.
 
 Keep the network-heavy jobs manual because they clone public repositories and can take longer than default CI.
 

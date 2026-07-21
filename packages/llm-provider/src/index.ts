@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 
 function readEnv(name: string): string | undefined {
   const value = process.env[name];
@@ -270,22 +270,9 @@ function runProcess(command: string, args: string[], stdin: string, timeoutMs: n
 }
 
 function resolveCodexCommand(command: string, prefixArgs: string[]): { command: string; prefixArgs: string[] } {
-  if (prefixArgs.length > 0 || process.platform !== "win32" || command.toLowerCase() !== "codex") {
-    return { command, prefixArgs };
-  }
-  const probe = spawnSync(command, ["--version"], {
-    encoding: "utf8",
-    shell: true,
-    windowsHide: true,
-    timeout: 10_000
-  });
-  const output = `${probe.stdout ?? ""}\n${probe.stderr ?? ""}`.toLowerCase();
-  if (probe.status === 0 && !output.includes("access is denied")) {
-    return { command, prefixArgs };
-  }
   return {
-    command: process.platform === "win32" ? "npx.cmd" : "npx",
-    prefixArgs: ["-y", "@openai/codex"]
+    command: process.platform === "win32" && command.toLowerCase() === "codex" ? "codex.exe" : command,
+    prefixArgs
   };
 }
 
@@ -557,7 +544,7 @@ export function resolveAgentProviderConfig(agentName: string, baseConfig: Provid
     apiKeySource = "global-generic";
   }
 
-  const provider = (agentOverride?.provider ?? baseConfig.provider ?? envProvider ?? readEnv("AUDIT_LLM_PROVIDER") ?? (apiKey ? "openai" : "mock")) as "openai" | "openai_codex" | "mock";
+  const provider = (agentOverride?.provider ?? baseConfig.provider ?? envProvider ?? readEnv("AUDIT_LLM_PROVIDER") ?? (apiKey ? "openai" : "openai_codex")) as "openai" | "openai_codex" | "mock";
   return {
     provider,
     model: agentOverride?.model ?? baseConfig.model ?? envModel ?? readEnv("AUDIT_LLM_MODEL") ?? undefined,

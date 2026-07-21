@@ -14,6 +14,8 @@ V1 implements self-learning as a governed improvement loop:
 
 V1 is intentionally advisory. It helps reviewers notice recurring patterns and approve improvements, but it does not silently change audit execution.
 
+The module is disabled by default. Enabling it records an explicit, versioned operator consent. Candidate generation and LLM synthesis are separate controls; synthesis and source excerpts are both off by default.
+
 ## V1 Non-Goals
 
 V1 must not:
@@ -74,6 +76,7 @@ Community Edition supports local SQLite persistence and `run`, `target`, and `pr
 V1 exposes:
 
 - `GET /learning/events`
+- `POST /learning/run` (explicit operator action; optional `run_id`)
 - `GET /learning/candidates`
 - `GET /learning/candidates/:id`
 - `POST /learning/candidates/:id/experiment`
@@ -85,6 +88,8 @@ V1 exposes:
 - `GET /runs/:runId/learning`
 
 Promotion, rejection, and rollback require reviewer-level governance permission. Experiments are dry-run records and do not mutate audit behavior.
+
+All `GET` routes are read-only. UI load, refresh, and run-detail navigation never sync events, generate candidates, or call a model. Scheduled and event-driven execution must be explicitly enabled and cannot use the local OAuth provider; background deployments use API-key providers with service-side quotas. The daily synthesis budget reserves attempts before provider execution and serializes same-scope work in the Community Edition process.
 
 ## Historical Implementation Plan
 

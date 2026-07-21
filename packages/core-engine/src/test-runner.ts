@@ -28,7 +28,9 @@ import { deriveInitialReviewWorkflow, listPersistedReviewNotifications, listPers
 import { createPersistedReviewComment } from "./persistence/review-comments.js";
 import { buildFindingEvidenceFingerprint, createPersistedFindingDisposition } from "./persistence/finding-dispositions.js";
 import { readPersistedArtifactIndex, readPersistedCommitDiff, readPersistedControlResults, readPersistedEvents, readPersistedEvidenceRecords, readPersistedFindings, readPersistedLanePlans, readPersistedLaneResults, readPersistedLaneReuseDecisions, readPersistedLaneSpecialistOutputs, readPersistedMaintenanceHistory, readPersistedMetrics, readPersistedObservability, readPersistedResolvedConfiguration, readPersistedReviewActions, readPersistedReviewComments, readPersistedReviewDecision, readPersistedReviewWorkflow, readPersistedRunUsageSummary, readPersistedScoreSummary, readPersistedStageArtifact, readPersistedStageArtifacts, readPersistedToolAdapterSummary, readPersistedToolExecutions } from "./persistence/run-details.js";
-import { PERSISTENCE_SCHEMA_VERSION, readPersistenceMetadata } from "./persistence/sqlite.js";
+import { ensureSqliteSchema, openSqliteDatabase, PERSISTENCE_SCHEMA_VERSION, readPersistenceMetadata, readSqliteTable, saveSqliteDatabase, upsertSqliteRecord } from "./persistence/sqlite.js";
+import { buildPsqlProcessEnv } from "./persistence/postgres.js";
+import { normalizeLearningSettings } from "./persistence/learning.js";
 import { listPersistedUiDocuments, readPersistedUiSettings, updatePersistedUiSettings } from "./persistence/ui-settings.js";
 import { markRuntimeFollowupJobTerminal, markRuntimeFollowupLaunched, readPersistedRuntimeFollowup, upsertRuntimeFollowupFromReviewAction } from "./persistence/runtime-followups.js";
 import { LinuxContainerSandboxBackend } from "./sandbox/backends/linux-container.js";
@@ -323,6 +325,22 @@ async function testOpenAICodexProviderRegistryAndStructuredExec(): Promise<void>
   assert.equal(resolved.provider, "openai_codex");
   assert.equal(resolved.apiKeySource, "oauth-local");
 
+  await withEnv({
+    AUDIT_LLM_PROVIDER: undefined,
+    AUDIT_LLM_MODEL: undefined,
+    AUDIT_LLM_API_KEY: undefined,
+    LLM_API_KEY: undefined,
+    OPENAI_API_KEY: undefined,
+    AUDIT_LLM_PLANNER_PROVIDER: undefined,
+    AUDIT_LLM_PLANNER_MODEL: undefined,
+    AUDIT_LLM_PLANNER_API_KEY: undefined
+  }, async () => {
+    assert.equal(resolveAgentProviderConfig("planner_agent").provider, "openai_codex");
+  });
+
+  assert.equal(normalizeLearningSettings({ enabled: true, event_driven_enabled: true }).enabled, false);
+  assert.equal(normalizeLearningSettings({ operator_consent_version: 1, enabled: true }).enabled, true);
+
   await withWorkspaceTempDir("harness-codex-provider-", async (rootDir) => {
     const fakeCli = path.join(rootDir, "fake-codex-cli.mjs");
     const fakeHome = path.join(rootDir, "home");
@@ -431,6 +449,46 @@ async function testLocalPersistenceUsesConfiguredRoot(): Promise<void> {
     assert.equal(await fs.stat(path.join(configuredRoot, "runs", "run_configured.json")).then(() => true).catch(() => false), false);
     assert.equal(await fs.stat(path.join(localRoot, "runs", "run_local.json")).then(() => true).catch(() => false), false);
   });
+}
+
+async function testConcurrentSqliteWritesAreMerged(): Promise<void> {
+  await withTempDir("tethermark-sqlite-concurrency-", async (rootDir) => {
+    const left = await openSqliteDatabase(rootDir);
+    const right = await openSqliteDatabase(rootDir);
+    try {
+      ensureSqliteSchema(left);
+      ensureSqliteSchema(right);
+      upsertSqliteRecord({ db: left, tableName: "concurrency_test", recordKey: "left", payload: { id: "left" } });
+      upsertSqliteRecord({ db: right, tableName: "concurrency_test", recordKey: "right", payload: { id: "right" } });
+      await Promise.all([
+        saveSqliteDatabase(rootDir, left),
+        saveSqliteDatabase(rootDir, right)
+      ]);
+    } finally {
+      left.close();
+      right.close();
+    }
+    const verification = await openSqliteDatabase(rootDir);
+    try {
+      ensureSqliteSchema(verification);
+      assert.deepEqual(
+        readSqliteTable<{ id: string }>(verification, "concurrency_test").map((item) => item.id).sort(),
+        ["left", "right"]
+      );
+    } finally {
+      verification.close();
+    }
+  });
+}
+
+async function testPsqlCredentialsUseEnvironment(): Promise<void> {
+  const environment = buildPsqlProcessEnv("postgresql://audit-user:p%26ss%20word@db.example.test:6543/tethermark?sslmode=verify-full", {});
+  assert.equal(environment.PGHOST, "db.example.test");
+  assert.equal(environment.PGPORT, "6543");
+  assert.equal(environment.PGDATABASE, "tethermark");
+  assert.equal(environment.PGUSER, "audit-user");
+  assert.equal(environment.PGPASSWORD, "p&ss word");
+  assert.equal(environment.PGSSLMODE, "verify-full");
 }
 
 async function testCompactBundleExportsPrunesOptionalDebugBundles(): Promise<void> {
@@ -3094,7 +3152,9 @@ async function testWebUiAndPersistedUiSettingsApi(): Promise<void> {
         const initialSettingsResponse = await fetch(`${webBaseUrl}/api/ui/settings`, { headers: scopedHeaders });
         const initialSettingsPayload = await initialSettingsResponse.json() as any;
         assert.equal(initialSettingsResponse.status, 200);
-        assert.equal(initialSettingsPayload.settings.providers_json.default_provider, "mock");
+        assert.equal(initialSettingsPayload.settings.providers_json.default_provider, "openai_codex");
+        assert.equal(initialSettingsPayload.settings.learning_json.enabled, false);
+        assert.equal(initialSettingsPayload.settings.learning_json.llm_synthesis_enabled, false);
         assert.equal(initialSettingsPayload.settings.review_json.publishability_threshold, "high");
         assert.equal(initialSettingsPayload.settings.review_json.default_visibility, "internal");
 
@@ -3145,7 +3205,7 @@ async function testWebUiAndPersistedUiSettingsApi(): Promise<void> {
 
         const otherScopeSettingsResponse = await fetch(`${webBaseUrl}/api/ui/settings`, { headers: otherScopeHeaders });
         const otherScopeSettingsPayload = await otherScopeSettingsResponse.json() as any;
-        assert.equal(otherScopeSettingsPayload.settings.providers_json.default_provider, "mock");
+        assert.equal(otherScopeSettingsPayload.settings.providers_json.default_provider, "openai_codex");
 
         const otherScopeDocumentsResponse = await fetch(`${webBaseUrl}/api/ui/documents`, { headers: otherScopeHeaders });
         const otherScopeDocumentsPayload = await otherScopeDocumentsResponse.json() as any;
@@ -4801,6 +4861,18 @@ async function testLearningApiLifecycle(): Promise<void> {
     await fs.mkdir(path.join(rootDir, "target"), { recursive: true });
     await persistAssistantApiFixture(rootDir);
     const localDbRoot = path.join(rootDir, ".artifacts", "state", "local-db");
+    await updatePersistedUiSettings({
+      learning: {
+        operator_consent_version: 1,
+        enabled: true,
+        trigger_mode: "manual",
+        event_driven_enabled: false,
+        scheduled_enabled: false,
+        llm_synthesis_enabled: false,
+        llm_manual_synthesis_enabled: false,
+        llm_send_source_excerpts: false
+      }
+    }, { rootDir: localDbRoot, dbMode: "local" });
     await submitPersistedReviewAction({
       runId: "run_assistant_prev",
       input: {
@@ -4825,6 +4897,8 @@ async function testLearningApiLifecycle(): Promise<void> {
         const initialCandidatesPayload = await initialCandidatesResponse.json() as any;
         assert.equal(initialCandidatesResponse.status, 200, JSON.stringify(initialCandidatesPayload));
         assert.equal(initialCandidatesPayload.learning_candidates.some((item: any) => item.candidate_type === "scoped_suppression_suggestion"), false);
+        const jobsAfterReadPayload = await (await fetch(`${baseUrl}/learning/jobs`)).json() as any;
+        assert.equal(jobsAfterReadPayload.learning_jobs.length, 0, "GET /learning/candidates must not start a learning job");
 
         await submitPersistedReviewAction({
           runId: "run_assistant",
@@ -4837,6 +4911,18 @@ async function testLearningApiLifecycle(): Promise<void> {
           },
           rootDirOrOptions: { rootDir: localDbRoot, dbMode: "local" }
         });
+
+        const manualRunResponse = await fetch(`${baseUrl}/learning/run`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({})
+        });
+        const manualRunPayload = await manualRunResponse.json() as any;
+        assert.equal(manualRunResponse.status, 200, JSON.stringify(manualRunPayload));
+        assert.equal(manualRunPayload.learning_job.trigger, "api");
+        assert.equal(manualRunPayload.learning_job.status, "completed");
+        const jobsAfterRunPayload = await (await fetch(`${baseUrl}/learning/jobs`)).json() as any;
+        assert.equal(jobsAfterRunPayload.learning_jobs.length, 1);
 
         const eventsResponse = await fetch(`${baseUrl}/learning/events?run_id=run_assistant`);
         const eventsPayload = await eventsResponse.json() as any;
@@ -4920,11 +5006,131 @@ async function testLearningApiLifecycle(): Promise<void> {
   });
 }
 
+async function testConcurrentLearningRunsRespectAttemptBudget(): Promise<void> {
+  await withTempDir("tethermark-learning-budget-", async (rootDir) => {
+    await persistAssistantApiFixture(rootDir);
+    const localDbRoot = path.join(rootDir, ".artifacts", "state", "local-db");
+    await updatePersistedUiSettings({
+      providers: {
+        default_provider: "openai",
+        default_model: "gpt-4.1",
+        agent_overrides: {}
+      },
+      learning: {
+        operator_consent_version: 1,
+        enabled: true,
+        trigger_mode: "manual",
+        event_driven_enabled: false,
+        scheduled_enabled: false,
+        llm_synthesis_enabled: true,
+        llm_manual_synthesis_enabled: true,
+        llm_max_calls_per_day: 1,
+        llm_min_source_signals: 2,
+        llm_min_distinct_runs: 2,
+        llm_send_source_excerpts: false
+      }
+    }, { rootDir: localDbRoot, dbMode: "local" });
+    for (const [runId, findingId] of [["run_assistant_prev", "finding_assistant_prev"], ["run_assistant", "finding_assistant"]] as const) {
+      await submitPersistedReviewAction({
+        runId,
+        input: {
+          reviewer_id: "budget_reviewer",
+          action_type: "suppress_finding",
+          finding_id: findingId,
+          triage_decision: "false_positive",
+          notes: "Repeated false positive used to verify an atomic synthesis-attempt budget."
+        },
+        rootDirOrOptions: { rootDir: localDbRoot, dbMode: "local" }
+      });
+    }
+
+    let providerCalls = 0;
+    const providerServer = http.createServer(async (req, res) => {
+      for await (const _chunk of req) {
+        // Drain the request body before returning the deterministic response.
+      }
+      providerCalls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              title: "Reviewed recurring false positive",
+              summary: "Two reviewed runs produced the same bounded signal.",
+              rationale: "Keep the proposal scoped and human approved.",
+              recommended_review: "Review the proposed scope before promotion.",
+              risk_notes: ["Do not suppress unrelated findings."],
+              experiment_plan: ["Replay both source runs."]
+            })
+          }
+        }],
+        usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 }
+      }));
+    });
+    await new Promise<void>((resolve, reject) => {
+      providerServer.once("error", reject);
+      providerServer.listen(0, "127.0.0.1", () => resolve());
+    });
+    const providerAddress = providerServer.address();
+    assert.ok(providerAddress && typeof providerAddress !== "string");
+
+    try {
+      await withEnv({
+        HARNESS_API_AUTH_MODE: "none",
+        AUDIT_LLM_LEARNING_SYNTHESIZER_PROVIDER: "openai",
+        AUDIT_LLM_LEARNING_SYNTHESIZER_MODEL: "gpt-4.1",
+        AUDIT_LLM_LEARNING_SYNTHESIZER_API_KEY: "test-only-key",
+        OPENAI_BASE_URL: `http://127.0.0.1:${providerAddress.port}/v1`
+      }, async () => withWorkingDir(rootDir, async () => {
+        const apiServer = createApiServer();
+        await new Promise<void>((resolve, reject) => {
+          apiServer.once("error", reject);
+          apiServer.listen(0, "127.0.0.1", () => resolve());
+        });
+        const address = apiServer.address();
+        assert.ok(address && typeof address !== "string");
+        const baseUrl = `http://127.0.0.1:${address.port}`;
+        try {
+          const responses = await Promise.all([
+            fetch(`${baseUrl}/learning/run`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }),
+            fetch(`${baseUrl}/learning/run`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })
+          ]);
+          assert.deepEqual(responses.map((response) => response.status), [200, 200]);
+          await Promise.all(responses.map((response) => response.json()));
+          assert.equal(providerCalls, 1, "Concurrent learning runs must share the configured daily attempt budget");
+          const jobsPayload = await (await fetch(`${baseUrl}/learning/jobs`)).json() as any;
+          assert.equal(jobsPayload.learning_jobs.length, 2);
+          const reserved = jobsPayload.learning_jobs.reduce((sum: number, job: any) => sum + Number(job.metadata_json?.synthesis_calls_reserved || 0), 0);
+          assert.equal(reserved, 1);
+        } finally {
+          await new Promise<void>((resolve, reject) => apiServer.close((error) => error ? reject(error) : resolve()));
+        }
+      }));
+    } finally {
+      await new Promise<void>((resolve, reject) => providerServer.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+}
+
 async function main(): Promise<void> {
+  // The regression suite is always offline and deterministic. Live provider
+  // validation is isolated in explicitly named smoke commands.
+  for (const key of Object.keys(process.env)) {
+    if (/^AUDIT_LLM_.+_(PROVIDER|MODEL|API_KEY)$/.test(key)) delete process.env[key];
+  }
+  process.env.AUDIT_LLM_PROVIDER = "mock";
+  process.env.AUDIT_LLM_MODEL = "mock-agent-runtime";
+  process.env.HARNESS_DISABLE_LEARNING_SCHEDULER = "1";
+  delete process.env.AUDIT_LLM_API_KEY;
+  delete process.env.LLM_API_KEY;
+  delete process.env.OPENAI_API_KEY;
   const tests: Array<[string, () => Promise<void>]> = [
     ["buildScanRequest parses llm flags", testBuildScanRequestParsesLlmFlags],
     ["OpenAI Codex OAuth provider registry and structured exec", testOpenAICodexProviderRegistryAndStructuredExec],
     ["local persistence uses configured root", testLocalPersistenceUsesConfiguredRoot],
+    ["concurrent sqlite writes are merged", testConcurrentSqliteWritesAreMerged],
+    ["psql credentials use process environment", testPsqlCredentialsUseEnvironment],
     ["compactBundleExports prunes optional debug bundles", testCompactBundleExportsPrunesOptionalDebugBundles],
     ["pruneArtifacts removes old run bundles and updates index", testPruneArtifactsRemovesOldRunBundlesAndUpdatesIndex],
     ["readPersistedLaneSpecialistOutputs from sqlite", testReadPersistedLaneSpecialistOutputsFromSqlite],
@@ -4955,6 +5161,7 @@ async function main(): Promise<void> {
     ["assistant provider cites findings", testAssistantProviderCitesFindings],
     ["assistant api scopes actions and target history", testAssistantApiScopesActionsAndTargetHistory],
     ["learning api lifecycle", testLearningApiLifecycle],
+    ["concurrent learning runs respect attempt budget", testConcurrentLearningRunsRespectAttemptBudget],
       ["validateFixtures passes for bundled targets", testValidateFixturesPassesForBundledTargets],
       ["product benchmark suite dry-run", testProductBenchmarkSuiteDryRun],
       ["product benchmark api endpoints", testProductBenchmarkApiEndpoints],

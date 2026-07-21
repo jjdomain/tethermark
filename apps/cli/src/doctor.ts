@@ -183,7 +183,7 @@ function buildProviderChecks(): DoctorCheck[] {
       summary: codex.available
         ? `Codex CLI detected (${codex.version}).`
         : denied
-          ? "Windows Codex app command is present but not executable from this shell; Tethermark will try the npm Codex fallback for provider execution."
+          ? "The Windows Codex command is present but not directly executable. Install a native Codex CLI executable or set AUDIT_LLM_CODEX_COMMAND to its explicit path; Tethermark does not download an npm fallback automatically."
           : `Codex CLI is not ready: ${codex.message ?? "not found"}.`,
       details: {
         command: envValue("AUDIT_LLM_CODEX_COMMAND") ?? "codex",
