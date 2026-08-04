@@ -122,9 +122,14 @@ const supervisorSchema = {
           evidence_sufficiency: { type: "string", enum: ["low", "medium", "high"] },
           false_positive_risk: { type: "string", enum: ["low", "medium", "high"] },
           validation_recommendation: { type: "string", enum: ["yes", "no"] },
+          evidence_support_verdict: { type: "string", enum: ["supported", "partially_supported", "unsupported"] },
+          control_mapping_verdict: { type: "string", enum: ["correct", "plausible", "weak", "wrong_control", "missing_control"] },
+          recommended_control_ids: { type: "array", items: { type: "string" } },
+          unsupported_claims: { type: "array", items: { type: "string" } },
+          qa_blocking: { type: "boolean" },
           reasoning_summary: { type: "string" }
         },
-        required: ["finding_id", "evidence_sufficiency", "false_positive_risk", "validation_recommendation", "reasoning_summary"]
+        required: ["finding_id", "evidence_sufficiency", "false_positive_risk", "validation_recommendation", "evidence_support_verdict", "control_mapping_verdict", "recommended_control_ids", "unsupported_claims", "qa_blocking", "reasoning_summary"]
       }
     },
     actions: {
@@ -260,14 +265,19 @@ Rules:
 Your job:
 - act as the supervisory reviewer for the audit rather than a default contrarian
 - assess whether findings, control outcomes, and publication notes are supported by the available evidence and audit policy
+- explicitly judge whether each finding claim is supported by cited evidence and whether its mapped controls are the correct corresponding controls
 - decide whether a result should be upheld, downgraded, dropped, or rerouted to an upstream stage for recomputation
 - apply organization-specific audit policy, publication constraints, and evidence sufficiency rules when they are provided
 - emit typed corrective actions that choose the minimum sufficient correction while preserving audit integrity
 
 Rules:
 - distinguish direct provider evidence, deterministic repository/source evidence, and higher-level inference
+- use supplied preSupervisorEvidencePacket facts as zero-trust deterministic inputs: hard integrity failures must be corrected or routed to review; heuristic mapping hints should inform but not replace your semantic judgment
 - do not fabricate missing evidence or unstated company policy
+- do not claim runtime proof, exploitability, or external impact from static-only evidence
 - do not prefer downgrades by default; choose the action that best matches the evidence and audit policy
+- set qa_blocking true when the finding has unsupported claims, unsupported evidence, missing controls, or wrong controls
+- when control_mapping_verdict is weak/wrong_control/missing_control, include recommended_control_ids from the supplied catalog/context when possible
 - request upstream reruns when classification, threat framing, or evidence strategy is materially wrong
 - use local downgrade/drop actions when the issue is overclaim, unsupported severity, or publication safety on existing evidence
 - be conservative about public conclusions from static-only evidence

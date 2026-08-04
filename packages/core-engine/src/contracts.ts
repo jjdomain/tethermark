@@ -1,5 +1,6 @@
 import type { HandoffRecord } from "../../handoff-contracts/src/index.js";
 import type { AgentInvocationRecord } from "../../trace-recorder/src/index.js";
+import type { LocalSandboxBackendResolution, RuntimeExecutionPolicy, RuntimeSandboxReadiness } from "../../validation-runner/src/index.js";
 
 export type TargetKind = "path" | "repo" | "endpoint";
 export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
@@ -35,11 +36,14 @@ export type SkepticActionType =
   | "request_additional_evidence";
 export type HarnessEventLevel = "debug" | "info" | "warn" | "error";
 export type HarnessMetricKind = "counter" | "gauge" | "histogram";
-export type DatabaseMode = "local";
+export type DatabaseMode = "local" | "postgres" | "supabase";
 export type AuditPackageId = "baseline-static" | "agentic-static" | "deep-static" | "runtime-validated" | "premium-comprehensive";
 export type HumanReviewStatus = "not_required" | "review_required" | "in_review" | "approved" | "rejected" | "requires_rerun";
 export type ProviderReadinessStatus = "available" | "blocked" | "conditional" | "deferred";
 export type PreflightReadinessStatus = "ready" | "ready_with_warnings" | "blocked";
+export type FindingTriageDecision = "confirmed" | "needs_validation" | "false_positive" | "out_of_scope" | "accepted_risk";
+export type FindingReviewPriority = "p0" | "p1" | "p2" | "p3";
+export type FindingValidationIntent = "not_required" | "manual_review" | "runtime_validation" | "rerun_required";
 export type ScopeDefaults = {
   workspace_id: string;
   project_id: string;
@@ -57,6 +61,12 @@ export type HumanReviewActionType =
     | "suppress_finding"
     | "downgrade_severity"
     | "request_validation"
+    | "open_remediation"
+    | "mark_fix_in_progress"
+    | "mark_fix_ready_for_validation"
+    | "mark_verification_pending"
+    | "resolve_finding"
+    | "reopen_finding"
     | "mark_manual_runtime_review_complete"
     | "accept_without_runtime_validation"
     | "mark_internal_only";
@@ -143,6 +153,12 @@ export interface SandboxExecutionArtifact {
   runtime: ContainerWorkspaceContract["runtime"] | "unconfigured";
   plan: SandboxExecutionPlan;
   results: SandboxExecutionResult[];
+  runtime_sandbox?: {
+    provider_id: "local_runtime";
+    selected_backend: string;
+    readiness: RuntimeSandboxReadiness;
+    policy: RuntimeExecutionPolicy;
+  } | null;
 }
 
 export interface SandboxSourceProvenance {
@@ -169,6 +185,9 @@ export interface SandboxSession {
   container_workspace?: ContainerWorkspaceContract;
   execution_plan?: SandboxExecutionPlan;
   execution_results?: SandboxExecutionResult[];
+  runtime_sandbox_readiness?: RuntimeSandboxReadiness;
+  runtime_backend_resolution?: LocalSandboxBackendResolution;
+  runtime_execution_policy?: RuntimeExecutionPolicy;
   source_provenance: SandboxSourceProvenance;
   storage_usage: SandboxStorageUsage;
 }
@@ -278,6 +297,7 @@ export interface PreflightSummary {
     warnings: string[];
     blockers: string[];
   };
+  runtime_sandbox?: RuntimeSandboxReadiness;
   recommended_audit_package: {
     id: string;
     title: string;
@@ -577,6 +597,11 @@ export interface GraderOutput {
   false_positive_risk: "low" | "medium" | "high";
   validation_recommendation: "yes" | "no";
   reasoning_summary: string;
+  evidence_support_verdict?: "supported" | "partially_supported" | "unsupported";
+  control_mapping_verdict?: "correct" | "plausible" | "weak" | "wrong_control" | "missing_control";
+  recommended_control_ids?: string[];
+  unsupported_claims?: string[];
+  qa_blocking?: boolean;
 }
 
 export interface SkepticAction {
@@ -999,6 +1024,9 @@ export interface HumanReviewAction {
   previous_severity?: Finding["severity"] | null;
   updated_severity?: Finding["severity"] | null;
   visibility_override?: PublishabilityArtifact["recommended_visibility"] | null;
+  triage_decision?: FindingTriageDecision | null;
+  review_priority?: FindingReviewPriority | null;
+  validation_intent?: FindingValidationIntent | null;
   notes?: string | null;
   metadata?: Record<string, unknown> | null;
 }
@@ -1011,6 +1039,9 @@ export interface HumanReviewActionInput {
   previous_severity?: Finding["severity"] | null;
   updated_severity?: Finding["severity"] | null;
   visibility_override?: PublishabilityArtifact["recommended_visibility"] | null;
+  triage_decision?: FindingTriageDecision | null;
+  review_priority?: FindingReviewPriority | null;
+  validation_intent?: FindingValidationIntent | null;
   notes?: string | null;
   metadata?: Record<string, unknown> | null;
   created_at?: string;
@@ -1049,6 +1080,7 @@ export interface AuditResult {
   observations: AuditObservation[];
   score_summary: ScoreSummary;
   skeptic_review: SkepticArtifact;
+  finding_quality: FindingQualitySummary;
   correction_plan?: CorrectionPlanArtifact | null;
   correction_result?: CorrectionResultArtifact | null;
   remediation: RemediationArtifact;
@@ -1061,6 +1093,51 @@ export interface AuditResult {
   trace: TraceRecord;
   observability: ObservabilityArtifacts;
   persistence?: PersistenceSummary;
+}
+
+export type FindingEvidenceSupportVerdict = "supported" | "partially_supported" | "unsupported";
+export type FindingControlMappingVerdict = "correct" | "plausible" | "weak" | "wrong_control" | "missing_control";
+export type FindingQualityNextAction = "ready_for_review" | "needs_evidence" | "fix_control_mapping" | "downgrade_or_reword" | "needs_runtime_validation" | "manual_review";
+
+export interface FindingControlMappingQuality {
+  control_id: string;
+  verdict: FindingControlMappingVerdict;
+  reason: string;
+}
+
+export interface FindingQualityRecord {
+  finding_id: string;
+  title: string;
+  evidence_support_verdict: FindingEvidenceSupportVerdict;
+  control_mapping_verdict: FindingControlMappingVerdict;
+  qa_blocking: boolean;
+  integrity_blocking?: boolean;
+  semantic_review_hint?: boolean;
+  quality_score: number;
+  matched_evidence_ids: string[];
+  missing_evidence_refs: string[];
+  unsupported_claims: string[];
+  claimed_control_ids: string[];
+  recommended_control_ids: string[];
+  control_mappings: FindingControlMappingQuality[];
+  reasons: string[];
+  next_action: FindingQualityNextAction;
+}
+
+export interface FindingQualitySummary {
+  run_id: string;
+  generated_at: string;
+  artifact_role?: "pre_supervisor_evidence_packet" | "post_supervisor_integrity" | "legacy_quality";
+  authority?: "deterministic_facts_and_hints" | "deterministic_integrity_gate";
+  overall_verdict: "pass" | "needs_review" | "fail";
+  validated_count: number;
+  plausible_count: number;
+  weak_count: number;
+  unsupported_count: number;
+  wrong_control_count: number;
+  missing_control_count: number;
+  blocking_count: number;
+  findings: FindingQualityRecord[];
 }
 
 export interface RunEnvelope {

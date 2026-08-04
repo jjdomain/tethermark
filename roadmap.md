@@ -107,6 +107,10 @@ For downstream integrators, the main missing pieces are contract stability and s
 
 ## Next Roadmap
 
+## Governed Self-Learning
+
+The v1 self-learning design is documented in [`docs/self-learning-governed-improvement-loop.md`](docs/self-learning-governed-improvement-loop.md). V1 records learning signals, proposes candidates, runs dry-run experiments, and requires explicit promotion. V2 may add bounded autopromotion only for low-risk reversible behavior; suppressions, waivers, severity downgrades, policy/control changes, visibility changes, runtime probe removal, and evidence-reducing behavior remain human-approved.
+
 ## Phase 1: OSS Adoption and Validation
 
 Goal:

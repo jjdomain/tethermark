@@ -44,42 +44,19 @@ export interface IntegrationDefinition {
 const BUILTIN_INTEGRATIONS: IntegrationDefinition[] = [
   {
     id: "github_outbound",
-    name: "GitHub Outbound",
-    description: "Manual outbound verification and delivery for PR comments, issue creation, labels, and checks.",
+    name: "GitHub Export Drafts",
+    description: "Create GitHub-ready issue, pull request comment, label, and check payloads that an operator can review and copy manually.",
     mode: "manual",
     notes: [
-      "Disabled by default and never posts automatically.",
-      "Requires a GitHub token for repository verification and manual delivery."
+      "Disabled by default.",
+      "This local installation creates drafts only; it does not post to GitHub automatically."
     ],
-    credential_fields: [
-      {
-        id: "github_api_base_url",
-        label: "GitHub API Base URL",
-        kind: "base_url",
-        secret: false,
-        required: false,
-        placeholder: "https://api.github.com",
-        help_text: "Override only for GitHub Enterprise Server or a local test double.",
-        env_var: "GITHUB_API_BASE_URL",
-        location: "credentials"
-      },
-      {
-        id: "github_token",
-        label: "GitHub API Token",
-        kind: "api_key",
-        secret: true,
-        required: false,
-        placeholder: "ghp_...",
-        help_text: "Used for outbound repository verification and manual delivery.",
-        env_var: "GITHUB_TOKEN",
-        location: "credentials"
-      }
-    ]
+    credential_fields: []
   },
   {
     id: "generic_webhook",
-    name: "Generic Automation Webhook",
-    description: "Optional signed webhook mirror for OSS automation events like run completion and rerun requests.",
+    name: "Audit Event Webhook",
+    description: "Send selected audit events to a webhook URL you provide, such as run completion or rerun requests.",
     mode: "webhook",
     notes: [
       "Only sends events explicitly selected in settings.",
@@ -93,7 +70,7 @@ const BUILTIN_INTEGRATIONS: IntegrationDefinition[] = [
         secret: false,
         required: false,
         placeholder: "https://example.internal/hooks/audit",
-        help_text: "Target URL for signed OSS automation event delivery.",
+        help_text: "Target URL for signed audit event delivery.",
         env_var: null,
         location: "integrations"
       },
@@ -170,7 +147,7 @@ function describeIntegrationStatus(
   const fields = integration.credential_fields.map((field) => describeFieldStatus(field, credentials, integrations, environment));
   const enabled = integrationEnabled(integration.id, integrations);
   const configured = integration.id === "github_outbound"
-    ? fields.some((field) => field.id === "github_token" && field.configured)
+    ? enabled
     : integration.id === "generic_webhook"
       ? fields.some((field) => field.id === "generic_webhook_url" && field.configured)
       : fields.every((field) => field.configured);
@@ -182,10 +159,8 @@ function describeIntegrationStatus(
       : "missing",
     note: integration.id === "github_outbound"
       ? enabled
-        ? configured
-          ? "GitHub outbound integration is ready for verification and manual delivery."
-          : "GitHub outbound is enabled but still missing a token."
-        : "GitHub outbound is disabled."
+        ? "GitHub draft export is enabled. This installation prepares drafts only and does not post to GitHub automatically. Use Tethermark Cloud for automatic posting."
+        : "GitHub draft export is disabled."
       : enabled
         ? "Generic webhook delivery is configured."
         : "Generic webhook delivery is disabled.",

@@ -1,4 +1,4 @@
-import type { ArtifactRecord, AsyncJobStatus, AuditRequest, AuditResult, DatabaseMode, HarnessEvent, HarnessMetricSnapshot, HumanReviewActionType, HumanReviewStatus, ResolvedConfigurationArtifact, ReviewActorRole } from "../contracts.js";
+import type { ArtifactRecord, AsyncJobStatus, AuditRequest, AuditResult, DatabaseMode, FindingQualitySummary, FindingReviewPriority, FindingTriageDecision, FindingValidationIntent, HarnessEvent, HarnessMetricSnapshot, HumanReviewActionType, HumanReviewStatus, ResolvedConfigurationArtifact, ReviewActorRole } from "../contracts.js";
 import type { AuditPackageDefinition } from "../audit-packages.js";
 
 export interface PersistedTargetRecord {
@@ -326,6 +326,8 @@ export interface PersistedSupervisorReviewRecord {
   final_review: boolean;
 }
 
+export interface PersistedFindingQualityRecord extends FindingQualitySummary {}
+
 export interface PersistedRemediationMemoRecord {
   run_id: string;
   summary: string;
@@ -363,6 +365,9 @@ export interface PersistedReviewActionRecord {
   previous_severity: string | null;
   updated_severity: string | null;
   visibility_override: string | null;
+  triage_decision: FindingTriageDecision | null;
+  review_priority: FindingReviewPriority | null;
+  validation_intent: FindingValidationIntent | null;
   notes: string | null;
   metadata_json: unknown;
 }
@@ -427,6 +432,43 @@ export interface PersistedFindingDispositionRecord {
   metadata_json: unknown;
 }
 
+export type RemediationItemStatus =
+  | "open"
+  | "fix_in_progress"
+  | "fix_ready_for_validation"
+  | "verification_pending"
+  | "resolved"
+  | "reopened";
+
+export interface PersistedRemediationItemRecord {
+  id: string;
+  run_id: string;
+  workspace_id: string;
+  project_id: string;
+  finding_id: string;
+  finding_signature: string | null;
+  status: RemediationItemStatus;
+  owner_id: string | null;
+  priority: FindingReviewPriority | null;
+  due_at: string | null;
+  summary: string;
+  acceptance_criteria: string | null;
+  external_provider: "manual" | "github" | "jira" | null;
+  external_issue_url: string | null;
+  external_issue_number: string | null;
+  external_pr_url: string | null;
+  external_pr_number: string | null;
+  fix_commit_sha: string | null;
+  validation_run_id: string | null;
+  resolution_notes: string | null;
+  created_by: string;
+  created_at: string;
+  updated_by: string;
+  updated_at: string;
+  resolved_at: string | null;
+  metadata_json: unknown;
+}
+
 export interface PersistedUiSettingsRecord {
   id: string;
   scope: "global" | "project";
@@ -441,6 +483,81 @@ export interface PersistedUiSettingsRecord {
   review_json: unknown;
   integrations_json: unknown;
   test_mode_json: unknown;
+  learning_json: unknown;
+}
+
+export interface PersistedRuntimeSandboxReadinessRecord {
+  id: string;
+  workspace_id: string;
+  project_id: string;
+  provider_id: "local_runtime";
+  selected_backend: string;
+  readiness_status: "ready" | "ready_with_warnings" | "blocked";
+  candidates_json: unknown;
+  settings_json: unknown;
+  warnings_json: unknown;
+  blockers_json: unknown;
+  generated_at: string;
+}
+
+export interface PersistedRuntimeValidationRunRecord {
+  id: string;
+  run_id: string;
+  workspace_id: string;
+  project_id: string;
+  provider_id: "local_runtime";
+  selected_backend: string;
+  readiness_status: "ready" | "ready_with_warnings" | "blocked";
+  policy_json: unknown;
+  plan_json: unknown;
+  result_count: number;
+  created_at: string;
+}
+
+export interface PersistedRuntimeValidationStepRecord {
+  id: string;
+  run_id: string;
+  workspace_id: string;
+  project_id: string;
+  step_id: string;
+  provider_id: "local_runtime";
+  selected_backend: string;
+  phase: string | null;
+  adapter: string | null;
+  command_json: unknown;
+  status: string;
+  exit_code: number | null;
+  duration_ms: number | null;
+  stdout_excerpt: string | null;
+  stderr_excerpt: string | null;
+  artifact_json: unknown;
+  checked_at: string;
+}
+
+export interface PersistedRuntimeValidationArtifactRecord {
+  id: string;
+  run_id: string;
+  workspace_id: string;
+  project_id: string;
+  artifact_type: string;
+  path: string | null;
+  summary: string;
+  metadata_json: unknown;
+  created_at: string;
+}
+
+export interface PersistedRuntimeSandboxEventRecord {
+  id: string;
+  run_id: string | null;
+  workspace_id: string;
+  project_id: string;
+  event_type: string;
+  level: "info" | "warn" | "error";
+  provider_id: "local_runtime";
+  selected_backend: string;
+  summary: string;
+  details_json: unknown;
+  created_at: string;
 }
 
 export interface PersistedUiDocumentRecord {
@@ -519,6 +636,134 @@ export interface PersistedRuntimeFollowupRecord {
   resolution_action_type: HumanReviewActionType | null;
   resolution_notes: string | null;
   metadata_json: unknown;
+}
+
+export type PersistedLearningEventType =
+  | "review_false_positive"
+  | "review_out_of_scope"
+  | "review_accepted_risk"
+  | "review_needs_validation"
+  | "finding_disposition"
+  | "finding_quality_gap"
+  | "runtime_followup_outcome"
+  | "remediation_state"
+  | "duplicate_or_conflict"
+  | "assistant_confirmed_action";
+
+export type PersistedLearningCandidateType =
+  | "scoped_suppression_suggestion"
+  | "severity_calibration_suggestion"
+  | "evidence_requirement_adjustment"
+  | "prompt_improvement_candidate"
+  | "eval_fixture_candidate"
+  | "runtime_followup_heuristic"
+  | "duplicate_grouping_signature";
+
+export type PersistedLearningScopeType = "run" | "target" | "project";
+export type PersistedLearningCandidateStatus = "proposed" | "experimented" | "promoted" | "rejected" | "rolled_back" | "expired";
+
+export interface PersistedLearningEventRecord {
+  id: string;
+  run_id: string | null;
+  target_id: string | null;
+  workspace_id: string;
+  project_id: string;
+  event_type: PersistedLearningEventType;
+  source_table: string;
+  source_id: string;
+  finding_id: string | null;
+  finding_signature: string | null;
+  control_ids_json: unknown;
+  signal_summary: string;
+  confidence: number;
+  actor_id: string | null;
+  evidence_refs_json: unknown;
+  payload_json: unknown;
+  created_at: string;
+}
+
+export interface PersistedLearningCandidateRecord {
+  id: string;
+  workspace_id: string;
+  project_id: string;
+  scope_type: PersistedLearningScopeType;
+  scope_id: string;
+  target_id: string | null;
+  candidate_type: PersistedLearningCandidateType;
+  status: PersistedLearningCandidateStatus;
+  title: string;
+  summary: string;
+  rationale: string;
+  proposed_change_json: unknown;
+  source_event_ids_json: unknown;
+  affected_finding_signatures_json: unknown;
+  expected_effect_json: unknown;
+  risk_level: "low" | "medium" | "high";
+  requires_human_approval: boolean;
+  created_at: string;
+  updated_at: string;
+  created_by: string;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  rejection_reason: string | null;
+  expires_at: string | null;
+  metadata_json: unknown;
+}
+
+export interface PersistedLearningExperimentRecord {
+  id: string;
+  candidate_id: string;
+  workspace_id: string;
+  project_id: string;
+  status: "passed" | "failed" | "inconclusive";
+  baseline_metrics_json: unknown;
+  candidate_metrics_json: unknown;
+  regressions_json: unknown;
+  notes_json: unknown;
+  created_at: string;
+  created_by: string;
+}
+
+export interface PersistedLearningPromotionRecord {
+  id: string;
+  candidate_id: string;
+  experiment_id: string | null;
+  workspace_id: string;
+  project_id: string;
+  scope_type: PersistedLearningScopeType;
+  scope_id: string;
+  target_id: string | null;
+  promoted_artifact_type: string;
+  promoted_artifact_version: string;
+  applied_change_json: unknown;
+  rollback_pointer_json: unknown;
+  status: "active" | "rolled_back" | "expired";
+  promoted_by: string;
+  promoted_at: string;
+  rolled_back_by: string | null;
+  rolled_back_at: string | null;
+  rollback_reason: string | null;
+  expires_at: string | null;
+  metadata_json: unknown;
+}
+
+export interface PersistedLearningJobRecord {
+  id: string;
+  workspace_id: string;
+  project_id: string;
+  run_id: string | null;
+  trigger: "page_load" | "manual_refresh" | "run_completed" | "review_action" | "run_detail" | "scheduled" | "api";
+  status: "running" | "completed" | "failed" | "skipped";
+  events_synced: number;
+  candidates_generated: number;
+  candidates_synthesized: number;
+  synthesis_skipped: number;
+  settings_snapshot_json: unknown;
+  metadata_json: unknown;
+  error: string | null;
+  created_by: string;
+  started_at: string;
+  completed_at: string | null;
 }
 
 export interface PersistedAsyncJobAttemptRecord {
@@ -601,6 +846,7 @@ export interface PersistedAuditBundle {
   score_summary: PersistedScoreSummaryRecord;
   review_decision: PersistedReviewDecisionRecord;
   supervisor_review?: PersistedSupervisorReviewRecord | null;
+  finding_quality?: PersistedFindingQualityRecord | null;
   remediation_memo?: PersistedRemediationMemoRecord | null;
   review_workflow?: PersistedReviewWorkflowRecord | null;
   review_actions?: PersistedReviewActionRecord[];

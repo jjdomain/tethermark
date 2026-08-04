@@ -24,19 +24,19 @@ Primary goals:
 
 ## Storage Mode
 
-The OSS harness supports one database mode:
+Tethermark Community Edition supports one database mode:
 
 - `local`
 
 ### Local
 - Backend target: SQLite file storage
-- Intended for OSS users, single-machine local use, self-hosted trusted teams, and CI smoke runs
+- Intended for Community Edition users, single-machine local use, self-hosted trusted teams, and CI smoke runs
 - Zero-config default under `.artifacts/state/local-db`
 - `HARNESS_LOCAL_DB_ROOT` can point storage at an operator-managed directory
 - Stores run metadata, scores, findings, invocations, artifact indexes, review state, and UI settings
 - Large/debug bundle exports remain optional files on disk
 
-Hosted production storage is outside the OSS runtime. The hosted product imports the shared engine contracts and provides a Supabase/Postgres adapter for tenant-aware production storage.
+Tethermark Cloud production storage is outside the Community Edition runtime. The Cloud product imports the shared engine contracts and provides a Supabase/Postgres adapter for tenant-aware production storage.
 
 ## Storage Model
 

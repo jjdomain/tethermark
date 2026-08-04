@@ -1,10 +1,10 @@
-# OSS and Hosted Boundary
+# Community Edition And Tethermark Cloud Boundary
 
-The OSS repository is the public core product. It should present an installation-first UX with optional project overrides.
+The Community Edition repository is the public core product. It should present an installation-first UX with optional project overrides.
 
-## OSS-first UX
+## Community Edition UX
 
-OSS should surface:
+Community Edition should surface:
 
 - agent configuration
 - audit defaults
@@ -13,9 +13,9 @@ OSS should surface:
 - local documents
 - project defaults where useful
 
-## Hosted-only UX
+## Tethermark Cloud UX
 
-The following features are reserved for the hosted product layer and should not remain first-class OSS navigation:
+The following features are reserved for Tethermark Cloud and should not remain first-class Community Edition navigation:
 
 - workspace registry
 - workspace role bindings
@@ -25,18 +25,18 @@ The following features are reserved for the hosted product layer and should not 
 
 ## Implementation note
 
-Some backend persistence and request-scope plumbing may continue to reference workspace identifiers for now. That does not mean workspace should remain a first-class OSS product concept.
+Some backend persistence and request-scope plumbing may continue to reference workspace identifiers for now. That does not mean workspace should remain a first-class Community Edition product concept.
 
-The OSS UI should progressively simplify toward:
+The Community Edition UI should progressively simplify toward:
 
 - installation defaults
 - current project overrides
 
-Hosted will own the full organization/workspace/project model in the private hosted repository.
+Tethermark Cloud will own the full organization/workspace/project model in the private Cloud repository.
 
 ## Backend migration candidates
 
-These OSS backend areas still reflect hosted-style workspace concepts and are the first candidates for migration or feature-flagging into hosted:
+These Community Edition backend areas still reflect Cloud-style workspace concepts and are the first candidates for migration or feature-flagging into Tethermark Cloud:
 
 - `/ui/workspaces`
 - `/ui/workspace-role-bindings`
@@ -46,33 +46,33 @@ These OSS backend areas still reflect hosted-style workspace concepts and are th
 - `packages/core-engine/src/review-governance.ts`
 - workspace-oriented persistence and API-key tests in `packages/core-engine/src/test-runner.ts`
 
-The OSS UI no longer needs to expose these as first-class navigation, even if backend compatibility remains temporarily.
+The Community Edition UI no longer needs to expose these as first-class navigation, even if backend compatibility remains temporarily.
 
 ## API boundary
 
-In OSS, the hosted-only admin routes should stay disabled by default:
+In Community Edition, Cloud admin routes should stay disabled by default:
 
 - `/ui/workspaces`
 - `/ui/workspace-role-bindings`
 - `/ui/api-keys`
 - `/ui/settings?scope_level=workspace`
 
-They can be re-enabled only for hosted migration/test flows with:
+They can be re-enabled only for Cloud migration/test flows with:
 
 - `HARNESS_ENABLE_HOSTED_ADMIN=1`
 - or `HARNESS_PRODUCT_MODE=hosted`
 
-This keeps the public OSS product installation-first while preserving a migration path for the private hosted layer.
+This keeps the public Community Edition product installation-first while preserving a migration path for the private Cloud layer.
 
 ## Database and storage notes
 
-Current OSS persistence mode:
+Current Community Edition persistence mode:
 
 - `local`: local SQLite under `.artifacts/state/local-db`
 
-OSS no longer exposes a `hosted` persistence mode.
+Community Edition no longer exposes a `hosted` persistence mode.
 
-Hosted migration candidates for a remote database such as Supabase or Postgres-backed services:
+Tethermark Cloud migration candidates for a remote database such as Supabase or Postgres-backed services:
 
 - `ui_settings`
 - `workspaces`
@@ -82,7 +82,7 @@ Hosted migration candidates for a remote database such as Supabase or Postgres-b
 - review workflow / review ownership tables
 - async jobs and runtime follow-up coordination if hosted workers are introduced
 
-If hosted adopts Supabase, keep the rule:
+If Tethermark Cloud adopts Supabase, keep the rule:
 
-- OSS remains file-backed/local-first
-- hosted owns remote tenancy, admin records, and multi-user control-plane data
+- Community Edition remains file-backed/local-first
+- Tethermark Cloud owns remote tenancy, admin records, and multi-user control-plane data

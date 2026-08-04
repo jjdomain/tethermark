@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 
 function readEnv(name: string): string | undefined {
   const value = process.env[name];
@@ -95,7 +95,8 @@ const AGENT_ENV_PREFIX: Record<string, string[]> = {
   eval_selection_agent: ["AUDIT_LLM_EVIDENCE_SELECTION"],
   audit_supervisor_agent: ["AUDIT_LLM_SUPERVISOR"],
   remediation_agent: ["AUDIT_LLM_REMEDIATION"],
-  lane_specialist_agent: ["AUDIT_LLM_AREA_REVIEW"]
+  lane_specialist_agent: ["AUDIT_LLM_AREA_REVIEW"],
+  learning_synthesizer_agent: ["AUDIT_LLM_LEARNING_SYNTHESIZER"]
 };
 
 function readAgentEnv(agentName: string, suffix: "PROVIDER" | "MODEL" | "API_KEY"): string | undefined {
@@ -229,10 +230,11 @@ function appendLimited(current: string, chunk: Buffer, limit = 20_000): string {
   return next.length > limit ? next.slice(next.length - limit) : next;
 }
 
-function runProcess(command: string, args: string[], stdin: string, timeoutMs: number): Promise<ProcessResult> {
+function runProcess(command: string, args: string[], stdin: string, timeoutMs: number, env?: NodeJS.ProcessEnv): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       stdio: ["pipe", "pipe", "pipe"],
+      env,
       windowsHide: true
     });
     let stdout = "";
@@ -268,22 +270,9 @@ function runProcess(command: string, args: string[], stdin: string, timeoutMs: n
 }
 
 function resolveCodexCommand(command: string, prefixArgs: string[]): { command: string; prefixArgs: string[] } {
-  if (prefixArgs.length > 0 || process.platform !== "win32" || command.toLowerCase() !== "codex") {
-    return { command, prefixArgs };
-  }
-  const probe = spawnSync(command, ["--version"], {
-    encoding: "utf8",
-    shell: true,
-    windowsHide: true,
-    timeout: 10_000
-  });
-  const output = `${probe.stdout ?? ""}\n${probe.stderr ?? ""}`.toLowerCase();
-  if (probe.status === 0 && !output.includes("access is denied")) {
-    return { command, prefixArgs };
-  }
   return {
-    command: "npx",
-    prefixArgs: ["-y", "@openai/codex"]
+    command: process.platform === "win32" && command.toLowerCase() === "codex" ? "codex.exe" : command,
+    prefixArgs
   };
 }
 
@@ -310,7 +299,8 @@ export class OpenAICodexCliProvider implements ModelProvider {
     private readonly command = readEnv("AUDIT_LLM_CODEX_COMMAND") ?? readEnv("CODEX_COMMAND") ?? "codex",
     private readonly sandbox = readEnv("AUDIT_LLM_CODEX_SANDBOX") ?? "read-only",
     private readonly timeoutMs = readNumberEnv("AUDIT_LLM_CODEX_TIMEOUT_MS", 600_000),
-    private readonly commandPrefixArgs: string[] = []
+    private readonly commandPrefixArgs: string[] = [],
+    private readonly processEnv?: NodeJS.ProcessEnv
   ) {
     const resolved = resolveCodexCommand(this.command, this.commandPrefixArgs);
     this.resolvedCommand = resolved.command;
@@ -337,7 +327,7 @@ export class OpenAICodexCliProvider implements ModelProvider {
       if (this.modelName) {
         args.push("--model", this.modelName);
       }
-      const result = await runProcess(this.resolvedCommand, args, buildCodexPrompt(request), this.timeoutMs);
+      const result = await runProcess(this.resolvedCommand, args, buildCodexPrompt(request), this.timeoutMs, this.processEnv);
       if (result.exitCode !== 0) {
         throw new Error(`Codex CLI exited with code ${result.exitCode}. ${result.stderr || result.stdout}`.trim());
       }
@@ -489,13 +479,34 @@ function inferMockPayload(request: StructuredGenerationRequest): unknown {
         },
         grader_outputs: (context?.findings ?? []).map((finding: any) => ({
           finding_id: finding.finding_id,
-          evidence_sufficiency: finding.source === "tool" ? "high" : "medium",
-          false_positive_risk: finding.source === "tool" ? "low" : "medium",
-          validation_recommendation: "no",
-          reasoning_summary: "Mock supervisor review adjusted confidence based on source type and available evidence."
+          evidence_sufficiency: (context?.findingQuality?.findings ?? []).find((item: any) => item.finding_id === finding.finding_id)?.evidence_support_verdict === "unsupported"
+            ? "low"
+            : finding.source === "tool" ? "high" : "medium",
+          false_positive_risk: (context?.findingQuality?.findings ?? []).find((item: any) => item.finding_id === finding.finding_id)?.qa_blocking
+            ? "high"
+            : finding.source === "tool" ? "low" : "medium",
+          validation_recommendation: (context?.findingQuality?.findings ?? []).find((item: any) => item.finding_id === finding.finding_id)?.qa_blocking ? "yes" : "no",
+          evidence_support_verdict: (context?.findingQuality?.findings ?? []).find((item: any) => item.finding_id === finding.finding_id)?.evidence_support_verdict ?? (finding.evidence?.length ? "partially_supported" : "unsupported"),
+          control_mapping_verdict: (context?.findingQuality?.findings ?? []).find((item: any) => item.finding_id === finding.finding_id)?.control_mapping_verdict ?? (finding.control_ids?.length ? "plausible" : "missing_control"),
+          recommended_control_ids: (context?.findingQuality?.findings ?? []).find((item: any) => item.finding_id === finding.finding_id)?.recommended_control_ids ?? finding.control_ids ?? [],
+          unsupported_claims: (context?.findingQuality?.findings ?? []).find((item: any) => item.finding_id === finding.finding_id)?.unsupported_claims ?? [],
+          qa_blocking: !!(context?.findingQuality?.findings ?? []).find((item: any) => item.finding_id === finding.finding_id)?.qa_blocking,
+          reasoning_summary: "Mock supervisor review incorporated deterministic finding-quality checks and source evidence posture."
         })),
-        actions: [],
-        notes: ["Mock supervisor review found no additional corrective actions."]
+        actions: (context?.findingQuality?.findings ?? [])
+          .filter((item: any) => item.qa_blocking)
+          .slice(0, 5)
+          .map((item: any) => ({
+            type: item.evidence_support_verdict === "unsupported" ? "request_additional_evidence" : "reassess_control_subset",
+            reason: `Deterministic QA flagged ${item.finding_id}: evidence ${item.evidence_support_verdict}, controls ${item.control_mapping_verdict}.`,
+            lane_names: [],
+            control_ids: item.claimed_control_ids ?? [],
+            finding_ids: [item.finding_id],
+            provider_ids: []
+          })),
+        notes: (context?.findingQuality?.blocking_count ?? 0) > 0
+          ? ["Mock supervisor review found deterministic QA blockers requiring correction or reviewer attention."]
+          : ["Mock supervisor review found no additional corrective actions."]
       };
     case "remediation_agent":
       return {
@@ -533,7 +544,7 @@ export function resolveAgentProviderConfig(agentName: string, baseConfig: Provid
     apiKeySource = "global-generic";
   }
 
-  const provider = (agentOverride?.provider ?? baseConfig.provider ?? envProvider ?? readEnv("AUDIT_LLM_PROVIDER") ?? (apiKey ? "openai" : "mock")) as "openai" | "openai_codex" | "mock";
+  const provider = (agentOverride?.provider ?? baseConfig.provider ?? envProvider ?? readEnv("AUDIT_LLM_PROVIDER") ?? (apiKey ? "openai" : "openai_codex")) as "openai" | "openai_codex" | "mock";
   return {
     provider,
     model: agentOverride?.model ?? baseConfig.model ?? envModel ?? readEnv("AUDIT_LLM_MODEL") ?? undefined,

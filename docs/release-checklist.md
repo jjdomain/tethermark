@@ -1,6 +1,6 @@
-# Tethermark OSS Release Checklist
+# Tethermark Community Edition Release Checklist
 
-Use this checklist before tagging or publicly announcing an OSS release.
+Use this checklist before tagging or publicly announcing a Tethermark Community Edition release.
 
 ## 1. Verification Commands
 
@@ -17,6 +17,14 @@ That command currently covers:
 - export golden/schema checks
 - bundled fixture validation
 
+For static audit production release candidates, also run:
+
+```bash
+npm run production:static-release
+```
+
+That command adds the deterministic Codex OAuth first-run smoke, Pi Agent static API E2E, Pi Agent browser/UI E2E, and export checks. See `docs/static-audit-production-readiness.md` for the full gate and release evidence requirements.
+
 ## 2. Local Runtime Smoke Test
 
 In a fresh shell with `.env` based on `.env.example`:
@@ -32,17 +40,21 @@ Confirm:
 - auth info responds on `http://127.0.0.1:8787/auth/info`
 - web UI loads on `http://127.0.0.1:8788`
 - the web UI can fetch runs, settings, and auth metadata
+- `GET /assistant/capabilities` returns enabled Community Edition capabilities by default, unless an explicit disable override is set
 
-## 3. End-to-End OSS Workflow Smoke Test
+## 3. End-To-End Community Edition Workflow Smoke Test
 
-Verify one full OSS operator path:
+Verify one full Community Edition operator path:
 
 1. Launch a local scan with the mock provider or a configured live provider.
 2. Run preflight and confirm the launch profile.
 3. Complete the run and inspect findings in the web UI.
 4. Exercise review actions or runtime follow-up if the run requires review.
-5. Download at least one executive summary and one SARIF or JSON export.
-6. Confirm `GET /runs/:runId/exports` returns the documented export catalog.
+5. For a confirmed finding, open a remediation item, add a manual external issue/PR link, advance it to resolved with evidence, and verify the finding status updates without a separate manual status change.
+6. Download at least one executive summary and one SARIF or JSON export. Verify the SARIF can be used with the documented GitHub code scanning upload workflow.
+7. Confirm `GET /runs/:runId/exports` returns the documented export catalog.
+8. Open the run assistant, ask a run-level remediation question, verify citations/limitations render, and confirm that automatic Cloud connector actions are unavailable in Community Edition.
+9. Toggle dark/light mode once and verify the selected theme is persisted after reload.
 
 ## 4. Documentation Review
 
@@ -59,18 +71,21 @@ Specifically re-check:
 - auth mode/trust model wording
 - supported persistence modes
 - runtime limitations
+- assistant default-on behavior, explicit disable override, model routing, fallback, and Community Edition/Cloud boundaries
+- remediation workflow, manual Community Edition external links, and Cloud connector/webhook boundary
+- dark/light theme default and persistence
 - release verification commands
 - public API/export routes
 
-## 5. OSS Scope Check
+## 5. Community Edition Scope Check
 
 Before release, confirm the public docs still present these boundaries accurately:
 
-- OSS defaults to trusted self-hosting, not enterprise identity
+- Community Edition defaults to trusted self-hosting, not enterprise identity
 - `auth=none` is advisory governance only
-- `auth=api_key` is the enforced OSS auth mode
-- non-SQLite persistence is not yet part of the OSS release
-- outbound GitHub actions remain guarded and operator-triggered
+- `auth=api_key` is the enforced Community Edition auth mode
+- non-SQLite persistence is not yet part of the Community Edition release
+- Community Edition does not create GitHub issues or receive GitHub webhooks; Tethermark Cloud connector automation is documented separately
 
 ## 6. Release Hygiene
 
@@ -79,5 +94,7 @@ Before cutting a public release:
 1. Update `changelog.md`
 2. Run `npm run exports:refresh` only if the export contract intentionally changed
 3. Re-run `npm run release:check`
-4. Verify example consumers under `examples/` still work against current export shapes
-5. Tag and publish only after the checklist is green
+4. For static audit releases, re-run `npm run production:static-release`
+5. Verify `npm run smoke:openai-codex-oauth:real` on a signed-in workstation when Codex OAuth behavior changed
+6. Verify example consumers under `examples/` still work against current export shapes
+7. Tag and publish only after the checklist is green

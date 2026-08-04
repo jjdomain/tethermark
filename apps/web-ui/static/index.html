@@ -7,6 +7,7 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
       tailwind.config = {
+        darkMode: "class",
         theme: {
           extend: {
             colors: {
@@ -31,10 +32,203 @@
         }
       };
     </script>
+    <script>
+      (() => {
+        const stored = window.localStorage.getItem("tethermark-theme");
+        const theme = stored === "light" || stored === "dark" ? stored : "dark";
+        document.documentElement.classList.toggle("theme-dark", theme === "dark");
+        document.documentElement.dataset.theme = theme;
+      })();
+    </script>
+    <style>
+      html.theme-dark {
+        color-scheme: dark;
+      }
+      html.theme-dark body,
+      html.theme-dark .bg-background {
+        background-color: #0b1120 !important;
+        color: #e2e8f0 !important;
+      }
+      html.theme-dark .bg-white,
+      html.theme-dark .bg-card,
+      html.theme-dark .bg-white\/95,
+      html.theme-dark .bg-white\/90,
+      html.theme-dark .bg-white\/80,
+      html.theme-dark .bg-white\/70 {
+        background-color: #111827 !important;
+      }
+      html.theme-dark .bg-slate-50,
+      html.theme-dark .bg-slate-50\/80,
+      html.theme-dark .bg-white\/50,
+      html.theme-dark .bg-secondary {
+        background-color: #172033 !important;
+      }
+      html.theme-dark .bg-slate-100 {
+        background-color: #1f2937 !important;
+      }
+      html.theme-dark .bg-stone-50,
+      html.theme-dark .bg-stone-100 {
+        background-color: #1f2937 !important;
+      }
+      html.theme-dark .bg-slate-200 {
+        background-color: #2b3648 !important;
+      }
+      html.theme-dark .bg-slate-800,
+      html.theme-dark .bg-slate-900 {
+        background-color: #2563eb !important;
+      }
+      html.theme-dark .bg-slate-800.text-white,
+      html.theme-dark .bg-slate-900.text-white {
+        color: #ffffff !important;
+      }
+      html.theme-dark .text-slate-950,
+      html.theme-dark .text-slate-900,
+      html.theme-dark .text-slate-800,
+      html.theme-dark .text-slate-700,
+      html.theme-dark .text-foreground {
+        color: #e2e8f0 !important;
+      }
+      html.theme-dark .text-slate-600 {
+        color: #bfdbfe !important;
+      }
+      html.theme-dark .text-slate-500,
+      html.theme-dark .text-stone-700,
+      html.theme-dark .text-muted {
+        color: #93a4b8 !important;
+      }
+      html.theme-dark .text-slate-400 {
+        color: #7f8ea3 !important;
+      }
+      html.theme-dark .border,
+      html.theme-dark .border-border,
+      html.theme-dark .border-slate-200,
+      html.theme-dark .border-slate-300,
+      html.theme-dark .border-stone-200 {
+        border-color: #2f3b4f !important;
+      }
+      html.theme-dark .divide-slate-200 > :not([hidden]) ~ :not([hidden]) {
+        border-color: #2f3b4f !important;
+      }
+      html.theme-dark input,
+      html.theme-dark textarea,
+      html.theme-dark select {
+        background-color: #111827 !important;
+        border-color: #2f3b4f !important;
+        color: #e2e8f0 !important;
+      }
+      html.theme-dark select option,
+      html.theme-dark select optgroup {
+        background-color: #111827 !important;
+        color: #e2e8f0 !important;
+      }
+      html.theme-dark input::placeholder,
+      html.theme-dark textarea::placeholder {
+        color: #64748b !important;
+      }
+      html.theme-dark button.border,
+      html.theme-dark button.border-border,
+      html.theme-dark button.border-slate-200 {
+        background-color: #111827 !important;
+        color: #dbeafe !important;
+      }
+      html.theme-dark button.border:hover,
+      html.theme-dark button.border-border:hover,
+      html.theme-dark button.border-slate-200:hover {
+        background-color: #172033 !important;
+        color: #f8fafc !important;
+      }
+      html.theme-dark button.system-tab-active,
+      html.theme-dark button.border.system-tab-active,
+      html.theme-dark button.border-border.system-tab-active,
+      html.theme-dark button.border-slate-200.system-tab-active {
+        background-color: rgba(37, 99, 235, 0.28) !important;
+        border-color: rgba(96, 165, 250, 0.8) !important;
+        color: #eff6ff !important;
+      }
+      html.theme-dark button.system-tab-active:hover,
+      html.theme-dark button.border.system-tab-active:hover,
+      html.theme-dark button.border-border.system-tab-active:hover,
+      html.theme-dark button.border-slate-200.system-tab-active:hover {
+        background-color: rgba(37, 99, 235, 0.36) !important;
+        color: #ffffff !important;
+      }
+      html.theme-dark .hover\:bg-slate-50:hover {
+        background-color: #172033 !important;
+      }
+      html.theme-dark .hover\:bg-slate-100:hover,
+      html.theme-dark .hover\:bg-slate-200:hover {
+        background-color: #223047 !important;
+      }
+      html.theme-dark .hover\:bg-slate-800:hover {
+        background-color: #1d4ed8 !important;
+      }
+      html.theme-dark .shadow-sm,
+      html.theme-dark .shadow-soft,
+      html.theme-dark .shadow-2xl {
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28) !important;
+      }
+      html.theme-dark .bg-red-50 {
+        background-color: rgba(127, 29, 29, 0.35) !important;
+      }
+      html.theme-dark .border-red-200,
+      html.theme-dark .border-red-300 {
+        border-color: rgba(248, 113, 113, 0.45) !important;
+      }
+      html.theme-dark .text-red-700 {
+        color: #fca5a5 !important;
+      }
+      html.theme-dark .bg-emerald-50 {
+        background-color: rgba(6, 78, 59, 0.35) !important;
+      }
+      html.theme-dark .border-emerald-200,
+      html.theme-dark .border-emerald-300 {
+        border-color: rgba(52, 211, 153, 0.45) !important;
+      }
+      html.theme-dark .text-emerald-700 {
+        color: #6ee7b7 !important;
+      }
+      html.theme-dark .bg-amber-50 {
+        background-color: rgba(120, 53, 15, 0.35) !important;
+      }
+      html.theme-dark .bg-orange-50 {
+        background-color: rgba(124, 45, 18, 0.35) !important;
+      }
+      html.theme-dark .border-amber-200,
+      html.theme-dark .border-amber-300,
+      html.theme-dark .border-orange-200 {
+        border-color: rgba(251, 191, 36, 0.45) !important;
+      }
+      html.theme-dark .text-amber-700,
+      html.theme-dark .text-amber-800,
+      html.theme-dark .text-amber-900,
+      html.theme-dark .text-amber-950,
+      html.theme-dark .text-orange-700 {
+        color: #fcd34d !important;
+      }
+      html.theme-dark .bg-blue-50,
+      html.theme-dark .bg-sky-50,
+      html.theme-dark .bg-cyan-50 {
+        background-color: rgba(30, 64, 175, 0.28) !important;
+      }
+      html.theme-dark .border-blue-200,
+      html.theme-dark .border-sky-200,
+      html.theme-dark .border-cyan-200 {
+        border-color: rgba(96, 165, 250, 0.45) !important;
+      }
+      html.theme-dark .text-blue-700,
+      html.theme-dark .text-sky-700,
+      html.theme-dark .text-cyan-700,
+      html.theme-dark .text-cyan-800 {
+        color: #93c5fd !important;
+      }
+      html.theme-dark ::selection {
+        background-color: rgba(37, 99, 235, 0.45);
+      }
+    </style>
   </head>
   <body class="min-h-screen bg-background text-foreground font-sans">
     <div id="root"></div>
     <script src="/config.js"></script>
-    <script type="module" src="/app.js"></script>
+    <script type="module" src="/app.js?v=20260604-learning-triggers-v2"></script>
   </body>
 </html>

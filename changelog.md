@@ -1,5 +1,33 @@
 ﻿# Changelog
 
+## 2026-08-02
+
+### Added
+
+- Added a canonical 12-phase Community Edition production tracker with current branch, release-gate, static-tool, OAuth-validation, runtime-sandbox, learning, packaging, and launch status.
+- Added the implementation plan for local Admin/System Policies, including versioned SQLite policy records, immutable per-run resolution snapshots, extensive-scan catalog and operational controls, API/UI scope, safe templates, and release tests.
+- Added a Docker/Docker Desktop production-readiness fixture using a digest-pinned image, read-only source/root filesystems, default-deny networking, non-root execution, dropped capabilities, bounded resources and output, live policy inspection, structured evidence, and verified cleanup.
+
+### Changed
+
+- Promoted local policy administration from deferred hosted-only planning to active Community Edition scope and linked `PLANS.md` to the canonical production tracker.
+
+### Fixed
+
+- Updated the static Pi browser E2E for the Audits navigation label and staged the benchmark suite in its isolated work root so the full static production release gate can complete.
+- Changed runtime fixture validation to fail closed when Docker is launchable but no isolated fixture has executed, preventing backend selection from appearing as production runtime validation.
+
+## 2026-07-20
+
+### Changed
+
+- Defined `hosted_e2b` on E2B Hobby/usage billing as the initial AISecurityBase runtime benchmark and pre-revenue Tethermark Cloud private-beta provider, subject to verification of the required custom memory profile.
+- Defined `hosted_daytona` Linux VM as the first capability-tested standby/overflow provider and deferred `hosted_modal` to demonstrated burst or GPU demand.
+- Added fail-closed Cloud provider capability requirements for exact commands, target staging, network and resource policy, artifact and usage capture, lifecycle control, and cleanup verification.
+- Added reproducible provider-failover rules: automatic failover is limited to pre-execution failures, while post-execution failures restart from the beginning as linked attempts with separate evidence and usage.
+- Added pre-revenue hosted controls for runtime eligibility, concurrency, per-project launch quotas, spending limits, hard timeouts, orphan cleanup, and static fallback.
+- Excluded Perplexity's current model-directed Sandbox tool from the general runtime-audit provider set while leaving room for a future evidence-computation role.
+
 ## 2026-04-18
 
 ### Added

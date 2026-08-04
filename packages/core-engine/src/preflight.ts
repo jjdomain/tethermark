@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
+import { buildRuntimeSandboxReadiness, isRuntimeRunMode } from "../../validation-runner/src/index.js";
 import type { AnalysisSummary, AuditRequest, PreflightReadinessStatus, PreflightSummary } from "./contracts.js";
 import { getBuiltinAuditPackage, resolveAuditPackage } from "./audit-packages.js";
 import { getBuiltinAuditPolicyPack, resolvePolicyPackReference } from "./audit-policy.js";
@@ -9,6 +10,7 @@ import { buildHeuristicTargetProfile, resolveRequestedOrAutoRunMode } from "./pl
 import { getPythonWorkerCapability } from "./python-worker.js";
 import { analyzeTarget } from "./repo.js";
 import { buildStaticToolsReadiness } from "./static-tools.js";
+import { checkGitRepoAccess } from "./git-utils.js";
 
 function emptyAnalysis(rootPath: string): AnalysisSummary {
   return {
@@ -209,6 +211,10 @@ export async function buildPreflightSummary(request: AuditRequest): Promise<Pref
       blockers.push(`Local path '${resolvedLocalPath}' could not be accessed.`);
     }
   } else if (request.repo_url) {
+    const repoAccess = await checkGitRepoAccess(request.repo_url);
+    if (!repoAccess.ok) {
+      blockers.push(repoAccess.summary);
+    }
     warnings.push("Remote repository preflight does not clone contents yet; file-level analysis is deferred until run start.");
     analysis = emptyAnalysis(request.repo_url);
   } else if (request.endpoint_url) {
@@ -239,6 +245,14 @@ export async function buildPreflightSummary(request: AuditRequest): Promise<Pref
   });
   const externalToolSelection = (effectiveRequest.hints as any)?.external_audit_tools?.included_tool_ids;
   const staticToolsReadiness = buildStaticToolsReadiness({ selectedToolIds: externalToolSelection });
+  const runtimeSandboxSettings = (effectiveRequest.hints as any)?.runtime_sandbox;
+  const runtimeSandboxReadiness = buildRuntimeSandboxReadiness({
+    settings: runtimeSandboxSettings,
+    target: {
+      source_type: effectiveRequest.repo_url ? "repo" : effectiveRequest.local_path ? "path" : effectiveRequest.endpoint_url ? "endpoint" : null,
+      trusted: Boolean(effectiveRequest.local_path)
+    }
+  });
 
   if ((effectiveRunMode === "runtime" || effectiveRunMode === "validate") && request.hints?.preflight && typeof request.hints.preflight === "object") {
     const runtimeAllowed = String((request.hints.preflight as any).runtime_allowed ?? "targeted_only");
@@ -252,6 +266,13 @@ export async function buildPreflightSummary(request: AuditRequest): Promise<Pref
   }
   warnings.push(...staticToolsReadiness.warnings);
   blockers.push(...staticToolsReadiness.blockers);
+  if (isRuntimeRunMode(effectiveRunMode)) {
+    if (runtimeSandboxReadiness.resolution.readiness_status === "blocked") {
+      blockers.push(...runtimeSandboxReadiness.resolution.blockers.map((item) => `Local Runtime Sandbox: ${item}`));
+    } else if (runtimeSandboxReadiness.resolution.readiness_status === "ready_with_warnings") {
+      warnings.push(...runtimeSandboxReadiness.resolution.warnings.map((item) => `Local Runtime Sandbox: ${item}`));
+    }
+  }
   if ((effectiveRunMode === "build" || effectiveRunMode === "runtime" || effectiveRunMode === "validate") && pythonWorkerCapability.status !== "available") {
     warnings.push("Python worker adapters are unavailable in this host environment; bounded runtime-worker evidence will be skipped.");
   }
@@ -288,6 +309,7 @@ export async function buildPreflightSummary(request: AuditRequest): Promise<Pref
     },
     provider_readiness: providerReadiness,
     static_tools: staticToolsReadiness,
+    runtime_sandbox: runtimeSandboxReadiness,
     recommended_audit_package: {
       id: recommendedPackage?.id ?? (request.audit_package ?? "agentic-static"),
       title: recommendedPackage?.title ?? (request.audit_package ?? "Selected package"),

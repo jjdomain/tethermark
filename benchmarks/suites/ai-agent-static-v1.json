@@ -1,0 +1,202 @@
+{
+  "suite_id": "ai-agent-static-v1",
+  "suite_version": "2026.06",
+  "title": "AI Agent Static Product Benchmark Suite",
+  "summary": "Pinned public targets that represent the AI-agent, tool-boundary, supply-chain, MCP, workflow, and LLM-app surfaces Tethermark is expected to audit.",
+  "default_run_mode": "static",
+  "default_audit_package": "agentic-static",
+  "cases": [
+    {
+      "id": "pi-agent-static",
+      "target_id": "pi-agent",
+      "target_name": "Pi Agent",
+      "repo_url": "https://github.com/earendil-works/pi.git",
+      "pinned_commit": "3d9e14d7482f4a99d5224926099bec0d17ff86fd",
+      "run_mode": "static",
+      "audit_package": "agentic-static",
+      "tier": "smoke",
+      "enabled_by_default": true,
+      "categories": ["static_posture", "agent_tool_boundary", "ci_workflow", "supply_chain"],
+      "expected_target_classes": ["tool_using_multi_turn_agent", "runnable_local_app"],
+      "expected_controls": [
+        "owasp_llm.sensitive_information_disclosure",
+        "owasp_agentic.tool_misuse_boundary",
+        "mitre_atlas.tool_misuse_mitigation",
+        "openssf.security_policy",
+        "openssf.dependency_update_tool",
+        "openssf.token_permissions"
+      ],
+      "expected_finding_families": [
+        "secret_exposure",
+        "workflow_permissions",
+        "security_policy",
+        "dependency_hygiene"
+      ],
+      "critical_failures": [
+        "finding_without_evidence",
+        "unknown_control_mapping",
+        "static_runtime_overclaim"
+      ],
+      "notes": [
+        "Lightweight public smoke target already used for manual Pi static validation.",
+        "Expected finding families are drift signals, not exact finding requirements."
+      ]
+    },
+    {
+      "id": "mini-swe-agent-static",
+      "target_id": "mini-swe-agent",
+      "target_name": "mini-swe-agent",
+      "repo_url": "https://github.com/SWE-agent/mini-swe-agent.git",
+      "pinned_commit": "2afd0fb81bacbf0aacfac9ded6f093c5acd0bf7c",
+      "run_mode": "static",
+      "audit_package": "agentic-static",
+      "tier": "core",
+      "enabled_by_default": true,
+      "categories": ["agent_tool_boundary", "ci_workflow", "supply_chain"],
+      "expected_target_classes": ["tool_using_multi_turn_agent", "runnable_local_app"],
+      "expected_controls": [
+        "owasp_agentic.tool_misuse_boundary",
+        "mitre_atlas.tool_misuse_mitigation",
+        "openssf.token_permissions",
+        "openssf.pinned_dependencies"
+      ],
+      "expected_finding_families": ["workflow_permissions", "dependency_hygiene", "agentic_controls"],
+      "critical_failures": ["finding_without_evidence", "unknown_control_mapping", "static_runtime_overclaim"],
+      "notes": ["Small coding-agent benchmark for command/file/tool boundary coverage."]
+    },
+    {
+      "id": "aider-static",
+      "target_id": "aider",
+      "target_name": "Aider",
+      "repo_url": "https://github.com/Aider-AI/aider.git",
+      "pinned_commit": "5dc9490bb35f9729ef2c95d00a19ccd30c26339c",
+      "run_mode": "static",
+      "audit_package": "agentic-static",
+      "tier": "core",
+      "enabled_by_default": true,
+      "categories": ["agent_tool_boundary", "supply_chain", "repo_posture"],
+      "expected_target_classes": ["tool_using_multi_turn_agent", "runnable_local_app"],
+      "expected_controls": [
+        "owasp_agentic.tool_misuse_boundary",
+        "owasp_llm.sensitive_information_disclosure",
+        "openssf.security_policy",
+        "openssf.pinned_dependencies"
+      ],
+      "expected_finding_families": ["agentic_controls", "dependency_hygiene", "security_policy"],
+      "critical_failures": ["finding_without_evidence", "unknown_control_mapping", "static_runtime_overclaim"],
+      "notes": ["CLI coding assistant with local repo editing and git-centric workflow."]
+    },
+    {
+      "id": "crewai-static",
+      "target_id": "crewai",
+      "target_name": "CrewAI",
+      "repo_url": "https://github.com/crewAIInc/crewAI.git",
+      "pinned_commit": "913a3abeadb0491eb09f98af2f36082b67747b68",
+      "run_mode": "static",
+      "audit_package": "deep-static",
+      "tier": "extended",
+      "enabled_by_default": false,
+      "categories": ["multi_agent_orchestration", "supply_chain", "repo_posture"],
+      "expected_target_classes": ["tool_using_multi_turn_agent", "runnable_local_app"],
+      "expected_controls": [
+        "owasp_agentic.tool_misuse_boundary",
+        "owasp_llm.sensitive_information_disclosure",
+        "openssf.security_policy",
+        "openssf.dependency_update_tool"
+      ],
+      "expected_finding_families": ["agentic_controls", "dependency_hygiene", "security_policy"],
+      "critical_failures": ["finding_without_evidence", "unknown_control_mapping", "static_runtime_overclaim"],
+      "notes": ["Common multi-agent orchestration framework; heavier than the smoke suite."]
+    },
+    {
+      "id": "langgraph-static",
+      "target_id": "langgraph",
+      "target_name": "LangGraph",
+      "repo_url": "https://github.com/langchain-ai/langgraph.git",
+      "pinned_commit": "2b1abc807b282245211f5ba8f292aaf3e24f1e07",
+      "run_mode": "static",
+      "audit_package": "deep-static",
+      "tier": "extended",
+      "enabled_by_default": false,
+      "categories": ["multi_agent_orchestration", "llm_app", "supply_chain"],
+      "expected_target_classes": ["tool_using_multi_turn_agent", "runnable_local_app"],
+      "expected_controls": [
+        "owasp_agentic.tool_misuse_boundary",
+        "owasp_llm.sensitive_information_disclosure",
+        "openssf.pinned_dependencies",
+        "openssf.token_permissions"
+      ],
+      "expected_finding_families": ["agentic_controls", "workflow_permissions", "dependency_hygiene"],
+      "critical_failures": ["finding_without_evidence", "unknown_control_mapping", "static_runtime_overclaim"],
+      "notes": ["Graph/stateful agent workflow framework with real CI and supply-chain surface."]
+    },
+    {
+      "id": "mcp-servers-static",
+      "target_id": "mcp-servers",
+      "target_name": "Model Context Protocol Servers",
+      "repo_url": "https://github.com/modelcontextprotocol/servers.git",
+      "pinned_commit": "f5054df1fb8665f4c224cf4f46d5314266ab5b45",
+      "run_mode": "static",
+      "audit_package": "agentic-static",
+      "tier": "core",
+      "enabled_by_default": true,
+      "categories": ["mcp_plugin_boundary", "agent_tool_boundary", "supply_chain"],
+      "expected_target_classes": ["mcp_server_plugin_skill_package", "tool_using_multi_turn_agent"],
+      "expected_controls": [
+        "owasp_agentic.tool_misuse_boundary",
+        "mitre_atlas.tool_misuse_mitigation",
+        "openssf.security_policy",
+        "openssf.token_permissions"
+      ],
+      "expected_finding_families": ["agentic_controls", "workflow_permissions", "security_policy"],
+      "critical_failures": ["finding_without_evidence", "unknown_control_mapping", "static_runtime_overclaim"],
+      "notes": ["Representative MCP/tool-server benchmark for filesystem/API/tool exposure boundaries."]
+    },
+    {
+      "id": "flowise-static",
+      "target_id": "flowise",
+      "target_name": "Flowise",
+      "repo_url": "https://github.com/FlowiseAI/Flowise.git",
+      "pinned_commit": "42d593f8ca854471059051a7fdd89bf8d8ab7c12",
+      "run_mode": "static",
+      "audit_package": "deep-static",
+      "tier": "extended",
+      "enabled_by_default": false,
+      "categories": ["llm_workflow_platform", "supply_chain", "ci_workflow"],
+      "expected_target_classes": ["tool_using_multi_turn_agent", "runnable_local_app"],
+      "expected_controls": [
+        "owasp_agentic.tool_misuse_boundary",
+        "owasp_llm.sensitive_information_disclosure",
+        "openssf.pinned_dependencies",
+        "openssf.token_permissions"
+      ],
+      "expected_finding_families": ["agentic_controls", "workflow_permissions", "dependency_hygiene"],
+      "critical_failures": ["finding_without_evidence", "unknown_control_mapping", "static_runtime_overclaim"],
+      "notes": ["Low-code LLM workflow platform with server/frontend/connector surface."]
+    },
+    {
+      "id": "agentdojo-runtime-pending",
+      "target_id": "agentdojo",
+      "target_name": "AgentDojo",
+      "repo_url": "https://github.com/ethz-spylab/agentdojo.git",
+      "pinned_commit": "089ed468cf3ed0322acc66b0211f26d9d90dbf60",
+      "run_mode": "validate",
+      "audit_package": "runtime-validated",
+      "tier": "runtime_pending",
+      "enabled_by_default": false,
+      "categories": ["runtime_validation", "prompt_injection", "agent_tool_boundary"],
+      "expected_target_classes": ["tool_using_multi_turn_agent", "runnable_local_app"],
+      "expected_controls": [
+        "owasp_llm.prompt_injection",
+        "owasp_agentic.tool_misuse_boundary",
+        "mitre_atlas.tool_misuse_mitigation"
+      ],
+      "expected_finding_families": ["prompt_injection", "agentic_controls"],
+      "critical_failures": ["runtime_validation_without_runtime_evidence", "unknown_control_mapping"],
+      "notes": [
+        "Runtime-pending benchmark anchor for Local Runtime Sandbox and third-party hosted sandbox adapters.",
+        "Excluded from default static benchmark execution until runtime adapters are release-gated."
+      ]
+    }
+  ]
+}

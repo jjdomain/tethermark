@@ -1,14 +1,49 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createRequire } from "node:module";
+import { spawnSync } from "node:child_process";
 
 import type { DatabaseMode } from "../contracts.js";
 import type { BundleExportPolicy } from "./bundle-exports.js";
+import { buildPostgresMigrationSql, buildPsqlProcessEnv, resolvePostgresConnectionConfig } from "./postgres.js";
+import { SELF_LEARNING_TABLE_DEFINITIONS } from "./schema-manifest.js";
 
 const require = createRequire(import.meta.url);
 const initSqlJs: any = require("sql.js/dist/sql-wasm.js");
 
 let sqlJsPromise: Promise<any> | null = null;
+const sqliteSaveQueues = new Map<string, Promise<void>>();
+const sqliteOpenSnapshots = new WeakMap<object, Map<string, SqliteRecordRow>>();
+
+interface SqliteRecordRow {
+  table_name: string;
+  record_key: string;
+  run_id: string | null;
+  created_at: string | null;
+  target_id: string | null;
+  target_snapshot_id: string | null;
+  parent_key: string | null;
+  payload_json: string;
+}
+
+interface PendingRecordUpsert {
+  tableName: string;
+  recordKey: string;
+  payload: unknown;
+  runId?: string | null;
+  createdAt?: string | null;
+  targetId?: string | null;
+  targetSnapshotId?: string | null;
+  parentKey?: string | null;
+}
+
+interface RemoteRecordDatabase {
+  __remoteRecordDatabase: true;
+  mode: "postgres" | "supabase";
+  pendingUpserts: PendingRecordUpsert[];
+  close(): void;
+  run(sql: string): void;
+}
 
 export interface PersistenceMetadata {
   persistence_schema_version: string;
@@ -25,10 +60,115 @@ export interface PersistenceMetadata {
 
 export type LocalPersistenceMetadata = PersistenceMetadata;
 
-export const PERSISTENCE_SCHEMA_VERSION = "1.1.0";
+export const PERSISTENCE_SCHEMA_VERSION = "1.2.0";
 
 function wasmPath(): string {
-  return path.resolve(process.cwd(), "node_modules", "sql.js", "dist", "sql-wasm.wasm");
+  return require.resolve("sql.js/dist/sql-wasm.wasm");
+}
+
+function isRemoteRoot(rootDir: string): rootDir is "postgres" | "supabase" {
+  return rootDir === "postgres" || rootDir === "supabase";
+}
+
+function isRemoteDatabase(db: any): db is RemoteRecordDatabase {
+  return Boolean(db?.__remoteRecordDatabase);
+}
+
+function postgresUrl(): string {
+  const config = resolvePostgresConnectionConfig();
+  if (!config.database_url) {
+    throw new Error("postgres_database_url_required");
+  }
+  return config.database_url;
+}
+
+function sqlLiteral(value: string | number | boolean | null | undefined): string {
+  if (value == null) return "NULL";
+  if (typeof value === "number") return Number.isFinite(value) ? String(value) : "NULL";
+  if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function jsonLiteral(value: unknown): string {
+  return `${sqlLiteral(JSON.stringify(value ?? null))}::jsonb`;
+}
+
+function fieldSqlLiteral(value: unknown, type: "text" | "integer" | "real" | "boolean" | "json" | "timestamp"): string {
+  if (type === "json") return jsonLiteral(value ?? null);
+  if (type === "integer") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? String(Math.trunc(parsed)) : "NULL";
+  }
+  if (type === "real") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? String(parsed) : "NULL";
+  }
+  if (type === "boolean") return typeof value === "boolean" ? value ? "TRUE" : "FALSE" : "NULL";
+  return sqlLiteral(value == null ? null : String(value));
+}
+
+function runPostgresSql(sql: string, args: { capture?: boolean } = {}): string {
+  const command = process.env.HARNESS_PSQL_COMMAND?.trim() || "psql";
+  const databaseUrl = postgresUrl();
+  const result = spawnSync(command, ["-X", "-v", "ON_ERROR_STOP=1", args.capture ? "-t" : "", args.capture ? "-A" : "", "-c", sql].filter(Boolean), {
+    encoding: "utf8",
+    env: buildPsqlProcessEnv(databaseUrl),
+    shell: false,
+    windowsHide: true,
+    timeout: 120_000
+  });
+  if (result.status !== 0 || result.error) {
+    throw new Error(`postgres_record_store_failed:${result.error?.message ?? result.stderr ?? result.stdout ?? `exit ${result.status}`}`);
+  }
+  return result.stdout ?? "";
+}
+
+function flushRemoteUpserts(db: RemoteRecordDatabase): void {
+  if (!db.pendingUpserts.length) return;
+  const values = db.pendingUpserts.map((record) => [
+    sqlLiteral(record.tableName),
+    sqlLiteral(record.recordKey),
+    sqlLiteral(record.runId),
+    sqlLiteral(record.createdAt),
+    sqlLiteral(record.targetId),
+    sqlLiteral(record.targetSnapshotId),
+    sqlLiteral(record.parentKey),
+    jsonLiteral(record.payload)
+  ].join(", "));
+  const recordStoreSql = `
+    INSERT INTO records (table_name, record_key, run_id, created_at, target_id, target_snapshot_id, parent_key, payload_json)
+    VALUES ${values.map((item) => `(${item})`).join(",\n")}
+    ON CONFLICT(table_name, record_key) DO UPDATE SET
+      run_id=EXCLUDED.run_id,
+      created_at=EXCLUDED.created_at,
+      target_id=EXCLUDED.target_id,
+      target_snapshot_id=EXCLUDED.target_snapshot_id,
+      parent_key=EXCLUDED.parent_key,
+      payload_json=EXCLUDED.payload_json
+  `;
+  const relationalSql = SELF_LEARNING_TABLE_DEFINITIONS
+    .map((definition) => {
+      const matching = db.pendingUpserts.filter((record) => record.tableName === definition.name);
+      if (!matching.length) return "";
+      const columns = definition.fields.map((item) => item.name);
+      const rows = matching.map((record) => {
+        const payload = record.payload && typeof record.payload === "object" && !Array.isArray(record.payload)
+          ? record.payload as Record<string, unknown>
+          : {};
+        return `(${definition.fields.map((field) => fieldSqlLiteral(payload[field.name], field.type)).join(", ")})`;
+      });
+      const updateColumns = columns.filter((column) => !definition.primary_key.includes(column));
+      return `
+        INSERT INTO ${definition.name} (${columns.join(", ")})
+        VALUES ${rows.join(",\n")}
+        ON CONFLICT(${definition.primary_key.join(", ")}) DO UPDATE SET
+          ${updateColumns.map((column) => `${column}=EXCLUDED.${column}`).join(",\n          ")}
+      `;
+    })
+    .filter(Boolean)
+    .join(";\n");
+  runPostgresSql(`BEGIN;\n${recordStoreSql};\n${relationalSql ? `${relationalSql};\n` : ""}COMMIT;`);
+  db.pendingUpserts = [];
 }
 
 async function getSqlJs(): Promise<any> {
@@ -45,6 +185,7 @@ export function localPersistenceMetadataPath(rootDir: string): string {
 }
 
 export async function hasSqliteDatabase(rootDir: string): Promise<boolean> {
+  if (isRemoteRoot(rootDir)) return true;
   try {
     await fs.access(sqliteDbPath(rootDir));
     return true;
@@ -54,14 +195,28 @@ export async function hasSqliteDatabase(rootDir: string): Promise<boolean> {
 }
 
 export async function openSqliteDatabase(rootDir: string): Promise<any> {
+  if (isRemoteRoot(rootDir)) {
+    return {
+      __remoteRecordDatabase: true,
+      mode: rootDir,
+      pendingUpserts: [],
+      close() {},
+      run(sql: string) {
+        runPostgresSql(sql);
+      }
+    } satisfies RemoteRecordDatabase;
+  }
   const SQL = await getSqlJs();
   const dbPath = sqliteDbPath(rootDir);
+  let db: any;
   try {
     const bytes = await fs.readFile(dbPath);
-    return new SQL.Database(bytes);
+    db = new SQL.Database(bytes);
   } catch {
-    return new SQL.Database();
+    db = new SQL.Database();
   }
+  sqliteOpenSnapshots.set(db, readSqliteRecordSnapshot(db));
+  return db;
 }
 
 export async function writePersistenceMetadata(rootDir: string, databaseMode: DatabaseMode, bundleExportPolicy: BundleExportPolicy): Promise<PersistenceMetadata> {
@@ -133,15 +288,212 @@ export async function readLocalPersistenceMetadata(rootDir: string): Promise<Loc
   return readPersistenceMetadata(rootDir);
 }
 
+async function waitForWritablePathError(error: unknown, attempt: number): Promise<boolean> {
+  const code = typeof error === "object" && error && "code" in error ? String((error as { code?: unknown }).code) : "";
+  if (!["EBUSY", "EPERM", "EACCES"].includes(code)) return false;
+  await new Promise((resolve) => setTimeout(resolve, Math.min(1500, 75 * (attempt + 1) * (attempt + 1))));
+  return true;
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function tolerateMissingTempDuringCleanup(error: unknown, tempPath: string, dbPath: string): Promise<boolean> {
+  const code = typeof error === "object" && error && "code" in error ? String((error as { code?: unknown }).code) : "";
+  if (code !== "ENOENT") return false;
+  const tempExists = await pathExists(tempPath);
+  if (tempExists) return false;
+  const rootExists = await pathExists(path.dirname(dbPath));
+  if (!rootExists) return true;
+  return pathExists(dbPath);
+}
+
+async function replaceSqliteFile(tempPath: string, dbPath: string): Promise<void> {
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    try {
+      await fs.rename(tempPath, dbPath);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (await tolerateMissingTempDuringCleanup(error, tempPath, dbPath)) return;
+      if (!await waitForWritablePathError(error, attempt)) throw error;
+    }
+  }
+
+  // Windows can intermittently reject replacing an existing file even after
+  // retries when scanners or another request briefly touch the destination.
+  // Copying over the existing file preserves the destination path and avoids
+  // the rename-over-existing edge while the per-path queue prevents same-process
+  // writers from interleaving bytes.
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    try {
+      await fs.copyFile(tempPath, dbPath);
+      await fs.rm(tempPath, { force: true });
+      return;
+    } catch (error) {
+      lastError = error;
+      if (await tolerateMissingTempDuringCleanup(error, tempPath, dbPath)) return;
+      if (!await waitForWritablePathError(error, attempt)) throw error;
+    }
+  }
+  throw lastError;
+}
+
+async function enqueueSqliteSave(dbPath: string, task: () => Promise<void>): Promise<void> {
+  const previous = sqliteSaveQueues.get(dbPath) ?? Promise.resolve();
+  const next = previous.catch(() => undefined).then(task);
+  sqliteSaveQueues.set(dbPath, next);
+  try {
+    await next;
+  } finally {
+    if (sqliteSaveQueues.get(dbPath) === next) {
+      sqliteSaveQueues.delete(dbPath);
+    }
+  }
+}
+
+function sqliteRecordKey(row: Pick<SqliteRecordRow, "table_name" | "record_key">): string {
+  return JSON.stringify([row.table_name, row.record_key]);
+}
+
+function readSqliteRecordSnapshot(db: any): Map<string, SqliteRecordRow> {
+  const snapshot = new Map<string, SqliteRecordRow>();
+  let statement: any = null;
+  try {
+    statement = db.prepare(`
+      SELECT table_name, record_key, run_id, created_at, target_id, target_snapshot_id, parent_key, payload_json
+      FROM records
+    `);
+    while (statement.step()) {
+      const raw = statement.getAsObject() as Record<string, unknown>;
+      const row: SqliteRecordRow = {
+        table_name: String(raw.table_name ?? ""),
+        record_key: String(raw.record_key ?? ""),
+        run_id: raw.run_id == null ? null : String(raw.run_id),
+        created_at: raw.created_at == null ? null : String(raw.created_at),
+        target_id: raw.target_id == null ? null : String(raw.target_id),
+        target_snapshot_id: raw.target_snapshot_id == null ? null : String(raw.target_snapshot_id),
+        parent_key: raw.parent_key == null ? null : String(raw.parent_key),
+        payload_json: String(raw.payload_json ?? "null")
+      };
+      snapshot.set(sqliteRecordKey(row), row);
+    }
+  } catch {
+    return snapshot;
+  } finally {
+    statement?.free?.();
+  }
+  return snapshot;
+}
+
+function recordsEqual(left: SqliteRecordRow | undefined, right: SqliteRecordRow): boolean {
+  return Boolean(left)
+    && left!.run_id === right.run_id
+    && left!.created_at === right.created_at
+    && left!.target_id === right.target_id
+    && left!.target_snapshot_id === right.target_snapshot_id
+    && left!.parent_key === right.parent_key
+    && left!.payload_json === right.payload_json;
+}
+
+async function openLatestSqliteDatabase(rootDir: string): Promise<any> {
+  const SQL = await getSqlJs();
+  try {
+    return new SQL.Database(await fs.readFile(sqliteDbPath(rootDir)));
+  } catch {
+    return new SQL.Database();
+  }
+}
+
+function mergeSqliteRecordChanges(args: {
+  latestDb: any;
+  original: Map<string, SqliteRecordRow>;
+  current: Map<string, SqliteRecordRow>;
+}): void {
+  args.latestDb.run("BEGIN");
+  let upsert: any = null;
+  let remove: any = null;
+  try {
+    upsert = args.latestDb.prepare(`
+      INSERT INTO records (table_name, record_key, run_id, created_at, target_id, target_snapshot_id, parent_key, payload_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(table_name, record_key) DO UPDATE SET
+        run_id=excluded.run_id,
+        created_at=excluded.created_at,
+        target_id=excluded.target_id,
+        target_snapshot_id=excluded.target_snapshot_id,
+        parent_key=excluded.parent_key,
+        payload_json=excluded.payload_json
+    `);
+    remove = args.latestDb.prepare("DELETE FROM records WHERE table_name = ? AND record_key = ?");
+    for (const [key, originalRow] of args.original.entries()) {
+      if (!args.current.has(key)) remove.run([originalRow.table_name, originalRow.record_key]);
+    }
+    for (const [key, currentRow] of args.current.entries()) {
+      if (recordsEqual(args.original.get(key), currentRow)) continue;
+      upsert.run([
+        currentRow.table_name,
+        currentRow.record_key,
+        currentRow.run_id,
+        currentRow.created_at,
+        currentRow.target_id,
+        currentRow.target_snapshot_id,
+        currentRow.parent_key,
+        currentRow.payload_json
+      ]);
+    }
+    args.latestDb.run("COMMIT");
+  } catch (error) {
+    try { args.latestDb.run("ROLLBACK"); } catch {}
+    throw error;
+  } finally {
+    upsert?.free?.();
+    remove?.free?.();
+  }
+}
+
 export async function saveSqliteDatabase(rootDir: string, db: any, databaseMode: DatabaseMode = "local", bundleExportPolicy?: BundleExportPolicy): Promise<void> {
+  if (isRemoteDatabase(db)) {
+    ensureSqliteSchema(db);
+    flushRemoteUpserts(db);
+    return;
+  }
   await fs.mkdir(rootDir, { recursive: true });
-  const bytes = db.export();
-  await fs.writeFile(sqliteDbPath(rootDir), Buffer.from(bytes));
+  const original = sqliteOpenSnapshots.get(db) ?? new Map<string, SqliteRecordRow>();
+  const current = readSqliteRecordSnapshot(db);
+  const dbPath = sqliteDbPath(rootDir);
+  await enqueueSqliteSave(dbPath, async () => {
+    const latestDb = await openLatestSqliteDatabase(rootDir);
+    const tempPath = `${dbPath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+    try {
+      ensureSqliteSchema(latestDb);
+      mergeSqliteRecordChanges({ latestDb, original, current });
+      await fs.writeFile(tempPath, Buffer.from(latestDb.export()));
+      await replaceSqliteFile(tempPath, dbPath);
+    } catch (error) {
+      await fs.rm(tempPath, { force: true }).catch(() => undefined);
+      throw error;
+    } finally {
+      latestDb.close();
+    }
+  });
+  sqliteOpenSnapshots.set(db, current);
   const { resolveBundleExportPolicy } = await import("./bundle-exports.js");
   await writePersistenceMetadata(rootDir, databaseMode, bundleExportPolicy ?? resolveBundleExportPolicy(databaseMode));
 }
 
 export function ensureSqliteSchema(db: any): void {
+  if (isRemoteDatabase(db)) {
+    runPostgresSql(buildPostgresMigrationSql());
+    return;
+  }
   db.run(`
     CREATE TABLE IF NOT EXISTS records (
       table_name TEXT NOT NULL,
@@ -158,7 +510,39 @@ export function ensureSqliteSchema(db: any): void {
     CREATE INDEX IF NOT EXISTS idx_records_run_id ON records(run_id);
     CREATE INDEX IF NOT EXISTS idx_records_target_id ON records(target_id);
     CREATE INDEX IF NOT EXISTS idx_records_created_at ON records(created_at);
+
+    CREATE TABLE IF NOT EXISTS record_schemas (
+      table_name TEXT PRIMARY KEY,
+      description TEXT NOT NULL,
+      primary_key_json TEXT NOT NULL,
+      fields_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
   `);
+  upsertSqliteRecordSchemas(db);
+}
+
+function upsertSqliteRecordSchemas(db: any): void {
+  const updatedAt = new Date().toISOString();
+  const statement = db.prepare(`
+    INSERT INTO record_schemas (table_name, description, primary_key_json, fields_json, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(table_name) DO UPDATE SET
+      description=excluded.description,
+      primary_key_json=excluded.primary_key_json,
+      fields_json=excluded.fields_json,
+      updated_at=excluded.updated_at
+  `);
+  for (const definition of SELF_LEARNING_TABLE_DEFINITIONS) {
+    statement.run([
+      definition.name,
+      definition.description,
+      JSON.stringify(definition.primary_key),
+      JSON.stringify(definition.fields),
+      updatedAt
+    ]);
+  }
+  statement.free();
 }
 
 export function upsertSqliteRecord(args: {
@@ -172,6 +556,19 @@ export function upsertSqliteRecord(args: {
   targetSnapshotId?: string | null;
   parentKey?: string | null;
 }): void {
+  if (isRemoteDatabase(args.db)) {
+    args.db.pendingUpserts.push({
+      tableName: String(args.tableName ?? ""),
+      recordKey: String(args.recordKey ?? ""),
+      payload: args.payload ?? null,
+      runId: args.runId ?? null,
+      createdAt: args.createdAt ?? null,
+      targetId: args.targetId ?? null,
+      targetSnapshotId: args.targetSnapshotId ?? null,
+      parentKey: args.parentKey ?? null
+    });
+    return;
+  }
   const normalizeBindValue = (value: string | number | boolean | null | undefined): string | number | boolean | null => value ?? null;
   const statement = args.db.prepare(`
     INSERT INTO records (table_name, record_key, run_id, created_at, target_id, target_snapshot_id, parent_key, payload_json)
@@ -198,6 +595,14 @@ export function upsertSqliteRecord(args: {
 }
 
 export function readSqliteTable<T>(db: any, tableName: string): T[] {
+  if (isRemoteDatabase(db)) {
+    flushRemoteUpserts(db);
+    const output = runPostgresSql(
+      `SELECT COALESCE(jsonb_agg(payload_json ORDER BY created_at NULLS LAST, record_key), '[]'::jsonb)::text FROM records WHERE table_name = ${sqlLiteral(tableName)}`,
+      { capture: true }
+    ).trim();
+    return JSON.parse(output || "[]") as T[];
+  }
   const statement = db.prepare(`SELECT payload_json FROM records WHERE table_name = ?`);
   statement.bind([String(tableName ?? "")]);
   const rows: T[] = [];
@@ -207,4 +612,27 @@ export function readSqliteTable<T>(db: any, tableName: string): T[] {
   }
   statement.free();
   return rows;
+}
+
+export function deleteSqliteRecord(args: { db: any; tableName: string; recordKey: string }): boolean {
+  if (isRemoteDatabase(args.db)) {
+    flushRemoteUpserts(args.db);
+    const definition = SELF_LEARNING_TABLE_DEFINITIONS.find((item) => item.name === args.tableName && item.primary_key.length === 1);
+    const relationalDelete = definition
+      ? `DELETE FROM ${definition.name} WHERE ${definition.primary_key[0]} = ${sqlLiteral(args.recordKey)};`
+      : "";
+    const output = runPostgresSql(
+      `BEGIN;
+       ${relationalDelete}
+       DELETE FROM records WHERE table_name = ${sqlLiteral(args.tableName)} AND record_key = ${sqlLiteral(args.recordKey)} RETURNING record_key;
+       COMMIT;`,
+      { capture: true }
+    ).trim();
+    return Boolean(output);
+  }
+  const statement = args.db.prepare("DELETE FROM records WHERE table_name = ? AND record_key = ?");
+  statement.run([String(args.tableName ?? ""), String(args.recordKey ?? "")]);
+  statement.free();
+  const changed = Number(args.db.exec("SELECT changes() AS count")[0]?.values?.[0]?.[0] ?? 0) > 0;
+  return changed;
 }

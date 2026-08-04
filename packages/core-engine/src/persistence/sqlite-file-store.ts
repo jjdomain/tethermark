@@ -54,7 +54,8 @@ export class SqliteFilePersistenceStore implements PersistenceStore {
       upsertSqliteRecord({ db, tableName: "lane_plans", recordKey: row.id, payload: row, runId: row.run_id, createdAt: bundle.run.created_at, targetId: bundle.run.target_id, parentKey: row.run_id });
     }
     for (const row of bundle.evidence_records ?? []) {
-      upsertSqliteRecord({ db, tableName: "evidence_records", recordKey: row.id, payload: row, runId: row.run_id, createdAt: bundle.run.created_at, targetId: bundle.run.target_id, parentKey: row.run_id });
+      const evidenceId = row.id ?? (row as any).evidence_id;
+      upsertSqliteRecord({ db, tableName: "evidence_records", recordKey: `${row.run_id}:${evidenceId}`, payload: row, runId: row.run_id, createdAt: bundle.run.created_at, targetId: bundle.run.target_id, parentKey: row.run_id });
     }
     for (const row of bundle.lane_results ?? []) {
       upsertSqliteRecord({ db, tableName: "lane_results", recordKey: row.id, payload: row, runId: row.run_id, createdAt: bundle.run.created_at, targetId: bundle.run.target_id, parentKey: row.run_id });
@@ -69,7 +70,8 @@ export class SqliteFilePersistenceStore implements PersistenceStore {
       upsertSqliteRecord({ db, tableName: "tool_executions", recordKey: row.id, payload: row, runId: row.run_id, createdAt: bundle.run.created_at, targetId: bundle.run.target_id, parentKey: row.run_id });
     }
     for (const row of bundle.findings ?? []) {
-      upsertSqliteRecord({ db, tableName: "findings", recordKey: row.id, payload: row, runId: row.run_id, createdAt: row.created_at, targetId: bundle.run.target_id, parentKey: row.run_id });
+      const findingId = row.id ?? (row as any).finding_id;
+      upsertSqliteRecord({ db, tableName: "findings", recordKey: `${row.run_id}:${findingId}`, payload: row, runId: row.run_id, createdAt: row.created_at, targetId: bundle.run.target_id, parentKey: row.run_id });
     }
     for (const row of bundle.control_results ?? []) {
       upsertSqliteRecord({ db, tableName: "control_results", recordKey: row.id, payload: row, runId: row.run_id, createdAt: bundle.run.created_at, targetId: bundle.run.target_id, parentKey: row.run_id });
@@ -85,6 +87,10 @@ export class SqliteFilePersistenceStore implements PersistenceStore {
     if (bundle.supervisor_review) {
       const reviewRunId = bundle.supervisor_review.run_id ?? bundle.run.id;
       upsertSqliteRecord({ db, tableName: "supervisor_reviews", recordKey: reviewRunId, payload: bundle.supervisor_review, runId: reviewRunId, createdAt: bundle.run.created_at, targetId: bundle.run.target_id, parentKey: reviewRunId });
+    }
+    if (bundle.finding_quality) {
+      const qualityRunId = bundle.finding_quality.run_id ?? bundle.run.id;
+      upsertSqliteRecord({ db, tableName: "finding_quality", recordKey: qualityRunId, payload: bundle.finding_quality, runId: qualityRunId, createdAt: bundle.finding_quality.generated_at ?? bundle.run.created_at, targetId: bundle.run.target_id, parentKey: qualityRunId });
     }
     if (bundle.remediation_memo) {
       const memoRunId = bundle.remediation_memo.run_id ?? bundle.run.id;

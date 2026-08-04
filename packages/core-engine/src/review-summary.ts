@@ -1,7 +1,19 @@
+import type { FindingReviewPriority, FindingTriageDecision, FindingValidationIntent } from "./contracts.js";
 import type { PersistedFindingDispositionRecord, PersistedFindingRecord, PersistedReviewActionRecord, PersistedReviewCommentRecord, PersistedReviewWorkflowRecord } from "./persistence/contracts.js";
 import { resolveFindingDispositions } from "./persistence/finding-dispositions.js";
 
-export type FindingReviewDisposition = "open" | "confirmed" | "suppressed" | "waived" | "downgraded" | "needs_validation";
+export type FindingReviewDisposition =
+  | "open"
+  | "confirmed"
+  | "suppressed"
+  | "waived"
+  | "downgraded"
+  | "needs_validation"
+  | "remediation_open"
+  | "fix_in_progress"
+  | "verification_pending"
+  | "resolved"
+  | "reopened";
 
 export interface FindingReviewSummary {
   finding_id: string;
@@ -20,6 +32,9 @@ export interface FindingReviewSummary {
   active_disposition_owner_id: string | null;
   active_disposition_reviewed_at: string | null;
   active_disposition_review_due_by: string | null;
+  triage_decision: FindingTriageDecision | null;
+  review_priority: FindingReviewPriority | null;
+  validation_intent: FindingValidationIntent | null;
   disposition_review_reason: string | null;
   needs_disposition_review: boolean;
   needs_human_review: boolean;
@@ -105,19 +120,41 @@ export function buildReviewSummary(args: {
     let disposition: FindingReviewDisposition = "open";
     let currentSeverity = finding.severity;
     let currentVisibility = finding.publication_state;
+    let triageDecision: FindingTriageDecision | null = null;
+    let reviewPriority: FindingReviewPriority | null = null;
+    let validationIntent: FindingValidationIntent | null = null;
 
     for (const action of related) {
-      if (action.action_type === "confirm_finding") disposition = "confirmed";
-      if (action.action_type === "suppress_finding") disposition = "suppressed";
-      if (action.action_type === "request_validation") disposition = "needs_validation";
+      const actionTriageDecision = action.triage_decision ?? ((action.metadata_json && typeof action.metadata_json === "object" ? (action.metadata_json as Record<string, unknown>).triage_decision : null) as FindingTriageDecision | null);
+      const actionReviewPriority = action.review_priority ?? ((action.metadata_json && typeof action.metadata_json === "object" ? (action.metadata_json as Record<string, unknown>).review_priority : null) as FindingReviewPriority | null);
+      const actionValidationIntent = action.validation_intent ?? ((action.metadata_json && typeof action.metadata_json === "object" ? (action.metadata_json as Record<string, unknown>).validation_intent : null) as FindingValidationIntent | null);
+      if (actionTriageDecision) triageDecision = actionTriageDecision;
+      if (actionReviewPriority) reviewPriority = actionReviewPriority;
+      if (actionValidationIntent) validationIntent = actionValidationIntent;
+      if (action.action_type === "confirm_finding" || actionTriageDecision === "confirmed") disposition = "confirmed";
+      if (action.action_type === "suppress_finding" || actionTriageDecision === "false_positive") disposition = "suppressed";
+      if (action.action_type === "request_validation" || actionTriageDecision === "needs_validation") disposition = "needs_validation";
+      if (action.action_type === "open_remediation") disposition = "remediation_open";
+      if (action.action_type === "mark_fix_in_progress") disposition = "fix_in_progress";
+      if (action.action_type === "mark_fix_ready_for_validation" || action.action_type === "mark_verification_pending") disposition = "verification_pending";
+      if (action.action_type === "resolve_finding") disposition = "resolved";
+      if (action.action_type === "reopen_finding") disposition = "reopened";
+      if (action.updated_severity) {
+        currentSeverity = action.updated_severity;
+      }
       if (action.action_type === "downgrade_severity") {
         disposition = "downgraded";
-        currentSeverity = action.updated_severity ?? currentSeverity;
       }
       if (action.visibility_override) {
         currentVisibility = action.visibility_override;
       }
     }
+    const dispositionMetadata = dispositionRecord?.metadata_json && typeof dispositionRecord.metadata_json === "object"
+      ? dispositionRecord.metadata_json as Record<string, unknown>
+      : {};
+    if (typeof dispositionMetadata.triage_decision === "string") triageDecision = dispositionMetadata.triage_decision as FindingTriageDecision;
+    if (typeof dispositionMetadata.review_priority === "string") reviewPriority = dispositionMetadata.review_priority as FindingReviewPriority;
+    if (typeof dispositionMetadata.validation_intent === "string") validationIntent = dispositionMetadata.validation_intent as FindingValidationIntent;
     if (dispositionRecord?.disposition_type === "waiver") disposition = "waived";
     if (dispositionRecord?.disposition_type === "suppression") disposition = "suppressed";
 
@@ -138,6 +175,9 @@ export function buildReviewSummary(args: {
       active_disposition_owner_id: resolvedDisposition?.governance_owner_id ?? null,
       active_disposition_reviewed_at: resolvedDisposition?.governance_reviewed_at ?? null,
       active_disposition_review_due_by: resolvedDisposition?.governance_review_due_by ?? null,
+      triage_decision: triageDecision,
+      review_priority: reviewPriority,
+      validation_intent: validationIntent,
       disposition_review_reason: resolvedDisposition?.review_reason ?? null,
       needs_disposition_review: resolvedDisposition?.needs_review ?? false,
       needs_human_review: finding.needs_human_review,
@@ -148,7 +188,7 @@ export function buildReviewSummary(args: {
     };
   });
 
-  const unresolved = findingSummaries.filter((item) => ["open", "needs_validation"].includes(item.disposition));
+  const unresolved = findingSummaries.filter((item) => ["open", "confirmed", "needs_validation", "remediation_open", "fix_in_progress", "verification_pending", "reopened"].includes(item.disposition));
   const expiredDispositionFindings = findingSummaries.filter((item) => item.disposition_status === "expired");
   const dueSoonDispositionFindings = findingSummaries.filter((item) => item.active_disposition_due_soon);
   const findingsNeedingDispositionReview = findingSummaries.filter((item) => item.needs_disposition_review);

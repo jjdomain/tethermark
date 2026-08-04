@@ -8,13 +8,14 @@
     "tethermark_version": { "type": "string" },
     "payload": {
       "type": "object",
-      "required": ["workflow", "actions", "comments", "summary", "finding_dispositions"],
+      "required": ["workflow", "actions", "comments", "summary", "finding_dispositions", "remediation_items"],
       "properties": {
         "workflow": { "type": ["object", "null"] },
         "actions": { "type": "array" },
         "comments": { "type": "array" },
         "summary": { "type": "object" },
-        "finding_dispositions": { "type": "array" }
+        "finding_dispositions": { "type": "array" },
+        "remediation_items": { "type": "array" }
       }
     }
   }

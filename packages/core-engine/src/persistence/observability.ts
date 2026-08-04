@@ -8,6 +8,12 @@ import {
   readPersistedToolExecutions
 } from "./run-details.js";
 import type { PersistenceReadOptions } from "./backend.js";
+import {
+  listPersistedLearningCandidates,
+  listPersistedLearningEvents,
+  listPersistedLearningJobs,
+  listPersistedLearningPromotions
+} from "./learning.js";
 
 export interface ObservabilityRetentionPolicy {
   database_mode: DatabaseMode;
@@ -108,6 +114,29 @@ export interface PersistedObservabilityHistory {
   };
   runs: PersistedObservabilityHistoryRun[];
   daily_rollups: PersistedObservabilityDailyRollup[];
+  learning: {
+    event_count: number;
+    candidate_count: number;
+    open_candidate_count: number;
+    promoted_candidate_count: number;
+    rejected_candidate_count: number;
+    promotion_count: number;
+    rollback_count: number;
+    job_count: number;
+    failed_job_count: number;
+    synthesized_candidate_count: number;
+    inactive_synthesis_count: number;
+    last_job_at: string | null;
+    latest_job: {
+      id: string;
+      trigger: string;
+      status: string;
+      candidates_generated: number;
+      candidates_synthesized: number;
+      synthesis_skipped: number;
+      completed_at: string | null;
+    } | null;
+  };
 }
 
 function retentionDays(name: string, fallback: number): number {
@@ -266,6 +295,12 @@ export async function readPersistedObservabilitySummary(runId: string, options?:
 export async function getPersistedObservabilityHistory(args?: PersistedRunQuery): Promise<PersistedObservabilityHistory> {
   const mode = args?.dbMode ?? "local";
   const runs = await listPersistedRuns({ ...args, limit: Number.MAX_SAFE_INTEGER });
+  const [learningEvents, learningCandidates, learningPromotions, learningJobs] = await Promise.all([
+    listPersistedLearningEvents({ rootDir: args?.rootDir, dbMode: mode, workspaceId: args?.workspaceId, projectId: args?.projectId, limit: Number.MAX_SAFE_INTEGER }),
+    listPersistedLearningCandidates({ rootDir: args?.rootDir, dbMode: mode, workspaceId: args?.workspaceId, projectId: args?.projectId, limit: Number.MAX_SAFE_INTEGER }),
+    listPersistedLearningPromotions({ rootDir: args?.rootDir, dbMode: mode, workspaceId: args?.workspaceId, projectId: args?.projectId, limit: Number.MAX_SAFE_INTEGER }),
+    listPersistedLearningJobs({ rootDir: args?.rootDir, dbMode: mode, workspaceId: args?.workspaceId, projectId: args?.projectId, limit: Number.MAX_SAFE_INTEGER })
+  ]);
   const summaries = await Promise.all(runs.map(async (run) => ({
     run,
     summary: await readPersistedObservabilitySummary(run.id, { rootDir: args?.rootDir, dbMode: mode })
@@ -309,6 +344,7 @@ export async function getPersistedObservabilityHistory(args?: PersistedRunQuery)
     }))
     .sort((left, right) => right.created_at.localeCompare(left.created_at));
 
+  const latestLearningJob = learningJobs[0] ?? null;
   return {
     retention_policy: resolveObservabilityRetentionPolicy(mode),
     totals: {
@@ -321,6 +357,35 @@ export async function getPersistedObservabilityHistory(args?: PersistedRunQuery)
       estimated_cost_usd: Number(historyRuns.reduce((sum: number, item: PersistedObservabilityHistoryRun) => sum + item.estimated_cost_usd, 0).toFixed(8))
     },
     runs: historyRuns,
-    daily_rollups: [...dailyMap.values()].sort((left, right) => right.day.localeCompare(left.day))
+    daily_rollups: [...dailyMap.values()].sort((left, right) => right.day.localeCompare(left.day)),
+    learning: {
+      event_count: learningEvents.length,
+      candidate_count: learningCandidates.length,
+      open_candidate_count: learningCandidates.filter((item) => ["proposed", "experimented"].includes(item.status)).length,
+      promoted_candidate_count: learningCandidates.filter((item) => item.status === "promoted").length,
+      rejected_candidate_count: learningCandidates.filter((item) => item.status === "rejected").length,
+      promotion_count: learningPromotions.length,
+      rollback_count: learningPromotions.filter((item) => item.status === "rolled_back").length,
+      job_count: learningJobs.length,
+      failed_job_count: learningJobs.filter((item) => item.status === "failed").length,
+      synthesized_candidate_count: learningCandidates.filter((item) => {
+        const metadata = item.metadata_json && typeof item.metadata_json === "object" && !Array.isArray(item.metadata_json) ? item.metadata_json as Record<string, any> : {};
+        return metadata.llm_synthesis?.status === "completed";
+      }).length,
+      inactive_synthesis_count: learningCandidates.filter((item) => {
+        const metadata = item.metadata_json && typeof item.metadata_json === "object" && !Array.isArray(item.metadata_json) ? item.metadata_json as Record<string, any> : {};
+        return metadata.llm_synthesis?.status === "inactive";
+      }).length,
+      last_job_at: latestLearningJob?.completed_at ?? latestLearningJob?.started_at ?? null,
+      latest_job: latestLearningJob ? {
+        id: latestLearningJob.id,
+        trigger: latestLearningJob.trigger,
+        status: latestLearningJob.status,
+        candidates_generated: latestLearningJob.candidates_generated,
+        candidates_synthesized: latestLearningJob.candidates_synthesized,
+        synthesis_skipped: latestLearningJob.synthesis_skipped,
+        completed_at: latestLearningJob.completed_at
+      } : null
+    }
   };
 }

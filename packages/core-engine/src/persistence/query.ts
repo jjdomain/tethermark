@@ -57,6 +57,26 @@ async function readTable<T>(rootDir: string, tableName: string): Promise<T[]> {
   return readJsonTable<T>(rootDir, tableName);
 }
 
+async function readTables(rootDir: string, tableNames: string[]): Promise<Record<string, unknown[]>> {
+  if (await hasSqliteDatabase(rootDir)) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const db = await openSqliteDatabase(rootDir);
+      try {
+        ensureSqliteSchema(db);
+        return Object.fromEntries(tableNames.map((tableName) => [tableName, readSqliteTable(db, tableName)]));
+      } catch (error) {
+        const isRetryable = error instanceof Error && /database disk image is malformed/i.test(error.message) && attempt === 0;
+        if (!isRetryable) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      } finally {
+        db.close();
+      }
+    }
+  }
+  const entries = await Promise.all(tableNames.map(async (tableName) => [tableName, await readJsonTable(rootDir, tableName)] as const));
+  return Object.fromEntries(entries);
+}
+
 export interface PersistedRunListItem extends PersistedRunRecord {
   target?: PersistedTargetRecord | null;
   target_snapshot?: PersistedTargetSnapshotRecord | null;
@@ -143,19 +163,30 @@ function summarizeCounts(values: string[]): Array<{ key: string; count: number }
 
 export async function listPersistedRuns(args?: PersistedRunQuery): Promise<PersistedRunListItem[]> {
   const { rootDir } = resolvePersistenceLocation({ rootDir: args?.rootDir, dbMode: args?.dbMode });
-  const [runs, targets, snapshots, targetSummaries, summaries, reviewDecisions, reviewWorkflows, policyApplications, resolvedConfigurations, findings, laneSpecialists] = await Promise.all([
-    readTable<PersistedRunRecord>(rootDir, "runs"),
-    readTable<PersistedTargetRecord>(rootDir, "targets"),
-    readTable<PersistedTargetSnapshotRecord>(rootDir, "target_snapshots"),
-    readTable<PersistedTargetSummaryRecord>(rootDir, "target_summaries"),
-    readTable<PersistedScoreSummaryRecord>(rootDir, "score_summaries"),
-    readTable<PersistedReviewDecisionRecord>(rootDir, "review_decisions"),
-    readTable<PersistedReviewWorkflowRecord>(rootDir, "review_workflows"),
-    readTable<PersistedPolicyApplicationRecord>(rootDir, "policy_applications"),
-    readTable<PersistedResolvedConfigurationRecord>(rootDir, "resolved_configurations"),
-    readTable<PersistedFindingRecord>(rootDir, "findings"),
-    readTable<PersistedLaneSpecialistRecord>(rootDir, "lane_specialists")
+  const tables = await readTables(rootDir, [
+    "runs",
+    "targets",
+    "target_snapshots",
+    "target_summaries",
+    "score_summaries",
+    "review_decisions",
+    "review_workflows",
+    "policy_applications",
+    "resolved_configurations",
+    "findings",
+    "lane_specialists"
   ]);
+  const runs = tables.runs as PersistedRunRecord[];
+  const targets = tables.targets as PersistedTargetRecord[];
+  const snapshots = tables.target_snapshots as PersistedTargetSnapshotRecord[];
+  const targetSummaries = tables.target_summaries as PersistedTargetSummaryRecord[];
+  const summaries = tables.score_summaries as PersistedScoreSummaryRecord[];
+  const reviewDecisions = tables.review_decisions as PersistedReviewDecisionRecord[];
+  const reviewWorkflows = tables.review_workflows as PersistedReviewWorkflowRecord[];
+  const policyApplications = tables.policy_applications as PersistedPolicyApplicationRecord[];
+  const resolvedConfigurations = tables.resolved_configurations as PersistedResolvedConfigurationRecord[];
+  const findings = tables.findings as PersistedFindingRecord[];
+  const laneSpecialists = tables.lane_specialists as PersistedLaneSpecialistRecord[];
 
   const targetMap = new Map(targets.map((item) => [item.id, item]));
   const snapshotMap = new Map(snapshots.map((item) => [item.id, item]));

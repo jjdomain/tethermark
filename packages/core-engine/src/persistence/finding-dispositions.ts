@@ -48,7 +48,11 @@ export function buildFindingEvidenceFingerprint(input: {
 }
 
 function isDispositionExpired(record: PersistedFindingDispositionRecord, nowIso = new Date().toISOString()): boolean {
-  return Boolean(record.expires_at && record.expires_at < nowIso);
+  if (!record.expires_at) return false;
+  const expiresAt = Date.parse(record.expires_at);
+  const now = Date.parse(nowIso);
+  if (Number.isNaN(expiresAt) || Number.isNaN(now)) return record.expires_at < nowIso;
+  return expiresAt < now;
 }
 
 function matchesFinding(record: PersistedFindingDispositionRecord, finding: { id: string; category?: string | null; title?: string | null }): boolean {
@@ -138,10 +142,10 @@ export function resolveFindingDispositions(args: {
     let reviewReason: string | null = null;
     if (effectiveStatus === "expired") {
       reviewReason = "an earlier suppression or waiver expired and needs explicit re-review";
-    } else if (effectiveDisposition?.scope_level === "project" && effectiveDisposition.disposition_type === "waiver" && (!governanceOwnerId || !governanceReviewedAt)) {
-      reviewReason = "project waiver is missing explicit owner or review timestamp governance metadata";
-    } else if (effectiveDisposition?.scope_level === "project" && effectiveDisposition.disposition_type === "waiver" && governanceReviewDueBy && governanceReviewDueBy < nowIso) {
-      reviewReason = "project waiver review due date passed and needs explicit re-review";
+    } else if (effectiveDisposition?.disposition_type === "waiver" && (!governanceOwnerId || !governanceReviewedAt)) {
+      reviewReason = "waiver is missing explicit owner or review timestamp governance metadata";
+    } else if (effectiveDisposition?.disposition_type === "waiver" && governanceReviewDueBy && governanceReviewDueBy < nowIso) {
+      reviewReason = "waiver review due date passed and needs explicit re-review";
     } else if (effectiveDisposition && storedEvidenceFingerprint && storedEvidenceFingerprint !== currentEvidenceFingerprint) {
       reviewReason = "finding evidence changed since the active suppression or waiver was reviewed";
     } else if (effectiveDisposition && !storedEvidenceFingerprint) {

@@ -1,5 +1,12 @@
 # PLANS.md
 
+> The canonical Community Edition production tracker is now
+> [`docs/community-edition-production-plan-phases-1-12.md`](docs/community-edition-production-plan-phases-1-12.md).
+> It reconciles current implementation status into 12 release phases and makes
+> local Admin/System Policies an active CE workstream. This older plan remains
+> useful for detailed historical architecture notes, but status and execution
+> order should be taken from the canonical tracker.
+
 ## Goal
 
 Track the remaining work needed to turn the current TypeScript/Node core plus Python worker scaffold into a practical AI security audit engine for local static audits and isolated deeper AI-security runtime validation.
@@ -60,6 +67,22 @@ Not completed:
 8. Add command execution logging, transcript capture, tool-call traces, and artifact capture.
 9. Add cleanup policy for finished sandboxes and orphaned runs.
 10. Add Linux backend tests and a smoke-run harness.
+
+## Hosted-Only: Metered Runtime Sandbox Rollout
+
+This work is implemented in the separate Tethermark Cloud repository; it is tracked here to keep the Community Edition/Cloud contract and release order aligned.
+
+1. Replace configuration-only provider readiness with live probes and a normalized capability contract covering create, target upload, exact command execution, network-policy enforcement, bounded output, artifact collection, status, usage, cancel, terminate, and cleanup verification.
+2. Fail launch when the selected provider cannot enforce any required isolation, network, duration, memory, process, output, or artifact policy.
+3. Complete `hosted_e2b` as the first native provider path and use E2B Hobby/usage billing for the pinned AISecurityBase AgentDojo runtime benchmark and the pre-revenue private beta.
+4. Verify in the E2B account or with E2B support whether Hobby permits a 2 vCPU/4 GiB custom template. If it does not, keep a smaller eligibility profile and route heavy targets only after a second provider is release-gated.
+5. Build and version a Tethermark runtime template, record its digest on every execution, and validate network phase changes, artifact export, timeout, cancellation, and cleanup against malicious fixtures.
+6. Enforce pre-revenue controls: 10-minute default, 30-minute metered ceiling, provider hard cutoff below one hour, three global concurrent runs, one active run per workspace, three launches per project per day, and an initial USD 25 monthly provider budget.
+7. Add termination in every terminal path plus an orphan-sandbox reconciler; expose provider usage, remaining budget, external IDs, and cleanup state in hosted observability.
+8. Run the private beta only for eligible small/medium Linux repositories. Return an explicit inconclusive/unsupported runtime outcome with static fallback for resource exhaustion, Docker-in-Docker, GPU, Windows, oversized targets, or provider limits.
+9. Add `hosted_daytona` Linux VM as the first standby/overflow provider only after it passes the same fixtures and policy checks. Automatic failover is allowed before target execution; failures after execution begins restart as a new linked attempt.
+10. Defer `hosted_modal` to demonstrated burst/GPU demand and exclude Perplexity Sandbox from general runtime execution until it exposes exact-command and policy-controlled lifecycle APIs.
+11. Upgrade from zero-base-price usage billing only when paying demand, measured resource pressure, required concurrency/session length, or a customer-facing uptime commitment justifies the fixed subscription.
 
 ## Phase 3: Python Worker Enablement
 

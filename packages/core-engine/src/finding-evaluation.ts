@@ -32,6 +32,9 @@ export interface FindingEvaluationRecord {
   active_disposition_owner_id: string | null;
   active_disposition_reviewed_at: string | null;
   active_disposition_review_due_by: string | null;
+  triage_decision: string | null;
+  review_priority: string | null;
+  validation_intent: string | null;
   disposition_review_reason: string | null;
   needs_disposition_review: boolean;
   confidence: number;
@@ -407,17 +410,19 @@ export function buildFindingEvaluationSummary(args: {
       grade?.false_positive_risk,
       finding.confidence >= 0.85 ? "low" : finding.confidence >= 0.65 ? "medium" : "high"
     );
-    const relatedRuntimeEvidence = collectRelatedRuntimeEvidence({
-      finding,
-      runtimeEvidenceRecords,
-      conflicts,
-      duplicates
-    });
+    const runtimeSensitive = isRuntimeSensitiveFinding(finding);
+    const relatedRuntimeEvidence = runtimeSensitive
+      ? collectRelatedRuntimeEvidence({
+        finding,
+        runtimeEvidenceRecords,
+        conflicts,
+        duplicates
+      })
+      : [];
     const relatedRuntimeLocations = collectRuntimeEvidenceLocations(relatedRuntimeEvidence);
     const relatedRuntimeCompleted = relatedRuntimeEvidence.filter((item) => runtimeMetadata(item).status === "completed");
     const relatedRuntimeBlocked = relatedRuntimeEvidence.filter((item) => runtimeMetadata(item).status === "blocked");
     const relatedRuntimeFailed = relatedRuntimeEvidence.filter((item) => runtimeMetadata(item).status === "failed");
-    const runtimeSensitive = isRuntimeSensitiveFinding(finding);
     const runtimeImpactReasons: string[] = [];
     let runtimeImpact: FindingEvaluationRecord["runtime_impact"] = "none";
     if (relatedRuntimeCompleted.length > 0) {
@@ -446,10 +451,12 @@ export function buildFindingEvaluationSummary(args: {
     if (falsePositiveRisk === "high") validationReasons.push("false-positive risk remains high");
     if (conflictWith.length) validationReasons.push("conflicting finding outcomes should be reconciled");
     if (duplicateWith.length) validationReasons.push("possible duplicate findings should be deduplicated");
-    if (sandboxSummary?.attention_required) validationReasons.push("bounded sandbox execution did not complete cleanly for this run");
+    if (sandboxSummary?.attention_required && runtimeSensitive) validationReasons.push("bounded sandbox execution did not complete cleanly for this runtime-sensitive finding");
     if (runtimeImpact === "weakened") validationReasons.push("runtime validation did not produce direct evidence strong enough to close uncertainty for this finding");
-    if (reviewFinding?.needs_disposition_review) validationReasons.push("an existing suppression or waiver expired and needs explicit re-review");
-    const validationRecommendation: "yes" | "no" = validationReasons.length ? "yes" : "no";
+    if (reviewFinding?.needs_disposition_review) validationReasons.push("an existing exception expired or changed and needs explicit re-review");
+    const handledByActiveException = (reviewFinding?.disposition === "suppressed" || reviewFinding?.disposition === "waived") && !reviewFinding?.needs_disposition_review;
+    if (handledByActiveException) validationReasons.length = 0;
+    let validationRecommendation: "yes" | "no" = validationReasons.length ? "yes" : "no";
     let runtimeValidationStatus: FindingEvaluationRecord["runtime_validation_status"] = "not_applicable";
     let runtimeFollowupPolicy: FindingEvaluationRecord["runtime_followup_policy"] = runtimeSensitive ? "runtime_validation_recommended" : "not_applicable";
     if (runtimeSensitive) {
@@ -485,11 +492,13 @@ export function buildFindingEvaluationSummary(args: {
         if (runtimeImpact === "none") runtimeImpact = "weakened";
         falsePositiveRisk = increaseTriageLevel(falsePositiveRisk);
         runtimeImpactReasons.push("linked rerun did not reproduce the finding and weakened confidence in the original issue");
-        validationReasons.push("linked rerun did not reproduce the finding and should be reviewed before final approval");
+        if (!handledByActiveException) validationReasons.push("linked rerun did not reproduce the finding and should be reviewed before final approval");
       } else if (runtimeFollowupOutcome === "still_inconclusive") {
-        validationReasons.push("linked rerun remained inconclusive and still requires reviewer judgment");
+        if (!handledByActiveException) validationReasons.push("linked rerun remained inconclusive and still requires reviewer judgment");
       }
     }
+    if (handledByActiveException) validationReasons.length = 0;
+    validationRecommendation = validationReasons.length ? "yes" : "no";
     let nextAction: FindingEvaluationRecord["next_action"] = "ready_for_review";
     if (reviewFinding?.disposition === "suppressed") nextAction = "suppressed";
     else if (reviewFinding?.disposition === "waived") nextAction = "waived";
@@ -536,6 +545,9 @@ export function buildFindingEvaluationSummary(args: {
       active_disposition_owner_id: reviewFinding?.active_disposition_owner_id ?? null,
       active_disposition_reviewed_at: reviewFinding?.active_disposition_reviewed_at ?? null,
       active_disposition_review_due_by: reviewFinding?.active_disposition_review_due_by ?? null,
+      triage_decision: reviewFinding?.triage_decision ?? null,
+      review_priority: reviewFinding?.review_priority ?? null,
+      validation_intent: reviewFinding?.validation_intent ?? null,
       disposition_review_reason: reviewFinding?.disposition_review_reason ?? null,
       needs_disposition_review: reviewFinding?.needs_disposition_review ?? false,
       confidence: finding.confidence,

@@ -7,12 +7,15 @@ import { fileURLToPath } from "node:url";
 
 import { buildRunComparisonReport, createApiServer } from "../../../apps/api-server/src/index.js";
 import { createWebUiServer } from "../../../apps/web-ui/src/index.js";
+import { loadBenchmarkSuite, runBenchmarkSuite, selectBenchmarkCases } from "../../../apps/cli/src/benchmark-suite.js";
 import { buildScanRequest } from "../../../apps/cli/src/args.js";
 import { validateFixtures } from "../../../apps/cli/src/fixture-validation.js";
+import { buildDockerRuntimeFixtureCreateArgs, RUNTIME_FIXTURE_IMAGE, validateDockerRuntimeFixtureInspect } from "../../../apps/cli/src/runtime-fixtures.js";
 import { describeArtifactType } from "./artifact-policy.js";
 import { pruneArtifacts } from "./artifact-retention.js";
 import { executeEvidenceProvider, normalizeEvidenceSummaryForTests, resetEvidenceProviderCapabilityCacheForTests } from "./evidence-providers.js";
 import { buildFindingEvaluationSummary } from "./finding-evaluation.js";
+import { buildFindingQualitySummary } from "./finding-quality.js";
 import { createEngine } from "./orchestrator.js";
 import { buildPreflightSummary } from "./preflight.js";
 import { resetPythonWorkerCapabilityCacheForTests } from "./python-worker.js";
@@ -26,7 +29,9 @@ import { deriveInitialReviewWorkflow, listPersistedReviewNotifications, listPers
 import { createPersistedReviewComment } from "./persistence/review-comments.js";
 import { buildFindingEvidenceFingerprint, createPersistedFindingDisposition } from "./persistence/finding-dispositions.js";
 import { readPersistedArtifactIndex, readPersistedCommitDiff, readPersistedControlResults, readPersistedEvents, readPersistedEvidenceRecords, readPersistedFindings, readPersistedLanePlans, readPersistedLaneResults, readPersistedLaneReuseDecisions, readPersistedLaneSpecialistOutputs, readPersistedMaintenanceHistory, readPersistedMetrics, readPersistedObservability, readPersistedResolvedConfiguration, readPersistedReviewActions, readPersistedReviewComments, readPersistedReviewDecision, readPersistedReviewWorkflow, readPersistedRunUsageSummary, readPersistedScoreSummary, readPersistedStageArtifact, readPersistedStageArtifacts, readPersistedToolAdapterSummary, readPersistedToolExecutions } from "./persistence/run-details.js";
-import { readPersistenceMetadata } from "./persistence/sqlite.js";
+import { ensureSqliteSchema, openSqliteDatabase, PERSISTENCE_SCHEMA_VERSION, readPersistenceMetadata, readSqliteTable, saveSqliteDatabase, upsertSqliteRecord } from "./persistence/sqlite.js";
+import { buildPsqlProcessEnv } from "./persistence/postgres.js";
+import { normalizeLearningSettings } from "./persistence/learning.js";
 import { listPersistedUiDocuments, readPersistedUiSettings, updatePersistedUiSettings } from "./persistence/ui-settings.js";
 import { markRuntimeFollowupJobTerminal, markRuntimeFollowupLaunched, readPersistedRuntimeFollowup, upsertRuntimeFollowupFromReviewAction } from "./persistence/runtime-followups.js";
 import { LinuxContainerSandboxBackend } from "./sandbox/backends/linux-container.js";
@@ -36,14 +41,59 @@ import { evaluateStandardsAudit } from "./standards-audit.js";
 import { getControlCatalog } from "./standards.js";
 import { deriveCanonicalTargetId } from "./target-identity.js";
 import { listBuiltinLlmProviders, listBuiltinLlmProviderPresets } from "./llm-provider-registry.js";
+import { createDefaultAssistantToolRegistry, EvidenceGroundedAssistantProvider } from "./assistant.js";
+import { SqliteAssistantStorage } from "./persistence/assistant.js";
 import { OpenAICodexCliProvider, resolveAgentProviderConfig } from "../../../packages/llm-provider/src/index.js";
+import { buildRuntimeExecutionPolicy, resolveLocalSandboxBackend } from "../../../packages/validation-runner/src/index.js";
 
 async function withTempDir<T>(prefix: string, fn: (dir: string) => Promise<T>): Promise<T> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
   try {
     return await fn(dir);
   } finally {
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      try {
+        await fs.rm(dir, { recursive: true, force: true });
+        break;
+      } catch (error) {
+        if (attempt === 9) {
+          const code = typeof error === "object" && error && "code" in error ? String((error as { code?: unknown }).code) : "";
+          if (code === "EBUSY" || code === "ENOTEMPTY" || code === "EPERM") {
+            console.warn(`WARN temp cleanup deferred for ${dir}: ${error instanceof Error ? error.message : String(error)}`);
+            break;
+          }
+          throw error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+      }
+    }
+  }
+}
+
+async function withWorkspaceTempDir<T>(prefix: string, fn: (dir: string) => Promise<T>): Promise<T> {
+  const root = path.resolve(process.cwd(), ".artifacts", "test-temp");
+  await fs.mkdir(root, { recursive: true });
+  const dir = await fs.mkdtemp(path.join(root, prefix));
+  try {
+    return await fn(dir);
+  } finally {
     await fs.rm(dir, { recursive: true, force: true });
+  }
+}
+
+async function withEnv<T>(updates: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> {
+  const previous = new Map(Object.keys(updates).map((key) => [key, process.env[key]] as const));
+  for (const [key, value] of Object.entries(updates)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const [key, value] of previous.entries()) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
 }
 
@@ -143,20 +193,78 @@ async function waitForServer(url: string, timeoutMs = 30000): Promise<void> {
   throw new Error(`Timed out waiting for server at ${url}`);
 }
 
-async function waitForAsyncRun(baseUrl: string, jobId: string, timeoutMs = 45000): Promise<any> {
+async function waitForAsyncRun(baseUrl: string, jobId: string, timeoutMs = 180000, expectedAttemptNumber?: number): Promise<any> {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
-    const response = await fetch(`${baseUrl}/runs/async/${jobId}`);
-    if (response.ok) {
-      const payload = await response.json() as any;
-      const status = payload.job?.status;
-      if (status === "succeeded" || status === "failed" || status === "canceled") {
-        return payload;
+    try {
+      const response = await fetch(`${baseUrl}/runs/async/${jobId}`);
+      if (response.ok) {
+        const payload = await response.json() as any;
+        const status = payload.job?.status;
+        const attempts = Array.isArray(payload.attempts) ? payload.attempts : [];
+        const latestAttempt = attempts.at(-1) ?? null;
+        const currentRunId = payload.job?.current_run_id;
+        const latestAttemptNumber = payload.job?.latest_attempt_number;
+        if (expectedAttemptNumber != null && latestAttemptNumber !== expectedAttemptNumber) {
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          continue;
+        }
+        const latestAttemptMatchesJob =
+          !latestAttempt ||
+          ((currentRunId == null || latestAttempt.run_id === currentRunId) &&
+            (latestAttemptNumber == null || latestAttempt.attempt_number === latestAttemptNumber));
+        const latestAttemptIsTerminal =
+          !latestAttempt ||
+          latestAttempt.status === "succeeded" ||
+          latestAttempt.status === "failed" ||
+          latestAttempt.status === "canceled";
+        if ((status === "succeeded" || status === "failed" || status === "canceled") && latestAttemptMatchesJob && latestAttemptIsTerminal) {
+          return payload;
+        }
       }
+    } catch {
+      // retry while the test server is restarting or closing a previous listener
     }
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
   throw new Error(`Timed out waiting for async job ${jobId}`);
+}
+
+async function waitForCondition(label: string, predicate: () => boolean, timeoutMs = 45000): Promise<void> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`Timed out waiting for ${label}`);
+}
+
+async function waitForRunSummary(baseUrl: string, runId: string, timeoutMs = 180000): Promise<any> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const [summaryResponse, toolExecutionsResponse, remediationResponse] = await Promise.all([
+      fetch(`${baseUrl}/runs/${runId}/summary`),
+      fetch(`${baseUrl}/runs/${runId}/tool-executions`),
+      fetch(`${baseUrl}/runs/${runId}/remediation`)
+    ]);
+    if (summaryResponse.ok && toolExecutionsResponse.ok && remediationResponse.ok) {
+      const [summaryPayload, toolExecutionsPayload, remediationPayload] = await Promise.all([
+        summaryResponse.json() as Promise<any>,
+        toolExecutionsResponse.json() as Promise<any>,
+        remediationResponse.json() as Promise<any>
+      ]);
+      const summaryStatus = summaryPayload.summary?.status;
+      const hasCompletedArtifacts =
+        Array.isArray(toolExecutionsPayload.tool_executions) &&
+        toolExecutionsPayload.tool_executions.length > 0 &&
+        Boolean(remediationPayload.remediation_memo?.summary);
+      if ((summaryStatus === "succeeded" || summaryStatus === "failed" || summaryStatus === "canceled") && hasCompletedArtifacts) {
+        return summaryPayload;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  throw new Error(`Timed out waiting for run summary ${runId}`);
 }
 
 function getListeningPort(server: http.Server): number {
@@ -218,15 +326,44 @@ async function testOpenAICodexProviderRegistryAndStructuredExec(): Promise<void>
   assert.equal(resolved.provider, "openai_codex");
   assert.equal(resolved.apiKeySource, "oauth-local");
 
-  await withTempDir("harness-codex-provider-", async (rootDir) => {
+  await withEnv({
+    AUDIT_LLM_PROVIDER: undefined,
+    AUDIT_LLM_MODEL: undefined,
+    AUDIT_LLM_API_KEY: undefined,
+    LLM_API_KEY: undefined,
+    OPENAI_API_KEY: undefined,
+    AUDIT_LLM_PLANNER_PROVIDER: undefined,
+    AUDIT_LLM_PLANNER_MODEL: undefined,
+    AUDIT_LLM_PLANNER_API_KEY: undefined
+  }, async () => {
+    assert.equal(resolveAgentProviderConfig("planner_agent").provider, "openai_codex");
+  });
+
+  assert.equal(normalizeLearningSettings({ enabled: true, event_driven_enabled: true }).enabled, false);
+  assert.equal(normalizeLearningSettings({ operator_consent_version: 1, enabled: true }).enabled, true);
+
+  await withWorkspaceTempDir("harness-codex-provider-", async (rootDir) => {
     const fakeCli = path.join(rootDir, "fake-codex-cli.mjs");
+    const fakeHome = path.join(rootDir, "home");
+    const fakeAppData = path.join(rootDir, "appdata");
+    const fakeLocalAppData = path.join(rootDir, "localappdata");
+    await fs.mkdir(fakeHome, { recursive: true });
+    await fs.mkdir(fakeAppData, { recursive: true });
+    await fs.mkdir(fakeLocalAppData, { recursive: true });
     await fs.writeFile(fakeCli, [
       "import fs from 'node:fs';",
       "const outIndex = process.argv.indexOf('--output-last-message');",
       "if (outIndex < 0) process.exit(2);",
       "fs.writeFileSync(process.argv[outIndex + 1], JSON.stringify({ ok: true, mode: 'oauth' }));"
     ].join("\n"), "utf8");
-    const codex = new OpenAICodexCliProvider("gpt-5.1-codex", process.execPath, "read-only", 10_000, [fakeCli]);
+    const codex = new OpenAICodexCliProvider("gpt-5.1-codex", process.execPath, "read-only", 10_000, [fakeCli], {
+      ...process.env,
+      APPDATA: fakeAppData,
+      CODEX_HOME: path.join(fakeHome, ".codex"),
+      HOME: fakeHome,
+      LOCALAPPDATA: fakeLocalAppData,
+      USERPROFILE: fakeHome
+    });
     const result = await codex.generateStructured<{ ok: boolean; mode: string }>({
       agentName: "planner_agent",
       schemaName: "fake_codex_result",
@@ -306,13 +443,53 @@ async function testLocalPersistenceUsesConfiguredRoot(): Promise<void> {
     assert.equal(localRun?.id, "run_local");
     assert.equal(configuredMeta?.database_mode, "local");
     assert.equal(localMeta?.database_mode, "local");
-    assert.equal(configuredMeta?.persistence_schema_version, "1.1.0");
+    assert.equal(configuredMeta?.persistence_schema_version, PERSISTENCE_SCHEMA_VERSION);
     assert.equal(configuredMeta?.compatibility_status, "current");
     assert.equal(localRun?.resolved_configuration?.db_mode, "local");
     assert.equal(configuredRun?.resolved_configuration?.db_mode, "local");
     assert.equal(await fs.stat(path.join(configuredRoot, "runs", "run_configured.json")).then(() => true).catch(() => false), false);
     assert.equal(await fs.stat(path.join(localRoot, "runs", "run_local.json")).then(() => true).catch(() => false), false);
   });
+}
+
+async function testConcurrentSqliteWritesAreMerged(): Promise<void> {
+  await withTempDir("tethermark-sqlite-concurrency-", async (rootDir) => {
+    const left = await openSqliteDatabase(rootDir);
+    const right = await openSqliteDatabase(rootDir);
+    try {
+      ensureSqliteSchema(left);
+      ensureSqliteSchema(right);
+      upsertSqliteRecord({ db: left, tableName: "concurrency_test", recordKey: "left", payload: { id: "left" } });
+      upsertSqliteRecord({ db: right, tableName: "concurrency_test", recordKey: "right", payload: { id: "right" } });
+      await Promise.all([
+        saveSqliteDatabase(rootDir, left),
+        saveSqliteDatabase(rootDir, right)
+      ]);
+    } finally {
+      left.close();
+      right.close();
+    }
+    const verification = await openSqliteDatabase(rootDir);
+    try {
+      ensureSqliteSchema(verification);
+      assert.deepEqual(
+        readSqliteTable<{ id: string }>(verification, "concurrency_test").map((item) => item.id).sort(),
+        ["left", "right"]
+      );
+    } finally {
+      verification.close();
+    }
+  });
+}
+
+async function testPsqlCredentialsUseEnvironment(): Promise<void> {
+  const environment = buildPsqlProcessEnv("postgresql://audit-user:p%26ss%20word@db.example.test:6543/tethermark?sslmode=verify-full", {});
+  assert.equal(environment.PGHOST, "db.example.test");
+  assert.equal(environment.PGPORT, "6543");
+  assert.equal(environment.PGDATABASE, "tethermark");
+  assert.equal(environment.PGUSER, "audit-user");
+  assert.equal(environment.PGPASSWORD, "p&ss word");
+  assert.equal(environment.PGSSLMODE, "verify-full");
 }
 
 async function testCompactBundleExportsPrunesOptionalDebugBundles(): Promise<void> {
@@ -844,14 +1021,19 @@ async function testFreshRunPersistsExpectedRecords(): Promise<void> {
     await fs.writeFile(path.join(projectDir, "package.json"), JSON.stringify({ name: "sample-project", version: "1.0.0" }, null, 2) + "\n", "utf8");
     await fs.writeFile(path.join(projectDir, "src", "index.ts"), "export function main() { return 'ok'; }\n", "utf8");
 
-    const result = await withWorkingDir(rootDir, async () => {
-      const engine = createEngine();
-      return engine.run({
-        local_path: projectDir,
-        run_mode: "static",
-        audit_package: "deep-static",
-        llm_provider: "mock",
-        llm_model: "mock-agent-runtime"
+    const result = await withEnv({
+      HARNESS_DISABLE_LOCAL_BINARIES: "1",
+      HARNESS_DISABLE_PYTHON_WORKERS: "1"
+    }, async () => {
+      return withWorkingDir(rootDir, async () => {
+        const engine = createEngine();
+        return engine.run({
+          local_path: projectDir,
+          run_mode: "static",
+          audit_package: "deep-static",
+          llm_provider: "mock",
+          llm_model: "mock-agent-runtime"
+        });
       });
     });
 
@@ -894,10 +1076,10 @@ async function testFreshRunPersistsExpectedRecords(): Promise<void> {
     assert.ok(events.length > 0);
     assert.ok(metrics.length > 0);
     assert.ok(artifactIndex.length > 0);
-    assert.deepEqual(
-      ["preflight-summary", "launch-intent", "planner-artifact", "target-profile", "threat-model", "eval-selection", "run-plan", "findings-pre-skeptic", "score-summary", "observations"].sort(),
-      stageArtifacts.map((item) => item.artifact_type).sort()
-    );
+    const stageArtifactTypes = new Set(stageArtifacts.map((item) => item.artifact_type));
+    for (const artifactType of ["preflight-summary", "launch-intent", "planner-artifact", "target-profile", "threat-model", "eval-selection", "run-plan", "findings-pre-skeptic", "finding-integrity-pre-supervisor", "finding-quality-pre-skeptic", "finding-quality", "handoffs", "score-summary", "observations"]) {
+      assert.equal(stageArtifactTypes.has(artifactType), true, `missing stage artifact ${artifactType}`);
+    }
     assert.equal(run?.id, result.run_id);
     assert.equal(scoreSummary?.overall_score, result.score_summary.overall_score);
     assert.equal(reviewDecision?.publishability_status, result.publishability.publishability_status);
@@ -1083,6 +1265,9 @@ async function testPersistedReviewWorkflowAndActions(): Promise<void> {
         previous_severity: "high",
         updated_severity: "medium",
         visibility_override: "internal",
+        triage_decision: "confirmed",
+        review_priority: "p1",
+        validation_intent: "manual_review",
         notes: "downgraded after manual verification"
       }
     });
@@ -1123,11 +1308,17 @@ async function testPersistedReviewWorkflowAndActions(): Promise<void> {
     assert.equal(actions[7]?.action_type, "mark_manual_runtime_review_complete");
     assert.equal(actions[8]?.action_type, "downgrade_severity");
     assert.equal(actions[8]?.updated_severity, "medium");
+    assert.equal(actions[8]?.triage_decision, "confirmed");
+    assert.equal(actions[8]?.review_priority, "p1");
+    assert.equal(actions[8]?.validation_intent, "manual_review");
     assert.equal(actions[9]?.action_type, "approve_run");
     assert.equal(reviewSummary.handoff.current_reviewer_id, "bob");
     assert.equal(reviewSummary.handoff.unresolved_finding_count, 0);
     assert.equal(reviewSummary.finding_summaries[0]?.disposition, "downgraded");
     assert.equal(reviewSummary.finding_summaries[0]?.current_severity, "medium");
+    assert.equal(reviewSummary.finding_summaries[0]?.triage_decision, "confirmed");
+    assert.equal(reviewSummary.finding_summaries[0]?.review_priority, "p1");
+    assert.equal(reviewSummary.finding_summaries[0]?.validation_intent, "manual_review");
     assert.equal(reviewSummary.recent_comments.length, 1);
     assert.equal(comments.length, 1);
     assert.equal(comments[0]?.finding_id, "finding_review");
@@ -1136,6 +1327,7 @@ async function testPersistedReviewWorkflowAndActions(): Promise<void> {
 
 async function testApiResponsesUsePersistedState(): Promise<void> {
   await withTempDir("harness-api-persisted-", async (rootDir) => {
+    const localDbRoot = path.join(rootDir, ".artifacts", "state", "local-db");
     const dueSoonReviewDue = new Date(Date.now() + 24 * 36e5).toISOString();
     const reopenedReviewDue = new Date(Date.now() + 48 * 36e5).toISOString();
     const laterExpiry = new Date(Date.now() + 10 * 24 * 36e5).toISOString();
@@ -1143,7 +1335,7 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
     await fs.mkdir(artifactRoot, { recursive: true });
     await fs.writeFile(path.join(artifactRoot, "final-score-summary.json"), JSON.stringify({ overall_score: 10, rating: "poor" }, null, 2) + "\n", "utf8");
 
-    const store = new LocalPersistenceStore(path.join(rootDir, ".artifacts", "state", "local-db"));
+    const store = new LocalPersistenceStore(localDbRoot);
     await store.persistBundle({
       mode: "local",
       package_definition: { id: "deep-static", title: "Deep Static", description: "", run_mode: "static", default_policy_profile: "default", requires_agents: true, lane_specialists_enabled: true, focus: [], minimum_tools: [], scorecard_weights: {} } as any,
@@ -1157,7 +1349,7 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
       correction_plan: null,
       correction_result: null,
       lane_reuse_decisions: [],
-      persistence_summary: { run_id: "run_api", mode: "local", root: path.join(rootDir, ".artifacts", "state", "local-db") },
+      persistence_summary: { run_id: "run_api", mode: "local", root: localDbRoot },
       stage_artifacts: [
         {
           id: "run_api:stage-artifact:preflight-summary",
@@ -1449,7 +1641,7 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
     await upsertRuntimeFollowupFromReviewAction({
       runId: "run_api",
       actionId: "review_action_runtime_followup_seed",
-      rootDirOrOptions: path.join(rootDir, ".artifacts", "state", "local-db"),
+      rootDirOrOptions: localDbRoot,
       input: {
         reviewer_id: "triage_api",
         action_type: "rerun_in_capable_env",
@@ -1459,10 +1651,8 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
       }
     });
 
-    await updatePersistedUiSettings({
+    const apiIntegrationSettings = {
       credentials: {
-        github_api_base_url: "http://127.0.0.1:1",
-        github_token: "test-github-token",
         configured_endpoints: []
       },
       integrations: {
@@ -1472,7 +1662,9 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
         github_owned_repo_prefixes: [],
         github_require_per_run_approval: true
       }
-    }, { rootDir: path.join(rootDir, ".artifacts", "state", "local-db"), dbMode: "local" }, { workspaceId: "default", projectId: "default", scopeLevel: "project" });
+    };
+    await updatePersistedUiSettings(apiIntegrationSettings, { rootDir: path.join(rootDir, ".artifacts", "state", "local-db"), dbMode: "local" });
+    await updatePersistedUiSettings(apiIntegrationSettings, { rootDir: path.join(rootDir, ".artifacts", "state", "local-db"), dbMode: "local" }, { workspaceId: "default", projectId: "default", scopeLevel: "project" });
 
     const seededSuppression = await createPersistedFindingDisposition({
       runId: "run_api",
@@ -1574,45 +1766,13 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
       }
     });
 
-    const githubPort = 8600 + Math.floor(Math.random() * 100);
     const port = 8800 + Math.floor(Math.random() * 200);
     await withWorkingDir(rootDir, async () => {
-      await updatePersistedUiSettings({
-        credentials: {
-          github_api_base_url: `http://127.0.0.1:${githubPort}`,
-          github_token: "test-github-token",
-          configured_endpoints: []
-        }
-      }, { rootDir: path.join(rootDir, ".artifacts", "state", "local-db"), dbMode: "local" }, { workspaceId: "default", projectId: "default", scopeLevel: "project" });
-
-      const githubServer = http.createServer(async (req, res) => {
-        if (req.method === "GET" && req.url === "/repos/example/api") {
-          res.writeHead(200, { "content-type": "application/json" });
-          res.end(JSON.stringify({
-            full_name: "example/api",
-            permissions: { admin: false, maintain: false, push: true, triage: true, pull: true }
-          }));
-          return;
-        }
-        if (req.method === "POST" && req.url === "/repos/example/api/issues/123/comments") {
-          const chunks: Buffer[] = [];
-          for await (const chunk of req) chunks.push(Buffer.from(chunk));
-          const payload = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
-          res.writeHead(201, { "content-type": "application/json" });
-          res.end(JSON.stringify({
-            html_url: "https://github.example/comment/123",
-            body: payload.body ?? ""
-          }));
-          return;
-        }
-        res.writeHead(404, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error: "not_found", path: req.url }));
-      });
-      await new Promise<void>((resolve, reject) => {
-        githubServer.once("error", reject);
-        githubServer.listen(githubPort, "127.0.0.1", () => resolve());
-      });
-
+      await withEnv({
+        HARNESS_LOCAL_DB_ROOT: localDbRoot,
+        HARNESS_API_AUTH_MODE: "none",
+        HARNESS_DISABLE_LEARNING_SCHEDULER: "1"
+      }, async () => {
       const server = createApiServer();
       await new Promise<void>((resolve, reject) => {
         server.once("error", reject);
@@ -1738,6 +1898,7 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
         const runtimeFollowupExportJsonResponse = await fetch(`http://127.0.0.1:${port}/runtime-followups/export?format=json`);
         const runtimeFollowupExportCsvResponse = await fetch(`http://127.0.0.1:${port}/runtime-followups/export?format=csv`);
         const observabilitySummaryResponse = await fetch(`http://127.0.0.1:${port}/runs/run_api/observability-summary`);
+        const agentTraceResponse = await fetch(`http://127.0.0.1:${port}/runs/run_api/agent-trace`);
         const observabilityStatsResponse = await fetch(`http://127.0.0.1:${port}/stats/observability`);
         const summaryPayload = await summaryResponse.json() as any;
         const findingsPayload = await findingsResponse.json() as any;
@@ -1787,6 +1948,7 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
         const runtimeFollowupExportJsonPayload = await runtimeFollowupExportJsonResponse.json() as any;
         const runtimeFollowupExportCsvPayload = await runtimeFollowupExportCsvResponse.json() as any;
         const observabilitySummaryPayload = await observabilitySummaryResponse.json() as any;
+        const agentTracePayload = await agentTraceResponse.json() as any;
         const observabilityStatsPayload = await observabilityStatsResponse.json() as any;
         const authInfoPayload = await authInfoResponse.json() as any;
         const llmProvidersPayload = await llmProvidersResponse.json() as any;
@@ -1832,10 +1994,10 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
         assert.equal(outboundSendResponse.status, 200);
         assert.equal(outboundSendStoredResponse.status, 200);
         assert.equal(outboundVerificationBeforeResponse.status, 200);
-        assert.equal(outboundDeliveryBlockedResponse.status, 409);
-        assert.equal(outboundVerificationPostResponse.status, 200);
+        assert.equal(outboundDeliveryBlockedResponse.status, 403);
+        assert.equal(outboundVerificationPostResponse.status, 403);
         assert.equal(outboundVerificationAfterResponse.status, 200);
-        assert.equal(outboundDeliveryResponse.status, 200);
+        assert.equal(outboundDeliveryResponse.status, 403);
         assert.equal(outboundDeliveryStoredResponse.status, 200);
         assert.equal(reviewSummaryResponse.status, 200);
         assert.equal(reviewAuditResponse.status, 200);
@@ -1844,6 +2006,7 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
         assert.equal(runtimeFollowupExportJsonResponse.status, 200);
         assert.equal(runtimeFollowupExportCsvResponse.status, 200);
         assert.equal(observabilitySummaryResponse.status, 200);
+        assert.equal(agentTraceResponse.status, 200);
         assert.equal(observabilityStatsResponse.status, 200);
         assert.equal(summaryPayload.summary.overall_score, 82);
         assert.equal(summaryPayload.summary.finding_count, 4);
@@ -1866,6 +2029,11 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
         assert.equal(evidenceRecordsPayload.evidence_records[0]?.locations_json?.[0]?.path, "src/agent.js");
         assert.equal(evidenceRecordsPayload.evidence_records[0]?.locations_json?.[0]?.line, 17);
         assert.equal(evidenceRecordsPayload.evidence_records[1]?.metadata_json?.normalized_artifact?.details_json?.probe?.classification, "connection_refused");
+        assert.equal(agentTracePayload.trace_policy.hidden_chain_of_thought_stored, false);
+        assert.equal(typeof agentTracePayload.summary.stage_execution_count, "number");
+        assert.equal(typeof agentTracePayload.summary.finding_quality_verdict, "string");
+        assert.equal(Array.isArray(agentTracePayload.timeline), true);
+        assert.equal(Array.isArray(agentTracePayload.intermediate_outputs), true);
         assert.equal(evidenceRecordsPayload.evidence_records[1]?.metadata_json?.normalized_artifact?.details_json?.startup?.signaled_ready, false);
         assert.equal(reviewWorkflowPayload.review_workflow.status, "review_required");
         assert.equal(reviewActionPostPayload.workflow.status, "approved");
@@ -1917,7 +2085,7 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
         assert.equal(findingEvaluationsPayload.export_schema.payload.overall_evidence_sufficiency, "medium");
         await assertExportSchemaMatches("finding_evaluations.v1.json", findingEvaluationsPayload.export_schema);
         assert.equal(findingEvaluationsPayload.finding_evaluations.overall_false_positive_risk, "medium");
-        assert.equal(findingEvaluationsPayload.finding_evaluations.findings_needing_validation_count, 4);
+        assert.equal(findingEvaluationsPayload.finding_evaluations.findings_needing_validation_count, 2);
         assert.equal(findingEvaluationsPayload.finding_evaluations.sandbox_execution.blocked_step_count, 2);
         assert.equal(findingEvaluationsPayload.finding_evaluations.sandbox_execution.attention_required, true);
         assert.equal(findingEvaluationsPayload.finding_evaluations.suppressed_finding_count, 0);
@@ -1941,8 +2109,11 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
         assert.equal(typeof findingEvaluationsPayload.finding_evaluations.runtime_generated_finding_count, "number");
         assert.equal(findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api_dup")?.validation_recommendation, "yes");
         assert.equal(findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api_dup")?.next_action, "rerun_in_capable_env");
+        assert.ok(findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api_dup")?.validation_reasons.some((reason: string) => /duplicate|conflict|runtime|sandbox/i.test(reason)));
         assert.equal(findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api")?.next_action, "waived");
         assert.equal(findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api")?.active_disposition_type, "waiver");
+        assert.equal(findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api")?.validation_recommendation, "no");
+        assert.equal(findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api")?.validation_reasons.length, 0);
         assert.equal(typeof findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api")?.active_disposition_review_due_by, "string");
         assert.equal(typeof findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api")?.runtime_validation_status, "string");
         assert.equal(typeof findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api")?.runtime_followup_policy, "string");
@@ -1955,14 +2126,18 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
         assert.equal(findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api_expired")?.disposition_status, "expired");
         assert.equal(findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api_expired")?.needs_disposition_review, true);
         assert.equal(findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api_expired")?.next_action, "review_expired_disposition");
+        assert.equal(findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api_expired")?.validation_recommendation, "yes");
+        assert.ok(findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api_expired")?.validation_reasons.some((reason: string) => /exception expired|re-review/i.test(reason)));
         assert.equal(typeof findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api_expired")?.runtime_impact, "string");
         assert.equal(findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api_reopened")?.active_disposition_owner_id, "lead-reviewer");
         assert.equal(findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api_reopened")?.needs_disposition_review, false);
         assert.equal(findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api_reopened")?.disposition_review_reason, null);
         assert.equal(findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api_reopened")?.next_action, "waived");
+        assert.equal(findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api_reopened")?.validation_recommendation, "no");
+        assert.equal(findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api_reopened")?.validation_reasons.length, 0);
         assert.equal(typeof findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api_reopened")?.runtime_impact, "string");
         assert.equal(Array.isArray(findingEvaluationsPayload.finding_evaluations.evaluations.find((item: any) => item.finding_id === "finding_api_reopened")?.runtime_evidence_ids), true);
-        assert.equal(findingEvaluationsPayload.finding_evaluations.evaluations.every((item: any) => item.validation_reasons.includes("bounded sandbox execution did not complete cleanly for this run")), true);
+        assert.equal(findingEvaluationsPayload.finding_evaluations.evaluations.filter((item: any) => item.validation_recommendation === "yes").length, 2);
         assert.equal(executiveReportJsonPayload.format, "json");
         assert.equal(executiveReportJsonPayload.filename, "run_api-executive-summary.json");
         assert.equal(executiveReportJsonPayload.export_schema.schema_name, "executive_summary.v1");
@@ -2044,16 +2219,17 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
         assert.equal(outboundSendPayload.outbound_send.status, "manual_only");
         assert.equal(outboundSendPayload.outbound_send.action_type, "pr_comment");
         assert.equal(outboundSendPayload.outbound_preview.readiness.send_allowed, true);
+        assert.equal(outboundSendPayload.outbound_preview.readiness.execute_allowed, false);
         assert.equal(outboundSendStoredPayload.outbound_send.status, "manual_only");
         assert.equal(outboundVerificationBeforePayload.outbound_verification, null);
-        assert.equal(outboundDeliveryBlockedPayload.error, "outbound_delivery_not_allowed");
-        assert.equal(outboundDeliveryBlockedPayload.outbound_preview.readiness.execute_allowed, false);
-        assert.equal(outboundVerificationPostPayload.outbound_verification.status, "verified");
-        assert.equal(outboundVerificationPostPayload.outbound_verification.repo_full_name, "example/api");
-        assert.equal(outboundVerificationAfterPayload.outbound_verification.status, "verified");
-        assert.equal(outboundDeliveryPayload.outbound_delivery.status, "sent");
-        assert.equal(outboundDeliveryPayload.outbound_delivery.external_url, "https://github.example/comment/123");
-        assert.equal(outboundDeliveryStoredPayload.outbound_delivery.status, "sent");
+        assert.equal(outboundDeliveryBlockedPayload.error, "hosted_only");
+        assert.equal(outboundDeliveryBlockedPayload.capability, "github_outbound_delivery");
+        assert.equal(outboundVerificationPostPayload.error, "hosted_only");
+        assert.equal(outboundVerificationPostPayload.capability, "github_outbound_verification");
+        assert.equal(outboundVerificationAfterPayload.outbound_verification, null);
+        assert.equal(outboundDeliveryPayload.error, "hosted_only");
+        assert.equal(outboundDeliveryPayload.capability, "github_outbound_delivery");
+        assert.equal(outboundDeliveryStoredPayload.outbound_delivery, null);
         assert.equal(reviewSummaryPayload.review_summary.handoff.status, "approved");
         assert.equal(reviewSummaryPayload.review_summary.finding_summaries.find((item: any) => item.finding_id === "finding_api")?.disposition, "waived");
         assert.equal(reviewSummaryPayload.review_summary.finding_summaries.find((item: any) => item.finding_id === "finding_api_expired")?.disposition_status, "expired");
@@ -2124,8 +2300,8 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
         assert.equal(llmProvidersPayload.presets.find((item: any) => item.id === "local_mock")?.provider_id, "mock");
         assert.equal(integrationsPayload.integrations.find((item: any) => item.id === "github_outbound")?.status?.enabled, true);
         assert.equal(integrationsPayload.integrations.find((item: any) => item.id === "github_outbound")?.status?.configured, true);
-        assert.equal(integrationsPayload.integrations.find((item: any) => item.id === "github_outbound")?.credential_fields?.find((field: any) => field.id === "github_token")?.env_var, "GITHUB_TOKEN");
-        assert.ok(["persisted", "environment"].includes(String(integrationsPayload.integrations.find((item: any) => item.id === "github_outbound")?.status?.fields?.find((field: any) => field.id === "github_token")?.source)));
+        assert.equal(integrationsPayload.integrations.find((item: any) => item.id === "github_outbound")?.credential_fields?.length, 0);
+        assert.match(String(integrationsPayload.integrations.find((item: any) => item.id === "github_outbound")?.status?.note || ""), /Tethermark Cloud/i);
         assert.equal(integrationsPayload.integrations.find((item: any) => item.id === "generic_webhook")?.status?.enabled, false);
         assert.equal(integrationsPayload.integrations.find((item: any) => item.id === "generic_webhook")?.status?.configured, false);
       } finally {
@@ -2138,16 +2314,8 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
             resolve();
           });
         });
-        await new Promise<void>((resolve, reject) => {
-          githubServer.close((error) => {
-            if (error) {
-              reject(error);
-              return;
-            }
-            resolve();
-          });
-        });
       }
+      });
     });
   });
 }
@@ -2587,6 +2755,10 @@ async function testAsyncRunLifecycleApi(): Promise<void> {
     });
     const genericWebhookPort = getListeningPort(genericWebhookServer);
     await withWorkingDir(rootDir, async () => {
+      const previousDisableLocalBinaries = process.env.HARNESS_DISABLE_LOCAL_BINARIES;
+      const previousDisablePythonWorkers = process.env.HARNESS_DISABLE_PYTHON_WORKERS;
+      process.env.HARNESS_DISABLE_LOCAL_BINARIES = "1";
+      process.env.HARNESS_DISABLE_PYTHON_WORKERS = "1";
       await updatePersistedUiSettings({
         integrations: {
           generic_webhook_url: `http://127.0.0.1:${genericWebhookPort}/events`,
@@ -2654,6 +2826,7 @@ async function testAsyncRunLifecycleApi(): Promise<void> {
         assert.equal(callbackPayload.latest_attempt.run_id, finalPayload.attempts[0].run_id);
         assert.equal(genericWebhookPayload.event_type, "run_completed");
         assert.equal(genericWebhookPayload.run_id, finalPayload.attempts[0].run_id);
+        await waitForCondition("review_required generic webhook", () => genericWebhookEvents.some((item: any) => item.payload?.event_type === "review_required"));
 
         const webhookDeliveriesResponse = await fetch(`${baseUrl}/runs/${finalPayload.attempts[0].run_id}/webhook-deliveries`);
         const webhookDeliveriesPayload = await webhookDeliveriesResponse.json() as any;
@@ -2738,11 +2911,12 @@ async function testAsyncRunLifecycleApi(): Promise<void> {
         assert.equal(retriedPayload.job.latest_attempt_number, 2);
         assert.equal(retriedPayload.attempts.at(-1)?.retry_of_run_id, canceledPayload.attempts.at(-1)?.run_id);
 
-        const finalRetriedPayload = await waitForAsyncRun(baseUrl, queuedCancelPayload.job.job_id);
+        const finalRetriedPayload = await waitForAsyncRun(baseUrl, queuedCancelPayload.job.job_id, 180000, 2);
         assert.equal(finalRetriedPayload.job.status, "succeeded");
         assert.equal(finalRetriedPayload.attempts.length, 2);
         assert.equal(finalRetriedPayload.attempts[0]?.status, "canceled");
         assert.equal(finalRetriedPayload.attempts[1]?.status, "succeeded");
+        await waitForRunSummary(baseUrl, finalRetriedPayload.attempts[1].run_id);
 
         const listResponse = await fetch(`${baseUrl}/runs/async`);
         const listPayload = await listResponse.json() as any;
@@ -2759,6 +2933,16 @@ async function testAsyncRunLifecycleApi(): Promise<void> {
             resolve();
           });
         });
+        if (previousDisableLocalBinaries === undefined) {
+          delete process.env.HARNESS_DISABLE_LOCAL_BINARIES;
+        } else {
+          process.env.HARNESS_DISABLE_LOCAL_BINARIES = previousDisableLocalBinaries;
+        }
+        if (previousDisablePythonWorkers === undefined) {
+          delete process.env.HARNESS_DISABLE_PYTHON_WORKERS;
+        } else {
+          process.env.HARNESS_DISABLE_PYTHON_WORKERS = previousDisablePythonWorkers;
+        }
       }
     });
 
@@ -2862,6 +3046,9 @@ async function testArtifactPolicyClassifiesPersistedAndArtifactOnlyOutputs(): Pr
   const findings = describeArtifactType("findings");
   const observations = describeArtifactType("observations");
   const skepticReview = describeArtifactType("skeptic-review");
+  const findingQuality = describeArtifactType("finding-quality");
+  const preSupervisorIntegrity = describeArtifactType("finding-integrity-pre-supervisor");
+  const postSupervisorIntegrity = describeArtifactType("post-supervisor-integrity");
   const remediation = describeArtifactType("remediation");
   const laneSpecialist = describeArtifactType("lane-specialist-repo_posture");
 
@@ -2871,6 +3058,11 @@ async function testArtifactPolicyClassifiesPersistedAndArtifactOnlyOutputs(): Pr
   assert.equal(observations.persisted_table, "stage_artifacts");
   assert.equal(skepticReview.disposition, "queryable_persisted");
   assert.equal(skepticReview.persisted_table, "supervisor_reviews");
+  assert.equal(findingQuality.disposition, "queryable_persisted");
+  assert.equal(findingQuality.persisted_table, "finding_quality");
+  assert.equal(preSupervisorIntegrity.disposition, "artifact_only");
+  assert.equal(postSupervisorIntegrity.disposition, "queryable_persisted");
+  assert.equal(postSupervisorIntegrity.persisted_table, "finding_quality");
   assert.equal(remediation.disposition, "queryable_persisted");
   assert.equal(remediation.persisted_table, "remediation_memos");
   assert.equal(laneSpecialist.disposition, "artifact_only");
@@ -2961,7 +3153,9 @@ async function testWebUiAndPersistedUiSettingsApi(): Promise<void> {
         const initialSettingsResponse = await fetch(`${webBaseUrl}/api/ui/settings`, { headers: scopedHeaders });
         const initialSettingsPayload = await initialSettingsResponse.json() as any;
         assert.equal(initialSettingsResponse.status, 200);
-        assert.equal(initialSettingsPayload.settings.providers_json.default_provider, "mock");
+        assert.equal(initialSettingsPayload.settings.providers_json.default_provider, "openai_codex");
+        assert.equal(initialSettingsPayload.settings.learning_json.enabled, false);
+        assert.equal(initialSettingsPayload.settings.learning_json.llm_synthesis_enabled, false);
         assert.equal(initialSettingsPayload.settings.review_json.publishability_threshold, "high");
         assert.equal(initialSettingsPayload.settings.review_json.default_visibility, "internal");
 
@@ -3012,7 +3206,7 @@ async function testWebUiAndPersistedUiSettingsApi(): Promise<void> {
 
         const otherScopeSettingsResponse = await fetch(`${webBaseUrl}/api/ui/settings`, { headers: otherScopeHeaders });
         const otherScopeSettingsPayload = await otherScopeSettingsResponse.json() as any;
-        assert.equal(otherScopeSettingsPayload.settings.providers_json.default_provider, "mock");
+        assert.equal(otherScopeSettingsPayload.settings.providers_json.default_provider, "openai_codex");
 
         const otherScopeDocumentsResponse = await fetch(`${webBaseUrl}/api/ui/documents`, { headers: otherScopeHeaders });
         const otherScopeDocumentsPayload = await otherScopeDocumentsResponse.json() as any;
@@ -3090,15 +3284,127 @@ async function testPreflightApiSummarizesReadiness(): Promise<void> {
   });
 }
 
+async function testRuntimeSandboxBackendResolution(): Promise<void> {
+  const unavailableProbe = () => ({ available: false, ok: false, version: null, message: "missing" });
+  const allAvailableProbe = (command: string, args?: string[]) => {
+    if (command === "podman" && args?.[0] === "info") return { available: true, ok: true, version: "true" };
+    return { available: true, ok: true, version: `${command} test` };
+  };
+  const gvisorOnly = resolveLocalSandboxBackend({
+    platform: "linux",
+    probeCommand: (command) => command === "runsc"
+      ? { available: true, ok: true, version: "runsc test" }
+      : { available: false, ok: false, version: null, message: "missing" }
+  });
+  assert.equal(gvisorOnly.selected_backend, "gvisor_container");
+  assert.equal(gvisorOnly.readiness_status, "ready");
+
+  const dockerOnlyAllowed = resolveLocalSandboxBackend({
+    platform: "linux",
+    settings: { allowed_backends: ["docker"] },
+    probeCommand: allAvailableProbe
+  });
+  assert.equal(dockerOnlyAllowed.selected_backend, "docker");
+
+  const pinnedMissing = resolveLocalSandboxBackend({
+    platform: "linux",
+    settings: { resolution_mode: "pinned", preferred_backend: "gvisor_container", allowed_backends: ["gvisor_container"] },
+    probeCommand: unavailableProbe
+  });
+  assert.equal(pinnedMissing.selected_backend, "unavailable");
+  assert.equal(pinnedMissing.readiness_status, "blocked");
+  assert.equal(pinnedMissing.blockers.some((item) => /Pinned Local Runtime Sandbox backend/i.test(item)), true);
+
+  const preferFallback = resolveLocalSandboxBackend({
+    platform: "linux",
+    settings: { resolution_mode: "prefer", preferred_backend: "gvisor_container" },
+    probeCommand: (command, args) => {
+      if (command === "podman" && args?.[0] === "info") return { available: true, ok: true, version: "true" };
+      if (command === "podman") return { available: true, ok: true, version: "podman test" };
+      return { available: false, ok: false, version: null, message: "missing" };
+    }
+  });
+  assert.equal(preferFallback.selected_backend, "rootless_podman");
+  assert.equal(preferFallback.readiness_status, "ready");
+
+  const dockerDesktop = resolveLocalSandboxBackend({
+    platform: "win32",
+    probeCommand: (command) => command === "docker"
+      ? { available: true, ok: true, version: "Docker Desktop test" }
+      : { available: false, ok: false, version: null, message: "missing" }
+  });
+  assert.equal(dockerDesktop.selected_backend, "docker_desktop");
+  assert.equal(dockerDesktop.readiness_status, "ready_with_warnings");
+
+  const defaultPolicy = buildRuntimeExecutionPolicy({ selectedBackend: "docker" });
+  assert.equal(defaultPolicy.provider_id, "local_runtime");
+  assert.equal(defaultPolicy.network_policy, "none");
+  assert.deepEqual(defaultPolicy.outbound_allowlist, []);
+  assert.equal(defaultPolicy.filesystem.block_host_mounts, true);
+}
+
+async function testRuntimeSandboxApiEndpoints(): Promise<void> {
+  await withTempDir("harness-runtime-sandbox-api-", async (rootDir) => {
+    const savedEnv = new Map<string, string | undefined>([
+      ["HARNESS_LOCAL_DB_ROOT", process.env.HARNESS_LOCAL_DB_ROOT],
+      ["HARNESS_API_AUTH_MODE", process.env.HARNESS_API_AUTH_MODE],
+      ["HARNESS_DISABLE_LEARNING_SCHEDULER", process.env.HARNESS_DISABLE_LEARNING_SCHEDULER]
+    ]);
+    process.env.HARNESS_LOCAL_DB_ROOT = rootDir;
+    process.env.HARNESS_API_AUTH_MODE = "none";
+    process.env.HARNESS_DISABLE_LEARNING_SCHEDULER = "1";
+    const apiServer = createApiServer();
+    await new Promise<void>((resolve) => apiServer.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = apiServer.address();
+      assert.ok(address && typeof address === "object");
+      const baseUrl = `http://127.0.0.1:${address.port}`;
+      const providersResponse = await fetch(`${baseUrl}/runtime-sandbox/providers`);
+      const providersPayload = await providersResponse.json() as any;
+      assert.equal(providersResponse.status, 200, JSON.stringify(providersPayload));
+      assert.equal(providersPayload.providers.some((item: any) => item.id === "local_runtime" && item.enabled), true);
+      assert.equal(providersPayload.providers.some((item: any) => item.hosted_only), true);
+
+      const readinessResponse = await fetch(`${baseUrl}/runtime-sandbox/readiness`);
+      const readinessPayload = await readinessResponse.json() as any;
+      assert.equal(readinessResponse.status, 200, JSON.stringify(readinessPayload));
+      assert.equal(readinessPayload.runtime_sandbox.provider_id, "local_runtime");
+      assert.ok(["ready", "ready_with_warnings", "blocked"].includes(readinessPayload.runtime_sandbox.resolution.readiness_status));
+      assert.equal(Array.isArray(readinessPayload.runtime_sandbox.resolution.candidates), true);
+
+      const policyResponse = await fetch(`${baseUrl}/runtime-sandbox/policy/defaults`);
+      const policyPayload = await policyResponse.json() as any;
+      assert.equal(policyResponse.status, 200, JSON.stringify(policyPayload));
+      assert.equal(policyPayload.runtime_execution_policy.provider_id, "local_runtime");
+      assert.equal(policyPayload.runtime_execution_policy.network_policy, "none");
+
+      const hostedReadinessResponse = await fetch(`${baseUrl}/runtime-sandbox/readiness?provider_id=hosted_e2b`);
+      const hostedReadinessPayload = await hostedReadinessResponse.json() as any;
+      assert.equal(hostedReadinessResponse.status, 403, JSON.stringify(hostedReadinessPayload));
+      assert.equal(hostedReadinessPayload.error, "hosted_only");
+    } finally {
+      await new Promise<void>((resolve, reject) => apiServer.close((error) => error ? reject(error) : resolve()));
+      for (const [key, value] of savedEnv.entries()) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+}
+
 async function testApiProjectScopingAndActorOwnedReviewActions(): Promise<void> {
   await withTempDir("harness-api-scope-", async (rootDir) => {
     const LocalRoot = path.join(rootDir, "local-db");
     const fixtureRoot = path.resolve(process.cwd(), "fixtures", "validation-targets");
     await stageBuiltinCoreEngineData(rootDir);
     await withWorkingDir(rootDir, async () => {
-      process.env.HARNESS_LOCAL_DB_ROOT = LocalRoot;
-      process.env.HARNESS_API_AUTH_MODE = "api_key";
-      process.env.HARNESS_API_KEY = "scope-secret";
+      await withEnv({
+        HARNESS_LOCAL_DB_ROOT: LocalRoot,
+        HARNESS_API_AUTH_MODE: "api_key",
+        HARNESS_API_KEY: "scope-secret",
+        HARNESS_DISABLE_LOCAL_BINARIES: "1",
+        HARNESS_DISABLE_PYTHON_WORKERS: "1"
+      }, async () => {
       const apiServer = createApiServer();
       await new Promise<void>((resolve) => apiServer.listen(0, "127.0.0.1", () => resolve()));
       const apiAddress = apiServer.address();
@@ -3183,11 +3489,9 @@ async function testApiProjectScopingAndActorOwnedReviewActions(): Promise<void> 
         assert.equal(persistedBetaRun?.project_id, "blue");
         assert.equal(persistedBetaRun?.requested_by, "bob");
       } finally {
-        delete process.env.HARNESS_LOCAL_DB_ROOT;
-        delete process.env.HARNESS_API_AUTH_MODE;
-        delete process.env.HARNESS_API_KEY;
         await new Promise<void>((resolve, reject) => apiServer.close((error) => error ? reject(error) : resolve()));
       }
+      });
     });
   });
 }
@@ -3195,8 +3499,11 @@ async function testApiProjectScopingAndActorOwnedReviewActions(): Promise<void> 
 async function testValidateFixturesPassesForBundledTargets(): Promise<void> {
   await withTempDir("harness-validate-fixtures-", async (rootDir) => {
     const sharedLocalRoot = path.join(rootDir, "shared-local-db");
-    process.env.HARNESS_LOCAL_DB_ROOT = sharedLocalRoot;
-    try {
+    await withEnv({
+      HARNESS_LOCAL_DB_ROOT: sharedLocalRoot,
+      HARNESS_DISABLE_LOCAL_BINARIES: "1",
+      HARNESS_DISABLE_PYTHON_WORKERS: "1"
+    }, async () => {
       const summary = await validateFixtures({
         rootDir: path.resolve(process.cwd(), "fixtures", "validation-targets"),
         auditPackage: "agentic-static",
@@ -3208,9 +3515,95 @@ async function testValidateFixturesPassesForBundledTargets(): Promise<void> {
       assert.equal(summary.failed_fixtures, 0);
       assert.equal(summary.passed_fixtures, 3);
       assert.equal(await fs.stat(path.join(sharedLocalRoot, "harness.sqlite")).then(() => true).catch(() => false), false);
-    } finally {
-      delete process.env.HARNESS_LOCAL_DB_ROOT;
-    }
+    });
+  });
+}
+
+async function testProductBenchmarkSuiteDryRun(): Promise<void> {
+  await withTempDir("harness-product-benchmark-", async (rootDir) => {
+    const suite = await loadBenchmarkSuite("ai-agent-static-v1");
+    const defaultCases = selectBenchmarkCases(suite, {});
+    const extendedCases = selectBenchmarkCases(suite, { includeExtended: true });
+    assert.equal(suite.suite_id, "ai-agent-static-v1");
+    assert.ok(defaultCases.some((item) => item.id === "pi-agent-static"));
+    assert.ok(defaultCases.some((item) => item.id === "mcp-servers-static"));
+    assert.ok(!defaultCases.some((item) => item.tier === "extended"));
+    assert.ok(extendedCases.some((item) => item.id === "crewai-static"));
+
+    const summary = await runBenchmarkSuite({
+      suitePath: "ai-agent-static-v1",
+      outputDir: rootDir,
+      execute: false
+    });
+    assert.equal(summary.executed, false);
+    assert.equal(summary.selected_cases, defaultCases.length);
+    assert.equal(summary.failed_cases, 0);
+    assert.equal(summary.dry_run_cases, defaultCases.length);
+    assert.ok(summary.report_path);
+    const report = JSON.parse(await fs.readFile(summary.report_path!, "utf8")) as any;
+    assert.equal(report.suite_id, "ai-agent-static-v1");
+    assert.equal(report.results.length, defaultCases.length);
+    assert.equal(report.results.every((item: any) => item.verdict === "dry_run"), true);
+  });
+}
+
+async function testProductBenchmarkApiEndpoints(): Promise<void> {
+  await withTempDir("harness-product-benchmark-api-", async (rootDir) => {
+    await withEnv({
+      HARNESS_BENCHMARK_REPORT_ROOT: path.join(rootDir, "reports")
+    }, async () => {
+      const apiServer = createApiServer();
+      await new Promise<void>((resolve) => apiServer.listen(0, "127.0.0.1", resolve));
+      try {
+        const address = apiServer.address();
+        assert.equal(typeof address, "object");
+        const apiBaseUrl = `http://127.0.0.1:${(address as any).port}`;
+
+        const suitesResponse = await fetch(`${apiBaseUrl}/benchmarks/suites`);
+        const suitesPayload = await suitesResponse.json() as any;
+        assert.equal(suitesResponse.status, 200);
+        assert.equal(suitesPayload.suites.some((item: any) => item.suite_id === "ai-agent-static-v1"), true);
+
+        const suiteResponse = await fetch(`${apiBaseUrl}/benchmarks/suites/ai-agent-static-v1`);
+        const suitePayload = await suiteResponse.json() as any;
+        assert.equal(suiteResponse.status, 200);
+        assert.equal(suitePayload.suite.suite_id, "ai-agent-static-v1");
+        assert.ok(suitePayload.suite.cases.length >= 4);
+
+        const runResponse = await fetch(`${apiBaseUrl}/benchmarks/suites/ai-agent-static-v1/run`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ case_id: "pi-agent-static", execute: false })
+        });
+        const runPayload = await runResponse.json() as any;
+        assert.equal(runResponse.status, 200, JSON.stringify(runPayload));
+        assert.equal(runPayload.benchmark_summary.selected_cases, 1);
+        assert.equal(runPayload.benchmark_summary.dry_run_cases, 1);
+        assert.equal(runPayload.reports.length, 1);
+
+        const reportsResponse = await fetch(`${apiBaseUrl}/benchmarks/reports`);
+        const reportsPayload = await reportsResponse.json() as any;
+        assert.equal(reportsResponse.status, 200);
+        assert.equal(reportsPayload.reports.length, 1);
+
+        const fileName = reportsPayload.reports[0].file_name;
+        const reportResponse = await fetch(`${apiBaseUrl}/benchmarks/reports/${encodeURIComponent(fileName)}`);
+        const reportPayload = await reportResponse.json() as any;
+        assert.equal(reportResponse.status, 200);
+        assert.equal(reportPayload.report.selected_cases, 1);
+
+        const compareResponse = await fetch(`${apiBaseUrl}/benchmarks/compare`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ baseline: fileName, current: fileName })
+        });
+        const comparePayload = await compareResponse.json() as any;
+        assert.equal(compareResponse.status, 200, JSON.stringify(comparePayload));
+        assert.equal(comparePayload.comparison.passed, true);
+      } finally {
+        await new Promise<void>((resolve, reject) => apiServer.close((error) => error ? reject(error) : resolve()));
+      }
+    });
   });
 }
 
@@ -3418,6 +3811,64 @@ async function testScorecardAndTrivyNormalizationEmitSymbolLocations(): Promise<
   assert.equal(trivy.locations?.some((item: any) => item.uri === "https://avd.aquasec.com/nvd/cve-2026-0001" && item.label === "CVE-2026-0001"), true);
 }
 
+async function testRuntimeReadinessFixturePolicy(): Promise<void> {
+  const sourceRoot = path.join(os.tmpdir(), "tethermark-runtime-policy-source");
+  const outputRoot = path.join(os.tmpdir(), "tethermark-runtime-policy-output");
+  const args = buildDockerRuntimeFixtureCreateArgs({
+    containerName: "tethermark-runtime-policy-test",
+    sourceRoot,
+    outputRoot
+  });
+  assert.equal(args[0], "create");
+  assert.equal(args.includes("--network") && args.includes("none"), true);
+  assert.equal(args.includes("--read-only"), true);
+  assert.equal(args.includes("--cap-drop") && args.includes("ALL"), true);
+  assert.equal(args.includes("--security-opt") && args.includes("no-new-privileges"), true);
+  assert.equal(args.includes(RUNTIME_FIXTURE_IMAGE), true);
+  assert.equal(args.some((item) => item.startsWith("type=bind") && item.includes("target=/workspace") && item.endsWith(",readonly")), true);
+  assert.equal(args.some((item) => item.startsWith("type=bind") && item.includes("target=/output") && !item.endsWith(",readonly")), true);
+
+  const inspection = {
+    Config: {
+      Image: RUNTIME_FIXTURE_IMAGE,
+      User: "65532:65532",
+      Env: ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "TETHERMARK_RUNTIME_FIXTURE=1"]
+    },
+    HostConfig: {
+      AutoRemove: false,
+      CapDrop: ["ALL"],
+      Init: true,
+      Memory: 128 * 1024 * 1024,
+      NanoCpus: 1_000_000_000,
+      NetworkMode: "none",
+      PidsLimit: 64,
+      Privileged: false,
+      ReadonlyRootfs: true,
+      SecurityOpt: ["no-new-privileges"],
+      Tmpfs: { "/tmp": "rw,noexec,nosuid,nodev,size=16777216" }
+    },
+    Mounts: [
+      { Destination: "/workspace", RW: false, Source: sourceRoot, Type: "bind" },
+      { Destination: "/output", RW: true, Source: outputRoot, Type: "bind" }
+    ]
+  };
+  const assertions = validateDockerRuntimeFixtureInspect(inspection, { sourceRoot, outputRoot });
+  assert.equal(Object.values(assertions).every(Boolean), true, JSON.stringify(assertions));
+  const secretAssertions = validateDockerRuntimeFixtureInspect({
+    ...inspection,
+    Config: { ...inspection.Config, Env: [...inspection.Config.Env, "OPENAI_API_KEY=must-not-pass"] }
+  }, { sourceRoot, outputRoot });
+  assert.equal(secretAssertions.no_secret_environment, false);
+  const writableSourceAssertions = validateDockerRuntimeFixtureInspect({
+    ...inspection,
+    Mounts: [
+      { Destination: "/workspace", RW: true, Source: sourceRoot, Type: "bind" },
+      { Destination: "/output", RW: true, Source: outputRoot, Type: "bind" }
+    ]
+  }, { sourceRoot, outputRoot });
+  assert.equal(writableSourceAssertions.source_mount_readonly, false);
+}
+
 async function testLinuxContainerSandboxBuildsExecutionPlan(): Promise<void> {
   await withTempDir("harness-container-plan-", async (rootDir) => {
     const sourceDir = path.join(rootDir, "source");
@@ -3461,7 +3912,7 @@ async function testLinuxContainerSandboxBuildsExecutionPlan(): Promise<void> {
       assert.equal(executionPlan?.steps.find((step) => step.step_id === "runtime-node")?.artifact_context?.script_name, "start");
       assert.equal(sandbox.command_policy.allowed_command_prefixes.includes("npm ci --ignore-scripts"), true);
       assert.equal(sandbox.enforcement_notes.some((item) => /Derived 4 bounded execution step/.test(item)), true);
-      assert.equal(sandbox.enforcement_notes.some((item) => /Bounded host execution is enabled/.test(item)), true);
+      assert.equal(sandbox.enforcement_notes.some((item) => /Local runtime execution is enabled/.test(item)), true);
       assert.equal(executionResults?.length, 4);
       assert.equal(executionResults?.every((item) => item.status === "completed" || item.status === "failed" || item.status === "blocked"), true);
       const buildResult = executionResults?.find((item) => item.step_id === "build-node") ?? null;
@@ -3478,6 +3929,7 @@ async function testLinuxContainerSandboxBuildsExecutionPlan(): Promise<void> {
       assert.equal(buildResult?.normalized_artifact?.details_json?.package_manager, "npm");
       assert.equal(runtimeResult?.normalized_artifact?.details_json?.artifact_role, "service_probe");
       assert.equal(typeof buildResult?.duration_ms, "number");
+      const boundedExecutionFailureSummary = /blocked by the current host|failed|not available for bounded host execution|could not connect to a healthy endpoint/i;
       if (runtimeResult?.normalized_artifact?.details_json?.probe) {
         assert.equal(Array.isArray((runtimeResult.normalized_artifact.details_json.probe as any).attempted_targets), true);
         assert.equal(typeof (runtimeResult.normalized_artifact.details_json.probe as any).classification, "string");
@@ -3486,7 +3938,7 @@ async function testLinuxContainerSandboxBuildsExecutionPlan(): Promise<void> {
       if (buildResult?.status === "completed") {
         assert.equal(await pathExists(path.join(sandbox.target_dir, "build.ok")), true);
       } else {
-        assert.match(buildResult?.summary ?? "", /blocked by the current host|failed|not available for bounded host execution/i);
+        assert.match(buildResult?.summary ?? "", boundedExecutionFailureSummary);
         if (buildResult?.stderr_excerpt) {
           assert.match(buildResult.stderr_excerpt, /spawn EPERM|not available/i);
         }
@@ -3494,12 +3946,12 @@ async function testLinuxContainerSandboxBuildsExecutionPlan(): Promise<void> {
       if (testResult?.status === "completed") {
         assert.equal(await pathExists(path.join(sandbox.target_dir, "test.ok")), true);
       } else {
-        assert.match(testResult?.summary ?? "", /blocked by the current host|failed|not available for bounded host execution/i);
+        assert.match(testResult?.summary ?? "", boundedExecutionFailureSummary);
       }
       if (runtimeResult?.status === "completed") {
         assert.equal(await pathExists(path.join(sandbox.target_dir, "runtime.ok")), true);
       } else {
-        assert.match(runtimeResult?.summary ?? "", /blocked by the current host|failed|not available for bounded host execution/i);
+        assert.match(runtimeResult?.summary ?? "", boundedExecutionFailureSummary);
       }
 
       const persistedPlan = JSON.parse(await fs.readFile(path.join(sandbox.root_dir, "artifacts", "execution-plan.json"), "utf8"));
@@ -3922,6 +4374,132 @@ async function testFindingEvaluationUsesEvidenceSymbolsForGrouping(): Promise<vo
   assert.deepEqual(summary.evaluations.find((item) => item.finding_id === "finding_symbol_right")?.duplicate_with_finding_ids, ["finding_symbol_left"]);
 }
 
+async function testFindingQualityFlagsUnsupportedEvidenceAndControlMismatch(): Promise<void> {
+  const summary = buildFindingQualitySummary({
+    runId: "run_quality",
+    request: { run_mode: "static" },
+    findings: [
+      {
+        finding_id: "finding_quality_bad",
+        title: "Runtime exploit validated against agent tool boundary",
+        severity: "high",
+        category: "runtime_validation",
+        description: "The issue is exploitable at runtime.",
+        evidence: ["missing runtime proof"],
+        public_safe: false,
+        confidence: 0.9,
+        score_impact: 8,
+        source: "agent_synthesis",
+        control_ids: ["openssf.security_policy"],
+        standards_refs: []
+      }
+    ],
+    evidenceRecords: [
+      {
+        evidence_id: "e_security_policy",
+        run_id: "run_quality",
+        source_type: "analysis",
+        source_id: "repo_analysis",
+        control_ids: ["openssf.security_policy"],
+        summary: "No visible SECURITY.md file was found.",
+        confidence: 0.9,
+        metadata: {}
+      }
+    ],
+    controlResults: [
+      {
+        control_id: "openssf.security_policy",
+        framework: "OpenSSF Scorecard",
+        standard_ref: "Security-Policy",
+        title: "Publish a security policy",
+        applicability: "applicable",
+        assessability: "assessed",
+        status: "fail",
+        score_weight: 1,
+        max_score: 1,
+        score_awarded: 0,
+        rationale: ["No security policy was found."],
+        evidence: ["e_security_policy"],
+        finding_ids: ["finding_quality_bad"],
+        sources: ["repo_analysis"]
+      }
+    ],
+    controlCatalog: getControlCatalog(),
+    toolExecutions: []
+  });
+
+  const quality = summary.findings[0]!;
+  assert.equal(summary.overall_verdict, "fail");
+  assert.equal(quality.qa_blocking, true);
+  assert.equal(quality.evidence_support_verdict, "partially_supported");
+  assert.equal(quality.control_mapping_verdict, "wrong_control");
+  assert.equal(quality.unsupported_claims.some((claim) => /runtime|exploit/i.test(claim)), true);
+  assert.equal(quality.next_action === "fix_control_mapping" || quality.next_action === "needs_runtime_validation", true);
+}
+
+async function testPostSupervisorIntegrityDoesNotVetoSemanticMappingHints(): Promise<void> {
+  const summary = buildFindingQualitySummary({
+    runId: "run_integrity",
+    request: { run_mode: "static" },
+    mode: "post_supervisor_integrity",
+    findings: [
+      {
+        finding_id: "finding_integrity_hint",
+        title: "Browser automation surface lacks visible safety policy",
+        severity: "high",
+        category: "browser_automation_safety",
+        description: "The static review identified browser automation capability without clear navigation or download policy evidence.",
+        evidence: ["e_security_policy"],
+        public_safe: true,
+        confidence: 0.7,
+        score_impact: 8,
+        source: "agent_synthesis",
+        control_ids: ["openssf.security_policy"],
+        standards_refs: []
+      }
+    ],
+    evidenceRecords: [
+      {
+        evidence_id: "e_security_policy",
+        run_id: "run_integrity",
+        source_type: "analysis",
+        source_id: "repo_analysis",
+        control_ids: ["openssf.security_policy"],
+        summary: "No visible SECURITY.md file was found.",
+        confidence: 0.9,
+        metadata: {}
+      }
+    ],
+    controlResults: [
+      {
+        control_id: "openssf.security_policy",
+        framework: "OpenSSF Scorecard",
+        standard_ref: "Security-Policy",
+        title: "Publish a security policy",
+        applicability: "applicable",
+        assessability: "assessed",
+        status: "fail",
+        score_weight: 1,
+        max_score: 1,
+        score_awarded: 0,
+        rationale: ["No security policy was found."],
+        evidence: ["e_security_policy"],
+        finding_ids: ["finding_integrity_hint"],
+        sources: ["repo_analysis"]
+      }
+    ],
+    controlCatalog: getControlCatalog(),
+    toolExecutions: []
+  });
+
+  const quality = summary.findings[0]!;
+  assert.equal(summary.artifact_role, "post_supervisor_integrity");
+  assert.equal(quality.control_mapping_verdict, "weak");
+  assert.equal(quality.semantic_review_hint, true);
+  assert.equal(quality.integrity_blocking, false);
+  assert.equal(quality.qa_blocking, false);
+}
+
 async function testRunComparisonUsesEvidenceSymbolsForMatching(): Promise<void> {
   const comparison = buildRunComparisonReport({
     currentRunId: "run_current",
@@ -3990,11 +4568,628 @@ async function testRunComparisonUsesEvidenceSymbolsForMatching(): Promise<void> 
   assert.equal(comparison.changed_findings[0]?.current_finding_id, "finding_current");
 }
 
+async function testAssistantStorageAndCapabilities(): Promise<void> {
+  await withTempDir("tethermark-assistant-", async (rootDir) => {
+    const registry = createDefaultAssistantToolRegistry();
+    assert.deepEqual(registry.capabilities("oss").allowed_scopes, ["run", "target"]);
+    assert.equal(registry.isScopeAllowed("project", "oss"), false);
+    assert.equal(registry.isScopeAllowed("project", "hosted"), true);
+
+    const storage = new SqliteAssistantStorage({ rootDir, dbMode: "local" });
+    const session = await storage.createSession({
+      scope_type: "run",
+      scope_id: "run_test",
+      workspace_id: "default",
+      project_id: "default",
+      target_id: "target_test",
+      run_id: "run_test",
+      actor_id: "tester",
+      product_mode: "oss",
+      metadata_json: null
+    });
+    const userMessage = await storage.appendMessage({
+      session_id: session.id,
+      role: "user",
+      body: "Give me a manager summary.",
+      response_json: null
+    });
+    assert.equal((await storage.listSessions({ scopeType: "run", scopeId: "run_test" })).length, 1);
+    const renamedSession = await storage.updateSession({
+      ...session,
+      metadata_json: { title: "Manager summary chat" }
+    });
+    assert.equal(renamedSession.metadata_json?.title, "Manager summary chat");
+    const archivedSession = await storage.updateSession({ ...renamedSession, status: "archived" });
+    assert.equal((await storage.listSessions({ scopeType: "run", scopeId: "run_test" })).length, 0);
+    assert.equal((await storage.listSessions({ scopeType: "run", scopeId: "run_test", status: "all" })).length, 1);
+    await storage.updateSession({ ...archivedSession, status: "active" });
+    const assistantMessage = await storage.appendMessage({
+      session_id: session.id,
+      role: "assistant",
+      body: "Summary",
+      response_json: {
+        message: "Summary",
+        citations: [{ citation_type: "run", id: "run_test", label: "Run run_test", run_id: "run_test" }],
+        confidence: "high",
+        proposed_actions: [{
+          id: "action_export",
+          action_type: "generate_export",
+          capability: "confirm_internal",
+          title: "Generate export",
+          summary: "Prepare export",
+          requires_confirmation: true,
+          hosted_only: false,
+          payload_json: { run_id: "run_test" }
+        }],
+        limitations: []
+      }
+    });
+    assert.equal(userMessage.role, "user");
+    const artifacts = await storage.persistResponseArtifacts({
+      sessionId: session.id,
+      messageId: assistantMessage.id,
+      response: assistantMessage.response_json!
+    });
+    assert.equal(artifacts.citations.length, 1);
+    assert.equal(artifacts.actions.length, 1);
+    const action = await storage.getActionProposal(session.id, "action_export");
+    assert.equal(action?.requires_confirmation, true);
+    await storage.updateActionProposal({ ...action!, status: "rejected", resolved_at: new Date().toISOString(), resolved_by: "tester" });
+    const execution = await storage.createActionExecution({
+      session_id: session.id,
+      action_id: "action_export",
+      actor_id: "tester",
+      status: "rejected",
+      original_user_request: "Give me a manager summary.",
+      proposed_action_json: action!,
+      confirmation_result: "rejected",
+      before_state_json: null,
+      after_state_json: null,
+      request_json: {},
+      result_json: { status: "rejected" },
+      error: null
+    });
+    assert.equal(execution.status, "rejected");
+    assert.equal((await storage.listMessages(session.id)).length, 2);
+  });
+}
+
+async function testAssistantProviderCitesFindings(): Promise<void> {
+  const provider = new EvidenceGroundedAssistantProvider();
+  const response = await provider.answer({
+    prompt: "Give me a manager summary and export it.",
+    session: {
+      id: "session_test",
+      scope_type: "run",
+      scope_id: "run_test",
+      workspace_id: "default",
+      project_id: "default",
+      target_id: "target_test",
+      run_id: "run_test",
+      actor_id: "tester",
+      product_mode: "oss",
+      status: "active",
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+      metadata_json: null
+    },
+    capabilities: createDefaultAssistantToolRegistry().capabilities("oss"),
+    context: {
+      scope_type: "run",
+      scope_id: "run_test",
+      run: {
+        id: "run_test",
+        target_id: "target_test",
+        target_snapshot_id: "snapshot_test",
+        workspace_id: "default",
+        project_id: "default",
+        requested_by: "tester",
+        policy_pack_id: null,
+        status: "completed",
+        run_mode: "static",
+        audit_package: "agentic-static",
+        artifact_root: "",
+        started_at: "2026-01-01T00:00:00.000Z",
+        completed_at: "2026-01-01T00:01:00.000Z",
+        static_score: 70,
+        overall_score: 70,
+        rating: "needs_review",
+        created_at: "2026-01-01T00:00:00.000Z",
+        canonical_target_id: "target_test",
+        finding_count: 1,
+        lane_specialist_count: 0
+      } as any,
+      target: null,
+      target_runs: [],
+      score_summary: null,
+      review_decision: { run_id: "run_test", publishability_status: "internal_only", human_review_required: true } as any,
+      review_workflow: null,
+      review_actions: [],
+      review_comments: [],
+      findings: [{
+        id: "finding_test",
+        run_id: "run_test",
+        lane_name: "agentic_controls",
+        title: "Tool boundary is unclear",
+        severity: "high",
+        category: "agentic_controls",
+        description: "The agent tool boundary lacks explicit policy.",
+        confidence: 0.8,
+        source: "analysis",
+        publication_state: "internal_only",
+        needs_human_review: true,
+        score_impact: 10,
+        control_ids_json: ["control_test"],
+        standards_refs_json: [],
+        evidence_json: [],
+        created_at: "2026-01-01T00:00:00.000Z"
+      }],
+      target_history_findings: {},
+      evidence_records: [],
+      tool_executions: [],
+      artifact_index: [],
+      remediation_memo: null,
+      remediation_items: [],
+      review_summary: null,
+      finding_evaluations: null,
+      executive_summary: null
+    }
+  });
+  assert.equal(response.citations.some((citation) => citation.citation_type === "finding" && citation.id === "finding_test"), true);
+  assert.equal(response.proposed_actions.some((action) => action.action_type === "generate_export"), true);
+}
+
+async function persistAssistantApiFixture(rootDir: string): Promise<void> {
+  const artifactRoot = path.join(rootDir, "artifacts", "assistant");
+  const localDbRoot = path.join(rootDir, ".artifacts", "state", "local-db");
+  await fs.mkdir(artifactRoot, { recursive: true });
+  const store = new LocalPersistenceStore(localDbRoot);
+  const baseBundle = (runId: string, createdAt: string, findingId: string) => ({
+    mode: "local",
+    package_definition: { id: "deep-static", title: "Deep Static", description: "", run_mode: "static", default_policy_profile: "default", requires_agents: false, lane_specialists_enabled: false, focus: [], minimum_tools: [], scorecard_weights: {} },
+    target: { id: "target_assistant", target_type: "path", canonical_name: "assistant target", repo_url: null, local_path: path.join(rootDir, "target"), endpoint_url: null, created_at: "2026-05-01T00:00:00.000Z" },
+    target_snapshot: { id: `${runId}:snapshot`, target_id: "target_assistant", snapshot_value: path.join(rootDir, "target"), commit_sha: null, captured_at: createdAt, analysis_hash: null },
+    target_summary: { id: "target_assistant", target_id: "target_assistant", canonical_target_id: "target_assistant", workspace_id: "default", project_id: "default", canonical_name: "assistant target", target_type: "path", repo_url: null, local_path: path.join(rootDir, "target"), endpoint_url: null, latest_run_id: runId, latest_run_created_at: createdAt, latest_status: "succeeded", latest_run_mode: "static", latest_audit_package: "deep-static", latest_target_class: "runnable_local_app", latest_rating: "needs_review", latest_overall_score: 64, latest_static_score: 64, latest_publishability_status: "internal_only", latest_human_review_required: true, latest_finding_count: 1, latest_frameworks_json: [], latest_languages_json: ["typescript"], latest_package_ecosystems_json: ["npm"], updated_at: createdAt },
+    policy_pack: null,
+    run: { id: runId, target_id: "target_assistant", target_snapshot_id: `${runId}:snapshot`, workspace_id: "default", project_id: "default", requested_by: "tester", policy_pack_id: null, status: "succeeded", run_mode: "static", audit_package: "deep-static", artifact_root: artifactRoot, started_at: createdAt, completed_at: createdAt, static_score: 64, overall_score: 64, rating: "needs_review", created_at: createdAt },
+    resolved_configuration: { run_id: runId, policy_pack_id: null, policy_pack_name: null, policy_pack_source: null, policy_profile: null, policy_version: null, requested_policy_pack: null, requested_audit_package: "deep-static", selected_audit_package: "deep-static", audit_package_title: "Deep Static", audit_package_selection_mode: "explicit", initial_target_class: "runnable_local_app", run_mode: "static", target_kind: "path", db_mode: "local", output_dir: null, validation_json: { valid: true, errors: [], warnings: [] }, request_summary_json: {}, policy_pack_json: {}, audit_package_json: {} },
+    commit_diff: { run_id: runId, previous_run_id: null, current_commit_sha: null, previous_commit_sha: null, comparison_mode: "no_prior_run", changed_files_json: [], stage_decisions_json: {}, rationale_json: [] },
+    correction_plan: null,
+    correction_result: null,
+    lane_reuse_decisions: [],
+    persistence_summary: { run_id: runId, mode: "local", root: localDbRoot },
+    stage_artifacts: [],
+    stage_executions: [],
+    lane_plans: [],
+    evidence_records: [{ id: `${runId}:evidence`, run_id: runId, lane_name: null, source_type: "tool", source_id: "assistant-test", control_ids_json: ["CTRL-A"], summary: "Assistant API fixture evidence.", confidence: 0.9, raw_artifact_path: null, locations_json: [], metadata_json: {} }],
+    lane_results: [],
+    lane_specialists: [],
+    agent_invocations: [],
+    tool_executions: [],
+    findings: [{ id: findingId, run_id: runId, lane_name: null, title: "Recurring unsafe automation boundary", severity: "high", category: "agentic_controls", description: "The automation boundary needs reviewer validation.", confidence: 0.82, source: "tool", publication_state: "internal_only", needs_human_review: true, score_impact: 12, control_ids_json: ["CTRL-A"], standards_refs_json: [], evidence_json: [`${runId}:evidence`], created_at: createdAt }],
+    control_results: [],
+    score_summary: { run_id: runId, methodology_version: "1", overall_score: 64, rating: "needs_review", leaderboard_summary: "assistant fixture", limitations_json: [] },
+    review_decision: { run_id: runId, publishability_status: "internal_only", human_review_required: true, public_summary_safe: false, threshold: "standard", rationale_json: [], gating_findings_json: [findingId], recommended_visibility: "internal" },
+    supervisor_review: null,
+    remediation_memo: { run_id: runId, summary: "Validate the unsafe automation boundary and document owner acceptance.", checklist_json: ["validate boundary", "assign owner"], human_review_required: true },
+    review_workflow: { run_id: runId, status: "review_required", current_reviewer_id: null, assigned_by: null, assigned_at: null, started_at: null, completed_at: null, completed_by: null, last_action_at: createdAt, summary: "Review required", handoff_json: {} },
+    review_actions: [],
+    review_comments: [],
+    finding_dispositions: [],
+    ui_settings: null,
+    ui_documents: [],
+    policy_application: { run_id: runId, policy_pack_id: null, policy_pack_source: null, profile: null, required_controls_json: [], excluded_controls_json: [], included_controls_json: ["CTRL-A"], evaluation_notes_json: [] },
+    dimension_scores: [],
+    metrics: [],
+    events: [],
+    artifact_index: []
+  } as any);
+  await store.persistBundle(baseBundle("run_assistant_prev", "2026-05-01T00:00:00.000Z", "finding_assistant_prev"));
+  await store.persistBundle(baseBundle("run_assistant", "2026-05-02T00:00:00.000Z", "finding_assistant"));
+}
+
+async function testAssistantApiScopesActionsAndTargetHistory(): Promise<void> {
+  await withTempDir("tethermark-assistant-api-", async (rootDir) => {
+    await fs.mkdir(path.join(rootDir, "target"), { recursive: true });
+    await persistAssistantApiFixture(rootDir);
+    await withWorkingDir(rootDir, async () => {
+      const localDbRoot = path.join(rootDir, ".artifacts", "state", "local-db");
+      const savedEnv = new Map(["HARNESS_ENABLE_ASSISTANT", "HARNESS_DISABLE_ASSISTANT", "HARNESS_API_AUTH_MODE", "HARNESS_DISABLE_LEARNING_SCHEDULER", "HARNESS_LOCAL_DB_ROOT"].map((key) => [key, process.env[key]] as const));
+      delete process.env.HARNESS_ENABLE_ASSISTANT;
+      delete process.env.HARNESS_DISABLE_ASSISTANT;
+      process.env.HARNESS_API_AUTH_MODE = "none";
+      process.env.HARNESS_DISABLE_LEARNING_SCHEDULER = "1";
+      process.env.HARNESS_LOCAL_DB_ROOT = localDbRoot;
+      const apiServer = createApiServer();
+      await new Promise<void>((resolve) => apiServer.listen(0, "127.0.0.1", () => resolve()));
+      const address = apiServer.address();
+      assert.ok(address && typeof address !== "string");
+      const baseUrl = `http://127.0.0.1:${address.port}`;
+      try {
+        const capabilities = await (await fetch(`${baseUrl}/assistant/capabilities`)).json() as any;
+        assert.equal(capabilities.enabled, true);
+        assert.equal(capabilities.allowed_scopes.includes("run"), true);
+        assert.equal(capabilities.allowed_scopes.includes("organization"), false);
+
+        const hostedScopeResponse = await fetch(`${baseUrl}/assistant/sessions`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ scope_type: "organization", scope_id: "org_test" })
+        });
+        assert.equal(hostedScopeResponse.status, 403);
+
+        const sessionResponse = await fetch(`${baseUrl}/assistant/sessions`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ scope_type: "run", scope_id: "run_assistant" })
+        });
+        const sessionPayload = await sessionResponse.json() as any;
+        assert.equal(sessionResponse.status, 201);
+        const sessionId = sessionPayload.assistant_session.id;
+        const assistantTargetId = sessionPayload.assistant_session.target_id;
+
+        const sessionsListResponse = await fetch(`${baseUrl}/assistant/sessions?scope_type=run&scope_id=run_assistant`);
+        const sessionsListPayload = await sessionsListResponse.json() as any;
+        assert.equal(sessionsListResponse.status, 200);
+        assert.equal(sessionsListPayload.assistant_sessions.some((item: any) => item.id === sessionId), true);
+
+        const renameResponse = await fetch(`${baseUrl}/assistant/sessions/${encodeURIComponent(sessionId)}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ title: "Renamed assistant chat" })
+        });
+        const renamePayload = await renameResponse.json() as any;
+        assert.equal(renameResponse.status, 200);
+        assert.equal(renamePayload.assistant_session.metadata_json.title, "Renamed assistant chat");
+
+        const messageResponse = await fetch(`${baseUrl}/assistant/sessions/${encodeURIComponent(sessionId)}/messages`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ message: "Add a review comment for finding_assistant and give a manager summary." })
+        });
+        const messagePayload = await messageResponse.json() as any;
+        assert.equal(messageResponse.status, 200);
+        assert.equal(messagePayload.response.citations.some((item: any) => item.id === "finding_assistant"), true);
+        const commentAction = messagePayload.proposed_actions.find((item: any) => item.action_type === "add_review_comment");
+        assert.ok(commentAction);
+
+        const confirmResponse = await fetch(`${baseUrl}/assistant/sessions/${encodeURIComponent(sessionId)}/actions/${encodeURIComponent(commentAction.id)}/confirm`, { method: "POST" });
+        const confirmPayload = await confirmResponse.json() as any;
+        assert.equal(confirmResponse.status, 200);
+        assert.equal(confirmPayload.assistant_execution.original_user_request.includes("review comment"), true);
+        assert.equal(confirmPayload.assistant_execution.confirmation_result, "confirmed");
+        assert.ok(confirmPayload.assistant_execution.before_state_json);
+        assert.ok(confirmPayload.assistant_execution.after_state_json);
+        assert.equal((await readPersistedReviewComments("run_assistant", { rootDir: localDbRoot, dbMode: "local" })).length, 1);
+
+        const storage = new SqliteAssistantStorage({ rootDir: localDbRoot, dbMode: "local" });
+        const hostedMessage = await storage.appendMessage({
+          session_id: sessionId,
+          role: "assistant",
+          body: "Hosted external send requires hosted mode.",
+          response_json: {
+            message: "Hosted external send requires hosted mode.",
+            citations: [],
+            confidence: "medium",
+            proposed_actions: [{ id: "hosted_action_test", action_type: "hosted_only", capability: "confirm_external", title: "Send Slack notification", summary: "Hosted-only external send.", requires_confirmation: true, hosted_only: true, payload_json: { requested_from: "send to slack" } }],
+            limitations: []
+          }
+        });
+        await storage.persistResponseArtifacts({ sessionId, messageId: hostedMessage.id, response: hostedMessage.response_json! });
+        const hostedActionResponse = await fetch(`${baseUrl}/assistant/sessions/${encodeURIComponent(sessionId)}/actions/hosted_action_test/confirm`, { method: "POST" });
+        assert.equal(hostedActionResponse.status, 403);
+
+        const targetSessionResponse = await fetch(`${baseUrl}/assistant/sessions`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ scope_type: "target", scope_id: assistantTargetId })
+        });
+        const targetSessionPayload = await targetSessionResponse.json() as any;
+        assert.equal(targetSessionResponse.status, 201, JSON.stringify(targetSessionPayload));
+        const targetMessageResponse = await fetch(`${baseUrl}/assistant/sessions/${encodeURIComponent(targetSessionPayload.assistant_session.id)}/messages`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ message: "Which findings keep recurring?" })
+        });
+        const targetMessagePayload = await targetMessageResponse.json() as any;
+        assert.equal(targetMessageResponse.status, 200);
+        assert.match(targetMessagePayload.response.message, /Recurring unsafe automation boundary|Recurring findings/i);
+
+        const deleteTargetSessionResponse = await fetch(`${baseUrl}/assistant/sessions/${encodeURIComponent(targetSessionPayload.assistant_session.id)}`, { method: "DELETE" });
+        assert.equal(deleteTargetSessionResponse.status, 200);
+        const deletedTargetListResponse = await fetch(`${baseUrl}/assistant/sessions?scope_type=target&scope_id=${encodeURIComponent(assistantTargetId)}`);
+        const deletedTargetListPayload = await deletedTargetListResponse.json() as any;
+        assert.equal(deletedTargetListPayload.assistant_sessions.some((item: any) => item.id === targetSessionPayload.assistant_session.id), false);
+
+        process.env.HARNESS_DISABLE_ASSISTANT = "1";
+        const disabledCapabilities = await (await fetch(`${baseUrl}/assistant/capabilities`)).json() as any;
+        assert.equal(disabledCapabilities.enabled, false);
+      } finally {
+        await new Promise<void>((resolve, reject) => apiServer.close((error) => error ? reject(error) : resolve()));
+        for (const [key, value] of savedEnv.entries()) {
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        }
+      }
+    });
+  });
+}
+
+async function testLearningApiLifecycle(): Promise<void> {
+  await withTempDir("tethermark-learning-api-", async (rootDir) => {
+    await fs.mkdir(path.join(rootDir, "target"), { recursive: true });
+    await persistAssistantApiFixture(rootDir);
+    const localDbRoot = path.join(rootDir, ".artifacts", "state", "local-db");
+    await updatePersistedUiSettings({
+      learning: {
+        operator_consent_version: 1,
+        enabled: true,
+        trigger_mode: "manual",
+        event_driven_enabled: false,
+        scheduled_enabled: false,
+        llm_synthesis_enabled: false,
+        llm_manual_synthesis_enabled: false,
+        llm_send_source_excerpts: false
+      }
+    }, { rootDir: localDbRoot, dbMode: "local" });
+    await submitPersistedReviewAction({
+      runId: "run_assistant_prev",
+      input: {
+        reviewer_id: "learning_reviewer",
+        action_type: "suppress_finding",
+        finding_id: "finding_assistant_prev",
+        triage_decision: "false_positive",
+        notes: "Recurring local fixture false positive for learning candidate generation."
+      },
+      rootDirOrOptions: { rootDir: localDbRoot, dbMode: "local" }
+    });
+    await withWorkingDir(rootDir, async () => {
+      const savedEnv = new Map(["HARNESS_API_AUTH_MODE"].map((key) => [key, process.env[key]] as const));
+      process.env.HARNESS_API_AUTH_MODE = "none";
+      const apiServer = createApiServer();
+      await new Promise<void>((resolve) => apiServer.listen(0, "127.0.0.1", () => resolve()));
+      const address = apiServer.address();
+      assert.ok(address && typeof address !== "string");
+      const baseUrl = `http://127.0.0.1:${address.port}`;
+      try {
+        const initialCandidatesResponse = await fetch(`${baseUrl}/learning/candidates?run_id=run_assistant_prev`);
+        const initialCandidatesPayload = await initialCandidatesResponse.json() as any;
+        assert.equal(initialCandidatesResponse.status, 200, JSON.stringify(initialCandidatesPayload));
+        assert.equal(initialCandidatesPayload.learning_candidates.some((item: any) => item.candidate_type === "scoped_suppression_suggestion"), false);
+        const jobsAfterReadPayload = await (await fetch(`${baseUrl}/learning/jobs`)).json() as any;
+        assert.equal(jobsAfterReadPayload.learning_jobs.length, 0, "GET /learning/candidates must not start a learning job");
+
+        await submitPersistedReviewAction({
+          runId: "run_assistant",
+          input: {
+            reviewer_id: "learning_reviewer",
+            action_type: "suppress_finding",
+            finding_id: "finding_assistant",
+            triage_decision: "false_positive",
+            notes: "Recurring local fixture false positive for learning candidate generation."
+          },
+          rootDirOrOptions: { rootDir: localDbRoot, dbMode: "local" }
+        });
+
+        const manualRunResponse = await fetch(`${baseUrl}/learning/run`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({})
+        });
+        const manualRunPayload = await manualRunResponse.json() as any;
+        assert.equal(manualRunResponse.status, 200, JSON.stringify(manualRunPayload));
+        assert.equal(manualRunPayload.learning_job.trigger, "api");
+        assert.equal(manualRunPayload.learning_job.status, "completed");
+        const jobsAfterRunPayload = await (await fetch(`${baseUrl}/learning/jobs`)).json() as any;
+        assert.equal(jobsAfterRunPayload.learning_jobs.length, 1);
+
+        const eventsResponse = await fetch(`${baseUrl}/learning/events?run_id=run_assistant`);
+        const eventsPayload = await eventsResponse.json() as any;
+        assert.equal(eventsResponse.status, 200, JSON.stringify(eventsPayload));
+        assert.equal(eventsPayload.export_schema.schema_name, "learning_events.v1");
+        await assertExportSchemaMatches("learning_events.v1.json", eventsPayload.export_schema);
+        assert.equal(eventsPayload.learning_events.some((item: any) => item.event_type === "review_false_positive"), true);
+
+        const globalEventsResponse = await fetch(`${baseUrl}/learning/events`);
+        const globalEventsPayload = await globalEventsResponse.json() as any;
+        assert.equal(globalEventsResponse.status, 200, JSON.stringify(globalEventsPayload));
+        assert.equal(globalEventsPayload.learning_events.some((item: any) => item.run_id === "run_assistant" && item.event_type === "review_false_positive"), true);
+
+        const candidatesResponse = await fetch(`${baseUrl}/learning/candidates?run_id=run_assistant`);
+        const candidatesPayload = await candidatesResponse.json() as any;
+        assert.equal(candidatesResponse.status, 200, JSON.stringify(candidatesPayload));
+        assert.equal(candidatesPayload.export_schema.schema_name, "learning_candidates.v1");
+        await assertExportSchemaMatches("learning_candidates.v1.json", candidatesPayload.export_schema);
+        const candidate = candidatesPayload.learning_candidates.find((item: any) => item.candidate_type === "scoped_suppression_suggestion");
+        assert.ok(candidate);
+        assert.equal(candidate.requires_human_approval, true);
+        assert.equal(candidate.status, "proposed");
+
+        const globalCandidatesResponse = await fetch(`${baseUrl}/learning/candidates`);
+        const globalCandidatesPayload = await globalCandidatesResponse.json() as any;
+        assert.equal(globalCandidatesResponse.status, 200, JSON.stringify(globalCandidatesPayload));
+        assert.equal(globalCandidatesPayload.learning_candidates.some((item: any) => item.id === candidate.id), true);
+
+        const runLearningResponse = await fetch(`${baseUrl}/runs/run_assistant/learning`);
+        const runLearningPayload = await runLearningResponse.json() as any;
+        assert.equal(runLearningResponse.status, 200, JSON.stringify(runLearningPayload));
+        assert.equal(runLearningPayload.learning_candidates.some((item: any) => item.id === candidate.id), true);
+
+        const detailResponse = await fetch(`${baseUrl}/learning/candidates/${encodeURIComponent(candidate.id)}`);
+        const detailPayload = await detailResponse.json() as any;
+        assert.equal(detailResponse.status, 200, JSON.stringify(detailPayload));
+        assert.equal(detailPayload.learning_candidate.id, candidate.id);
+
+        const experimentResponse = await fetch(`${baseUrl}/learning/candidates/${encodeURIComponent(candidate.id)}/experiment`, { method: "POST" });
+        const experimentPayload = await experimentResponse.json() as any;
+        assert.equal(experimentResponse.status, 200, JSON.stringify(experimentPayload));
+        assert.equal(experimentPayload.export_schema.schema_name, "learning_experiments.v1");
+        await assertExportSchemaMatches("learning_experiments.v1.json", experimentPayload.export_schema);
+        assert.equal(experimentPayload.learning_candidate.status, "experimented");
+        assert.equal(experimentPayload.learning_experiment.candidate_metrics_json.audit_behavior_changed, false);
+
+        const promoteResponse = await fetch(`${baseUrl}/learning/candidates/${encodeURIComponent(candidate.id)}/promote`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ expires_at: "2026-12-31T00:00:00.000Z" })
+        });
+        const promotePayload = await promoteResponse.json() as any;
+        assert.equal(promoteResponse.status, 200, JSON.stringify(promotePayload));
+        assert.equal(promotePayload.export_schema.schema_name, "learning_promotions.v1");
+        await assertExportSchemaMatches("learning_promotions.v1.json", promotePayload.export_schema);
+        assert.equal(promotePayload.learning_candidate.status, "promoted");
+        assert.equal(promotePayload.learning_promotion.metadata_json.v1_no_automatic_live_behavior_change, true);
+
+        const promotionsResponse = await fetch(`${baseUrl}/learning/promotions`);
+        const promotionsPayload = await promotionsResponse.json() as any;
+        assert.equal(promotionsResponse.status, 200, JSON.stringify(promotionsPayload));
+        assert.equal(promotionsPayload.learning_promotions.some((item: any) => item.id === promotePayload.learning_promotion.id), true);
+
+        const rollbackResponse = await fetch(`${baseUrl}/learning/promotions/${encodeURIComponent(promotePayload.learning_promotion.id)}/rollback`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ reason: "test rollback" })
+        });
+        const rollbackPayload = await rollbackResponse.json() as any;
+        assert.equal(rollbackResponse.status, 200, JSON.stringify(rollbackPayload));
+        assert.equal(rollbackPayload.learning_promotion.status, "rolled_back");
+        assert.equal(rollbackPayload.learning_candidate.status, "rolled_back");
+      } finally {
+        await new Promise<void>((resolve, reject) => apiServer.close((error) => error ? reject(error) : resolve()));
+        for (const [key, value] of savedEnv.entries()) {
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        }
+      }
+    });
+  });
+}
+
+async function testConcurrentLearningRunsRespectAttemptBudget(): Promise<void> {
+  await withTempDir("tethermark-learning-budget-", async (rootDir) => {
+    await persistAssistantApiFixture(rootDir);
+    const localDbRoot = path.join(rootDir, ".artifacts", "state", "local-db");
+    await updatePersistedUiSettings({
+      providers: {
+        default_provider: "openai",
+        default_model: "gpt-4.1",
+        agent_overrides: {}
+      },
+      learning: {
+        operator_consent_version: 1,
+        enabled: true,
+        trigger_mode: "manual",
+        event_driven_enabled: false,
+        scheduled_enabled: false,
+        llm_synthesis_enabled: true,
+        llm_manual_synthesis_enabled: true,
+        llm_max_calls_per_day: 1,
+        llm_min_source_signals: 2,
+        llm_min_distinct_runs: 2,
+        llm_send_source_excerpts: false
+      }
+    }, { rootDir: localDbRoot, dbMode: "local" });
+    for (const [runId, findingId] of [["run_assistant_prev", "finding_assistant_prev"], ["run_assistant", "finding_assistant"]] as const) {
+      await submitPersistedReviewAction({
+        runId,
+        input: {
+          reviewer_id: "budget_reviewer",
+          action_type: "suppress_finding",
+          finding_id: findingId,
+          triage_decision: "false_positive",
+          notes: "Repeated false positive used to verify an atomic synthesis-attempt budget."
+        },
+        rootDirOrOptions: { rootDir: localDbRoot, dbMode: "local" }
+      });
+    }
+
+    let providerCalls = 0;
+    const providerServer = http.createServer(async (req, res) => {
+      for await (const _chunk of req) {
+        // Drain the request body before returning the deterministic response.
+      }
+      providerCalls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              title: "Reviewed recurring false positive",
+              summary: "Two reviewed runs produced the same bounded signal.",
+              rationale: "Keep the proposal scoped and human approved.",
+              recommended_review: "Review the proposed scope before promotion.",
+              risk_notes: ["Do not suppress unrelated findings."],
+              experiment_plan: ["Replay both source runs."]
+            })
+          }
+        }],
+        usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 }
+      }));
+    });
+    await new Promise<void>((resolve, reject) => {
+      providerServer.once("error", reject);
+      providerServer.listen(0, "127.0.0.1", () => resolve());
+    });
+    const providerAddress = providerServer.address();
+    assert.ok(providerAddress && typeof providerAddress !== "string");
+
+    try {
+      await withEnv({
+        HARNESS_API_AUTH_MODE: "none",
+        AUDIT_LLM_LEARNING_SYNTHESIZER_PROVIDER: "openai",
+        AUDIT_LLM_LEARNING_SYNTHESIZER_MODEL: "gpt-4.1",
+        AUDIT_LLM_LEARNING_SYNTHESIZER_API_KEY: "test-only-key",
+        OPENAI_BASE_URL: `http://127.0.0.1:${providerAddress.port}/v1`
+      }, async () => withWorkingDir(rootDir, async () => {
+        const apiServer = createApiServer();
+        await new Promise<void>((resolve, reject) => {
+          apiServer.once("error", reject);
+          apiServer.listen(0, "127.0.0.1", () => resolve());
+        });
+        const address = apiServer.address();
+        assert.ok(address && typeof address !== "string");
+        const baseUrl = `http://127.0.0.1:${address.port}`;
+        try {
+          const responses = await Promise.all([
+            fetch(`${baseUrl}/learning/run`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }),
+            fetch(`${baseUrl}/learning/run`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })
+          ]);
+          assert.deepEqual(responses.map((response) => response.status), [200, 200]);
+          await Promise.all(responses.map((response) => response.json()));
+          assert.equal(providerCalls, 1, "Concurrent learning runs must share the configured daily attempt budget");
+          const jobsPayload = await (await fetch(`${baseUrl}/learning/jobs`)).json() as any;
+          assert.equal(jobsPayload.learning_jobs.length, 2);
+          const reserved = jobsPayload.learning_jobs.reduce((sum: number, job: any) => sum + Number(job.metadata_json?.synthesis_calls_reserved || 0), 0);
+          assert.equal(reserved, 1);
+        } finally {
+          await new Promise<void>((resolve, reject) => apiServer.close((error) => error ? reject(error) : resolve()));
+        }
+      }));
+    } finally {
+      await new Promise<void>((resolve, reject) => providerServer.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+}
+
 async function main(): Promise<void> {
+  // The regression suite is always offline and deterministic. Live provider
+  // validation is isolated in explicitly named smoke commands.
+  for (const key of Object.keys(process.env)) {
+    if (/^AUDIT_LLM_.+_(PROVIDER|MODEL|API_KEY)$/.test(key)) delete process.env[key];
+  }
+  process.env.AUDIT_LLM_PROVIDER = "mock";
+  process.env.AUDIT_LLM_MODEL = "mock-agent-runtime";
+  process.env.HARNESS_DISABLE_LEARNING_SCHEDULER = "1";
+  delete process.env.AUDIT_LLM_API_KEY;
+  delete process.env.LLM_API_KEY;
+  delete process.env.OPENAI_API_KEY;
   const tests: Array<[string, () => Promise<void>]> = [
     ["buildScanRequest parses llm flags", testBuildScanRequestParsesLlmFlags],
     ["OpenAI Codex OAuth provider registry and structured exec", testOpenAICodexProviderRegistryAndStructuredExec],
     ["local persistence uses configured root", testLocalPersistenceUsesConfiguredRoot],
+    ["concurrent sqlite writes are merged", testConcurrentSqliteWritesAreMerged],
+    ["psql credentials use process environment", testPsqlCredentialsUseEnvironment],
     ["compactBundleExports prunes optional debug bundles", testCompactBundleExportsPrunesOptionalDebugBundles],
     ["pruneArtifacts removes old run bundles and updates index", testPruneArtifactsRemovesOldRunBundlesAndUpdatesIndex],
     ["readPersistedLaneSpecialistOutputs from sqlite", testReadPersistedLaneSpecialistOutputsFromSqlite],
@@ -4018,12 +5213,22 @@ async function main(): Promise<void> {
     ["artifact policy classifies persisted and artifact-only outputs", testArtifactPolicyClassifiesPersistedAndArtifactOnlyOutputs],
     ["web ui and persisted ui settings api", testWebUiAndPersistedUiSettingsApi],
     ["preflight api summarizes readiness", testPreflightApiSummarizesReadiness],
+    ["runtime sandbox backend resolution", testRuntimeSandboxBackendResolution],
+    ["runtime sandbox api endpoints", testRuntimeSandboxApiEndpoints],
     ["api project scoping and actor-owned review actions", testApiProjectScopingAndActorOwnedReviewActions],
+    ["assistant storage and capability gating", testAssistantStorageAndCapabilities],
+    ["assistant provider cites findings", testAssistantProviderCitesFindings],
+    ["assistant api scopes actions and target history", testAssistantApiScopesActionsAndTargetHistory],
+    ["learning api lifecycle", testLearningApiLifecycle],
+    ["concurrent learning runs respect attempt budget", testConcurrentLearningRunsRespectAttemptBudget],
       ["validateFixtures passes for bundled targets", testValidateFixturesPassesForBundledTargets],
+      ["product benchmark suite dry-run", testProductBenchmarkSuiteDryRun],
+      ["product benchmark api endpoints", testProductBenchmarkApiEndpoints],
       ["local binary providers short-circuit when spawn is blocked", testLocalBinaryProvidersShortCircuitWhenSpawnBlocked],
       ["python worker providers report blocked runtime capability when disabled", testPythonWorkerProvidersReportBlockedWhenDisabled],
       ["repo analysis provider emits normalized locations", testRepoAnalysisProviderEmitsNormalizedLocations],
       ["scorecard and trivy normalization emit symbol locations", testScorecardAndTrivyNormalizationEmitSymbolLocations],
+      ["runtime readiness fixture enforces container policy", testRuntimeReadinessFixturePolicy],
       ["linux container sandbox builds bounded execution plan", testLinuxContainerSandboxBuildsExecutionPlan],
       ["linux container sandbox builds python runtime probe plan", testLinuxContainerSandboxBuildsPythonRuntimeProbePlan],
       ["linux container sandbox detects python framework probe defaults", testLinuxContainerSandboxDetectsPythonFrameworkProbeDefaults],
@@ -4032,10 +5237,13 @@ async function main(): Promise<void> {
       ["runtime evidence influences standards audit", testRuntimeEvidenceInfluencesStandardsAudit]
       ,
       ["finding evaluation uses evidence symbols for grouping", testFindingEvaluationUsesEvidenceSymbolsForGrouping],
+      ["finding quality flags unsupported evidence and control mismatch", testFindingQualityFlagsUnsupportedEvidenceAndControlMismatch],
+      ["post-supervisor integrity does not veto semantic mapping hints", testPostSupervisorIntegrityDoesNotVetoSemanticMappingHints],
       ["run comparison uses evidence symbols for matching", testRunComparisonUsesEvidenceSymbolsForMatching]
     ];
 
-  for (const [name, fn] of tests) {
+  const filter = process.env.TETHERMARK_TEST_FILTER;
+  for (const [name, fn] of filter ? tests.filter(([name]) => name.includes(filter)) : tests) {
     await fn();
     console.log(`PASS ${name}`);
   }

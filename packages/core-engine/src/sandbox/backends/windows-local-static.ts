@@ -50,7 +50,7 @@ export class WindowsLocalStaticSandboxBackend {
         allow_install_commands: false,
         allow_target_execution: false,
         allow_network_egress: false,
-        allowed_command_prefixes: ["git clone --depth 1", "git rev-parse HEAD"],
+        allowed_command_prefixes: ["git clone --depth 1", "git clone --no-checkout", "git -c http.sslBackend=schannel clone", "git checkout --detach", "git rev-parse HEAD"],
         blocked_command_patterns: ["npm install", "pip install", "docker run", "python app.py", "node server.js"]
       },
       source_provenance: buildSourceProvenance({ repoUrl: request.repo_url, localPath: request.local_path, endpointUrl: request.endpoint_url, commitSha, upstreamRepoUrl }),

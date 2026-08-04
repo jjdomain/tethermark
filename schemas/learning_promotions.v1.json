@@ -1,0 +1,40 @@
+{
+  "type": "object",
+  "required": ["schema_name", "schema_version", "generated_at", "tethermark_version", "payload"],
+  "properties": {
+    "schema_name": { "const": "learning_promotions.v1" },
+    "schema_version": { "type": "string" },
+    "generated_at": { "type": "string" },
+    "tethermark_version": { "type": "string" },
+    "payload": {
+      "type": "object",
+      "required": ["learning_promotions"],
+      "properties": {
+        "learning_promotions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "candidate_id", "workspace_id", "project_id", "scope_type", "scope_id", "promoted_artifact_type", "promoted_artifact_version", "status", "promoted_by", "promoted_at"],
+            "properties": {
+              "id": { "type": "string" },
+              "candidate_id": { "type": "string" },
+              "workspace_id": { "type": "string" },
+              "project_id": { "type": "string" },
+              "scope_type": { "type": "string" },
+              "scope_id": { "type": "string" },
+              "target_id": { "type": ["string", "null"] },
+              "promoted_artifact_type": { "type": "string" },
+              "promoted_artifact_version": { "type": "string" },
+              "status": { "type": "string" },
+              "promoted_by": { "type": "string" },
+              "promoted_at": { "type": "string" }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

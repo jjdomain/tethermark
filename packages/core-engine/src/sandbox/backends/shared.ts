@@ -1,12 +1,19 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 
 import type { SandboxSourceProvenance, SandboxStorageUsage } from "../../contracts.js";
+import { gitErrorText, isGitTlsCertificateError, runGit, type GitTlsMode } from "../../git-utils.js";
 
-const execFileAsync = promisify(execFile);
 const SKIP_NAMES = new Set([".git", "node_modules", ".artifacts", ".npm-cache", ".legacy-js-archive", "dist", "build", "__pycache__", ".venv"]);
+
+async function cloneRepoWithGit(repoUrl: string, destination: string, checkoutRef: string | null, tlsMode: GitTlsMode): Promise<void> {
+  if (checkoutRef) {
+    await runGit(["clone", "--no-checkout", repoUrl, destination], tlsMode);
+    await runGit(["-C", destination, "checkout", "--detach", checkoutRef], tlsMode);
+  } else {
+    await runGit(["clone", "--depth", "1", repoUrl, destination], tlsMode);
+  }
+}
 
 function getPinnedCheckoutRef(requestHints: unknown): string | null {
   const value = (requestHints as any)?.diagnostic_run?.pinned_reference ?? (requestHints as any)?.repo_checkout_ref ?? null;
@@ -20,14 +27,20 @@ export function resolvePinnedCheckoutRef(requestHints: unknown): string | null {
 
 export async function cloneRepo(repoUrl: string, destination: string, checkoutRef?: string | null): Promise<string | null> {
   const ref = checkoutRef?.trim() || null;
-  if (ref) {
-    await execFileAsync("git", ["clone", "--no-checkout", repoUrl, destination], { maxBuffer: 8 * 1024 * 1024 });
-    await execFileAsync("git", ["-C", destination, "checkout", "--detach", ref], { maxBuffer: 8 * 1024 * 1024 });
-  } else {
-    await execFileAsync("git", ["clone", "--depth", "1", repoUrl, destination], { maxBuffer: 8 * 1024 * 1024 });
+  try {
+    await cloneRepoWithGit(repoUrl, destination, ref, "default");
+  } catch (error) {
+    const shouldRetryWithWindowsTrust = process.platform === "win32" && isGitTlsCertificateError(error);
+    if (!shouldRetryWithWindowsTrust) throw error;
+    await fs.rm(destination, { recursive: true, force: true });
+    try {
+      await cloneRepoWithGit(repoUrl, destination, ref, "windows_schannel");
+    } catch (retryError) {
+      throw new Error(`Git clone failed after retrying with the Windows certificate store. ${gitErrorText(retryError)}`);
+    }
   }
   try {
-    const { stdout } = await execFileAsync("git", ["-C", destination, "rev-parse", "HEAD"], { maxBuffer: 1024 * 1024 });
+    const { stdout } = await runGit(["-C", destination, "rev-parse", "HEAD"]);
     return stdout.trim() || null;
   } catch {
     return null;
@@ -63,7 +76,7 @@ function normalizeRepoUrl(rawUrl: string): string | null {
   const trimmed = rawUrl.trim();
   if (!trimmed) return null;
   if (/^https?:\/\//i.test(trimmed)) return trimmed.replace(/\.git$/i, "");
-  const sshMatch = trimmed.match(/^git@([^:]+):(.+)$/i);
+  const sshMatch = trimmed.match(/^(?:ssh:\/\/)?git@([^/:]+)[:/](.+)$/i);
   if (sshMatch) {
     return "https://" + sshMatch[1] + "/" + sshMatch[2].replace(/\.git$/i, "");
   }

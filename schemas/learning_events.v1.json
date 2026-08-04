@@ -1,0 +1,41 @@
+{
+  "type": "object",
+  "required": ["schema_name", "schema_version", "generated_at", "tethermark_version", "payload"],
+  "properties": {
+    "schema_name": { "const": "learning_events.v1" },
+    "schema_version": { "type": "string" },
+    "generated_at": { "type": "string" },
+    "tethermark_version": { "type": "string" },
+    "payload": {
+      "type": "object",
+      "required": ["learning_events"],
+      "properties": {
+        "learning_events": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "workspace_id", "project_id", "event_type", "source_table", "source_id", "signal_summary", "confidence", "created_at"],
+            "properties": {
+              "id": { "type": "string" },
+              "run_id": { "type": ["string", "null"] },
+              "target_id": { "type": ["string", "null"] },
+              "workspace_id": { "type": "string" },
+              "project_id": { "type": "string" },
+              "event_type": { "type": "string" },
+              "source_table": { "type": "string" },
+              "source_id": { "type": "string" },
+              "finding_id": { "type": ["string", "null"] },
+              "finding_signature": { "type": ["string", "null"] },
+              "signal_summary": { "type": "string" },
+              "confidence": { "type": "number" },
+              "created_at": { "type": "string" }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

@@ -1,4 +1,4 @@
-import type { AuditLanePlan, AuditPolicyArtifact, ControlResult, EvalSelectionArtifact, Finding, PlannerArtifact, RepoContextArtifact, ScoreSummary, StandardControlDefinition, TargetDescriptor, TargetProfileArtifact, ThreatModelArtifact } from "./contracts.js";
+import type { AuditLanePlan, AuditPolicyArtifact, ControlResult, EvalSelectionArtifact, Finding, FindingQualitySummary, PlannerArtifact, RepoContextArtifact, ScoreSummary, StandardControlDefinition, TargetDescriptor, TargetProfileArtifact, ThreatModelArtifact } from "./contracts.js";
 
 function truncate(text: string, max = 400): string {
   return text.length <= max ? text : `${text.slice(0, max)}...`;
@@ -167,6 +167,7 @@ export function buildSupervisorContext(args: {
   scoreSummary: ScoreSummary;
   controlCatalog: StandardControlDefinition[];
   auditPolicy: AuditPolicyArtifact;
+  findingQuality?: FindingQualitySummary | null;
   lanePlans?: any[];
   laneResults?: any[];
   correctionPass?: boolean;
@@ -205,6 +206,47 @@ export function buildSupervisorContext(args: {
       finding_ids: control.finding_ids,
       evidence: control.evidence.slice(0, 4)
     })),
+    preSupervisorEvidencePacket: args.findingQuality ? {
+      artifact_role: args.findingQuality.artifact_role,
+      authority: args.findingQuality.authority,
+      overall_verdict: args.findingQuality.overall_verdict,
+      blocking_count: args.findingQuality.blocking_count,
+      unsupported_count: args.findingQuality.unsupported_count,
+      wrong_control_count: args.findingQuality.wrong_control_count,
+      missing_control_count: args.findingQuality.missing_control_count,
+      weak_count: args.findingQuality.weak_count,
+      findings: args.findingQuality.findings.map((item) => ({
+        finding_id: item.finding_id,
+        evidence_support_verdict: item.evidence_support_verdict,
+        control_mapping_verdict: item.control_mapping_verdict,
+        qa_blocking: item.qa_blocking,
+        integrity_blocking: item.integrity_blocking ?? item.qa_blocking,
+        semantic_review_hint: item.semantic_review_hint ?? false,
+        quality_score: item.quality_score,
+        matched_evidence_ids: item.matched_evidence_ids.slice(0, 8),
+        missing_evidence_refs: item.missing_evidence_refs.slice(0, 5),
+        unsupported_claims: item.unsupported_claims,
+        claimed_control_ids: item.claimed_control_ids,
+        recommended_control_ids: item.recommended_control_ids,
+        reasons: item.reasons.slice(0, 5),
+        next_action: item.next_action
+      }))
+    } : null,
+    findingQuality: args.findingQuality ? {
+      compatibility_note: "Deprecated supervisor context alias. Use preSupervisorEvidencePacket for deterministic facts and hints.",
+      overall_verdict: args.findingQuality.overall_verdict,
+      blocking_count: args.findingQuality.blocking_count,
+      findings: args.findingQuality.findings.map((item) => ({
+        finding_id: item.finding_id,
+        evidence_support_verdict: item.evidence_support_verdict,
+        control_mapping_verdict: item.control_mapping_verdict,
+        integrity_blocking: item.integrity_blocking ?? item.qa_blocking,
+        semantic_review_hint: item.semantic_review_hint ?? false,
+        unsupported_claims: item.unsupported_claims,
+        recommended_control_ids: item.recommended_control_ids,
+        next_action: item.next_action
+      }))
+    } : null,
     toolExecutions: args.toolExecutions.map((tool) => ({
       provider_id: tool.provider_id,
       tool: tool.tool,
