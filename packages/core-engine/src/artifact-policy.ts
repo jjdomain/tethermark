@@ -52,6 +52,7 @@ const exactPolicies = new Map<string, ArtifactPolicy>([
   ["remediation", { disposition: "queryable_persisted", persisted_table: "remediation_memos", rationale: "Remediation memo is persisted in a normalized query table." }],
   ["publishability", { disposition: "queryable_persisted", persisted_table: "review_decisions", rationale: "Publishability decisions are persisted in normalized query tables." }],
   ["agent-config-summary", { disposition: "artifact_only", persisted_table: null, rationale: "Agent config summary remains archival/debug JSON for runtime inspection." }],
+  ["provider-policy", { disposition: "artifact_only", persisted_table: null, rationale: "Resolved non-secret provider decisions remain archival/debug JSON; invocation-level usage is persisted in agent_invocations." }],
   ["agent-invocations", { disposition: "queryable_persisted", persisted_table: "agent_invocations", rationale: "Agent invocations are persisted in normalized query tables." }],
   ["handoffs", { disposition: "artifact_only", persisted_table: null, rationale: "Handoff records remain archival/debug JSON for agent trace inspection." }],
   ["trace", { disposition: "artifact_only", persisted_table: null, rationale: "Execution trace remains archival/debug JSON for step-by-step inspection." }],

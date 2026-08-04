@@ -3,6 +3,15 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 
+import {
+  computeBackoffDelayMs,
+  executeWithProviderGovernor,
+  resolveProviderPolicy,
+  type ProviderCredentialClass,
+  type ProviderPolicyDecision,
+  type ProviderWorkloadClass
+} from "./policy.js";
+
 function readEnv(name: string): string | undefined {
   const value = process.env[name];
   if (typeof value !== "string") {
@@ -52,6 +61,8 @@ export interface StructuredGenerationRequest {
   metadata?: Record<string, unknown>;
   temperature?: number;
   maxRetries?: number;
+  maxOutputTokens?: number;
+  beforeAttempt?: () => void;
 }
 
 export interface StructuredGenerationResult<T> {
@@ -73,6 +84,10 @@ export interface ProviderConfig {
   provider?: "openai" | "openai_codex" | "mock";
   model?: string;
   apiKey?: string;
+  workloadClass?: ProviderWorkloadClass;
+  credentialClass?: ProviderCredentialClass;
+  maxRequests?: number;
+  maxTokens?: number;
   agentOverrides?: Record<string, {
     provider?: "openai" | "openai_codex" | "mock";
     model?: string;
@@ -85,6 +100,9 @@ export interface ResolvedProviderConfig {
   model?: string;
   apiKey?: string;
   apiKeySource: "agent-specific" | "request-level" | "global-audit-llm" | "global-generic" | "oauth-local" | "none";
+  workloadClass: ProviderWorkloadClass;
+  credentialClass: ProviderCredentialClass;
+  policyDecision: ProviderPolicyDecision;
 }
 
 type MockResponseFactory = (request: StructuredGenerationRequest) => unknown;
@@ -120,7 +138,7 @@ function parseStructuredJson<T>(text: string): T {
 }
 
 function makeOpenAIRequestBody(request: StructuredGenerationRequest, modelName: string): Record<string, unknown> {
-  return {
+  const body: Record<string, unknown> = {
     model: modelName,
     messages: [
       { role: "system", content: request.systemPrompt },
@@ -136,6 +154,10 @@ function makeOpenAIRequestBody(request: StructuredGenerationRequest, modelName: 
     },
     temperature: request.temperature ?? 0.2
   };
+  if (request.maxOutputTokens && request.maxOutputTokens > 0) {
+    body.max_completion_tokens = request.maxOutputTokens;
+  }
+  return body;
 }
 
 function extractOpenAIMessageContent(payload: any): string {
@@ -179,6 +201,7 @@ export class OpenAIModelProvider implements ModelProvider {
 
     for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
       try {
+        request.beforeAttempt?.();
         const response = await fetch(`${this.baseUrl}/chat/completions`, {
           method: "POST",
           headers: {
@@ -189,7 +212,10 @@ export class OpenAIModelProvider implements ModelProvider {
         });
 
         if (!response.ok) {
-          throw new Error(`OpenAI API request failed with status ${response.status}: ${await response.text()}`);
+          const retryable = response.status === 408 || response.status === 409 || response.status === 429 || response.status >= 500;
+          const error = new Error(`OpenAI API request failed with status ${response.status}: ${await response.text()}`) as Error & { retryable?: boolean };
+          error.retryable = retryable;
+          throw error;
         }
 
         const payload = await response.json();
@@ -205,6 +231,8 @@ export class OpenAIModelProvider implements ModelProvider {
         };
       } catch (error) {
         lastError = error;
+        if ((error as { retryable?: boolean })?.retryable === false || attempt >= maxRetries) break;
+        await new Promise((resolve) => setTimeout(resolve, computeBackoffDelayMs(attempt, readNumberEnv("AUDIT_LLM_BACKOFF_BASE_MS", 250))));
       }
     }
 
@@ -289,6 +317,34 @@ function buildCodexPrompt(request: StructuredGenerationRequest): string {
   ].join("\n");
 }
 
+function extractCodexUsage(stdout: string): NonNullable<StructuredGenerationResult<unknown>["usage"]> {
+  let promptTokens = 0;
+  let completionTokens = 0;
+  let found = false;
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const event = JSON.parse(line) as { type?: string; usage?: Record<string, unknown> };
+      if (event.type !== "turn.completed" || !event.usage) continue;
+      const input = Number(event.usage.input_tokens);
+      const output = Number(event.usage.output_tokens);
+      if (Number.isFinite(input) && input >= 0) promptTokens += input;
+      if (Number.isFinite(output) && output >= 0) completionTokens += output;
+      found = found || Number.isFinite(input) || Number.isFinite(output);
+    } catch {
+      // The structured result is written separately; ignore non-JSON diagnostics.
+    }
+  }
+  return found
+    ? {
+        prompt_tokens: promptTokens,
+        completion_tokens: completionTokens,
+        total_tokens: promptTokens + completionTokens,
+        estimated_cost_usd: null
+      }
+    : { prompt_tokens: null, completion_tokens: null, total_tokens: null, estimated_cost_usd: null };
+}
+
 export class OpenAICodexCliProvider implements ModelProvider {
   readonly providerName = "openai_codex";
   private readonly resolvedCommand: string;
@@ -308,46 +364,81 @@ export class OpenAICodexCliProvider implements ModelProvider {
   }
 
   async generateStructured<T>(request: StructuredGenerationRequest): Promise<StructuredGenerationResult<T>> {
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "tethermark-codex-"));
-    const schemaPath = path.join(tempDir, `${request.schemaName}.schema.json`);
-    const outputPath = path.join(tempDir, `${request.schemaName}.result.json`);
-    try {
-      await fs.writeFile(schemaPath, JSON.stringify(request.schema, null, 2), "utf8");
-      const args = [
-        ...this.resolvedPrefixArgs,
-        "exec",
-        "--ephemeral",
-        "--sandbox",
-        this.sandbox,
-        "--output-schema",
-        schemaPath,
-        "--output-last-message",
-        outputPath
-      ];
-      if (this.modelName) {
-        args.push("--model", this.modelName);
-      }
-      const result = await runProcess(this.resolvedCommand, args, buildCodexPrompt(request), this.timeoutMs, this.processEnv);
-      if (result.exitCode !== 0) {
-        throw new Error(`Codex CLI exited with code ${result.exitCode}. ${result.stderr || result.stdout}`.trim());
-      }
-      const rawText = await fs.readFile(outputPath, "utf8");
-      return {
-        provider: this.providerName,
-        model: this.modelName,
-        rawText,
-        parsed: parseStructuredJson<T>(rawText),
-        attempts: 1,
-        usage: {
-          prompt_tokens: null,
-          completion_tokens: null,
-          total_tokens: null,
-          estimated_cost_usd: null
+    const maxRetries = request.maxRetries ?? 2;
+    let lastError: unknown = null;
+    let promptTokens = 0;
+    let completionTokens = 0;
+    let hasUsage = false;
+    for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
+      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "tethermark-codex-"));
+      const schemaPath = path.join(tempDir, `${request.schemaName}.schema.json`);
+      const outputPath = path.join(tempDir, `${request.schemaName}.result.json`);
+      try {
+        request.beforeAttempt?.();
+        await fs.writeFile(schemaPath, JSON.stringify(request.schema, null, 2), "utf8");
+        const args = [
+          ...this.resolvedPrefixArgs,
+          "exec",
+          "--ephemeral",
+          "--json",
+          "--sandbox",
+          this.sandbox,
+          "--output-schema",
+          schemaPath,
+          "--output-last-message",
+          outputPath
+        ];
+        if (this.modelName) args.push("--model", this.modelName);
+        const result = await runProcess(this.resolvedCommand, args, buildCodexPrompt(request), this.timeoutMs, this.processEnv);
+        const attemptUsage = extractCodexUsage(result.stdout);
+        if (attemptUsage.total_tokens != null) {
+          hasUsage = true;
+          promptTokens += attemptUsage.prompt_tokens ?? 0;
+          completionTokens += attemptUsage.completion_tokens ?? 0;
         }
-      };
-    } finally {
-      await fs.rm(tempDir, { recursive: true, force: true });
+        if (result.exitCode !== 0) {
+          throw new Error(`Codex CLI exited with code ${result.exitCode}. ${result.stderr || result.stdout}`.trim());
+        }
+        const rawText = await fs.readFile(outputPath, "utf8");
+        return {
+          provider: this.providerName,
+          model: this.modelName,
+          rawText,
+          parsed: parseStructuredJson<T>(rawText),
+          attempts: attempt,
+          usage: hasUsage
+            ? {
+                prompt_tokens: promptTokens,
+                completion_tokens: completionTokens,
+                total_tokens: promptTokens + completionTokens,
+                estimated_cost_usd: null
+              }
+            : { prompt_tokens: null, completion_tokens: null, total_tokens: null, estimated_cost_usd: null }
+        };
+      } catch (error) {
+        lastError = error;
+        if (attempt < maxRetries) {
+          await new Promise((resolve) => setTimeout(resolve, computeBackoffDelayMs(attempt, readNumberEnv("AUDIT_LLM_BACKOFF_BASE_MS", 500))));
+        }
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
     }
+    throw new Error(`Codex structured generation failed after ${maxRetries} attempts. ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+  }
+}
+
+class GovernedModelProvider implements ModelProvider {
+  constructor(private readonly inner: ModelProvider, private readonly decision: ProviderPolicyDecision) {}
+
+  get providerName(): string { return this.inner.providerName; }
+  get modelName(): string { return this.inner.modelName; }
+
+  generateStructured<T>(request: StructuredGenerationRequest): Promise<StructuredGenerationResult<T>> {
+    return executeWithProviderGovernor(this.decision, () => this.inner.generateStructured<T>({
+      ...request,
+      maxRetries: Math.min(request.maxRetries ?? this.decision.max_retries, this.decision.max_retries)
+    }));
   }
 }
 
@@ -357,6 +448,7 @@ export class MockModelProvider implements ModelProvider {
   constructor(readonly modelName = "mock-agent-runtime", private readonly responseFactory?: MockResponseFactory) {}
 
   async generateStructured<T>(request: StructuredGenerationRequest): Promise<StructuredGenerationResult<T>> {
+    request.beforeAttempt?.();
     const payload = this.responseFactory ? this.responseFactory(request) : {};
     const rawText = JSON.stringify(payload);
     return {
@@ -544,12 +636,30 @@ export function resolveAgentProviderConfig(agentName: string, baseConfig: Provid
     apiKeySource = "global-generic";
   }
 
-  const provider = (agentOverride?.provider ?? baseConfig.provider ?? envProvider ?? readEnv("AUDIT_LLM_PROVIDER") ?? (apiKey ? "openai" : "openai_codex")) as "openai" | "openai_codex" | "mock";
+  const provider = (agentOverride?.provider ?? baseConfig.provider ?? envProvider ?? readEnv("AUDIT_LLM_PROVIDER") ?? "openai_codex") as "openai" | "openai_codex" | "mock";
+  const model = agentOverride?.model
+    ?? baseConfig.model
+    ?? envModel
+    ?? readEnv("AUDIT_LLM_MODEL")
+    ?? (provider === "openai" ? "gpt-5.4-mini" : provider === "openai_codex" ? "gpt-5.1-codex" : "mock-agent-runtime");
+  const credentialClass = baseConfig.credentialClass ?? (provider === "openai" ? "api_key" : provider === "openai_codex" ? "chatgpt_session" : "none");
+  const workloadClass = baseConfig.workloadClass ?? "interactive_operator";
+  const policyDecision = resolveProviderPolicy({
+    provider,
+    model,
+    workloadClass,
+    credentialClass,
+    maxRequests: baseConfig.maxRequests,
+    maxTokens: baseConfig.maxTokens
+  });
   return {
     provider,
-    model: agentOverride?.model ?? baseConfig.model ?? envModel ?? readEnv("AUDIT_LLM_MODEL") ?? undefined,
+    model,
     apiKey,
-    apiKeySource: provider === "openai_codex" ? "oauth-local" : apiKeySource
+    apiKeySource: provider === "openai_codex" ? "oauth-local" : apiKeySource,
+    workloadClass,
+    credentialClass,
+    policyDecision
   };
 }
 
@@ -560,12 +670,14 @@ export function createModelProvider(config: ProviderConfig = {}, agentName?: str
     if (!apiKey) {
       throw new Error("A live provider-backed run requires an API key. Set LLM_API_KEY, AUDIT_LLM_API_KEY, or an agent-specific *_API_KEY value.");
     }
-    return new OpenAIModelProvider(apiKey, resolved.model ?? "gpt-4.1");
+    return new GovernedModelProvider(new OpenAIModelProvider(apiKey, resolved.model ?? "gpt-5.4-mini"), resolved.policyDecision);
   }
 
   if (resolved.provider === "openai_codex") {
-    return new OpenAICodexCliProvider(resolved.model ?? undefined);
+    return new GovernedModelProvider(new OpenAICodexCliProvider(resolved.model ?? undefined), resolved.policyDecision);
   }
 
-  return new MockModelProvider(resolved.model ?? "mock-agent-runtime", inferMockPayload);
+  return new GovernedModelProvider(new MockModelProvider(resolved.model ?? "mock-agent-runtime", inferMockPayload), resolved.policyDecision);
 }
+
+export * from "./policy.js";

@@ -9,6 +9,10 @@ export interface AgentInvocationRecord {
   agent_name: string;
   model_provider: string;
   model_name: string;
+  workload_class: "interactive_operator" | "unattended_local" | "external_service";
+  credential_class: "chatgpt_session" | "api_key" | "enterprise_access_token" | "none";
+  initiation_mode: "operator" | "background" | "service";
+  request_index: number;
   input_artifacts: string[];
   output_artifact: string;
   status: "success" | "failure";
@@ -21,6 +25,7 @@ export interface AgentInvocationRecord {
   completion_tokens?: number | null;
   total_tokens?: number | null;
   estimated_cost_usd?: number | null;
+  terminal_reason: string;
 }
 
 export function beginInvocation(
@@ -52,6 +57,11 @@ export function finishInvocation(
     model: string;
     status: "success" | "failure";
     attempts: number;
+    workloadClass: AgentInvocationRecord["workload_class"];
+    credentialClass: AgentInvocationRecord["credential_class"];
+    initiationMode: AgentInvocationRecord["initiation_mode"];
+    requestIndex: number;
+    terminalReason: string;
     promptTokens?: number | null;
     completionTokens?: number | null;
     totalTokens?: number | null;
@@ -64,11 +74,16 @@ export function finishInvocation(
     model_name: details.model,
     status: details.status,
     attempts: details.attempts,
+    workload_class: details.workloadClass,
+    credential_class: details.credentialClass,
+    initiation_mode: details.initiationMode,
+    request_index: details.requestIndex,
     completed_at: nowIso(),
     prompt_tokens: details.promptTokens ?? null,
     completion_tokens: details.completionTokens ?? null,
     total_tokens: details.totalTokens ?? null,
-    estimated_cost_usd: details.estimatedCostUsd ?? null
+    estimated_cost_usd: details.estimatedCostUsd ?? null,
+    terminal_reason: details.terminalReason
   };
 }
 

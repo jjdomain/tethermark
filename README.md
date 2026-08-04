@@ -23,7 +23,7 @@ Tethermark Community Edition is in production stabilization for local and truste
 
 - `local` is the Community Edition SQLite storage mode.
 - Tethermark Cloud production storage is not a Community Edition database mode; the Cloud product provides its own Supabase/Postgres adapter around the shared persistence contracts.
-- Community Edition defaults to the local OpenAI Codex OAuth provider for operator-started audits. The mock provider is selected explicitly by tests and CI only.
+- Community Edition defaults to local OpenAI Codex with ChatGPT sign-in for operator-started audits. The mock provider is selected explicitly by tests and CI only.
 - Community Edition auth defaults to `none`, which is appropriate for solo operators and trusted internal teams. In that mode, review roles and assignments are advisory governance rather than hard identity enforcement.
 - The supported Community Edition path is end-to-end for repository and local-path audits: preflight, run execution, findings, review workflow, runtime follow-up, exports, SARIF upload, and manual external remediation links.
 - Runtime validation is a primary Community Edition capability for cloned or local targets through one user-facing **Local Runtime Sandbox**. Admin settings auto-resolve the strongest allowed local backend and gate runtime launch on readiness.
@@ -192,7 +192,7 @@ npm run exports:check --silent
 npm run scan -- validate-fixtures
 ```
 
-The test runner forces `AUDIT_LLM_PROVIDER=mock`, removes live API keys from its process, and disables the learning scheduler. Running `npm test` never consumes OAuth or API-provider quota.
+The test runner forces `AUDIT_LLM_PROVIDER=mock`, removes live API keys from its process, and disables the learning scheduler. Running `npm test` never consumes ChatGPT-session or API-provider quota.
 
 For a release-candidate verification pass, run:
 
@@ -466,7 +466,14 @@ Community Edition has meaningful runtime validation support, but it is intention
 
 ## LLM Configuration
 
-The default environment is mock-backed:
+The Community Edition default for an explicit operator-started local audit is OpenAI Codex with the operator's local ChatGPT sign-in:
+
+```bash
+AUDIT_LLM_PROVIDER=openai_codex
+AUDIT_LLM_MODEL=gpt-5.1-codex
+```
+
+Mock mode is an explicit deterministic-development and CI configuration. It does not validate real model behavior:
 
 ```bash
 AUDIT_LLM_PROVIDER=mock
@@ -481,7 +488,7 @@ AUDIT_LLM_MODEL=gpt-5.4-mini
 AUDIT_LLM_API_KEY=sk-...
 ```
 
-Local Codex OAuth mode is available for operator-owned runs after the Codex CLI is installed and signed in with ChatGPT/Codex:
+Local Codex ChatGPT-sign-in mode is available for operator-owned runs after the Codex CLI is installed and signed in:
 
 ```bash
 AUDIT_LLM_PROVIDER=openai_codex
@@ -490,7 +497,7 @@ AUDIT_LLM_CODEX_COMMAND=codex
 AUDIT_LLM_CODEX_SANDBOX=read-only
 ```
 
-Codex OAuth mode delegates structured agent steps through `codex exec` and uses the user's local Codex entitlement subject to provider plan limits. Tethermark does not store OpenAI OAuth tokens in this mode. See [`docs/LLM_PROVIDER_AND_AGENT_BACKEND_MODES.md`](docs/LLM_PROVIDER_AND_AGENT_BACKEND_MODES.md) for the provider/backend boundary.
+Codex ChatGPT-session mode delegates structured agent steps through `codex exec` and uses the operator's local Codex entitlement subject to provider plan limits. Tethermark does not store ChatGPT access tokens in this mode. It is limited to explicit local operator launches; unattended and service workloads require an API-key provider. See [`docs/LLM_PROVIDER_AND_AGENT_BACKEND_MODES.md`](docs/LLM_PROVIDER_AND_AGENT_BACKEND_MODES.md) for the provider/backend boundary and [`docs/provider-workload-policy.md`](docs/provider-workload-policy.md) for the enforced workload matrix.
 
 Agent-specific overrides are supported for planner, threat model, eval selection, skeptic, and remediation agents.
 

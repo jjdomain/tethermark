@@ -80,6 +80,10 @@ export interface AuditRequest {
   llm_provider?: "openai" | "openai_codex" | "mock";
   llm_model?: string;
   llm_api_key?: string;
+  llm_workload_class?: "interactive_operator" | "unattended_local" | "external_service";
+  llm_credential_class?: "chatgpt_session" | "api_key" | "enterprise_access_token" | "none";
+  llm_max_requests?: number;
+  llm_max_tokens?: number;
   audit_policy_pack?: string;
   audit_policy?: AuditPolicyArtifact;
   db_mode?: DatabaseMode;
@@ -743,6 +747,11 @@ export interface AgentConfigSummary {
   provider: string;
   model: string;
   api_key_source: "agent-specific" | "request-level" | "global-audit-llm" | "global-generic" | "oauth-local" | "none";
+  workload_class: "interactive_operator" | "unattended_local" | "external_service";
+  credential_class: "chatgpt_session" | "api_key" | "enterprise_access_token" | "none";
+  initiation_mode: "operator" | "background" | "service";
+  max_requests: number;
+  max_tokens: number;
 }
 
 export interface StandardControlDefinition {

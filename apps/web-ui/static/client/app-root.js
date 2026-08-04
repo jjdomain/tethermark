@@ -1340,6 +1340,7 @@ function buildDiagnosticsRunRequest({ kind, effectiveSettings, auditPackages, ta
   return {
     repo_url: repoUrl,
     run_mode: "static",
+    llm_workload_class: "interactive_operator",
     audit_package: packageId,
     llm_provider: provider,
     ...(model ? { llm_model: model } : {}),
@@ -1377,6 +1378,7 @@ function buildDiagnosticsRunRequest({ kind, effectiveSettings, auditPackages, ta
 
 function buildLaunchRunRequest(form, requestContext, launchIntentState, effectiveSettings, llmRegistry, auditPackages) {
   const payload = buildRunRequest(form, effectiveSettings, llmRegistry, auditPackages);
+  payload.llm_workload_class = "interactive_operator";
   payload.hints = {
     ...(payload.hints || {}),
     launch_intent: {

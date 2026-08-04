@@ -15,9 +15,9 @@ function usage(): void {
   console.log(`Tethermark CLI
 
 Usage:
-npm run scan -- scan path <local-path> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|build|runtime|validate] [--package <id>] [--db-mode local|postgres|supabase] [--llm-provider openai|mock] [--llm-model <id>] [--llm-api-key <value>]
-npm run scan -- scan repo <repo-url> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|build|runtime|validate] [--package <id>] [--db-mode local|postgres|supabase] [--llm-provider openai|mock] [--llm-model <id>] [--llm-api-key <value>]
-npm run scan -- scan endpoint <url> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|runtime|validate] [--package <id>] [--db-mode local|postgres|supabase] [--llm-provider openai|mock] [--llm-model <id>] [--llm-api-key <value>]
+npm run scan -- scan path <local-path> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|build|runtime|validate] [--package <id>] [--db-mode local|postgres|supabase] [--llm-provider openai|openai_codex|mock] [--llm-model <id>] [--llm-api-key <value>] [--llm-workload interactive_operator|unattended_local|external_service] [--llm-max-requests <n>] [--llm-max-tokens <n>]
+npm run scan -- scan repo <repo-url> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|build|runtime|validate] [--package <id>] [--db-mode local|postgres|supabase] [--llm-provider openai|openai_codex|mock] [--llm-model <id>] [--llm-api-key <value>] [--llm-workload interactive_operator|unattended_local|external_service] [--llm-max-requests <n>] [--llm-max-tokens <n>]
+npm run scan -- scan endpoint <url> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|runtime|validate] [--package <id>] [--db-mode local|postgres|supabase] [--llm-provider openai|openai_codex|mock] [--llm-model <id>] [--llm-api-key <value>] [--llm-workload interactive_operator|unattended_local|external_service] [--llm-max-requests <n>] [--llm-max-tokens <n>]
 npm run scan -- doctor [--json]
 npm run scan -- onboard [--dry-run] [--skip-doctor] [--skip-fixtures]
 npm run scan -- setup-tools [--dry-run] [--yes] [--tool scorecard,semgrep,trivy]

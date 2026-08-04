@@ -17,7 +17,8 @@ Completed:
 - TypeScript / Node core engine rewrite
 - CLI, API, and MCP bridge entrypoints
 - core run, artifact, trace, sandbox, agent-invocation, and handoff contracts
-- LLM provider abstraction with OpenAI and mock support
+- LLM provider abstraction with OpenAI API, local Codex ChatGPT sign-in, and mock support
+- fail-closed provider workload classes, model allowlists, per-run budgets, pacing, retries, concurrency limits, circuit breaking, and non-secret invocation audit fields
 - agent runtime and prompt registry
 - model-backed planner-agent, threat-model-agent, eval-selection-agent, skeptic-agent, and remediation-agent in the main run flow
 - standards-based audit methodology artifact and control catalog
@@ -39,7 +40,6 @@ Not completed:
 - real Python worker execution on this machine
 - real Linux container or microVM execution for isolated build/runtime/validate flows
 - persistent queue/storage
-- hardened policy enforcement
 - richer control coverage and framework depth beyond the first static control set
 
 ## Phase 1: Local Static Mode Hardening
