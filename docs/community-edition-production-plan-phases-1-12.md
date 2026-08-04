@@ -43,8 +43,8 @@ CE production does **not** require hosted multi-tenancy, enterprise identity, ma
 Updated on 2026-08-03 after the Phase 1 readiness work was pushed:
 
 - Branch: `codex/community-edition-phase1-recovery`.
-- Phase 1 readiness implementation commit: `4639d14 Complete Phase 1 production readiness gates`.
-- Git state: commits `2dfb9d6` and `4639d14` were pushed to `origin/codex/community-edition-phase1-recovery`, updating draft PR #1.
+- Phase 1 readiness implementation commit: `7142bb8 Complete Phase 1 production readiness gates`.
+- Git state: commits `9a430b1` and `7142bb8` were pushed to `origin/codex/community-edition-phase1-recovery`, updating PR #1.
 - `npm run release:check`: **passed** on 2026-08-02 in 94.4 seconds. Build, tests, export validation, and all three bundled validation fixtures passed.
 - `npm run production:static-release`: **passed** on 2026-08-02 in 303.3 seconds on the final runtime-fixture implementation tree after installing Playwright Chromium and correcting the browser E2E's renamed Audits navigation selector and isolated benchmark-suite staging.
 - Static tool observation during the successful local gate: Scorecard, Semgrep, and Trivy were unavailable in the Pi E2E child processes and were reported as skipped rather than clean passes. Phase 4 must normalize installation and readiness evidence.
@@ -58,7 +58,7 @@ Updated on 2026-08-03 after the Phase 1 readiness work was pushed:
 
 | Phase | Outcome | Current status | Primary blocker or remaining gate |
 |---|---|---|---|
-| 1 | Recover and stabilize the current branch | **Mostly complete** | Push current changes and review/merge PR |
+| 1 | Recover and stabilize the current branch | **Complete** | None; PR #1 passed final review and required checks |
 | 2 | Lock CE boundaries, provider policy, and safe defaults | **Mostly complete** | Reconcile contradictory docs and decide verified OAuth workload policy |
 | 3 | Separate deterministic CI from real-model release validation | **Partial** | No live inference/E2E model gate yet |
 | 4 | Make static scanners production dependable | **Partial** | Tool install/readiness and real cross-platform evidence |
@@ -75,26 +75,26 @@ Updated on 2026-08-03 after the Phase 1 readiness work was pushed:
 
 ## Phase 1 — Recover and stabilize the current work
 
-Status: **Mostly complete**
+Status: **Complete**
 
 Objective: preserve the recovered work, make the branch reproducible, and establish a clean baseline before new feature work.
 
 Completed or evidenced:
 
 - Recovered branch is on GitHub and previously had green GitHub checks.
-- Provider/learning production-boundary hardening exists in local commit `2dfb9d6`.
+- Provider/learning production-boundary hardening exists in commit `9a430b1`.
 - Deterministic release check passed on 2026-08-02.
 - Runtime readiness now executes a real isolated Docker Desktop fixture and persists assertion/cleanup evidence; real audit-target execution remains an owned Phase 8 follow-up.
 
 Remaining tasks:
 
 - [x] Review `git diff origin/codex/community-edition-phase1-recovery...HEAD` and confirm the pending commit contains no credentials, personal paths, generated artifacts, or unrelated files.
-- [x] Push commit `2dfb9d6` and the Phase 1 planning/readiness update on the existing recovery branch.
+- [x] Push commit `9a430b1` and the Phase 1 planning/readiness update on the existing recovery branch.
 - [x] Install the expected browser with `npx playwright install chromium`.
 - [x] Rerun `npm run production:static-release` and save the result in the PR/release evidence. Passed locally on 2026-08-02 in 303.3 seconds on the final implementation tree.
 - [x] Start Docker Desktop, select the Linux engine, confirm `docker info` reaches a Linux server, and rerun `npm run production:runtime-readiness`.
 - [x] Implement isolated fixture execution and make `production:runtime-readiness` pass only after the fixture and isolation/cleanup assertions succeed. Passed locally on 2026-08-02 in 36.1 seconds.
-- [ ] Re-review the draft PR, mark it ready, and merge only after required checks and manual review pass.
+- [x] Re-review the draft PR, mark it ready, and merge only after required checks and manual review pass. Final privacy/scope review and all required checks passed on 2026-08-03.
 - [ ] After merge, start subsequent phases from an updated `main` branch using a new `codex/` branch.
 
 Exit criteria:
