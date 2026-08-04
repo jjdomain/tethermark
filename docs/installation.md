@@ -129,7 +129,7 @@ npm run scan -- runtime-doctor
 npm run scan -- validate-runtime-fixtures
 ```
 
-`runtime-doctor` reports Local Runtime Sandbox backend resolution. `validate-runtime-fixtures` checks whether runtime validation is launchable in the current environment. It does not silently install privileged runtimes.
+`runtime-doctor` reports Local Runtime Sandbox backend resolution. `validate-runtime-fixtures` runs a digest-pinned Alpine fixture with no network, a read-only source mount, bounded writable scratch, non-root execution, dropped capabilities, resource limits, and explicit cleanup verification. It may pull the pinned image when it is not cached, does not silently install privileged runtimes, and writes evidence under `.artifacts/runtime-readiness/`.
 
 For release gates:
 
@@ -138,7 +138,7 @@ npm run production:runtime-readiness
 npm run production:harness-readiness
 ```
 
-`production:runtime-readiness` intentionally fails when no launchable local runtime backend is available.
+`production:runtime-readiness` intentionally fails when no launchable local runtime backend is available or when isolated runtime fixtures do not execute successfully.
 
 ## External Tool Setup
 

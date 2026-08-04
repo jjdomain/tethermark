@@ -207,7 +207,7 @@ npm run production:runtime-readiness
 npm run production:harness-readiness
 ```
 
-`production:runtime-readiness` requires a launchable Local Runtime Sandbox backend. Static audits are still valid when runtime readiness is blocked, but runtime-validated audits are not launchable.
+`production:runtime-readiness` requires both a launchable Local Runtime Sandbox backend and successful execution of an isolated runtime fixture. The Docker fixture uses a digest-pinned image, default-deny networking, a read-only source mount, bounded writable scratch, non-root execution, dropped capabilities, resource limits, and verified cleanup. Evidence is written under `.artifacts/runtime-readiness/`. Static audits are still valid when runtime readiness is blocked; passing this readiness fixture does not by itself mean arbitrary audit targets can execute until the runtime provider path is complete.
 
 ### 3. Run a Local Static Audit
 

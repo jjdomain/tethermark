@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 
 import { buildRuntimeSandboxReadiness, buildRuntimeSetupCommands } from "../../../packages/validation-runner/src/index.js";
+import { executeRuntimeReadinessFixture, type RuntimeFixtureExecutionResult } from "./runtime-fixtures.js";
 
 export interface RuntimeSetupCommand {
   label: string;
@@ -290,25 +291,42 @@ export function runSetupRuntime(args: { dryRun?: boolean; yes?: boolean } = {}):
   console.log("Runtime setup command finished. Start the runtime if required, then run npm run scan -- runtime-doctor.");
 }
 
-export function validateRuntimeFixtures(): { passed: boolean; status: string; selected_backend: string; blockers: string[] } {
+export async function validateRuntimeFixtures(): Promise<{
+  passed: boolean;
+  backend_launchable: boolean;
+  fixture_execution_status: "blocked" | "failed" | "completed";
+  status: string;
+  selected_backend: string;
+  blockers: string[];
+  fixture: RuntimeFixtureExecutionResult | null;
+}> {
   const readiness = buildRuntimeSandboxReadiness();
-  const passed = readiness.resolution.readiness_status !== "blocked";
+  const backendLaunchable = readiness.resolution.readiness_status !== "blocked";
+  const blockers = [...readiness.resolution.blockers];
+  const fixture = backendLaunchable ? await executeRuntimeReadinessFixture(readiness) : null;
+  const fixtureExecutionStatus = !backendLaunchable ? "blocked" : fixture?.passed ? "completed" : "failed";
+  if (backendLaunchable && !fixture?.passed) blockers.push(fixture?.error ?? "Runtime fixture execution failed.");
   console.log("Runtime fixture readiness");
   console.log(`Status: ${readiness.resolution.readiness_status}`);
   console.log(`Selected backend: ${readiness.resolution.selected_backend}`);
-  for (const blocker of readiness.resolution.blockers) console.log(`blocker: ${blocker}`);
+  for (const blocker of blockers) console.log(`blocker: ${blocker}`);
   if (readiness.resolution.readiness_status === "ready_with_warnings") {
     for (const warning of readiness.resolution.warnings) console.log(`warning: ${warning}`);
   }
-  if (!passed) {
+  if (!backendLaunchable) {
     console.log("Runtime fixtures were not launched because Local Runtime Sandbox is not ready.");
+  } else if (!fixture?.passed) {
+    console.log("Runtime backend launch gate passed, but isolated fixture execution failed. Production runtime readiness fails closed.");
   } else {
-    console.log("Runtime fixture launch gate passed. Full runtime fixture execution should run through the API/UI E2E suite.");
+    console.log(`Runtime fixture execution passed. Evidence: ${fixture.evidence_path ?? "stdout only"}`);
   }
   return {
-    passed,
+    passed: fixture?.passed === true,
+    backend_launchable: backendLaunchable,
+    fixture_execution_status: fixtureExecutionStatus,
     status: readiness.resolution.readiness_status,
     selected_backend: readiness.resolution.selected_backend,
-    blockers: readiness.resolution.blockers
+    blockers,
+    fixture
   };
 }

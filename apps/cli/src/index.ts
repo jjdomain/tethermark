@@ -651,7 +651,8 @@ async function main(): Promise<void> {
   }
 
   if (args[0] === "validate-runtime-fixtures") {
-    const result = validateRuntimeFixtures();
+    const result = await validateRuntimeFixtures();
+    console.log(JSON.stringify({ runtime_fixture_validation: result }, null, 2));
     if (!result.passed) process.exitCode = 1;
     return;
   }

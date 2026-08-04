@@ -1,5 +1,22 @@
 ﻿# Changelog
 
+## 2026-08-02
+
+### Added
+
+- Added a canonical 12-phase Community Edition production tracker with current branch, release-gate, static-tool, OAuth-validation, runtime-sandbox, learning, packaging, and launch status.
+- Added the implementation plan for local Admin/System Policies, including versioned SQLite policy records, immutable per-run resolution snapshots, extensive-scan catalog and operational controls, API/UI scope, safe templates, and release tests.
+- Added a Docker/Docker Desktop production-readiness fixture using a digest-pinned image, read-only source/root filesystems, default-deny networking, non-root execution, dropped capabilities, bounded resources and output, live policy inspection, structured evidence, and verified cleanup.
+
+### Changed
+
+- Promoted local policy administration from deferred hosted-only planning to active Community Edition scope and linked `PLANS.md` to the canonical production tracker.
+
+### Fixed
+
+- Updated the static Pi browser E2E for the Audits navigation label and staged the benchmark suite in its isolated work root so the full static production release gate can complete.
+- Changed runtime fixture validation to fail closed when Docker is launchable but no isolated fixture has executed, preventing backend selection from appearing as production runtime validation.
+
 ## 2026-07-20
 
 ### Changed

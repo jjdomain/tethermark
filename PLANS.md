@@ -1,5 +1,12 @@
 # PLANS.md
 
+> The canonical Community Edition production tracker is now
+> [`docs/community-edition-production-plan-phases-1-12.md`](docs/community-edition-production-plan-phases-1-12.md).
+> It reconciles current implementation status into 12 release phases and makes
+> local Admin/System Policies an active CE workstream. This older plan remains
+> useful for detailed historical architecture notes, but status and execution
+> order should be taken from the canonical tracker.
+
 ## Goal
 
 Track the remaining work needed to turn the current TypeScript/Node core plus Python worker scaffold into a practical AI security audit engine for local static audits and isolated deeper AI-security runtime validation.

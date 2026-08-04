@@ -55,6 +55,10 @@ async function stageBuiltinCoreEngineData(workRoot) {
     path.join(repoRoot, "apps", "web-ui", "static"),
     path.join(workRoot, "apps", "web-ui", "static")
   );
+  await copyDirectory(
+    path.join(repoRoot, "benchmarks", "suites"),
+    path.join(workRoot, "benchmarks", "suites")
+  );
 }
 
 function getListeningPort(server) {
@@ -200,7 +204,7 @@ async function main() {
 
     log("opening web UI and selecting the Pi run");
     await page.goto(webUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
-    await clickOrExplain(page, page.getByRole("button", { name: "Runs" }).first(), "Runs navigation", pageMessages);
+    await clickOrExplain(page, page.getByRole("button", { name: "Audits" }).first(), "Audits navigation", pageMessages);
     await clickOrExplain(page, page.getByText(runId).first(), `run ${runId}`, pageMessages);
     await page.locator('main button[aria-label="Hide run queue"]').click();
     assert.equal(await page.locator('main button[aria-label="Show run queue"]').isVisible(), true);

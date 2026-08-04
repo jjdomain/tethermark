@@ -10,6 +10,7 @@ import { createWebUiServer } from "../../../apps/web-ui/src/index.js";
 import { loadBenchmarkSuite, runBenchmarkSuite, selectBenchmarkCases } from "../../../apps/cli/src/benchmark-suite.js";
 import { buildScanRequest } from "../../../apps/cli/src/args.js";
 import { validateFixtures } from "../../../apps/cli/src/fixture-validation.js";
+import { buildDockerRuntimeFixtureCreateArgs, RUNTIME_FIXTURE_IMAGE, validateDockerRuntimeFixtureInspect } from "../../../apps/cli/src/runtime-fixtures.js";
 import { describeArtifactType } from "./artifact-policy.js";
 import { pruneArtifacts } from "./artifact-retention.js";
 import { executeEvidenceProvider, normalizeEvidenceSummaryForTests, resetEvidenceProviderCapabilityCacheForTests } from "./evidence-providers.js";
@@ -3810,6 +3811,64 @@ async function testScorecardAndTrivyNormalizationEmitSymbolLocations(): Promise<
   assert.equal(trivy.locations?.some((item: any) => item.uri === "https://avd.aquasec.com/nvd/cve-2026-0001" && item.label === "CVE-2026-0001"), true);
 }
 
+async function testRuntimeReadinessFixturePolicy(): Promise<void> {
+  const sourceRoot = path.join(os.tmpdir(), "tethermark-runtime-policy-source");
+  const outputRoot = path.join(os.tmpdir(), "tethermark-runtime-policy-output");
+  const args = buildDockerRuntimeFixtureCreateArgs({
+    containerName: "tethermark-runtime-policy-test",
+    sourceRoot,
+    outputRoot
+  });
+  assert.equal(args[0], "create");
+  assert.equal(args.includes("--network") && args.includes("none"), true);
+  assert.equal(args.includes("--read-only"), true);
+  assert.equal(args.includes("--cap-drop") && args.includes("ALL"), true);
+  assert.equal(args.includes("--security-opt") && args.includes("no-new-privileges"), true);
+  assert.equal(args.includes(RUNTIME_FIXTURE_IMAGE), true);
+  assert.equal(args.some((item) => item.startsWith("type=bind") && item.includes("target=/workspace") && item.endsWith(",readonly")), true);
+  assert.equal(args.some((item) => item.startsWith("type=bind") && item.includes("target=/output") && !item.endsWith(",readonly")), true);
+
+  const inspection = {
+    Config: {
+      Image: RUNTIME_FIXTURE_IMAGE,
+      User: "65532:65532",
+      Env: ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "TETHERMARK_RUNTIME_FIXTURE=1"]
+    },
+    HostConfig: {
+      AutoRemove: false,
+      CapDrop: ["ALL"],
+      Init: true,
+      Memory: 128 * 1024 * 1024,
+      NanoCpus: 1_000_000_000,
+      NetworkMode: "none",
+      PidsLimit: 64,
+      Privileged: false,
+      ReadonlyRootfs: true,
+      SecurityOpt: ["no-new-privileges"],
+      Tmpfs: { "/tmp": "rw,noexec,nosuid,nodev,size=16777216" }
+    },
+    Mounts: [
+      { Destination: "/workspace", RW: false, Source: sourceRoot, Type: "bind" },
+      { Destination: "/output", RW: true, Source: outputRoot, Type: "bind" }
+    ]
+  };
+  const assertions = validateDockerRuntimeFixtureInspect(inspection, { sourceRoot, outputRoot });
+  assert.equal(Object.values(assertions).every(Boolean), true, JSON.stringify(assertions));
+  const secretAssertions = validateDockerRuntimeFixtureInspect({
+    ...inspection,
+    Config: { ...inspection.Config, Env: [...inspection.Config.Env, "OPENAI_API_KEY=must-not-pass"] }
+  }, { sourceRoot, outputRoot });
+  assert.equal(secretAssertions.no_secret_environment, false);
+  const writableSourceAssertions = validateDockerRuntimeFixtureInspect({
+    ...inspection,
+    Mounts: [
+      { Destination: "/workspace", RW: true, Source: sourceRoot, Type: "bind" },
+      { Destination: "/output", RW: true, Source: outputRoot, Type: "bind" }
+    ]
+  }, { sourceRoot, outputRoot });
+  assert.equal(writableSourceAssertions.source_mount_readonly, false);
+}
+
 async function testLinuxContainerSandboxBuildsExecutionPlan(): Promise<void> {
   await withTempDir("harness-container-plan-", async (rootDir) => {
     const sourceDir = path.join(rootDir, "source");
@@ -5169,6 +5228,7 @@ async function main(): Promise<void> {
       ["python worker providers report blocked runtime capability when disabled", testPythonWorkerProvidersReportBlockedWhenDisabled],
       ["repo analysis provider emits normalized locations", testRepoAnalysisProviderEmitsNormalizedLocations],
       ["scorecard and trivy normalization emit symbol locations", testScorecardAndTrivyNormalizationEmitSymbolLocations],
+      ["runtime readiness fixture enforces container policy", testRuntimeReadinessFixturePolicy],
       ["linux container sandbox builds bounded execution plan", testLinuxContainerSandboxBuildsExecutionPlan],
       ["linux container sandbox builds python runtime probe plan", testLinuxContainerSandboxBuildsPythonRuntimeProbePlan],
       ["linux container sandbox detects python framework probe defaults", testLinuxContainerSandboxDetectsPythonFrameworkProbeDefaults],

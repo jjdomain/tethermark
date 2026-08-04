@@ -185,4 +185,12 @@ npm run production:runtime-readiness
 npm run production:harness-readiness
 ```
 
-`production:runtime-readiness` fails when no launchable local runtime backend is available.
+`production:runtime-readiness` fails when no launchable local runtime backend is available or when the isolated runtime fixture does not execute successfully. The Docker/Docker Desktop fixture:
+
+- uses a digest-pinned Alpine image and exact argv with host shell execution disabled
+- runs as a non-root user with `--network none`, a read-only root filesystem, all capabilities dropped, and `no-new-privileges`
+- mounts only a generated read-only source directory and generated writable output directory
+- uses a bounded `noexec`, `nosuid`, `nodev` tmpfs plus CPU, memory, PID, time, and output limits
+- verifies source mutation and outbound HTTP fail, inspects the live container policy, persists structured evidence under `.artifacts/runtime-readiness/`, and proves container/temp cleanup
+
+This fixture proves the selected backend can enforce the readiness policy. It does not replace `localRuntimeProvider.execute()` for real audit targets.
