@@ -40,11 +40,11 @@ CE production does **not** require hosted multi-tenancy, enterprise identity, ma
 
 ## Current repository snapshot
 
-Recorded on 2026-08-02 before this planning document was committed:
+Updated on 2026-08-03 after the Phase 1 readiness work was pushed:
 
 - Branch: `codex/community-edition-phase1-recovery`.
-- HEAD: `2dfb9d6 Harden provider and learning production boundaries`.
-- Git state: branch was one commit ahead of `origin/codex/community-edition-phase1-recovery`; the latest hardening commit still needed to be pushed.
+- Phase 1 readiness implementation commit: `4639d14 Complete Phase 1 production readiness gates`.
+- Git state: commits `2dfb9d6` and `4639d14` were pushed to `origin/codex/community-edition-phase1-recovery`, updating draft PR #1.
 - `npm run release:check`: **passed** on 2026-08-02 in 94.4 seconds. Build, tests, export validation, and all three bundled validation fixtures passed.
 - `npm run production:static-release`: **passed** on 2026-08-02 in 303.3 seconds on the final runtime-fixture implementation tree after installing Playwright Chromium and correcting the browser E2E's renamed Audits navigation selector and isolated benchmark-suite staging.
 - Static tool observation during the successful local gate: Scorecard, Semgrep, and Trivy were unavailable in the Pi E2E child processes and were reported as skipped rather than clean passes. Phase 4 must normalize installation and readiness evidence.
@@ -89,7 +89,7 @@ Completed or evidenced:
 Remaining tasks:
 
 - [x] Review `git diff origin/codex/community-edition-phase1-recovery...HEAD` and confirm the pending commit contains no credentials, personal paths, generated artifacts, or unrelated files.
-- [ ] Push commit `2dfb9d6` and this planning update on the existing recovery branch.
+- [x] Push commit `2dfb9d6` and the Phase 1 planning/readiness update on the existing recovery branch.
 - [x] Install the expected browser with `npx playwright install chromium`.
 - [x] Rerun `npm run production:static-release` and save the result in the PR/release evidence. Passed locally on 2026-08-02 in 303.3 seconds on the final implementation tree.
 - [x] Start Docker Desktop, select the Linux engine, confirm `docker info` reaches a Linux server, and rerun `npm run production:runtime-readiness`.
