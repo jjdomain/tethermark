@@ -16,7 +16,7 @@ Tethermark Cloud sandbox providers are Cloud-managed and metered:
 - `hosted_e2b`
 - `hosted_daytona`
 
-Cloud provider code belongs in `D:\ai-security-audit-engine-hosted`, not the Community Edition repository. Community Edition API requests for Cloud provider IDs must return the stable `hosted_only` compatibility code with user-facing Cloud guidance.
+Cloud provider code belongs in the separate Tethermark Cloud repository, not the Community Edition repository. Community Edition API requests for Cloud provider IDs must return the stable `hosted_only` compatibility code with user-facing Cloud guidance.
 
 The Cloud provider IDs are compatibility identifiers, not a claim that all providers are equally ready or interchangeable. The initial hosted rollout uses this order:
 

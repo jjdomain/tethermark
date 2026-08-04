@@ -70,7 +70,7 @@ Not completed:
 
 ## Hosted-Only: Metered Runtime Sandbox Rollout
 
-This work is implemented in `D:\ai-security-audit-engine-hosted`; it is tracked here to keep the Community Edition/Cloud contract and release order aligned.
+This work is implemented in the separate Tethermark Cloud repository; it is tracked here to keep the Community Edition/Cloud contract and release order aligned.
 
 1. Replace configuration-only provider readiness with live probes and a normalized capability contract covering create, target upload, exact command execution, network-policy enforcement, bounded output, artifact collection, status, usage, cancel, terminate, and cleanup verification.
 2. Fail launch when the selected provider cannot enforce any required isolation, network, duration, memory, process, output, or artifact policy.
