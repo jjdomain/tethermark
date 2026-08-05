@@ -40,6 +40,8 @@ export interface LlmProviderDefinition {
   id: string;
   name: string;
   mode: LlmProviderMode;
+  credential_class: "chatgpt_session" | "api_key" | "none";
+  allowed_workloads: Array<"interactive_operator" | "unattended_local" | "external_service">;
   requires_api_key: boolean;
   api_key_field: string | null;
   default_model: string | null;
@@ -64,6 +66,8 @@ const BUILTIN_LLM_PROVIDERS: LlmProviderDefinition[] = [
     id: "mock",
     name: "Mock (Dev/Test)",
     mode: "local_mock",
+    credential_class: "none",
+    allowed_workloads: ["interactive_operator", "unattended_local", "external_service"],
     requires_api_key: false,
     api_key_field: null,
     default_model: "mock-agent-runtime",
@@ -82,6 +86,8 @@ const BUILTIN_LLM_PROVIDERS: LlmProviderDefinition[] = [
     id: "openai",
     name: "OpenAI",
     mode: "live_api",
+    credential_class: "api_key",
+    allowed_workloads: ["interactive_operator", "unattended_local", "external_service"],
     requires_api_key: true,
     api_key_field: "openai_api_key",
     default_model: "gpt-5.4-mini",
@@ -114,13 +120,15 @@ const BUILTIN_LLM_PROVIDERS: LlmProviderDefinition[] = [
   },
   {
     id: "openai_codex",
-    name: "OpenAI Codex Local (OAuth)",
+    name: "OpenAI Codex Local (ChatGPT sign-in)",
     mode: "agent_oauth",
+    credential_class: "chatgpt_session",
+    allowed_workloads: ["interactive_operator"],
     requires_api_key: false,
     api_key_field: null,
     default_model: "gpt-5.1-codex",
     supports_custom_model: true,
-    description: "Local Codex CLI agent backend that uses the operator's own ChatGPT/Codex OAuth session instead of Tethermark-held API keys.",
+    description: "Local Codex CLI agent backend that uses the operator's own ChatGPT session instead of Tethermark-held API keys.",
     notes: [
       "Requires the Codex CLI to be installed and already signed in with ChatGPT on the local machine.",
       "Subject to the user's ChatGPT/Codex plan limits rather than predictable API token billing.",
@@ -169,16 +177,17 @@ const BUILTIN_LLM_PROVIDER_PRESETS: LlmProviderPreset[] = [
   },
   {
     id: "openai_codex_local",
-    label: "OpenAI Codex Local (OAuth)",
+    label: "OpenAI Codex Local (ChatGPT sign-in)",
     provider_id: "openai_codex",
     model: "gpt-5.1-codex",
-    summary: "User-owned local Codex CLI/OAuth preset for manual OSS and runtime validation runs."
+    summary: "User-owned local Codex CLI/ChatGPT-session preset for explicit operator-started OSS runs."
   }
 ];
 
 export function listBuiltinLlmProviders(): LlmProviderDefinition[] {
   return BUILTIN_LLM_PROVIDERS.map((item) => ({
     ...item,
+    allowed_workloads: [...item.allowed_workloads],
     notes: [...item.notes],
     models: item.models.map((model) => ({ ...model })),
     credential_fields: item.credential_fields.map((field) => ({ ...field })),

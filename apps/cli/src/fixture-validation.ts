@@ -75,13 +75,14 @@ export async function validateFixtures(args?: {
         continue;
       }
 
+      const llmProvider = args?.llmProvider ?? "mock";
       const request: AuditRequest = {
         local_path: fixtureDir,
         run_mode: "static",
         audit_package: args?.auditPackage ?? "agentic-static",
         db_mode: dbMode,
-        llm_provider: args?.llmProvider ?? "mock",
-        llm_model: args?.llmModel
+        llm_provider: llmProvider,
+        llm_model: args?.llmModel ?? (llmProvider === "mock" ? "mock-agent-runtime" : undefined)
       };
 
       const result = await engine.run(request);

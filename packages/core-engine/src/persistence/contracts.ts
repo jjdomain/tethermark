@@ -177,6 +177,10 @@ export interface PersistedAgentInvocationRecord {
   agent_name: string;
   provider: string;
   model: string;
+  workload_class: "interactive_operator" | "unattended_local" | "external_service" | null;
+  credential_class: "chatgpt_session" | "api_key" | "enterprise_access_token" | "none" | null;
+  initiation_mode: "operator" | "background" | "service" | null;
+  request_index: number | null;
   status: string;
   attempts: number;
   context_bytes: number | null;
@@ -185,6 +189,7 @@ export interface PersistedAgentInvocationRecord {
   completion_tokens: number | null;
   total_tokens: number | null;
   estimated_cost_usd: number | null;
+  terminal_reason: string | null;
   started_at: string;
   completed_at: string;
   input_artifacts_json: unknown;

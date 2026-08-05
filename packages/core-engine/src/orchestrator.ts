@@ -59,6 +59,7 @@ import { stageApplyPolicyOverrides } from "./stages/stage-apply-policy-overrides
 import { stageResolveConfig } from "./stages/stage-resolve-config.js";
 import { isAutoRunModeRequest, resolveRequestedOrAutoRunMode } from "./planner.js";
 import { AUDIT_LANES, type AuditLaneName } from "./audit-lanes.js";
+import { assertAuditRequestProviderPolicy } from "./provider-policy.js";
 
 type AssessmentCycle = Awaited<ReturnType<typeof stageAssessControls>>;
 
@@ -570,6 +571,7 @@ export class AuditEngine {
   }
 
   async run(request: AuditRequest, options?: { runId?: string; retryOfRunId?: string }): Promise<AuditResult> {
+    request = assertAuditRequestProviderPolicy(request, "interactive_operator");
     const runId = options?.runId ?? createId("run", deriveRunLabel(request));
     this.cancelRequested.delete(runId);
     const existing = this.queue.get(runId);
@@ -597,6 +599,10 @@ export class AuditEngine {
       provider: request.llm_provider,
       model: request.llm_model,
       apiKey: request.llm_api_key,
+      workloadClass: request.llm_workload_class,
+      credentialClass: request.llm_credential_class,
+      maxRequests: request.llm_max_requests,
+      maxTokens: request.llm_max_tokens,
       agentOverrides: runtimeOverrides.agentOverrides
     });
     const trace: TraceRecord = { trace_id: createId("trace"), run_id: runId, steps: [] };
@@ -608,7 +614,10 @@ export class AuditEngine {
       actor: "orchestrator",
       eventType: "run_started",
       status: "running",
-      details: { run_mode: request.run_mode ?? (isAutoRunModeRequest(request) ? "auto" : "static") }
+      details: {
+        run_mode: request.run_mode ?? (isAutoRunModeRequest(request) ? "auto" : "static"),
+        llm_workload_class: request.llm_workload_class
+      }
     });
 
     try {
@@ -693,6 +702,7 @@ export class AuditEngine {
       effectiveRequest,
       resolveAuditPackage({ request: effectiveRequest, analysis: prepared.analysis, initialTargetClass: initialTargetClass as any })
     );
+    agentRuntime.setRunBudget(auditPackage.max_agent_calls, auditPackage.max_total_tokens);
     let resolvedConfiguration = stageResolveConfig({
       runId,
       request: effectiveRequest,
@@ -743,6 +753,7 @@ export class AuditEngine {
       effectiveRequest,
       resolveAuditPackage({ request: effectiveRequest, analysis: prepared.analysis, initialTargetClass: targetProfile.semantic_review.final_class as any })
     );
+    agentRuntime.setRunBudget(auditPackage.max_agent_calls, auditPackage.max_total_tokens);
     resolvedConfiguration = stageResolveConfig({
       runId,
       request: effectiveRequest,
@@ -1333,6 +1344,12 @@ export class AuditEngine {
       await artifactStore.writeJson(runId, "remediation", remediation),
       await artifactStore.writeJson(runId, "publishability", publishability),
       await artifactStore.writeJson(runId, "agent-config-summary", agentRuntime.artifacts.configSummary),
+      await artifactStore.writeJson(runId, "provider-policy", {
+        policy_version: "provider-policy.v1",
+        workload_class: request.llm_workload_class,
+        request_count: agentRuntime.totalRequestCount,
+        decisions: agentRuntime.artifacts.providerPolicy
+      }),
       await artifactStore.writeJson(runId, "agent-invocations", agentRuntime.artifacts.invocations),
       await artifactStore.writeJson(runId, "handoffs", agentRuntime.artifacts.handoffs),
       await artifactStore.writeJson(runId, "trace", trace),
@@ -1443,6 +1460,7 @@ export class AuditEngine {
   }
 
   enqueue(request: AuditRequest, options?: { retryOfRunId?: string }): RunEnvelope {
+    request = assertAuditRequestProviderPolicy(request, "unattended_local");
     const runId = createId("run", deriveRunLabel(request));
     return this.queue.add({
       run_id: runId,

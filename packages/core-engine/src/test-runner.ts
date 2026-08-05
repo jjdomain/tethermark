@@ -43,7 +43,9 @@ import { deriveCanonicalTargetId } from "./target-identity.js";
 import { listBuiltinLlmProviders, listBuiltinLlmProviderPresets } from "./llm-provider-registry.js";
 import { createDefaultAssistantToolRegistry, EvidenceGroundedAssistantProvider } from "./assistant.js";
 import { SqliteAssistantStorage } from "./persistence/assistant.js";
-import { OpenAICodexCliProvider, resolveAgentProviderConfig } from "../../../packages/llm-provider/src/index.js";
+import { OpenAICodexCliProvider, OpenAIModelProvider, resolveAgentProviderConfig } from "../../../packages/llm-provider/src/index.js";
+import { executeWithProviderGovernor, resetProviderGovernorForTests, resolveProviderPolicy } from "../../../packages/llm-provider/src/policy.js";
+import { AgentRuntime } from "../../../packages/agent-runtime/src/index.js";
 import { buildRuntimeExecutionPolicy, resolveLocalSandboxBackend } from "../../../packages/validation-runner/src/index.js";
 
 async function withTempDir<T>(prefix: string, fn: (dir: string) => Promise<T>): Promise<T> {
@@ -313,6 +315,7 @@ async function testBuildScanRequestParsesLlmFlags(): Promise<void> {
   assert.equal(parsed.request.llm_provider, "mock");
   assert.equal(parsed.request.llm_model, "mock-lane-specialist");
   assert.equal(parsed.request.llm_api_key, "test-key");
+  assert.equal(parsed.request.llm_workload_class, "interactive_operator");
   assert.ok(parsed.request.local_path);
 }
 
@@ -339,6 +342,16 @@ async function testOpenAICodexProviderRegistryAndStructuredExec(): Promise<void>
     assert.equal(resolveAgentProviderConfig("planner_agent").provider, "openai_codex");
   });
 
+  await withEnv({
+    AUDIT_LLM_PROVIDER: undefined,
+    AUDIT_LLM_MODEL: undefined,
+    AUDIT_LLM_API_KEY: undefined,
+    LLM_API_KEY: undefined,
+    OPENAI_API_KEY: "configured-but-not-selected"
+  }, async () => {
+    assert.equal(resolveAgentProviderConfig("planner_agent").provider, "openai_codex");
+  });
+
   assert.equal(normalizeLearningSettings({ enabled: true, event_driven_enabled: true }).enabled, false);
   assert.equal(normalizeLearningSettings({ operator_consent_version: 1, enabled: true }).enabled, true);
 
@@ -354,7 +367,8 @@ async function testOpenAICodexProviderRegistryAndStructuredExec(): Promise<void>
       "import fs from 'node:fs';",
       "const outIndex = process.argv.indexOf('--output-last-message');",
       "if (outIndex < 0) process.exit(2);",
-      "fs.writeFileSync(process.argv[outIndex + 1], JSON.stringify({ ok: true, mode: 'oauth' }));"
+      "fs.writeFileSync(process.argv[outIndex + 1], JSON.stringify({ ok: true, mode: 'oauth' }));",
+      "process.stdout.write(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 12, cached_input_tokens: 4, output_tokens: 3 } }) + '\\n');"
     ].join("\n"), "utf8");
     const codex = new OpenAICodexCliProvider("gpt-5.1-codex", process.execPath, "read-only", 10_000, [fakeCli], {
       ...process.env,
@@ -383,7 +397,125 @@ async function testOpenAICodexProviderRegistryAndStructuredExec(): Promise<void>
     } as any);
     assert.deepEqual(result.parsed, { ok: true, mode: "oauth" });
     assert.equal(result.provider, "openai_codex");
+    assert.equal(result.usage?.prompt_tokens, 12);
+    assert.equal(result.usage?.completion_tokens, 3);
+    assert.equal(result.usage?.total_tokens, 15);
   });
+}
+
+async function testProviderWorkloadPolicyAndBudgets(): Promise<void> {
+  const interactive = resolveProviderPolicy({
+    provider: "openai_codex",
+    model: "gpt-5.1-codex",
+    workloadClass: "interactive_operator",
+    credentialClass: "chatgpt_session",
+    maxRequests: 2,
+    maxTokens: 1000
+  });
+  assert.equal(interactive.initiation_mode, "operator");
+  assert.equal(interactive.max_requests, 2);
+
+  assert.throws(() => resolveProviderPolicy({
+    provider: "openai_codex",
+    model: "gpt-5.1-codex",
+    workloadClass: "unattended_local",
+    credentialClass: "chatgpt_session"
+  }), /provider_workload_not_allowed/);
+  assert.throws(() => resolveProviderPolicy({
+    provider: "openai",
+    model: "unreviewed-model",
+    workloadClass: "external_service",
+    credentialClass: "api_key"
+  }), /provider_model_not_allowed/);
+  assert.throws(() => resolveProviderPolicy({
+    provider: "openai",
+    model: "gpt-4.1",
+    workloadClass: "external_service",
+    credentialClass: "api_key",
+    maxRequests: 29
+  }), /provider_budget_exceeds_policy/);
+
+  const engine = createEngine();
+  assert.throws(() => engine.enqueue({
+    local_path: ".",
+    run_mode: "static",
+    llm_provider: "openai_codex",
+    llm_model: "gpt-5.1-codex"
+  }), /provider_workload_not_allowed/);
+  const queued = engine.enqueue({
+    local_path: ".",
+    run_mode: "static",
+    llm_provider: "mock",
+    llm_model: "mock-agent-runtime"
+  });
+  assert.equal(queued.request.llm_workload_class, "unattended_local");
+
+  const runtime = new AgentRuntime({
+    provider: "mock",
+    model: "mock-agent-runtime",
+    workloadClass: "interactive_operator",
+    maxRequests: 1,
+    maxTokens: 1000
+  });
+  await runtime.callAgent({
+    runId: "run_policy_budget",
+    agentName: "planner_agent",
+    context: { controlCatalog: [], request: { run_mode: "static" } },
+    inputArtifacts: [],
+    outputArtifact: "planner-artifact.json"
+  });
+  await assert.rejects(() => runtime.callAgent({
+    runId: "run_policy_budget",
+    agentName: "planner_agent",
+    context: { controlCatalog: [], request: { run_mode: "static" } },
+    inputArtifacts: [],
+    outputArtifact: "planner-artifact-2.json"
+  }), /provider_request_budget_exhausted/);
+  assert.equal(runtime.artifacts.invocations[0]?.credential_class, "none");
+  assert.equal(runtime.artifacts.invocations[0]?.request_index, 1);
+  assert.equal(runtime.artifacts.invocations[0]?.terminal_reason, "completed");
+  assert.equal(runtime.totalRequestCount, 1);
+
+  let providerAttempts = 0;
+  const retryServer = http.createServer((_request, response) => {
+    providerAttempts += 1;
+    response.setHeader("content-type", "application/json");
+    if (providerAttempts === 1) {
+      response.statusCode = 500;
+      response.end(JSON.stringify({ error: "retry" }));
+      return;
+    }
+    response.end(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify({ ok: true }) } }],
+      usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 }
+    }));
+  });
+  await new Promise<void>((resolve) => retryServer.listen(0, "127.0.0.1", resolve));
+  try {
+    let budgetedAttempts = 0;
+    const retryProvider = new OpenAIModelProvider("test-key", "gpt-4.1", `http://127.0.0.1:${getListeningPort(retryServer)}/v1`);
+    const retryResult = await retryProvider.generateStructured<{ ok: boolean }>({
+      agentName: "planner_agent",
+      schemaName: "retry_budget",
+      schema: { type: "object", required: ["ok"], properties: { ok: { type: "boolean" } } },
+      systemPrompt: "Return JSON.",
+      userPrompt: "Return ok.",
+      maxRetries: 2,
+      beforeAttempt: () => { budgetedAttempts += 1; }
+    });
+    assert.equal(retryResult.attempts, 2);
+    assert.equal(providerAttempts, 2);
+    assert.equal(budgetedAttempts, 2, "Each provider retry must consume one request-budget unit");
+  } finally {
+    await new Promise<void>((resolve, reject) => retryServer.close((error) => error ? reject(error) : resolve()));
+  }
+
+  resetProviderGovernorForTests();
+  const breakerDecision = { ...resolveProviderPolicy({ provider: "mock", model: "mock-agent-runtime", workloadClass: "unattended_local" }), circuit_breaker_failure_threshold: 2, circuit_breaker_cooldown_ms: 60_000 };
+  await assert.rejects(() => executeWithProviderGovernor(breakerDecision, async () => { throw new Error("first"); }), /first/);
+  await assert.rejects(() => executeWithProviderGovernor(breakerDecision, async () => { throw new Error("second"); }), /second/);
+  await assert.rejects(() => executeWithProviderGovernor(breakerDecision, async () => "blocked"), /provider_circuit_open/);
+  resetProviderGovernorForTests();
 }
 
 async function testLocalPersistenceUsesConfiguredRoot(): Promise<void> {
@@ -3502,7 +3634,8 @@ async function testValidateFixturesPassesForBundledTargets(): Promise<void> {
     await withEnv({
       HARNESS_LOCAL_DB_ROOT: sharedLocalRoot,
       HARNESS_DISABLE_LOCAL_BINARIES: "1",
-      HARNESS_DISABLE_PYTHON_WORKERS: "1"
+      HARNESS_DISABLE_PYTHON_WORKERS: "1",
+      AUDIT_LLM_MODEL: "gpt-5.1-codex"
     }, async () => {
       const summary = await validateFixtures({
         rootDir: path.resolve(process.cwd(), "fixtures", "validation-targets"),
@@ -5187,6 +5320,7 @@ async function main(): Promise<void> {
   const tests: Array<[string, () => Promise<void>]> = [
     ["buildScanRequest parses llm flags", testBuildScanRequestParsesLlmFlags],
     ["OpenAI Codex OAuth provider registry and structured exec", testOpenAICodexProviderRegistryAndStructuredExec],
+    ["provider workload policy, budgets, and circuit breaker", testProviderWorkloadPolicyAndBudgets],
     ["local persistence uses configured root", testLocalPersistenceUsesConfiguredRoot],
     ["concurrent sqlite writes are merged", testConcurrentSqliteWritesAreMerged],
     ["psql credentials use process environment", testPsqlCredentialsUseEnvironment],

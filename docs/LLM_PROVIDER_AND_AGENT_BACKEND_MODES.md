@@ -41,10 +41,10 @@ Useful patterns for Tethermark:
 - run in read-only mode by default
 - treat usage as plan/rate-limit bound, not token-price predictable
 
-Sources:
+Sources (reviewed 2026-08-03):
 
-- `https://www.mintlify.com/openai/codex/advanced/exec-mode`
-- `https://help.openai.com/en/articles/11369540-codex-in-chatgpt`
+- `https://developers.openai.com/codex/auth`
+- `https://developers.openai.com/codex/cli/reference`
 
 ### Paperclip
 
@@ -94,7 +94,7 @@ Fallback API key environment variables are still supported:
 
 ### `openai_codex`
 
-Local OpenAI Codex CLI backend for user-owned OAuth/subscription-backed runs. This is the Community Edition default for operator-started audits.
+Local OpenAI Codex CLI backend for user-owned ChatGPT subscription sessions. This is the Community Edition default for explicit operator-started audits.
 
 Configuration:
 
@@ -106,7 +106,7 @@ AUDIT_LLM_CODEX_SANDBOX=read-only
 AUDIT_LLM_CODEX_TIMEOUT_MS=600000
 ```
 
-Before running, the operator must install Codex CLI explicitly and sign in through the official Codex/ChatGPT flow. Tethermark does not store OpenAI OAuth tokens for this mode, does not invoke `npx`, and does not download or install Codex during status checks or audits.
+Before running, the operator must install Codex CLI explicitly and sign in through the official Codex/ChatGPT flow. Tethermark does not store or inspect OpenAI authentication tokens for this mode, does not invoke `npx`, and does not download or install Codex during status checks or audits.
 
 The provider invokes:
 
@@ -131,11 +131,11 @@ The OpenAI Codex status endpoint only reads local Codex auth metadata:
 2. The default Codex home, such as `%USERPROFILE%\.codex\auth.json` on Windows or `~/.codex/auth.json` on Unix-like systems.
 The status response must not expose access tokens, refresh tokens, ID tokens, or API keys. It may expose non-secret readiness metadata such as `connected`, `auth_mode`, `credential_source`, expiry, and ChatGPT plan type.
 
-OAuth is restricted to explicit operator-started local work. Page loads, read endpoints, scheduled learning, completed-run hooks, and reviewer-action hooks cannot invoke the OAuth provider. Unattended, bulk, hosted, and leaderboard scanning—including AISecurityBase workers—must use an API-key provider behind service quotas, queue concurrency, and audit logs.
+The `chatgpt_session` credential class is restricted to `interactive_operator` local work. Page loads and read endpoints never invoke a model. Scheduled learning, unattended queue clients, completed-run hooks, hosted workers, and leaderboard scanning must use an API-key provider behind request/token budgets, rate pacing, concurrency limits, exponential backoff, a circuit breaker, and non-secret audit logs. The full enforced matrix is in [Provider Workload Policy](./provider-workload-policy.md); the dated official-source review is in [Provider Policy Decision Log](./provider-policy-decision-log.md).
 
-Governed learning is disabled by default and requires a versioned operator-consent setting. LLM synthesis requires a separate opt-in, source excerpts are excluded by default, and OAuth synthesis is allowed only from the explicit `Run learning now` action. Existing settings written before this safety boundary do not count as consent until the operator reviews and saves them again.
+Governed learning is disabled by default and requires a versioned operator-consent setting. LLM synthesis requires a separate opt-in, source excerpts are excluded by default, and ChatGPT-session synthesis is allowed only from the explicit `Run learning now` action. Existing settings written before this safety boundary do not count as consent until the operator reviews and saves them again.
 
-For first-run machines, `npm run smoke:openai-codex-oauth` isolates `CODEX_HOME` and verifies the disconnected state is clean and actionable. For already-authenticated workstations, `npm run smoke:openai-codex-oauth:real` verifies that the local Codex OAuth session is detected without invoking a live model call.
+For first-run machines, the compatibility command `npm run smoke:openai-codex-oauth` isolates `CODEX_HOME` and verifies the disconnected state is clean and actionable. For already-authenticated workstations, `npm run smoke:openai-codex-oauth:real` verifies that the local Codex ChatGPT session is detected without invoking a live model call.
 
 ## Product Boundary
 
@@ -169,11 +169,11 @@ Use API mode when:
 - needing predictable billing and observability
 - using non-Codex OpenAI models
 
-Use Codex OAuth mode when:
+Use Codex ChatGPT-session mode when:
 
 - running local Community Edition scans as the operator
 - running manual deep/runtime audits
 - using the user's own ChatGPT/Codex allowance
 - avoiding storage of API keys in Tethermark
 
-Do not position OAuth mode as free unlimited scanning. It is subject to provider plan limits and can fail or throttle independently of Tethermark.
+Do not position ChatGPT-session mode as free or unlimited scanning. It is subject to provider plan limits and can fail or throttle independently of Tethermark.

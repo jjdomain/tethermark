@@ -1,5 +1,25 @@
 ﻿# Changelog
 
+## 2026-08-03
+
+### Added
+
+- Added `provider-policy.v1` workload and credential classification for interactive operator, unattended local, and external-service model work.
+- Added fail-closed provider/model allowlists, per-run request and token budgets, concurrency and pacing controls, bounded exponential retry, and provider circuit breaking.
+- Added non-secret provider policy artifacts and persisted invocation fields for workload, credential class, initiation mode, request index, terminal reason, timestamps, and token usage.
+- Added a provider workload matrix and dated decision log based on current official OpenAI authentication, CLI, and service-policy documentation.
+
+### Changed
+
+- Kept local Codex ChatGPT sign-in as the explicit operator default without silently switching providers when an API key is present.
+- Restricted unattended and service workloads to explicit API-key or mock configurations; unsupported combinations now fail before queueing model work.
+- Made `codex exec` emit JSONL usage events so live invocation budgets and local audit records can use measured token counts.
+- Clarified that mock mode is an explicit deterministic development/CI mode rather than the Community Edition operator default.
+
+### Security
+
+- Kept ChatGPT-session credentials out of unattended/background synthesis and stopped non-mock runs whose provider does not expose auditable token usage.
+
 ## 2026-08-02
 
 ### Added

@@ -1159,10 +1159,19 @@ async function runLearningPipelineUnlocked(args: {
       projectId,
       limit: Number.MAX_SAFE_INTEGER
     });
-    const providerConfig = providerConfigFromSettings(args.providers);
-    const resolvedSynthesisProvider = resolveAgentProviderConfig("learning_synthesizer_agent", providerConfig);
     const manualTrigger = baseJob.trigger === "api";
+    const configuredProvider = providerConfigFromSettings(args.providers);
+    const resolvedSynthesisProvider = resolveAgentProviderConfig("learning_synthesizer_agent", {
+      ...configuredProvider,
+      workloadClass: "interactive_operator"
+    });
     const oauthBackgroundBlocked = !manualTrigger && resolvedSynthesisProvider.provider === "openai_codex";
+    const providerConfig: ProviderConfig = {
+      ...configuredProvider,
+      workloadClass: manualTrigger ? "interactive_operator" : "unattended_local",
+      maxRequests: Math.max(1, Math.min(settings.llm_max_calls_per_day, 20)),
+      maxTokens: 80_000
+    };
     const synthesisSettings: LearningSettings = {
       ...settings,
       llm_synthesis_enabled: settings.llm_synthesis_enabled

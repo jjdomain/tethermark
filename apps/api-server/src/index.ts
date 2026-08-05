@@ -1531,7 +1531,10 @@ async function executeAssistantAction(args: {
     const request = payload.request_json as AuditRequest | undefined;
     if (!request || typeof request !== "object") throw new Error("request_required");
     const job = await asyncJobs.createJob({
-      request: applyRequestContextToAuditRequest(request, args.context)
+      request: applyRequestContextToAuditRequest({
+        ...request,
+        llm_workload_class: request.llm_workload_class ?? "interactive_operator"
+      }, args.context)
     });
     return { status: "queued", async_job: job };
   }
@@ -1558,6 +1561,7 @@ async function executeAssistantAction(args: {
     if (!followup.rerun_request_json) throw new Error("runtime_followup_not_launchable");
     const request = applyRequestContextToAuditRequest({
       ...followup.rerun_request_json,
+      llm_workload_class: followup.rerun_request_json.llm_workload_class ?? "interactive_operator",
       requested_by: args.context.actorId,
       hints: {
         ...((followup.rerun_request_json.hints as Record<string, unknown> | null) ?? {}),
@@ -3439,6 +3443,7 @@ export function createApiServer(): http.Server {
       }
       const request = await applySettingsToAuditRequest({
         ...followup.rerun_request_json,
+        llm_workload_class: followup.rerun_request_json.llm_workload_class ?? "interactive_operator",
         requested_by: context.actorId,
         hints: {
           ...((followup.rerun_request_json.hints as Record<string, unknown> | null) ?? {}),
@@ -4733,6 +4738,10 @@ export function createApiServer(): http.Server {
               lane_name: item.lane_name,
               provider: item.provider,
               model: item.model,
+              workload_class: item.workload_class,
+              credential_class: item.credential_class,
+              initiation_mode: item.initiation_mode,
+              request_index: item.request_index,
               attempts: item.attempts,
               input_artifacts: item.input_artifacts_json,
               output_artifact: item.output_artifact,
@@ -4741,7 +4750,8 @@ export function createApiServer(): http.Server {
                 completion: item.completion_tokens,
                 total: item.total_tokens
               },
-              estimated_cost_usd: item.estimated_cost_usd
+              estimated_cost_usd: item.estimated_cost_usd,
+              terminal_reason: item.terminal_reason
             }
           })),
           ...handoffItems.map((item: any, index: number) => ({

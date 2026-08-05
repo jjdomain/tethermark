@@ -11,6 +11,7 @@ import { getPythonWorkerCapability } from "./python-worker.js";
 import { analyzeTarget } from "./repo.js";
 import { buildStaticToolsReadiness } from "./static-tools.js";
 import { checkGitRepoAccess } from "./git-utils.js";
+import { assertAuditRequestProviderPolicy } from "./provider-policy.js";
 
 function emptyAnalysis(rootPath: string): AnalysisSummary {
   return {
@@ -180,6 +181,12 @@ export async function buildPreflightSummary(request: AuditRequest): Promise<Pref
   const blockers: string[] = [];
   const warnings: string[] = [];
 
+  try {
+    request = assertAuditRequestProviderPolicy(request, "interactive_operator");
+  } catch (error) {
+    blockers.push(error instanceof Error ? error.message : String(error));
+  }
+
   if (targetInputs.length !== 1) {
     blockers.push("Exactly one of local_path, repo_url, or endpoint_url must be provided.");
   }
@@ -326,7 +333,7 @@ export async function buildPreflightSummary(request: AuditRequest): Promise<Pref
       run_mode: effectiveRunMode,
       audit_package: request.audit_package ?? recommendedPackage?.id ?? "agentic-static",
       audit_policy_pack: request.audit_policy_pack ?? selectedPolicyPack?.id ?? "default",
-      llm_provider: request.llm_provider ?? "mock",
+      llm_provider: request.llm_provider ?? "openai_codex",
       llm_model: request.llm_model ?? null,
       preflight_strictness: String((request.hints as any)?.preflight?.strictness ?? "standard"),
       runtime_allowed: String((request.hints as any)?.preflight?.runtime_allowed ?? "targeted_only"),

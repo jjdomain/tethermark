@@ -1,6 +1,7 @@
 import type { AsyncJobStatus, AuditRequest, RunEnvelope } from "../contracts.js";
 import type { AuditEngine } from "../orchestrator.js";
 import { deriveRequestScope, normalizeProjectId, normalizeWorkspaceId } from "../request-scope.js";
+import { assertAuditRequestProviderPolicy } from "../provider-policy.js";
 import { createId, nowIso } from "../utils.js";
 import { resolvePersistenceLocation, type PersistenceReadOptions } from "./backend.js";
 import type { PersistedAsyncJobAttemptRecord, PersistedAsyncJobRecord } from "./contracts.js";
@@ -242,15 +243,16 @@ export class PersistedAsyncJobManager {
     startImmediately?: boolean;
     completionWebhookUrl?: string | null;
   }): Promise<PersistedAsyncJobDetails> {
-    const location = resolveLocation({ dbMode: args.request.db_mode });
-    const scope = deriveRequestScope(args.request);
+    const request = assertAuditRequestProviderPolicy(args.request, "unattended_local");
+    const location = resolveLocation({ dbMode: request.db_mode });
+    const scope = deriveRequestScope(request);
     const createdAt = nowIso();
     const jobId = createId("job", "async");
     const runId = createId("run", "async");
     const job: PersistedAsyncJobRecord = {
       job_id: jobId,
       status: "queued",
-      request_json: args.request,
+      request_json: request,
       db_mode: location.mode,
       workspace_id: scope.workspace_id,
       project_id: scope.project_id,

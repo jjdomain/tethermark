@@ -26,7 +26,7 @@ Status legend:
 
 Community Edition is a local or trusted-team, self-hosted AI security audit product. It must provide:
 
-- OpenAI Codex OAuth as the default provider for operator-started audits.
+- OpenAI Codex with local ChatGPT sign-in as the default provider for operator-started audits.
 - Optional API-key providers for other supported LLMs.
 - Mock models only for deterministic unit tests, fixtures, CI, and offline demos; mock results must never be presented as real model validation.
 - SQLite-backed local persistence, durable jobs, review history, policy snapshots, artifacts, and exports.
@@ -40,26 +40,26 @@ CE production does **not** require hosted multi-tenancy, enterprise identity, ma
 
 ## Current repository snapshot
 
-Updated on 2026-08-03 after the Phase 1 readiness work was pushed:
+Updated on 2026-08-03 during Phase 2 provider-policy verification:
 
-- Branch: `codex/community-edition-phase1-recovery`.
-- Phase 1 readiness implementation commit: `7142bb8 Complete Phase 1 production readiness gates`.
-- Git state: commits `9a430b1` and `7142bb8` were pushed to `origin/codex/community-edition-phase1-recovery`, updating PR #1.
+- Branch: `codex/community-edition-phase2-provider-policy`, created from merged `main` at `83f73a4`.
+- Phase 1 was merged through PR #1; Phase 2 is isolated on the new branch.
+- Phase 2 `npm run release:check`: **passed** on 2026-08-03 in 117.2 seconds on the final reviewed tree. Build, the full regression suite, export validation, and all three bundled validation fixtures passed with provider-policy enforcement and retry-attempt accounting enabled.
 - `npm run release:check`: **passed** on 2026-08-02 in 94.4 seconds. Build, tests, export validation, and all three bundled validation fixtures passed.
 - `npm run production:static-release`: **passed** on 2026-08-02 in 303.3 seconds on the final runtime-fixture implementation tree after installing Playwright Chromium and correcting the browser E2E's renamed Audits navigation selector and isolated benchmark-suite staging.
 - Static tool observation during the successful local gate: Scorecard, Semgrep, and Trivy were unavailable in the Pi E2E child processes and were reported as skipped rather than clean passes. Phase 4 must normalize installation and readiness evidence.
 - `npm run production:runtime-readiness`: **passed** on 2026-08-02 in 36.1 seconds with Docker Desktop `29.3.0` on the Linux engine. A digest-pinned Alpine fixture executed with no network, read-only source/root filesystems, bounded writable scratch, non-root execution, dropped capabilities, no-new-privileges, CPU/memory/PID/output limits, exact policy inspection, structured evidence, and verified container/temp cleanup. Independent post-gate checks found no leftover fixture containers or temp roots. `localRuntimeProvider.execute()` remains a blocked placeholder, so real audit-target runtime execution is still Phase 8 work.
-- The current real OAuth smoke verifies signed-in readiness only. It does not yet make and validate a live model inference.
+- The current real Codex sign-in smoke verifies signed-in readiness only. It does not yet make and validate a live model inference.
 - The Local Runtime Sandbox resolver and policy contracts exist, but `localRuntimeProvider.execute()` still returns a blocked placeholder. The Linux container backend has execution-plan scaffolding but is not yet the finished isolated CE execution path.
 - The governed self-learning v1 path exists for CE and is off by default. Candidate generation/promotion is human governed. Hosted products may extend it, but it is not hosted-only.
-- Personal OAuth is currently blocked for unattended/background model synthesis. Any change to that rule requires an explicit, current provider-policy decision and regression coverage; do not silently remove the guard.
+- Local ChatGPT-session credentials are blocked for unattended/background model synthesis. The approved matrix requires API-key or mock credentials for unattended and service work.
 
 ## Phase summary
 
 | Phase | Outcome | Current status | Primary blocker or remaining gate |
 |---|---|---|---|
 | 1 | Recover and stabilize the current branch | **Complete** | None; PR #1 passed final review and required checks |
-| 2 | Lock CE boundaries, provider policy, and safe defaults | **Mostly complete** | Reconcile contradictory docs and decide verified OAuth workload policy |
+| 2 | Lock CE boundaries, provider policy, and safe defaults | **Complete** | None; policy matrix, enforcement, audit fields, and regression coverage are in place |
 | 3 | Separate deterministic CI from real-model release validation | **Partial** | No live inference/E2E model gate yet |
 | 4 | Make static scanners production dependable | **Partial** | Tool install/readiness and real cross-platform evidence |
 | 5 | Calibrate audit quality, evidence integrity, and scoring | **Mostly complete** | Golden-repo calibration and false-positive review |
@@ -95,7 +95,7 @@ Remaining tasks:
 - [x] Start Docker Desktop, select the Linux engine, confirm `docker info` reaches a Linux server, and rerun `npm run production:runtime-readiness`.
 - [x] Implement isolated fixture execution and make `production:runtime-readiness` pass only after the fixture and isolation/cleanup assertions succeed. Passed locally on 2026-08-02 in 36.1 seconds.
 - [x] Re-review the draft PR, mark it ready, and merge only after required checks and manual review pass. Final privacy/scope review and all required checks passed on 2026-08-03.
-- [ ] After merge, start subsequent phases from an updated `main` branch using a new `codex/` branch.
+- [x] After merge, start subsequent phases from an updated `main` branch using a new `codex/` branch. Phase 2 began from merged `main` at `83f73a4` on `codex/community-edition-phase2-provider-policy`.
 
 Exit criteria:
 
@@ -105,7 +105,7 @@ Exit criteria:
 
 ## Phase 2 — Lock CE product boundaries, provider policy, and safe defaults
 
-Status: **Mostly complete**
+Status: **Complete**
 
 Objective: make configuration behavior unambiguous and avoid accidental quota use, unsafe unattended workloads, and misleading tests.
 
@@ -115,16 +115,16 @@ Tasks:
 - [x] Force mock mode in unit tests and CI, clear live credentials from test processes, and disable the learning scheduler during tests.
 - [x] Keep API-key providers optional rather than making them the CE default.
 - [x] Default governed learning and LLM learning synthesis to off.
-- [ ] Remove or rewrite the contradictory README section that says “The default environment is mock-backed.” It should be clearly labeled as an explicit deterministic-development example.
-- [ ] Define provider workload classes in code and docs: `interactive_operator`, `unattended_local`, and `external_service`.
-- [ ] Verify current provider terms and product documentation before changing the existing unattended/background OAuth block. Record the source, date, allowed workload, and credential type in the release decision log.
-- [ ] Add policy-driven provider/model allowlists, per-run budgets, rate limits, concurrency limits, exponential backoff, and a circuit breaker.
-- [ ] Surface exact provider, credential class, initiation mode, model, request count, token usage, timestamps, and terminal reason in local audit logs without storing OAuth tokens or secrets.
-- [ ] Ensure no product copy, prompt, job name, or learning workflow describes output collection as training, imitation, model extraction, or distillation.
+- [x] Remove or rewrite the contradictory README section that says “The default environment is mock-backed.” It is now clearly labeled as an explicit deterministic-development example.
+- [x] Define provider workload classes in code and docs: `interactive_operator`, `unattended_local`, and `external_service`.
+- [x] Verify current provider terms and product documentation before changing the existing unattended/background ChatGPT-session block. Sources, review dates, allowed workloads, and credential types are recorded in `docs/provider-policy-decision-log.md`.
+- [x] Add policy-driven provider/model allowlists, per-run budgets, rate limits, concurrency limits, exponential backoff, and a circuit breaker.
+- [x] Surface exact provider, credential class, initiation mode, model, request count, token usage, timestamps, and terminal reason in local audit logs without storing authentication tokens or secrets.
+- [x] Ensure no product copy, prompt, job name, or learning workflow describes output collection as training, imitation, model extraction, or distillation.
 
 Account-safety note:
 
-The repository cannot prove why an external account was deactivated. The only known signal is the user's report that it was automatically flagged for “distillation.” Plausible risk signals include high-volume repetitive model calls, unattended scanning, repeated structured outputs across many repositories, or learning-related terminology, but these are hypotheses—not a confirmed cause. Prevention work must therefore focus on transparent workload classification, bounded volume, auditable user intent, no model-output training corpus, and prompt/account logs that can support a future appeal. These controls reduce risk but cannot guarantee a provider will not flag an account.
+The repository cannot attribute external provider-enforcement events or guarantee that bounded use will never be flagged. Prevention therefore focuses on transparent workload classification, bounded volume, auditable operator intent, approved output-use boundaries, and non-secret request/account logs that can support incident review.
 
 Exit criteria:
 
@@ -141,9 +141,9 @@ Objective: keep CI deterministic and free while adding deliberate tests that pro
 Tasks:
 
 - [x] Unit and CI suites use mock providers only.
-- [x] Add deterministic OAuth disconnected/readiness smoke coverage.
+- [x] Add deterministic Codex ChatGPT-sign-in disconnected/readiness smoke coverage.
 - [ ] Add `test:integration:llm:live` for one bounded structured-output call using the selected live provider.
-- [ ] Add `e2e:audit:oauth:live` for a small, fixed repository fixture through planner, threat model, specialists, supervisor, remediation, persistence, and export.
+- [ ] Add `e2e:audit:codex:live` for a small, fixed repository fixture through planner, threat model, specialists, supervisor, remediation, persistence, and export.
 - [ ] Validate schema conformance, evidence citations, usage accounting, timeout/backoff behavior, and secret redaction—not exact prose.
 - [ ] Require explicit environment opt-in and a low hard request/token budget. Never run live-model tests in ordinary pull-request CI.
 - [ ] Provide a maintainer workflow or self-hosted runner for manual/nightly live checks after the provider/workload policy in Phase 2 is approved.
@@ -225,7 +225,7 @@ Completed foundation:
 
 Remaining tasks:
 
-- [ ] Run a clean-machine workflow: onboarding, OAuth connection, repository preflight, scan, review, remediation, runtime follow-up, exports, and restart recovery.
+- [ ] Run a clean-machine workflow: onboarding, Codex ChatGPT sign-in, repository preflight, scan, review, remediation, runtime follow-up, exports, and restart recovery.
 - [ ] Verify every UI action has loading, empty, permission, validation, retry, and failure states.
 - [ ] Verify SARIF against GitHub code scanning and document manual upload/remediation-link behavior.
 - [ ] Add export compatibility/version metadata and backward-compatibility tests.
@@ -322,7 +322,7 @@ The present catalog has 25 definitions. Before runtime production, extend it wit
 | Deterministic tools | Required tools and versions are declared; missing required evidence downgrades publishability or blocks according to policy. |
 | Runtime isolation | No host fallback for untrusted code; read-only target, writable artifact scratch, CPU/memory/PID/time limits, teardown verification. |
 | Network | Default deny during runtime; dependency-install egress only when explicit and allowlisted; record all policy phases. |
-| Secrets/data | Fake runtime credentials, environment allowlist, prompt/tool/log redaction, source-retention controls, and no raw OAuth token persistence. |
+| Secrets/data | Fake runtime credentials, environment allowlist, prompt/tool/log redaction, source-retention controls, and no raw authentication-token persistence. |
 | Review/publication | High publishability threshold, human review for high/critical or incomplete evidence, explicit accepted-risk reason and expiry. |
 | Learning | Off by default; explicit consent; review-derived candidates only; no training/distillation corpus; human promotion for policy/severity/evidence changes. |
 | Retention | Configured retention for source snapshots, prompts/responses, artifacts, traces, and exports; deletion is auditable. |
@@ -345,7 +345,7 @@ Tests:
 - [ ] SQLite migration, backup/restore, restart, and concurrent read/write tests.
 - [ ] Golden resolved-policy snapshots for each built-in template and target class.
 - [ ] Extensive-scan E2E proving every applicable control is assessed or explicitly not assessed with a reason.
-- [ ] Provider workload tests proving disallowed background/OAuth or budget combinations fail before model calls.
+- [x] Provider workload tests proving disallowed background/ChatGPT-session or budget combinations fail before model calls. Covered by Phase 2 provider-policy regressions.
 - [ ] Runtime tests proving no unisolated host fallback and no secret/network policy escape.
 
 Exit criteria:
@@ -448,7 +448,7 @@ Tasks:
 - [ ] Provide reproducible installation/update/uninstall paths and a one-command first-run setup/doctor.
 - [ ] Package or securely bootstrap required browser and static/runtime tools with pinned checksums.
 - [ ] Default API/UI binding to localhost; make external binding require explicit auth and warning acknowledgement.
-- [ ] Threat-model API key storage, OAuth/Codex home discovery, logs, artifacts, webhooks, archive extraction, repository cloning, and runtime mounts.
+- [ ] Threat-model API key storage, Codex sign-in/session-cache discovery, logs, artifacts, webhooks, archive extraction, repository cloning, and runtime mounts.
 - [ ] Run dependency, license, secret, Semgrep, Trivy, and Scorecard release checks with triage policy.
 - [ ] Produce an SBOM and signed/checksummed release artifacts; document verification.
 - [ ] Add least-privilege service examples and filesystem permissions for shared trusted-team installs.
@@ -473,7 +473,7 @@ Release-candidate gates:
 - [ ] `npm run release:check` passes on the release commit.
 - [ ] `npm run production:static-release` passes on the release commit.
 - [ ] `npm run production:runtime-readiness` passes and actually launches runtime fixtures.
-- [ ] Real OpenAI Codex OAuth inference and end-to-end audit gates pass under the approved workload policy.
+- [ ] Real OpenAI Codex ChatGPT-session inference and end-to-end audit gates pass under the approved workload policy.
 - [ ] Real static tools run on a real repository; missing evidence behavior is reviewed.
 - [ ] Fresh-install, upgrade, backup/restore, cancellation/recovery, policy migration, and export compatibility pass.
 - [ ] Security review, dependency/license review, SBOM, artifact checksums/signing, docs, and rollback notes are complete.
@@ -495,15 +495,13 @@ A static-only beta may be cut before Phases 8–9 finish only if it is explicitl
 
 ## Recommended execution order from this snapshot
 
-1. Finish Phase 1: install Playwright Chromium, rerun static production, push, review, and merge.
-2. Close Phase 2 provider/workload decisions and contradictory defaults.
-3. Implement Phase 7 System Policies early because it governs the live-model, extensive-scan, runtime, retention, and learning work that follows.
-4. In parallel where safe, close Phase 4 tool setup and Phase 3 bounded real-model tests.
-5. Calibrate Phase 5 and finish the Phase 6 clean-user workflow against the new resolved-policy snapshots.
-6. Implement Phase 8 real sandbox execution, then Phase 9 executable runtime eval packs.
-7. Stress and recovery hardening in Phase 10.
-8. Package and cross-platform security work in Phase 11.
-9. Execute Phase 12 release candidate and beta gates.
+1. Implement Phase 7 System Policies because it governs the live-model, extensive-scan, runtime, retention, and learning work that follows.
+2. Close Phase 3 bounded real-model validation and Phase 4 scanner installation/readiness evidence.
+3. Calibrate Phase 5 and finish the Phase 6 clean-user workflow against the new resolved-policy snapshots.
+4. Implement Phase 8 real sandbox execution, then Phase 9 executable runtime eval packs.
+5. Stress and recovery hardening in Phase 10.
+6. Package and cross-platform security work in Phase 11.
+7. Execute Phase 12 release candidate and beta gates.
 
 ## Immediate next-task checklist
 
@@ -511,15 +509,15 @@ A static-only beta may be cut before Phases 8–9 finish only if it is explicitl
 cd <path-to-ai-security-audit-engine>
 git status --short --branch
 git log -5 --oneline --decorate
-git diff origin/codex/community-edition-phase1-recovery...HEAD
-git diff -- PLANS.md changelog.md docs/community-edition-production-plan-phases-1-12.md scripts/check-static-pi-ui-e2e.mjs
+git diff origin/main...HEAD
+git diff -- PLANS.md changelog.md docs/community-edition-production-plan-phases-1-12.md docs/provider-workload-policy.md docs/provider-policy-decision-log.md
 ```
 
-Re-run the release gates on the final reviewed commit:
+For Phase 2, verify the provider-policy implementation before review:
 
 ```powershell
-npm run production:static-release
-npm run production:runtime-readiness
+npm run release:check
+rg -n -S "training|imitation|model extraction|distillation" apps packages/prompt-registry packages/core-engine/src/persistence/learning.ts
 ```
 
-Do not mark runtime complete merely because `runtime-doctor` selects a backend. Completion requires a fixture to execute inside that backend and all isolation/cleanup assertions to pass.
+The next implementation phase is Phase 7. Do not start Phase 8 merely because runtime readiness selects a backend; Phase 8 completion requires an audit target to execute inside that backend with all isolation and cleanup assertions passing.
