@@ -1,5 +1,18 @@
 ﻿# Changelog
 
+## 2026-08-06
+
+### Added
+
+- Added explicit, bounded live-model integration and fixed-fixture audit E2E commands covering structured output, all required agent stages, persistence, exports, usage accounting, evidence citations, timeouts, and redaction.
+- Added a deterministic fail-closed live-validation harness to the normal release check and a dispatch-only protected GitHub workflow for API-key validation.
+- Added dated redacted evidence summaries and maintainer documentation without retaining raw model output or local source content.
+
+### Changed
+
+- Added a request timeout to the OpenAI provider and made provider-policy budget failures bypass retry wrapping.
+- Kept live-model gates outside ordinary push and pull-request CI; mock remains mandatory there.
+
 ## 2026-08-03
 
 ### Added

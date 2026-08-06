@@ -16,6 +16,9 @@ That command currently covers:
 - regression test suite
 - export golden/schema checks
 - bundled fixture validation
+- deterministic live-validation opt-in, budget, usage, and redaction harness checks
+
+`release:check` never contacts a live model. For a release candidate, separately follow `docs/live-model-validation.md` and retain current passing evidence from both bounded live gates.
 
 For static audit production release candidates, also run:
 
@@ -95,6 +98,7 @@ Before cutting a public release:
 2. Run `npm run exports:refresh` only if the export contract intentionally changed
 3. Re-run `npm run release:check`
 4. For static audit releases, re-run `npm run production:static-release`
-5. Verify `npm run smoke:openai-codex-oauth:real` on a signed-in workstation when Codex OAuth behavior changed
-6. Verify example consumers under `examples/` still work against current export shapes
-7. Tag and publish only after the checklist is green
+5. Run the bounded integration and E2E gates in `docs/live-model-validation.md`; verify both dated summaries are passing, redacted, and from the release candidate commit
+6. Verify `npm run smoke:openai-codex-oauth:real` on a signed-in workstation when Codex ChatGPT-session behavior changed
+7. Verify example consumers under `examples/` still work against current export shapes
+8. Tag and publish only after the checklist is green

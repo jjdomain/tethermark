@@ -200,6 +200,16 @@ For a release-candidate verification pass, run:
 npm run release:check
 ```
 
+Real-model release validation is separate from ordinary CI and requires an explicit quota acknowledgement:
+
+```bash
+npm run test:integration:llm:live
+npm run e2e:audit:live
+npm run e2e:audit:codex:live
+```
+
+Do not run those commands as ordinary tests. See [`docs/live-model-validation.md`](docs/live-model-validation.md) for credential policy, exact opt-in, hard budgets, the manual workflow, and redacted evidence handling.
+
 Runtime-specific release gates:
 
 ```bash
@@ -377,10 +387,11 @@ If you need enforced auth in Community Edition, use `HARNESS_API_AUTH_MODE=api_k
 The maintainer release checklist lives at [`docs/release-checklist.md`](docs/release-checklist.md). The short version is:
 
 1. `npm run release:check`
-2. `npm run api`
-3. `npm run web`
-4. complete one local scan plus one web-UI review/export smoke path
-5. confirm the documented Community Edition limitations still match reality
+2. complete the current bounded live-model gates described in [`docs/live-model-validation.md`](docs/live-model-validation.md)
+3. `npm run api`
+4. `npm run web`
+5. complete one local scan plus one web-UI review/export smoke path
+6. confirm the documented Community Edition limitations still match reality
 
 ## Community Edition Auth Model
 

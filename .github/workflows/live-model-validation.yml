@@ -1,0 +1,81 @@
+name: Live Model Validation
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      validation:
+        description: "Bounded live validation to run"
+        required: true
+        default: "integration"
+        type: choice
+        options:
+          - integration
+          - audit-e2e
+      model:
+        description: "Exact Phase 2 allowlisted OpenAI model"
+        required: true
+        default: "gpt-5.4-mini"
+        type: string
+      confirm_live_usage:
+        description: "Confirm that this run may consume live API quota"
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+jobs:
+  live-validation:
+    if: ${{ inputs.confirm_live_usage == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: live-model-validation
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify fail-closed live harness
+        run: npm run test:live-validation-harness
+
+      - name: Run bounded live validation
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          TETHERMARK_LIVE_MODEL_VALIDATION: I_UNDERSTAND_THIS_USES_A_LIVE_MODEL
+          TETHERMARK_LIVE_LLM_PROVIDER: openai
+          TETHERMARK_LIVE_LLM_MODEL: ${{ inputs.model }}
+          TETHERMARK_LIVE_WORKLOAD_CLASS: external_service
+          TETHERMARK_LIVE_INTEGRATION_MAX_TOKENS: "4096"
+          TETHERMARK_LIVE_E2E_MAX_REQUESTS: "12"
+          TETHERMARK_LIVE_E2E_MAX_TOKENS: "60000"
+          TETHERMARK_LIVE_REQUEST_TIMEOUT_MS: "90000"
+          TETHERMARK_LIVE_E2E_TIMEOUT_MS: "720000"
+          TETHERMARK_LIVE_EVIDENCE_DIR: ${{ runner.temp }}/tethermark-live-evidence
+        run: |
+          if [ "${{ inputs.validation }}" = "integration" ]; then
+            npm run test:integration:llm:live
+          else
+            npm run e2e:audit:live
+          fi
+
+      - name: Upload redacted validation evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: live-model-validation-${{ inputs.validation }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/tethermark-live-evidence/*.json
+          if-no-files-found: warn
+          retention-days: 30

@@ -510,6 +510,35 @@ async function testProviderWorkloadPolicyAndBudgets(): Promise<void> {
     await new Promise<void>((resolve, reject) => retryServer.close((error) => error ? reject(error) : resolve()));
   }
 
+  const timeoutServer = http.createServer((_request, response) => {
+    setTimeout(() => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({ ok: true }) } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }
+      }));
+    }, 200);
+  });
+  await new Promise<void>((resolve) => timeoutServer.listen(0, "127.0.0.1", resolve));
+  try {
+    const timeoutProvider = new OpenAIModelProvider(
+      "test-key",
+      "gpt-4.1",
+      `http://127.0.0.1:${getListeningPort(timeoutServer)}/v1`,
+      25
+    );
+    await assert.rejects(() => timeoutProvider.generateStructured<{ ok: boolean }>({
+      agentName: "planner_agent",
+      schemaName: "timeout_budget",
+      schema: { type: "object", required: ["ok"], properties: { ok: { type: "boolean" } } },
+      systemPrompt: "Return JSON.",
+      userPrompt: "Return ok.",
+      maxRetries: 1
+    }), /OpenAI structured generation failed after 1 attempts/);
+  } finally {
+    await new Promise<void>((resolve, reject) => timeoutServer.close((error) => error ? reject(error) : resolve()));
+  }
+
   resetProviderGovernorForTests();
   const breakerDecision = { ...resolveProviderPolicy({ provider: "mock", model: "mock-agent-runtime", workloadClass: "unattended_local" }), circuit_breaker_failure_threshold: 2, circuit_breaker_cooldown_ms: 60_000 };
   await assert.rejects(() => executeWithProviderGovernor(breakerDecision, async () => { throw new Error("first"); }), /first/);

@@ -48,6 +48,8 @@ npm run release:check
 
 The GitHub Actions CI workflow runs the same verification steps for pushes and pull requests.
 
+Ordinary CI never runs a real model. Changes to provider execution, usage accounting, or live evidence handling should also run `npm run test:live-validation-harness`. Maintainers run the quota-consuming gates only through the explicit process in [`docs/live-model-validation.md`](docs/live-model-validation.md).
+
 `validate-fixtures` uses an isolated temporary persistence root by default, so it should not contend with the normal local embedded database unless you explicitly pass `--persistence-root`.
 
 If your change touches the API surface, also run:

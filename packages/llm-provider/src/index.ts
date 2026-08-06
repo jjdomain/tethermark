@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import {
   computeBackoffDelayMs,
   executeWithProviderGovernor,
+  ProviderPolicyError,
   resolveProviderPolicy,
   type ProviderCredentialClass,
   type ProviderPolicyDecision,
@@ -192,7 +193,8 @@ export class OpenAIModelProvider implements ModelProvider {
   constructor(
     private readonly apiKey: string,
     readonly modelName: string,
-    private readonly baseUrl = readEnv("LLM_BASE_URL") ?? readEnv("OPENAI_BASE_URL") ?? "https://api.openai.com/v1"
+    private readonly baseUrl = readEnv("LLM_BASE_URL") ?? readEnv("OPENAI_BASE_URL") ?? "https://api.openai.com/v1",
+    private readonly timeoutMs = readNumberEnv("AUDIT_LLM_REQUEST_TIMEOUT_MS", 120_000)
   ) {}
 
   async generateStructured<T>(request: StructuredGenerationRequest): Promise<StructuredGenerationResult<T>> {
@@ -204,6 +206,7 @@ export class OpenAIModelProvider implements ModelProvider {
         request.beforeAttempt?.();
         const response = await fetch(`${this.baseUrl}/chat/completions`, {
           method: "POST",
+          signal: AbortSignal.timeout(this.timeoutMs),
           headers: {
             "content-type": "application/json",
             authorization: `Bearer ${this.apiKey}`
@@ -231,6 +234,7 @@ export class OpenAIModelProvider implements ModelProvider {
         };
       } catch (error) {
         lastError = error;
+        if (error instanceof ProviderPolicyError) throw error;
         if ((error as { retryable?: boolean })?.retryable === false || attempt >= maxRetries) break;
         await new Promise((resolve) => setTimeout(resolve, computeBackoffDelayMs(attempt, readNumberEnv("AUDIT_LLM_BACKOFF_BASE_MS", 250))));
       }
@@ -417,6 +421,7 @@ export class OpenAICodexCliProvider implements ModelProvider {
         };
       } catch (error) {
         lastError = error;
+        if (error instanceof ProviderPolicyError) throw error;
         if (attempt < maxRetries) {
           await new Promise((resolve) => setTimeout(resolve, computeBackoffDelayMs(attempt, readNumberEnv("AUDIT_LLM_BACKOFF_BASE_MS", 500))));
         }

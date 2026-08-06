@@ -1,6 +1,6 @@
 # Tethermark Community Edition Production Plan — Phases 1–12
 
-Last updated: 2026-08-03
+Last updated: 2026-08-06
 Purpose: durable implementation and release handoff for a fresh Codex task
 Scope: Tethermark Community Edition (CE) in this repository
 
@@ -40,10 +40,11 @@ CE production does **not** require hosted multi-tenancy, enterprise identity, ma
 
 ## Current repository snapshot
 
-Updated on 2026-08-03 during Phase 2 provider-policy verification:
+Updated on 2026-08-06 during Phase 3 live-validation implementation:
 
-- Branch: `codex/community-edition-phase2-provider-policy`, created from merged `main` at `83f73a4`.
-- Phase 1 was merged through PR #1; Phase 2 is isolated on the new branch.
+- Branch: `codex/community-edition-phase3-live-validation`, created from merged `main` at `44628cc` after Phases 1 and 2 were merged.
+- Phase 3's bounded commands, deterministic harness, manual workflow, and redacted evidence writer are implemented on this branch. Current passing real-provider evidence is still required before Phase 3 can be marked complete.
+- Phase 3 `npm run release:check`: **passed** on 2026-08-06 in 124.5 seconds. Build, regression tests (including provider timeout/backoff), export validation, all three bundled fixtures, and the fail-closed live-validation harness passed without a live model call.
 - Phase 2 `npm run release:check`: **passed** on 2026-08-03 in 117.2 seconds on the final reviewed tree. Build, the full regression suite, export validation, and all three bundled validation fixtures passed with provider-policy enforcement and retry-attempt accounting enabled.
 - `npm run release:check`: **passed** on 2026-08-02 in 94.4 seconds. Build, tests, export validation, and all three bundled validation fixtures passed.
 - `npm run production:static-release`: **passed** on 2026-08-02 in 303.3 seconds on the final runtime-fixture implementation tree after installing Playwright Chromium and correcting the browser E2E's renamed Audits navigation selector and isolated benchmark-suite staging.
@@ -60,7 +61,7 @@ Updated on 2026-08-03 during Phase 2 provider-policy verification:
 |---|---|---|---|
 | 1 | Recover and stabilize the current branch | **Complete** | None; PR #1 passed final review and required checks |
 | 2 | Lock CE boundaries, provider policy, and safe defaults | **Complete** | None; policy matrix, enforcement, audit fields, and regression coverage are in place |
-| 3 | Separate deterministic CI from real-model release validation | **Partial** | No live inference/E2E model gate yet |
+| 3 | Separate deterministic CI from real-model release validation | **Mostly complete** | Run both live gates and retain current passing release-candidate evidence |
 | 4 | Make static scanners production dependable | **Partial** | Tool install/readiness and real cross-platform evidence |
 | 5 | Calibrate audit quality, evidence integrity, and scoring | **Mostly complete** | Golden-repo calibration and false-positive review |
 | 6 | Complete review, remediation, exports, and operator workflows | **Mostly complete** | Manual fresh-user workflow and release evidence |
@@ -134,7 +135,7 @@ Exit criteria:
 
 ## Phase 3 — Separate deterministic CI from real-model validation
 
-Status: **Partial**
+Status: **Mostly complete**
 
 Objective: keep CI deterministic and free while adding deliberate tests that prove real models work.
 
@@ -142,12 +143,13 @@ Tasks:
 
 - [x] Unit and CI suites use mock providers only.
 - [x] Add deterministic Codex ChatGPT-sign-in disconnected/readiness smoke coverage.
-- [ ] Add `test:integration:llm:live` for one bounded structured-output call using the selected live provider.
-- [ ] Add `e2e:audit:codex:live` for a small, fixed repository fixture through planner, threat model, specialists, supervisor, remediation, persistence, and export.
-- [ ] Validate schema conformance, evidence citations, usage accounting, timeout/backoff behavior, and secret redaction—not exact prose.
-- [ ] Require explicit environment opt-in and a low hard request/token budget. Never run live-model tests in ordinary pull-request CI.
-- [ ] Provide a maintainer workflow or self-hosted runner for manual/nightly live checks after the provider/workload policy in Phase 2 is approved.
-- [ ] Preserve a dated, redacted result summary as release evidence.
+- [x] Add `test:integration:llm:live` for one bounded structured-output call using the selected live provider.
+- [x] Add `e2e:audit:codex:live` for a small, fixed repository fixture through planner, threat model, specialists, supervisor, remediation, persistence, and export.
+- [x] Validate schema conformance, evidence citations, usage accounting, timeout/backoff behavior, and secret redaction—not exact prose.
+- [x] Require explicit environment opt-in and a low hard request/token budget. Never run live-model tests in ordinary pull-request CI.
+- [x] Provide a maintainer workflow or self-hosted runner for manual/nightly live checks after the provider/workload policy in Phase 2 is approved.
+- [x] Write a dated, redacted result summary without raw model output or local source content.
+- [ ] Run both live commands against a release-candidate commit and preserve their passing summaries as current release evidence.
 
 Exit criteria:
 
@@ -495,13 +497,14 @@ A static-only beta may be cut before Phases 8–9 finish only if it is explicitl
 
 ## Recommended execution order from this snapshot
 
-1. Implement Phase 7 System Policies because it governs the live-model, extensive-scan, runtime, retention, and learning work that follows.
-2. Close Phase 3 bounded real-model validation and Phase 4 scanner installation/readiness evidence.
-3. Calibrate Phase 5 and finish the Phase 6 clean-user workflow against the new resolved-policy snapshots.
-4. Implement Phase 8 real sandbox execution, then Phase 9 executable runtime eval packs.
-5. Stress and recovery hardening in Phase 10.
-6. Package and cross-platform security work in Phase 11.
-7. Execute Phase 12 release candidate and beta gates.
+1. Close Phase 3 by running both bounded real-model gates and retaining current passing evidence.
+2. Complete Phase 4 scanner installation/readiness and real-tool evidence.
+3. Complete Phase 5 calibration and false-positive review.
+4. Complete the Phase 6 clean-user review/remediation/export workflow evidence.
+5. Implement Phase 7 System Policies and extensive-scan controls.
+6. Implement Phase 8 real sandbox execution, then Phase 9 executable runtime eval packs.
+7. Complete Phase 10 stress/recovery hardening and Phase 11 packaging/cross-platform security.
+8. Execute Phase 12 release candidate and beta gates.
 
 ## Immediate next-task checklist
 
@@ -513,11 +516,11 @@ git diff origin/main...HEAD
 git diff -- PLANS.md changelog.md docs/community-edition-production-plan-phases-1-12.md docs/provider-workload-policy.md docs/provider-policy-decision-log.md
 ```
 
-For Phase 2, verify the provider-policy implementation before review:
+For Phase 3, verify the deterministic implementation before authorizing quota use:
 
 ```powershell
 npm run release:check
-rg -n -S "training|imitation|model extraction|distillation" apps packages/prompt-registry packages/core-engine/src/persistence/learning.ts
+npm run test:live-validation-harness
 ```
 
-The next implementation phase is Phase 7. Do not start Phase 8 merely because runtime readiness selects a backend; Phase 8 completion requires an audit target to execute inside that backend with all isolation and cleanup assertions passing.
+Then follow `docs/live-model-validation.md` for the two explicit live commands. Do not begin Phase 4 until the Phase 3 implementation has passed review and the live evidence requirement is either completed or recorded as the named remaining gate.
