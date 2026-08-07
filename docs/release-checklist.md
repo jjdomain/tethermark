@@ -18,7 +18,7 @@ That command currently covers:
 - bundled fixture validation
 - deterministic live-validation opt-in, budget, usage, and redaction harness checks
 
-`release:check` never contacts a live model. For a release candidate, separately follow `docs/live-model-validation.md` and retain current passing evidence from both bounded live gates.
+`release:check` never contacts a live model. For a release candidate, separately follow `docs/live-model-validation.md` and retain current passing `openai_codex`/`chatgpt_session` evidence from both bounded primary gates. Optional API-key evidence does not replace it.
 
 For static audit production release candidates, also run:
 
@@ -98,7 +98,7 @@ Before cutting a public release:
 2. Run `npm run exports:refresh` only if the export contract intentionally changed
 3. Re-run `npm run release:check`
 4. For static audit releases, re-run `npm run production:static-release`
-5. Run the bounded integration and E2E gates in `docs/live-model-validation.md`; verify both dated summaries are passing, redacted, and from the release candidate commit
+5. Run `npm run phase3:codex:live` as a signed-in local operator; verify both dated summaries are passing, redacted, identify `openai_codex`/`chatgpt_session`, and come from the release candidate commit
 6. Verify `npm run smoke:openai-codex-oauth:real` on a signed-in workstation when Codex ChatGPT-session behavior changed
 7. Verify example consumers under `examples/` still work against current export shapes
 8. Tag and publish only after the checklist is green

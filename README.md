@@ -200,15 +200,13 @@ For a release-candidate verification pass, run:
 npm run release:check
 ```
 
-Real-model release validation is separate from ordinary CI and requires an explicit quota acknowledgement:
+Primary real-model release validation uses the local Codex CLI with ChatGPT subscription sign-in. It is separate from ordinary CI and requires an explicit quota acknowledgement:
 
 ```bash
-npm run test:integration:llm:live
-npm run e2e:audit:live
-npm run e2e:audit:codex:live
+npm run phase3:codex:live
 ```
 
-Do not run those commands as ordinary tests. See [`docs/live-model-validation.md`](docs/live-model-validation.md) for credential policy, exact opt-in, hard budgets, the manual workflow, and redacted evidence handling.
+API-key validation remains available only as an explicit secondary path through `npm run phase3:api:live`; it does not replace the Codex acceptance gate. Do not run either command as an ordinary test. See [`docs/live-model-validation.md`](docs/live-model-validation.md) for credential policy, exact opt-in, hard budgets, and redacted evidence handling.
 
 Runtime-specific release gates:
 
@@ -218,6 +216,8 @@ npm run production:harness-readiness
 ```
 
 `production:runtime-readiness` requires both a launchable Local Runtime Sandbox backend and successful execution of an isolated runtime fixture. The Docker fixture uses a digest-pinned image, default-deny networking, a read-only source mount, bounded writable scratch, non-root execution, dropped capabilities, resource limits, and verified cleanup. Evidence is written under `.artifacts/runtime-readiness/`. Static audits are still valid when runtime readiness is blocked; passing this readiness fixture does not by itself mean arbitrary audit targets can execute until the runtime provider path is complete.
+
+When real operator-started runtime validation is implemented, its model-backed planning, supervision, and remediation also default to local Codex with ChatGPT sign-in. Target commands must still execute only inside the selected isolated sandbox. Phase 8 must separately prove that the Codex model subprocess cannot become a host-execution fallback; the provider's `read-only` setting alone is not runtime-isolation evidence. API-key routing is an explicit secondary override, not the Community Edition default.
 
 ### 3. Run a Local Static Audit
 
@@ -387,7 +387,7 @@ If you need enforced auth in Community Edition, use `HARNESS_API_AUTH_MODE=api_k
 The maintainer release checklist lives at [`docs/release-checklist.md`](docs/release-checklist.md). The short version is:
 
 1. `npm run release:check`
-2. complete the current bounded live-model gates described in [`docs/live-model-validation.md`](docs/live-model-validation.md)
+2. complete the primary bounded Codex/ChatGPT-session gates described in [`docs/live-model-validation.md`](docs/live-model-validation.md)
 3. `npm run api`
 4. `npm run web`
 5. complete one local scan plus one web-UI review/export smoke path

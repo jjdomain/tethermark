@@ -1,4 +1,4 @@
-name: Live Model Validation
+name: Optional API Live Model Validation
 
 permissions:
   contents: read
@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       validation:
-        description: "Bounded live validation to run"
+        description: "Secondary API-key validation to run"
         required: true
         default: "integration"
         type: choice
@@ -20,7 +20,7 @@ on:
         default: "gpt-5.4-mini"
         type: string
       confirm_live_usage:
-        description: "Confirm that this run may consume live API quota"
+        description: "Confirm that this optional run may consume API quota"
         required: true
         default: "false"
         type: choice
@@ -33,7 +33,7 @@ jobs:
     if: ${{ inputs.confirm_live_usage == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    environment: live-model-validation
+    environment: optional-api-live-validation
 
     steps:
       - name: Checkout repository
@@ -66,16 +66,16 @@ jobs:
           TETHERMARK_LIVE_EVIDENCE_DIR: ${{ runner.temp }}/tethermark-live-evidence
         run: |
           if [ "${{ inputs.validation }}" = "integration" ]; then
-            npm run test:integration:llm:live
+            npm run test:integration:llm:api:live
           else
-            npm run e2e:audit:live
+            npm run e2e:audit:api:live
           fi
 
       - name: Upload redacted validation evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: live-model-validation-${{ inputs.validation }}-${{ github.run_id }}
+          name: optional-api-live-validation-${{ inputs.validation }}-${{ github.run_id }}
           path: ${{ runner.temp }}/tethermark-live-evidence/*.json
           if-no-files-found: warn
           retention-days: 30

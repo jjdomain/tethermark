@@ -1,5 +1,13 @@
 ﻿# Changelog
 
+## 2026-08-07
+
+### Changed
+
+- Made the standard Phase 3 live integration and E2E commands use local Codex ChatGPT-session authentication; API-key validation now has explicitly named secondary commands and cannot satisfy the primary release gate.
+- Clarified that future operator-started runtime-validation audits retain the same Codex/ChatGPT-session model default while target execution remains isolated in the runtime backend.
+- Relabeled the hosted manual workflow as optional API interoperability coverage rather than the Community Edition default validation path.
+
 ## 2026-08-06
 
 ### Added

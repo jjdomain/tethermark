@@ -21,6 +21,7 @@ Completed:
 - fail-closed provider workload classes, model allowlists, per-run budgets, pacing, retries, concurrency limits, circuit breaking, and non-secret invocation audit fields
 - agent runtime and prompt registry
 - separate deterministic CI and explicit bounded live-model integration/E2E release harnesses with redacted evidence
+- local Codex ChatGPT-session authentication as the primary live and operator-started runtime-validation model path; API-key validation is explicitly secondary
 - model-backed planner-agent, threat-model-agent, eval-selection-agent, skeptic-agent, and remediation-agent in the main run flow
 - standards-based audit methodology artifact and control catalog
 - planner-driven framework and control selection for static runs

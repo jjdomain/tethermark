@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   LIVE_VALIDATION_OPT_IN,
@@ -17,11 +18,19 @@ import {
   writeRedactedEvidence
 } from "./live-validation-lib.mjs";
 
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
 function assertThrowsCode(fn, code) {
   assert.throws(fn, (error) => error instanceof Error && error.message.includes(code));
 }
 
 async function main() {
+  const packageJson = JSON.parse(await fs.readFile(path.join(repoRoot, "package.json"), "utf8"));
+  assert.match(packageJson.scripts["test:integration:llm:live"], /--codex\b/);
+  assert.match(packageJson.scripts["e2e:audit:live"], /--codex\b/);
+  assert.match(packageJson.scripts["test:integration:llm:api:live"], /--provider openai\b/);
+  assert.match(packageJson.scripts["e2e:audit:api:live"], /--provider openai\b/);
+
   assertThrowsCode(() => requireLiveValidationOptIn({}), "live_validation_opt_in_required");
   requireLiveValidationOptIn({ TETHERMARK_LIVE_MODEL_VALIDATION: LIVE_VALIDATION_OPT_IN });
   assertThrowsCode(() => resolveLiveProvider([], {}), "live_provider_required");
@@ -31,7 +40,7 @@ async function main() {
   assertThrowsCode(() => resolveLiveProvider([], { CI: "true" }, "openai_codex"), "chatgpt_session_ci_blocked");
   assertThrowsCode(() => resolveLiveWorkload("openai_codex", { TETHERMARK_LIVE_WORKLOAD_CLASS: "external_service" }), "chatgpt_session_workload_blocked");
   assert.equal(resolveLiveWorkload("openai", { CI: "true" }), "external_service");
-  assert.equal(resolveSourceRevision(process.cwd(), { GITHUB_SHA: "A".repeat(40) }), "a".repeat(40));
+  assert.equal(resolveSourceRevision(repoRoot, { GITHUB_SHA: "A".repeat(40) }), "a".repeat(40));
   assert.equal(boundedPositiveInt(undefined, 4, 8, "budget"), 4);
   assertThrowsCode(() => boundedPositiveInt("9", 4, 8, "budget"), "no greater than 8");
 

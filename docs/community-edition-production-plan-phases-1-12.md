@@ -1,6 +1,6 @@
 # Tethermark Community Edition Production Plan — Phases 1–12
 
-Last updated: 2026-08-06
+Last updated: 2026-08-07
 Purpose: durable implementation and release handoff for a fresh Codex task
 Scope: Tethermark Community Edition (CE) in this repository
 
@@ -40,11 +40,13 @@ CE production does **not** require hosted multi-tenancy, enterprise identity, ma
 
 ## Current repository snapshot
 
-Updated on 2026-08-06 during Phase 3 live-validation implementation:
+Updated on 2026-08-07 during Phase 3 Codex-default live-validation clarification:
 
 - Branch: `codex/community-edition-phase3-live-validation`, created from merged `main` at `44628cc` after Phases 1 and 2 were merged.
 - Phase 3's bounded commands, deterministic harness, manual workflow, and redacted evidence writer are implemented on this branch. Current passing real-provider evidence is still required before Phase 3 can be marked complete.
+- Phase 3 acceptance now explicitly requires local `openai_codex` with `chatgpt_session`; API-key validation is optional secondary evidence. On 2026-08-07 the packaged Codex executable was discoverable but could not be launched from this shell because access was denied, so a directly executable signed-in CLI remains the live-run prerequisite.
 - Phase 3 `npm run release:check`: **passed** on 2026-08-06 in 124.5 seconds. Build, regression tests (including provider timeout/backoff), export validation, all three bundled fixtures, and the fail-closed live-validation harness passed without a live model call.
+- Phase 3 Codex-default clarification `npm run release:check`: **passed** on 2026-08-07 in 108.6 seconds. The deterministic harness verified the standard live commands resolve to Codex and the explicitly named API commands remain secondary; no live quota was consumed.
 - Phase 2 `npm run release:check`: **passed** on 2026-08-03 in 117.2 seconds on the final reviewed tree. Build, the full regression suite, export validation, and all three bundled validation fixtures passed with provider-policy enforcement and retry-attempt accounting enabled.
 - `npm run release:check`: **passed** on 2026-08-02 in 94.4 seconds. Build, tests, export validation, and all three bundled validation fixtures passed.
 - `npm run production:static-release`: **passed** on 2026-08-02 in 303.3 seconds on the final runtime-fixture implementation tree after installing Playwright Chromium and correcting the browser E2E's renamed Audits navigation selector and isolated benchmark-suite staging.
@@ -143,18 +145,18 @@ Tasks:
 
 - [x] Unit and CI suites use mock providers only.
 - [x] Add deterministic Codex ChatGPT-sign-in disconnected/readiness smoke coverage.
-- [x] Add `test:integration:llm:live` for one bounded structured-output call using the selected live provider.
+- [x] Add `test:integration:llm:live` for one bounded structured-output call using local Codex ChatGPT-session authentication by default; keep API-key coverage explicitly secondary.
 - [x] Add `e2e:audit:codex:live` for a small, fixed repository fixture through planner, threat model, specialists, supervisor, remediation, persistence, and export.
 - [x] Validate schema conformance, evidence citations, usage accounting, timeout/backoff behavior, and secret redaction—not exact prose.
 - [x] Require explicit environment opt-in and a low hard request/token budget. Never run live-model tests in ordinary pull-request CI.
-- [x] Provide a maintainer workflow or self-hosted runner for manual/nightly live checks after the provider/workload policy in Phase 2 is approved.
+- [x] Provide a primary local Codex maintainer command and an explicitly secondary API-key workflow after the provider/workload policy in Phase 2 is approved.
 - [x] Write a dated, redacted result summary without raw model output or local source content.
 - [ ] Run both live commands against a release-candidate commit and preserve their passing summaries as current release evidence.
 
 Exit criteria:
 
 - Deterministic CI remains model-free.
-- A release candidate has current evidence of a real provider inference and a real end-to-end audit.
+- A release candidate has current evidence of a real Codex ChatGPT-session inference and a real end-to-end audit; an API-key-only pass is insufficient.
 - Live tests stop safely at their budget and never retry indefinitely.
 
 ## Phase 4 — Make static scanners production dependable
@@ -368,6 +370,8 @@ Tasks:
 - [x] Provide backend discovery/resolution, readiness statuses, policy construction, and launch gating.
 - [x] Define candidate backends including gVisor, rootless Podman, Podman, Docker, and Docker Desktop.
 - [ ] Implement `localRuntimeProvider.execute()` against the selected backend instead of returning a blocked placeholder.
+- [ ] Keep model-backed planning, supervision, and remediation for operator-started runtime validation on the `openai_codex`/`chatgpt_session` default; require an explicit operator override for API-key routing.
+- [ ] Make the Codex model subprocess inference-only for runtime-validation runs and prove it cannot launch target or host commands; do not treat its `read-only` flag as runtime-isolation evidence.
 - [ ] Implement Docker first for broad CE usability, then rootless Podman and gVisor hardening on Linux.
 - [ ] Never execute untrusted build/runtime commands directly on the host as a fallback.
 - [ ] Use exact argv with shell disabled; validate workdir and mounts against traversal/symlink escape.
@@ -384,6 +388,7 @@ Exit criteria:
 - `production:runtime-readiness` launches and validates fixtures inside a selected backend.
 - Malicious fixtures cannot mutate the source checkout, read host secrets, use unapproved network, or leave processes/resources behind.
 - Unsupported environments fail closed with an actionable static fallback.
+- Release evidence includes a real runtime-validation audit using both the selected isolated backend and the local Codex ChatGPT-session default; API-only model evidence cannot close this gate.
 
 ## Phase 9 — Operationalize runtime evals and Python workers
 
