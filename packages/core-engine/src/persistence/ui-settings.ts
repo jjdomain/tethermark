@@ -103,7 +103,7 @@ function defaultUiSettingsForScope(args: {
     updated_at: updatedAt,
     providers_json: args.scope === "global" ? {
       default_provider: "openai_codex",
-      default_model: "gpt-5.1-codex",
+      default_model: "gpt-5.6-sol",
       assistant_inherit_default: true,
       assistant_provider: "",
       assistant_model: "",

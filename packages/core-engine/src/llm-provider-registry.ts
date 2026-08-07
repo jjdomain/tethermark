@@ -126,7 +126,7 @@ const BUILTIN_LLM_PROVIDERS: LlmProviderDefinition[] = [
     allowed_workloads: ["interactive_operator"],
     requires_api_key: false,
     api_key_field: null,
-    default_model: "gpt-5.1-codex",
+    default_model: "gpt-5.6-sol",
     supports_custom_model: true,
     description: "Local Codex CLI agent backend that uses the operator's own ChatGPT session instead of Tethermark-held API keys.",
     notes: [
@@ -147,8 +147,9 @@ const BUILTIN_LLM_PROVIDERS: LlmProviderDefinition[] = [
       }
     ],
     models: [
-      { id: "gpt-5.1-codex", label: "GPT-5.1 Codex", recommended_for: "subscription-backed local audit harness runs" },
-      { id: "gpt-5.1-codex-mini", label: "GPT-5.1 Codex Mini", recommended_for: "lower-cost or lower-allowance local runs" }
+      { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", recommended_for: "frontier-quality subscription-backed local audit runs" },
+      { id: "gpt-5.6-terra", label: "GPT-5.6 Terra", recommended_for: "balanced subscription-backed local audit runs" },
+      { id: "gpt-5.6-luna", label: "GPT-5.6 Luna", recommended_for: "efficient lower-allowance local audit runs" }
     ]
   }
 ];
@@ -179,7 +180,7 @@ const BUILTIN_LLM_PROVIDER_PRESETS: LlmProviderPreset[] = [
     id: "openai_codex_local",
     label: "OpenAI Codex Local (ChatGPT sign-in)",
     provider_id: "openai_codex",
-    model: "gpt-5.1-codex",
+    model: "gpt-5.6-sol",
     summary: "User-owned local Codex CLI/ChatGPT-session preset for explicit operator-started OSS runs."
   }
 ];

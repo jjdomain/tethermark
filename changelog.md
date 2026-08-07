@@ -8,6 +8,8 @@
 - Clarified that future operator-started runtime-validation audits retain the same Codex/ChatGPT-session model default while target execution remains isolated in the runtime backend.
 - Relabeled the hosted manual workflow as optional API interoperability coverage rather than the Community Edition default validation path.
 - Split cached ChatGPT authentication from Codex CLI execution readiness in the API and Agent Configuration UI, added a bounded `codex login status` probe, and exposed an advanced runnable-command override.
+- Migrated the active ChatGPT-session Codex model catalog from deprecated GPT-5.1 Codex models to GPT-5.6 Sol, Terra, and Luna, with Sol as the default.
+- Recalibrated Phase 3 measured token ceilings for the fixed instruction/tool context emitted by current Codex CLI releases while retaining hard request, timeout, fixture, schema, and redaction bounds.
 
 ### Fixed
 

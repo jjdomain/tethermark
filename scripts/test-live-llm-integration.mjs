@@ -33,7 +33,7 @@ async function main() {
   const workloadClass = resolveLiveWorkload(providerId);
   const model = readOption(args, "--model") ?? process.env.TETHERMARK_LIVE_LLM_MODEL;
   if (!model) throw new Error("live_model_required: pass --model or set TETHERMARK_LIVE_LLM_MODEL explicitly.");
-  const maxTokens = boundedPositiveInt(process.env.TETHERMARK_LIVE_INTEGRATION_MAX_TOKENS, 4_096, 8_000, "TETHERMARK_LIVE_INTEGRATION_MAX_TOKENS");
+  const maxTokens = boundedPositiveInt(process.env.TETHERMARK_LIVE_INTEGRATION_MAX_TOKENS, 20_000, 24_000, "TETHERMARK_LIVE_INTEGRATION_MAX_TOKENS");
   const timeoutMs = boundedPositiveInt(process.env.TETHERMARK_LIVE_REQUEST_TIMEOUT_MS, 90_000, 180_000, "TETHERMARK_LIVE_REQUEST_TIMEOUT_MS");
   const credentialClass = providerId === "openai" ? "api_key" : "chatgpt_session";
   const secrets = collectConfiguredSecrets();

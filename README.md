@@ -481,7 +481,7 @@ The Community Edition default for an explicit operator-started local audit is Op
 
 ```bash
 AUDIT_LLM_PROVIDER=openai_codex
-AUDIT_LLM_MODEL=gpt-5.1-codex
+AUDIT_LLM_MODEL=gpt-5.6-sol
 ```
 
 Mock mode is an explicit deterministic-development and CI configuration. It does not validate real model behavior:
@@ -503,7 +503,7 @@ Local Codex ChatGPT-sign-in mode is available for operator-owned runs after the 
 
 ```bash
 AUDIT_LLM_PROVIDER=openai_codex
-AUDIT_LLM_MODEL=gpt-5.1-codex
+AUDIT_LLM_MODEL=gpt-5.6-sol
 AUDIT_LLM_CODEX_COMMAND=codex
 AUDIT_LLM_CODEX_SANDBOX=read-only
 ```

@@ -278,12 +278,12 @@ async function main() {
 
       log("checking structured Codex provider execution with fake OAuth command");
       const { OpenAICodexCliProvider, resolveAgentProviderConfig } = await import(pathToFileURL(distLlmProvider).href);
-      const resolved = resolveAgentProviderConfig("planner_agent", { provider: "openai_codex", model: "gpt-5.1-codex" });
+      const resolved = resolveAgentProviderConfig("planner_agent", { provider: "openai_codex", model: "gpt-5.6-sol" });
       assert.equal(resolved.provider, "openai_codex");
       assert.equal(resolved.apiKeySource, "oauth-local");
       assert.equal(resolved.apiKey, undefined);
       const fakeExec = await createFakeCodexExec(workRoot);
-      const provider = new OpenAICodexCliProvider("gpt-5.1-codex", process.execPath, "read-only", 10_000, [fakeExec]);
+      const provider = new OpenAICodexCliProvider("gpt-5.6-sol", process.execPath, "read-only", 10_000, [fakeExec]);
       const result = await provider.generateStructured({
         agentName: "planner_agent",
         schemaName: "codex_oauth_smoke",

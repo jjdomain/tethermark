@@ -325,7 +325,7 @@ async function testOpenAICodexProviderRegistryAndStructuredExec(): Promise<void>
   assert.equal(provider?.requires_api_key, false);
   assert.equal(listBuiltinLlmProviderPresets().find((item) => item.id === "openai_codex_local")?.provider_id, "openai_codex");
 
-  const resolved = resolveAgentProviderConfig("planner_agent", { provider: "openai_codex", model: "gpt-5.1-codex" });
+  const resolved = resolveAgentProviderConfig("planner_agent", { provider: "openai_codex", model: "gpt-5.6-sol" });
   assert.equal(resolved.provider, "openai_codex");
   assert.equal(resolved.apiKeySource, "oauth-local");
 
@@ -370,7 +370,7 @@ async function testOpenAICodexProviderRegistryAndStructuredExec(): Promise<void>
       "fs.writeFileSync(process.argv[outIndex + 1], JSON.stringify({ ok: true, mode: 'oauth' }));",
       "process.stdout.write(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 12, cached_input_tokens: 4, output_tokens: 3 } }) + '\\n');"
     ].join("\n"), "utf8");
-    const codex = new OpenAICodexCliProvider("gpt-5.1-codex", process.execPath, "read-only", 10_000, [fakeCli], {
+    const codex = new OpenAICodexCliProvider("gpt-5.6-sol", process.execPath, "read-only", 10_000, [fakeCli], {
       ...process.env,
       APPDATA: fakeAppData,
       CODEX_HOME: path.join(fakeHome, ".codex"),
@@ -406,7 +406,7 @@ async function testOpenAICodexProviderRegistryAndStructuredExec(): Promise<void>
 async function testProviderWorkloadPolicyAndBudgets(): Promise<void> {
   const interactive = resolveProviderPolicy({
     provider: "openai_codex",
-    model: "gpt-5.1-codex",
+    model: "gpt-5.6-sol",
     workloadClass: "interactive_operator",
     credentialClass: "chatgpt_session",
     maxRequests: 2,
@@ -417,7 +417,7 @@ async function testProviderWorkloadPolicyAndBudgets(): Promise<void> {
 
   assert.throws(() => resolveProviderPolicy({
     provider: "openai_codex",
-    model: "gpt-5.1-codex",
+    model: "gpt-5.6-sol",
     workloadClass: "unattended_local",
     credentialClass: "chatgpt_session"
   }), /provider_workload_not_allowed/);
@@ -440,7 +440,7 @@ async function testProviderWorkloadPolicyAndBudgets(): Promise<void> {
     local_path: ".",
     run_mode: "static",
     llm_provider: "openai_codex",
-    llm_model: "gpt-5.1-codex"
+    llm_model: "gpt-5.6-sol"
   }), /provider_workload_not_allowed/);
   const queued = engine.enqueue({
     local_path: ".",
@@ -3664,7 +3664,7 @@ async function testValidateFixturesPassesForBundledTargets(): Promise<void> {
       HARNESS_LOCAL_DB_ROOT: sharedLocalRoot,
       HARNESS_DISABLE_LOCAL_BINARIES: "1",
       HARNESS_DISABLE_PYTHON_WORKERS: "1",
-      AUDIT_LLM_MODEL: "gpt-5.1-codex"
+      AUDIT_LLM_MODEL: "gpt-5.6-sol"
     }, async () => {
       const summary = await validateFixtures({
         rootDir: path.resolve(process.cwd(), "fixtures", "validation-targets"),

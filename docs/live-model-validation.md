@@ -7,9 +7,9 @@ Phase 3 keeps ordinary CI deterministic while providing explicit, bounded releas
 | Gate | Scope | Hard default ceiling | Credential path |
 |---|---|---:|---|
 | `phase3:codex:live` | Runs both primary Phase 3 gates in sequence | Combined ceilings below | Local Codex ChatGPT session |
-| `test:integration:llm:live` | One structured-output call; schema, usage, timeout, and redaction assertions | 1 request / 4,096 tokens | Local Codex ChatGPT session |
-| `e2e:audit:live` | Fixed local risky fixture through planner, threat model, eval selection, one lane specialist, supervisor, remediation, persistence, and exports | 12 requests / 60,000 tokens | Local Codex ChatGPT session |
-| `phase3:api:live` | Optional API-key integration and E2E checks | Same ceilings | Explicit OpenAI API key |
+| `test:integration:llm:live` | One structured-output call; schema, usage, timeout, and redaction assertions | 1 request / 20,000 measured total tokens | Local Codex ChatGPT session |
+| `e2e:audit:live` | Fixed local risky fixture through planner, threat model, eval selection, one lane specialist, supervisor, remediation, persistence, and exports | 12 requests / 180,000 measured total tokens | Local Codex ChatGPT session |
+| `phase3:api:live` | Optional API-key integration and E2E checks | Explicit workflow overrides: 4,096 / 60,000 tokens | Explicit OpenAI API key |
 
 The standard live command names deliberately invoke `openai_codex`; the presence of `OPENAI_API_KEY` does not change them. The explicit API commands are `test:integration:llm:api:live` and `e2e:audit:api:live`. `e2e:audit:codex:live` remains as a descriptive alias for the primary E2E.
 
@@ -29,7 +29,7 @@ Then run the primary Phase 3 gate from the repository root:
 ```powershell
 $env:TETHERMARK_LIVE_MODEL_VALIDATION = "I_UNDERSTAND_THIS_USES_A_LIVE_MODEL"
 $env:TETHERMARK_LIVE_LLM_PROVIDER = "openai_codex"
-$env:TETHERMARK_LIVE_LLM_MODEL = "gpt-5.1-codex"
+$env:TETHERMARK_LIVE_LLM_MODEL = "gpt-5.6-sol"
 $env:TETHERMARK_LIVE_WORKLOAD_CLASS = "interactive_operator"
 npm run phase3:codex:live
 Remove-Item Env:TETHERMARK_LIVE_MODEL_VALIDATION
@@ -42,9 +42,9 @@ Tethermark permits ChatGPT-session credentials only for an explicit local operat
 A maintainer may lower these budgets but cannot raise them above the script ceilings:
 
 ```powershell
-$env:TETHERMARK_LIVE_INTEGRATION_MAX_TOKENS = "4096"
+$env:TETHERMARK_LIVE_INTEGRATION_MAX_TOKENS = "20000"
 $env:TETHERMARK_LIVE_E2E_MAX_REQUESTS = "12"
-$env:TETHERMARK_LIVE_E2E_MAX_TOKENS = "60000"
+$env:TETHERMARK_LIVE_E2E_MAX_TOKENS = "180000"
 $env:TETHERMARK_LIVE_REQUEST_TIMEOUT_MS = "90000"
 $env:TETHERMARK_LIVE_E2E_TIMEOUT_MS = "720000"
 ```
@@ -62,6 +62,8 @@ Remove-Item Env:TETHERMARK_LIVE_MODEL_VALIDATION
 ```
 
 The dispatch-only `Optional API Live Model Validation` GitHub workflow provides the same secondary coverage for a protected `optional-api-live-validation` environment. It requires `OPENAI_API_KEY`, explicit approval, and a separate quota confirmation. It does not satisfy the Codex/ChatGPT-session release requirement.
+
+The Codex ceilings include the CLI's measured fixed instruction and tool context in addition to the harness prompt and response. They were calibrated against Codex CLI 0.147.0 after the supported ChatGPT-session model catalog moved to GPT-5.6; one minimal structured call measured 14,810 total tokens. The integration ceiling remains one request, and the E2E remains limited to the fixed fixture and named agent stages. Script hard maxima are 24,000 and 240,000 tokens respectively. OpenAI's current [model guidance](https://developers.openai.com/api/docs/guides/latest-model) identifies GPT-5.6 Sol as the flagship starting point, with Terra and Luna providing balanced and efficient roles.
 
 ## Runtime-validation provider boundary
 

@@ -355,7 +355,7 @@ export class OpenAICodexCliProvider implements ModelProvider {
   private readonly resolvedPrefixArgs: string[];
 
   constructor(
-    readonly modelName = readEnv("AUDIT_LLM_CODEX_MODEL") ?? readEnv("AUDIT_LLM_MODEL") ?? "gpt-5.1-codex",
+    readonly modelName = readEnv("AUDIT_LLM_CODEX_MODEL") ?? readEnv("AUDIT_LLM_MODEL") ?? "gpt-5.6-sol",
     private readonly command = readEnv("AUDIT_LLM_CODEX_COMMAND") ?? readEnv("CODEX_COMMAND") ?? "codex",
     private readonly sandbox = readEnv("AUDIT_LLM_CODEX_SANDBOX") ?? "read-only",
     private readonly timeoutMs = readNumberEnv("AUDIT_LLM_CODEX_TIMEOUT_MS", 600_000),
@@ -646,7 +646,7 @@ export function resolveAgentProviderConfig(agentName: string, baseConfig: Provid
     ?? baseConfig.model
     ?? envModel
     ?? readEnv("AUDIT_LLM_MODEL")
-    ?? (provider === "openai" ? "gpt-5.4-mini" : provider === "openai_codex" ? "gpt-5.1-codex" : "mock-agent-runtime");
+    ?? (provider === "openai" ? "gpt-5.4-mini" : provider === "openai_codex" ? "gpt-5.6-sol" : "mock-agent-runtime");
   const credentialClass = baseConfig.credentialClass ?? (provider === "openai" ? "api_key" : provider === "openai_codex" ? "chatgpt_session" : "none");
   const workloadClass = baseConfig.workloadClass ?? "interactive_operator";
   const policyDecision = resolveProviderPolicy({
