@@ -11,6 +11,7 @@
 - Migrated the active ChatGPT-session Codex model catalog from deprecated GPT-5.1 Codex models to GPT-5.6 Sol, Terra, and Luna, with Sol as the default.
 - Recalibrated Phase 3 measured token ceilings for the fixed instruction/tool context emitted by current Codex CLI releases while retaining hard request, timeout, fixture, schema, and redaction bounds.
 - Raised the fixed-fixture E2E per-stage timeout to its existing 180-second hard maximum after current GPT-5.6 Sol supervisor validation exceeded the former 90-second default.
+- Moved the multi-minute live E2E onto the persisted asynchronous run API and recalibrated its six-stage measured-token ceiling without weakening request, duration, fixture, or execution bounds.
 
 ### Fixed
 

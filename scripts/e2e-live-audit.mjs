@@ -56,6 +56,28 @@ async function closeServer(server) {
   await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 }
 
+async function waitForAsyncRun(api, jobId, timeoutMs) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const payload = await api("GET", `/runs/async/${encodeURIComponent(jobId)}`);
+    const status = payload?.job?.status;
+    const attempts = Array.isArray(payload?.attempts) ? payload.attempts : [];
+    const latestAttempt = attempts.at(-1) ?? null;
+    const currentRunId = payload?.job?.current_run_id;
+    const latestAttemptNumber = payload?.job?.latest_attempt_number;
+    const latestAttemptMatchesJob =
+      latestAttempt &&
+      (currentRunId == null || latestAttempt.run_id === currentRunId) &&
+      (latestAttemptNumber == null || latestAttempt.attempt_number === latestAttemptNumber);
+    const latestAttemptIsTerminal =
+      latestAttemptMatchesJob &&
+      ["succeeded", "failed", "canceled"].includes(latestAttempt.status);
+    if (["succeeded", "failed", "canceled"].includes(status) && latestAttemptIsTerminal) return payload;
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+  throw new Error(`Timed out waiting for async job ${jobId}`);
+}
+
 async function main() {
   requireLiveValidationOptIn();
   const forcedProvider = args.includes("--codex") ? "openai_codex" : undefined;
@@ -65,7 +87,7 @@ async function main() {
   if (!model) throw new Error("live_model_required: pass --model or set TETHERMARK_LIVE_LLM_MODEL explicitly.");
 
   const maxRequests = boundedPositiveInt(process.env.TETHERMARK_LIVE_E2E_MAX_REQUESTS, 12, 12, "TETHERMARK_LIVE_E2E_MAX_REQUESTS");
-  const maxTokens = boundedPositiveInt(process.env.TETHERMARK_LIVE_E2E_MAX_TOKENS, 180_000, 240_000, "TETHERMARK_LIVE_E2E_MAX_TOKENS");
+  const maxTokens = boundedPositiveInt(process.env.TETHERMARK_LIVE_E2E_MAX_TOKENS, 260_000, 300_000, "TETHERMARK_LIVE_E2E_MAX_TOKENS");
   const requestTimeoutMs = boundedPositiveInt(process.env.TETHERMARK_LIVE_REQUEST_TIMEOUT_MS, 180_000, 180_000, "TETHERMARK_LIVE_REQUEST_TIMEOUT_MS");
   const runTimeoutMs = boundedPositiveInt(process.env.TETHERMARK_LIVE_E2E_TIMEOUT_MS, 720_000, 900_000, "TETHERMARK_LIVE_E2E_TIMEOUT_MS");
   const credentialClass = providerId === "openai" ? "api_key" : "chatgpt_session";
@@ -144,32 +166,69 @@ async function main() {
     }
 
     log(`running bounded ${providerId}/${model} audit against the fixed local fixture`);
-    const result = await api("POST", "/runs", {
-      local_path: targetFixture,
-      output_dir: path.join(workRoot, "runs"),
-      run_mode: "static",
-      audit_package: "deep-static",
-      db_mode: "local",
-      llm_provider: providerId,
-      llm_model: model,
-      llm_workload_class: workloadClass,
-      llm_credential_class: credentialClass,
-      llm_max_requests: maxRequests,
-      llm_max_tokens: maxTokens,
-      requested_by: "phase3-live-validator",
-      hints: {
-        requested_run_mode_selection: "static",
-        audit_package_overrides: {
-          enabled_lanes: ["agentic_controls"],
-          max_agent_calls: maxRequests,
-          max_total_tokens: maxTokens,
-          max_rerun_rounds: 1
-        },
-        preflight: { strictness: "standard", runtime_allowed: "never", static_tool_gate_policy: "warn" },
-        external_audit_tools: { included_tool_ids: [] },
-        review: { require_human_review_for_severity: "medium", default_visibility: "internal" }
+    const queued = await api("POST", "/runs/async", {
+      start_immediately: true,
+      request: {
+        local_path: targetFixture,
+        output_dir: path.join(workRoot, "runs"),
+        run_mode: "static",
+        audit_package: "deep-static",
+        db_mode: "local",
+        llm_provider: providerId,
+        llm_model: model,
+        llm_workload_class: workloadClass,
+        llm_credential_class: credentialClass,
+        llm_max_requests: maxRequests,
+        llm_max_tokens: maxTokens,
+        requested_by: "phase3-live-validator",
+        hints: {
+          requested_run_mode_selection: "static",
+          audit_package_overrides: {
+            enabled_lanes: ["agentic_controls"],
+            max_agent_calls: maxRequests,
+            max_total_tokens: maxTokens,
+            max_rerun_rounds: 1
+          },
+          preflight: { strictness: "standard", runtime_allowed: "never", static_tool_gate_policy: "warn" },
+          external_audit_tools: { included_tool_ids: [] },
+          review: { require_human_review_for_severity: "medium", default_visibility: "internal" }
+        }
       }
-    }, runTimeoutMs);
+    });
+    assert.ok(queued?.job?.job_id, "Async run did not return a job id.");
+    const completed = await waitForAsyncRun(api, queued.job.job_id, runTimeoutMs);
+    const latestAttempt = completed.attempts.at(-1);
+    if (completed.job.status !== "succeeded" || latestAttempt?.status !== "succeeded") {
+      throw new Error(`Async audit ${completed.job.status}: ${latestAttempt?.error ?? completed.job.error ?? "unknown_failure"}`);
+    }
+    assert.ok(latestAttempt.run_id, "Completed async run did not return a run id.");
+
+    const runId = encodeURIComponent(latestAttempt.run_id);
+    const [persistedRun, persistedInvocations, findingsPayload, controlsPayload, evidencePayload, artifactsPayload, sandboxPayload, persistencePayload, markdown, sarif, executive] = await Promise.all([
+      api("GET", `/runs/${runId}`),
+      api("GET", `/runs/${runId}/agent-invocations`),
+      api("GET", `/runs/${runId}/findings`),
+      api("GET", `/runs/${runId}/control-results`),
+      api("GET", `/runs/${runId}/evidence-records`),
+      api("GET", `/runs/${runId}/artifact-index`),
+      api("GET", `/runs/${runId}/sandbox-execution`),
+      api("GET", `/runs/${runId}/persistence`),
+      api("GET", `/runs/${runId}/report-markdown`),
+      api("GET", `/runs/${runId}/report-sarif`),
+      api("GET", `/runs/${runId}/report-executive?format=json`)
+    ]);
+    const result = {
+      run_id: latestAttempt.run_id,
+      status: persistedRun.run?.status,
+      audit_package: persistedRun.run?.audit_package,
+      agent_invocations: persistedInvocations.agent_invocations,
+      findings: findingsPayload.findings,
+      control_results: controlsPayload.control_results,
+      evidence_records: evidencePayload.evidence_records,
+      artifacts: artifactsPayload.artifact_index,
+      sandbox: sandboxPayload.sandbox_execution,
+      persistence: persistencePayload.persistence
+    };
 
     assert.equal(result.status, "succeeded");
     assert.equal(result.audit_package, "deep-static");
@@ -180,23 +239,15 @@ async function main() {
     assert.ok(Array.isArray(result.control_results) && result.control_results.length > 0, "Run did not produce control results.");
     assert.ok(Array.isArray(result.evidence_records) && result.evidence_records.length > 0, "Run did not produce evidence records.");
     assert.ok(Array.isArray(result.findings) && result.findings.length > 0, "Fixed risky fixture did not produce findings.");
-    assert.ok(result.findings.every((finding) => Array.isArray(finding.evidence) && finding.evidence.length > 0), "At least one finding lacked evidence citations.");
+    assert.ok(result.findings.every((finding) => Array.isArray(finding.evidence_json) && finding.evidence_json.length > 0), "At least one finding lacked evidence citations.");
 
     const expectedAgents = ["planner_agent", "threat_model_agent", "eval_selection_agent", "lane_specialist_agent", "audit_supervisor_agent", "remediation_agent"];
     const invokedAgents = new Set(result.agent_invocations.map((item) => item.agent_name));
     for (const agentName of expectedAgents) assert.ok(invokedAgents.has(agentName), `Missing live ${agentName} invocation.`);
     const usage = validateInvocationUsage(result.agent_invocations, { maxRequests, maxTokens, maxRetries: 1 });
-    assert.ok(result.agent_invocations.every((item) => item.model_provider === providerId && item.model_name === model));
+    assert.ok(result.agent_invocations.every((item) => item.provider === providerId && item.model === model));
     assert.ok(result.agent_invocations.every((item) => item.workload_class === workloadClass && item.credential_class === credentialClass));
 
-    const runId = encodeURIComponent(result.run_id);
-    const [persistedRun, persistedInvocations, markdown, sarif, executive] = await Promise.all([
-      api("GET", `/runs/${runId}`),
-      api("GET", `/runs/${runId}/agent-invocations`),
-      api("GET", `/runs/${runId}/report-markdown`),
-      api("GET", `/runs/${runId}/report-sarif`),
-      api("GET", `/runs/${runId}/report-executive?format=json`)
-    ]);
     assert.equal(persistedRun.run?.status, "succeeded");
     assert.equal(persistedInvocations.agent_invocations?.length, result.agent_invocations.length);
     assert.ok(typeof markdown.report_markdown === "string" && markdown.report_markdown.length > 0);
@@ -229,7 +280,7 @@ async function main() {
       run_timeout_ms: runTimeoutMs,
       agent_names: [...invokedAgents].sort(),
       finding_count: result.findings.length,
-      cited_finding_count: result.findings.filter((finding) => finding.evidence?.length).length,
+      cited_finding_count: result.findings.filter((finding) => finding.evidence_json?.length).length,
       control_result_count: result.control_results.length,
       evidence_record_count: result.evidence_records.length,
       artifact_count: result.artifacts.length,
