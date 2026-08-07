@@ -211,7 +211,7 @@ async function main() {
       api("GET", `/runs/${runId}/control-results`),
       api("GET", `/runs/${runId}/evidence-records`),
       api("GET", `/runs/${runId}/artifact-index`),
-      api("GET", `/runs/${runId}/sandbox-execution`),
+      api("GET", `/artifacts/runs/${runId}/sandbox`),
       api("GET", `/runs/${runId}/persistence`),
       api("GET", `/runs/${runId}/report-markdown`),
       api("GET", `/runs/${runId}/report-sarif`),
@@ -226,7 +226,7 @@ async function main() {
       control_results: controlsPayload.control_results,
       evidence_records: evidencePayload.evidence_records,
       artifacts: artifactsPayload.artifact_index,
-      sandbox: sandboxPayload.sandbox_execution,
+      sandbox: sandboxPayload.artifact?.payload,
       persistence: persistencePayload.persistence
     };
 
