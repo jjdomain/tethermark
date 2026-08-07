@@ -243,7 +243,7 @@ async function main() {
         markdown_export: true,
         sarif_export: true,
         executive_export: true,
-        configured_secret_values_absent: true,
+        configured_credentials_absent: true,
         static_target_execution_blocked: true
       },
       raw_model_output_retained: false,

@@ -92,6 +92,8 @@ async function main() {
     assert.equal(persisted.includes(secret), false);
     assert.equal(persisted.includes(localPath), false);
     assert.match(path.basename(evidencePath), /^harness-self-test-\d{4}-\d{2}-\d{2}T/);
+    const observableAssertion = redactEvidence({ configured_credentials_absent: true });
+    assert.equal(observableAssertion.configured_credentials_absent, true);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

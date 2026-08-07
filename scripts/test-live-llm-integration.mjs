@@ -130,7 +130,7 @@ async function main() {
         limitations_present: true,
         measured_usage_within_budget: true,
         timeout_within_budget: true,
-        configured_secret_values_absent: true
+        configured_credentials_absent: true
       },
       raw_model_output_retained: false
     }, { prefix: "live-llm-integration", secretValues: secrets, pathValues: [repoRoot] });
