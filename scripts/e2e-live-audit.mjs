@@ -66,7 +66,7 @@ async function main() {
 
   const maxRequests = boundedPositiveInt(process.env.TETHERMARK_LIVE_E2E_MAX_REQUESTS, 12, 12, "TETHERMARK_LIVE_E2E_MAX_REQUESTS");
   const maxTokens = boundedPositiveInt(process.env.TETHERMARK_LIVE_E2E_MAX_TOKENS, 180_000, 240_000, "TETHERMARK_LIVE_E2E_MAX_TOKENS");
-  const requestTimeoutMs = boundedPositiveInt(process.env.TETHERMARK_LIVE_REQUEST_TIMEOUT_MS, 90_000, 180_000, "TETHERMARK_LIVE_REQUEST_TIMEOUT_MS");
+  const requestTimeoutMs = boundedPositiveInt(process.env.TETHERMARK_LIVE_REQUEST_TIMEOUT_MS, 180_000, 180_000, "TETHERMARK_LIVE_REQUEST_TIMEOUT_MS");
   const runTimeoutMs = boundedPositiveInt(process.env.TETHERMARK_LIVE_E2E_TIMEOUT_MS, 720_000, 900_000, "TETHERMARK_LIVE_E2E_TIMEOUT_MS");
   const credentialClass = providerId === "openai" ? "api_key" : "chatgpt_session";
   const secrets = collectConfiguredSecrets();

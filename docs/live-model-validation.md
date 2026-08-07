@@ -45,7 +45,7 @@ A maintainer may lower these budgets but cannot raise them above the script ceil
 $env:TETHERMARK_LIVE_INTEGRATION_MAX_TOKENS = "20000"
 $env:TETHERMARK_LIVE_E2E_MAX_REQUESTS = "12"
 $env:TETHERMARK_LIVE_E2E_MAX_TOKENS = "180000"
-$env:TETHERMARK_LIVE_REQUEST_TIMEOUT_MS = "90000"
+$env:TETHERMARK_LIVE_REQUEST_TIMEOUT_MS = "180000"
 $env:TETHERMARK_LIVE_E2E_TIMEOUT_MS = "720000"
 ```
 
@@ -63,7 +63,7 @@ Remove-Item Env:TETHERMARK_LIVE_MODEL_VALIDATION
 
 The dispatch-only `Optional API Live Model Validation` GitHub workflow provides the same secondary coverage for a protected `optional-api-live-validation` environment. It requires `OPENAI_API_KEY`, explicit approval, and a separate quota confirmation. It does not satisfy the Codex/ChatGPT-session release requirement.
 
-The Codex ceilings include the CLI's measured fixed instruction and tool context in addition to the harness prompt and response. They were calibrated against Codex CLI 0.147.0 after the supported ChatGPT-session model catalog moved to GPT-5.6; one minimal structured call measured 14,810 total tokens. The integration ceiling remains one request, and the E2E remains limited to the fixed fixture and named agent stages. Script hard maxima are 24,000 and 240,000 tokens respectively. OpenAI's current [model guidance](https://developers.openai.com/api/docs/guides/latest-model) identifies GPT-5.6 Sol as the flagship starting point, with Terra and Luna providing balanced and efficient roles.
+The Codex ceilings include the CLI's measured fixed instruction and tool context in addition to the harness prompt and response. They were calibrated against Codex CLI 0.147.0 after the supported ChatGPT-session model catalog moved to GPT-5.6; one minimal structured call measured 14,810 total tokens. The integration ceiling remains one request, and the E2E remains limited to the fixed fixture and named agent stages. Script hard maxima are 24,000 and 240,000 tokens respectively. The integration call defaults to a 90-second request limit; the multi-finding E2E supervisor uses the 180-second request maximum while the whole run remains capped at 12 minutes. OpenAI's current [model guidance](https://developers.openai.com/api/docs/guides/latest-model) identifies GPT-5.6 Sol as the flagship starting point, with Terra and Luna providing balanced and efficient roles.
 
 ## Runtime-validation provider boundary
 
