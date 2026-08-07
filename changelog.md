@@ -19,6 +19,10 @@
 - Prevented generic environment sentinels and sensitive-key matching from masking non-secret boolean assertions in redacted live-validation evidence.
 - Allowed bounded Codex structured generation from Tethermark's isolated non-Git staging directories while retaining the `read-only` sandbox.
 
+### Verified
+
+- Completed Phase 3 with passing Codex/ChatGPT-session structured integration and fixed-fixture E2E evidence on GPT-5.6 Sol, followed by a green deterministic release check.
+
 ## 2026-08-06
 
 ### Added
