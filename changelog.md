@@ -7,6 +7,11 @@
 - Made the standard Phase 3 live integration and E2E commands use local Codex ChatGPT-session authentication; API-key validation now has explicitly named secondary commands and cannot satisfy the primary release gate.
 - Clarified that future operator-started runtime-validation audits retain the same Codex/ChatGPT-session model default while target execution remains isolated in the runtime backend.
 - Relabeled the hosted manual workflow as optional API interoperability coverage rather than the Community Edition default validation path.
+- Split cached ChatGPT authentication from Codex CLI execution readiness in the API and Agent Configuration UI, added a bounded `codex login status` probe, and exposed an advanced runnable-command override.
+
+### Fixed
+
+- Stopped the Codex connection UI from reporting an unusable cached auth file as fully connected and audit-ready.
 
 ## 2026-08-06
 

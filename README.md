@@ -510,6 +510,8 @@ AUDIT_LLM_CODEX_SANDBOX=read-only
 
 Codex ChatGPT-session mode delegates structured agent steps through `codex exec` and uses the operator's local Codex entitlement subject to provider plan limits. Tethermark does not store ChatGPT access tokens in this mode. It is limited to explicit local operator launches; unattended and service workloads require an API-key provider. See [`docs/LLM_PROVIDER_AND_AGENT_BACKEND_MODES.md`](docs/LLM_PROVIDER_AND_AGENT_BACKEND_MODES.md) for the provider/backend boundary and [`docs/provider-workload-policy.md`](docs/provider-workload-policy.md) for the enforced workload matrix.
 
+In Settings -> Agent Configuration, Tethermark reports cached ChatGPT authentication separately from Codex CLI execution readiness. A cached session alone is not enough: the configured CLI must also complete a bounded `codex login status` check before the UI reports that local audits are ready. Use the advanced Codex CLI command field when the runnable executable is not available as `codex` on the API server's PATH.
+
 Agent-specific overrides are supported for planner, threat model, eval selection, skeptic, and remediation agents.
 
 ## Web UI Settings

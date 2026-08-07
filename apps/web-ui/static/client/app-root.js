@@ -3664,6 +3664,16 @@ function App() {
     () => getProviderCredentialFields(llmRegistry, settings.providers_json.default_provider || ""),
     [llmRegistry, settings.providers_json.default_provider]
   );
+  const settingsCodexCommandField = settingsProviderCredentialFields.find((field) => field.id === "codex_command") || null;
+  const settingsCodexCommandFieldStatus = settingsCodexCommandField
+    ? getProviderCredentialFieldStatus(llmRegistry, settings.providers_json.default_provider || "", settingsCodexCommandField.id)
+    : null;
+  const settingsCodexCommandValue = settingsCodexCommandField
+    ? getProviderCredentialFieldValue(settingsCodexCommandField, effectiveSettings, providerCredentialDrafts)
+    : "";
+  const settingsCodexCommandPlaceholder = settingsCodexCommandField
+    ? getProviderCredentialFieldPlaceholder(settingsCodexCommandField, settingsCodexCommandFieldStatus, settingsDefaultEnvCredentials)
+    : "codex";
   const settingsAgentOverrides = useMemo(
     () => settings.providers_json?.agent_overrides || {},
     [settings.providers_json]
@@ -8119,12 +8129,9 @@ function triageDecisionFromReviewSummary(summary) {
           credentials: buildSettingsCredentialsPayload(settings, llmRegistry, providerCredentialDrafts)
         })
       }, requestContext).then(() => api("/llm-providers/openai_codex/status", undefined, requestContext)).then((statusPayload) => {
-        if (statusPayload.connected) {
+        if (statusPayload.authenticated ?? statusPayload.connected) {
           if (oauthStatusRequestId.current === requestId) {
-            setOauthConnectionState({
-              ...statusPayload,
-              note: "An existing ChatGPT Codex session is already signed in on this machine. No new browser sign-in was started."
-            });
+            setOauthConnectionState(statusPayload);
           }
           return statusPayload;
         }
@@ -8215,9 +8222,18 @@ function triageDecisionFromReviewSummary(summary) {
     );
   };
 
-  const oauthConnected = Boolean(oauthConnectionState?.connected);
+  const oauthAuthenticated = Boolean(oauthConnectionState?.authenticated ?? oauthConnectionState?.connected);
+  const oauthCommandAvailable = Boolean(oauthConnectionState?.command_available);
+  const oauthExecutableReady = Boolean(oauthConnectionState?.executable_ready);
+  const oauthReady = Boolean(oauthConnectionState?.ready);
   const oauthStatusBadge = oauthConnectionState
-    ? (oauthConnected ? "connected" : oauthConnectionState.status === "started" ? "sign-in started" : "needs sign-in")
+    ? (oauthReady
+      ? "ready"
+      : oauthConnectionState.status === "started"
+        ? "sign-in started"
+        : oauthAuthenticated
+          ? "CLI unavailable"
+          : "needs sign-in")
     : "not checked";
   const oauthStatusNote = oauthConnectionState?.note
     || (settingsProviderCredentialStatus.configured
@@ -8250,13 +8266,13 @@ function triageDecisionFromReviewSummary(summary) {
             .map((item) => h("option", { key: item.value, value: item.value }, item.label))))
         ])),
         settingsProvider?.mode === "agent_oauth"
-          ? h(Field, { key: "oauth", label: "Credential" }, h("div", { className: "space-y-2" }, [
+          ? h(Field, { key: "oauth", label: "ChatGPT + Codex CLI" }, h("div", { className: "space-y-3" }, [
             h("div", { key: "buttons", className: "flex h-11 items-center gap-2" }, [
               h(Button, {
                 key: "connect",
                 onClick: connectSelectedOAuthProvider,
-                disabled: settings.providers_json.default_provider !== "openai_codex" || oauthConnected
-              }, oauthConnected ? "Already connected" : "Connect ChatGPT account"),
+                disabled: settings.providers_json.default_provider !== "openai_codex" || oauthAuthenticated
+              }, oauthAuthenticated ? "ChatGPT connected" : "Connect ChatGPT account"),
               h(Button, {
                 key: "refresh",
                 variant: "outline",
@@ -8264,9 +8280,42 @@ function triageDecisionFromReviewSummary(summary) {
                 disabled: settings.providers_json.default_provider !== "openai_codex"
               }, "Refresh")
             ]),
-            h("div", { key: "help", className: "text-xs text-slate-500" }, oauthConnected
-              ? "ChatGPT account is connected through the local Codex CLI."
-              : "Connect your ChatGPT account through the local Codex CLI.")
+            h("div", { key: "status", className: "rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-700" }, [
+              h("div", { key: "summary", className: "flex items-center justify-between gap-3" }, [
+                h("span", { key: "label", className: "font-medium text-slate-900" }, "Audit readiness"),
+                h(Badge, { key: "badge" }, oauthStatusBadge)
+              ]),
+              h("div", { key: "auth", className: "mt-2 flex items-center justify-between gap-3" }, [
+                h("span", { key: "label" }, "ChatGPT session"),
+                h("span", { key: "value", className: "font-mono" }, oauthAuthenticated ? "authenticated" : "not authenticated")
+              ]),
+              h("div", { key: "cli", className: "mt-1 flex items-center justify-between gap-3" }, [
+                h("span", { key: "label" }, "Codex CLI check"),
+                h("span", { key: "value", className: "font-mono" }, oauthExecutableReady
+                  ? "verified"
+                  : oauthCommandAvailable
+                    ? "status failed"
+                    : "unavailable")
+              ]),
+              h("div", { key: "note", className: "mt-2 text-slate-500" }, oauthStatusNote)
+            ]),
+            settingsCodexCommandField ? h("div", { key: "command", className: "space-y-2" }, [
+              h("div", { key: "label", className: "text-xs font-medium text-slate-700" }, settingsCodexCommandField.label),
+              h("div", { key: "input", className: "flex items-center gap-2" }, [
+                h(Input, {
+                  key: "field",
+                  value: settingsCodexCommandValue,
+                  onChange: (event) => updateProviderCredentialDraft(settingsCodexCommandField.id, event.target.value),
+                  placeholder: settingsCodexCommandPlaceholder
+                }),
+                h(Button, {
+                  key: "save",
+                  variant: "outline",
+                  onClick: saveAndCheckSelectedOAuthProvider
+                }, "Save & check")
+              ]),
+              h("div", { key: "help", className: "text-xs text-slate-500" }, settingsCodexCommandField.help_text)
+            ]) : null
           ]))
           : h(Field, { key: "api", label: "API Key" }, h("div", { className: "space-y-2" }, [
             h(PasswordInput, {

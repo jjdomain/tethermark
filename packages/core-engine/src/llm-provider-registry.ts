@@ -137,12 +137,12 @@ const BUILTIN_LLM_PROVIDERS: LlmProviderDefinition[] = [
     credential_fields: [
       {
         id: "codex_command",
-        label: "Advanced: Codex app command",
+        label: "Advanced: Codex CLI command",
         kind: "local_command",
         secret: false,
         required: false,
         placeholder: "codex",
-        help_text: "Optional. Leave this as codex unless Codex was installed in a custom location.",
+        help_text: "Optional. Leave this as codex unless the runnable Codex CLI was installed in a custom location. The command must support both `login status` and `exec`.",
         env_var: "AUDIT_LLM_CODEX_COMMAND"
       }
     ],

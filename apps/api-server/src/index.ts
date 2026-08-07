@@ -952,6 +952,16 @@ interface CodexCommandResolution {
   note?: string;
 }
 
+interface CodexCommandProbe {
+  command_available: boolean;
+  executable_ready: boolean;
+  execution_status: "ready" | "command_missing" | "command_inaccessible" | "status_failed" | "status_timeout" | "spawn_failed";
+  execution_note: string;
+}
+
+const DEFAULT_CODEX_STATUS_TIMEOUT_MS = 10_000;
+const MAX_CODEX_STATUS_TIMEOUT_MS = 30_000;
+
 function resolveCodexCommand(configuredCommand: string): CodexCommandResolution {
   const command = configuredCommand.trim() || "codex";
   const executable = process.platform === "win32" && command.toLowerCase() === "codex" ? "codex.exe" : command;
@@ -965,6 +975,142 @@ function resolveCodexCommand(configuredCommand: string): CodexCommandResolution 
 
 function buildCodexArgs(resolution: CodexCommandResolution, args: string[]): string[] {
   return [...resolution.argsPrefix, ...args];
+}
+
+function codexStatusTimeoutMs(): number {
+  const configured = Number.parseInt(readEnv("AUDIT_LLM_CODEX_STATUS_TIMEOUT_MS") ?? "", 10);
+  if (!Number.isFinite(configured) || configured <= 0) return DEFAULT_CODEX_STATUS_TIMEOUT_MS;
+  return Math.min(configured, MAX_CODEX_STATUS_TIMEOUT_MS);
+}
+
+function codexCommandProbeFailure(error: unknown): CodexCommandProbe {
+  const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+  if (code === "ENOENT") {
+    return {
+      command_available: false,
+      executable_ready: false,
+      execution_status: "command_missing",
+      execution_note: "The configured Codex CLI command was not found. Install Codex or set the advanced Codex CLI command to a runnable executable."
+    };
+  }
+  if (code === "EACCES" || code === "EPERM") {
+    return {
+      command_available: false,
+      executable_ready: false,
+      execution_status: "command_inaccessible",
+      execution_note: "The configured Codex CLI command exists but the API server cannot execute it. Configure a standalone runnable Codex CLI executable."
+    };
+  }
+  return {
+    command_available: false,
+    executable_ready: false,
+    execution_status: "spawn_failed",
+    execution_note: "The configured Codex CLI command could not be started. Check the advanced Codex CLI command and try again."
+  };
+}
+
+async function resolvesToProtectedWindowsApp(command: string): Promise<boolean> {
+  if (process.platform !== "win32" || path.isAbsolute(command) || command.includes("/") || command.includes("\\")) return false;
+  const systemRoot = process.env.SystemRoot || "C:\\Windows";
+  const whereCommand = path.join(systemRoot, "System32", "where.exe");
+  return await new Promise<boolean>((resolve) => {
+    let settled = false;
+    let stdout = "";
+    const finish = (result: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(whereCommand, [command], {
+        stdio: ["ignore", "pipe", "ignore"],
+        windowsHide: true,
+        shell: false
+      });
+    } catch {
+      resolve(false);
+      return;
+    }
+    const timer = setTimeout(() => {
+      child.kill();
+      finish(false);
+    }, 2_000);
+    child.stdout?.on("data", (chunk: Buffer | string) => {
+      if (stdout.length < 8_192) stdout += String(chunk).slice(0, 8_192 - stdout.length);
+    });
+    child.once("error", () => finish(false));
+    child.once("close", (code) => {
+      if (code !== 0) {
+        finish(false);
+        return;
+      }
+      const firstMatch = stdout.split(/\r?\n/).map((item) => item.trim()).find(Boolean) ?? "";
+      finish(firstMatch.toLowerCase().includes("\\program files\\windowsapps\\"));
+    });
+  });
+}
+
+async function probeCodexCommand(resolution: CodexCommandResolution): Promise<CodexCommandProbe> {
+  if (await resolvesToProtectedWindowsApp(resolution.command)) {
+    return codexCommandProbeFailure({ code: "EPERM" });
+  }
+  return await new Promise<CodexCommandProbe>((resolve) => {
+    let settled = false;
+    let spawned = false;
+    let timer: NodeJS.Timeout | undefined;
+    const finish = (result: CodexCommandProbe): void => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(result);
+    };
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(resolution.command, buildCodexArgs(resolution, ["login", "status"]), {
+        stdio: "ignore",
+        windowsHide: true,
+        shell: false
+      });
+    } catch (error) {
+      finish(codexCommandProbeFailure(error));
+      return;
+    }
+    const timeoutMs = codexStatusTimeoutMs();
+    timer = setTimeout(() => {
+      child.kill();
+      finish({
+        command_available: spawned,
+        executable_ready: false,
+        execution_status: "status_timeout",
+        execution_note: `Codex CLI authentication verification exceeded the ${timeoutMs} ms safety limit.`
+      });
+    }, timeoutMs);
+    child.once("spawn", () => {
+      spawned = true;
+    });
+    child.once("error", (error) => {
+      finish(codexCommandProbeFailure(error));
+    });
+    child.once("close", (code) => {
+      if (code === 0) {
+        finish({
+          command_available: true,
+          executable_ready: true,
+          execution_status: "ready",
+          execution_note: "The configured Codex CLI completed its bounded authentication status check."
+        });
+        return;
+      }
+      finish({
+        command_available: true,
+        executable_ready: false,
+        execution_status: "status_failed",
+        execution_note: "The configured Codex CLI ran, but its authentication status check did not succeed. Run Codex login and try again."
+      });
+    });
+  });
 }
 
 function decodeJwtPayload(token: string): Record<string, unknown> | null {
@@ -1097,23 +1243,38 @@ async function getOpenAICodexLoginStatus(context: RequestContext): Promise<Recor
     ? credentials.codex_command.trim()
     : readEnv("AUDIT_LLM_CODEX_COMMAND") ?? readEnv("CODEX_COMMAND") ?? "codex";
   const resolvedCommand = resolveCodexCommand(configuredCommand);
-  const authFileStatus = await readCodexAuthFileStatus();
-  if (authFileStatus) {
-    return {
-      provider_id: "openai_codex",
-      command: resolvedCommand.displayCommand,
-      checked_at: new Date().toISOString(),
-      ...authFileStatus
-    };
-  }
+  const [authFileStatus, commandProbe] = await Promise.all([
+    readCodexAuthFileStatus(),
+    probeCodexCommand(resolvedCommand)
+  ]);
+  const authStatus = authFileStatus ?? {
+    connected: false,
+    status: "not_connected",
+    credential_source: "none",
+    note: "No local Codex OAuth session was found. Install Codex explicitly, choose Connect ChatGPT account, and complete sign-in."
+  };
+  const authenticated = authStatus.connected === true;
+  const ready = authenticated && commandProbe.executable_ready;
+  const authNote = typeof authStatus.note === "string" ? authStatus.note : "";
   return {
     provider_id: "openai_codex",
     command: resolvedCommand.displayCommand,
     checked_at: new Date().toISOString(),
-    connected: false,
-    status: "not_connected",
-    credential_source: "none",
-    note: "No local Codex OAuth session was found. Install Codex explicitly, choose Connect ChatGPT account, and complete sign-in. Status checks never install or execute packages."
+    ...authStatus,
+    connected: authenticated,
+    authenticated,
+    ...commandProbe,
+    ready,
+    status: ready
+      ? "ready"
+      : authenticated
+        ? "authenticated_cli_unavailable"
+        : authStatus.status,
+    note: ready
+      ? "ChatGPT authentication is present and the configured Codex CLI is ready for local audits."
+      : authenticated
+        ? `${authNote} ${commandProbe.execution_note} Local model-backed audits are blocked until both checks pass.`.trim()
+        : `${authNote} ${commandProbe.execution_note}`.trim()
   };
 }
 

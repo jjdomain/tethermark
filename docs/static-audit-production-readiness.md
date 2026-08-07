@@ -49,7 +49,7 @@ After the user signs in with Codex CLI or the web UI connection action, rerun:
 npm run smoke:openai-codex-oauth:real
 ```
 
-Expected result: the status endpoint reports `connected: true` using local Codex auth metadata, without returning token material.
+Expected result: the status endpoint reports `authenticated: true`, `executable_ready: true`, and `ready: true` without returning token material or raw CLI output. `authenticated: true` with `ready: false` means the cached ChatGPT session exists but the API server cannot complete the configured CLI's bounded `login status` check.
 
 ## Static Tool Readiness
 

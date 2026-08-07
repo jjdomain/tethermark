@@ -77,6 +77,8 @@ A Phase 3 release evidence set is current only when both primary gates pass with
 
 If `codex login status` reports that the executable is missing or access is denied, install or expose a standalone Codex CLI that the terminal can execute, then sign in again. The Microsoft Store application package path may not be directly executable from every host process. Do not work around this by copying its credential cache into the repository.
 
+The Connections/Agent Configuration status is intentionally stricter than cached sign-in detection. It reports `ready` only when the auth cache is valid and the configured command completes a bounded `codex login status` probe. If the UI shows **CLI unavailable**, set **Advanced: Codex CLI command** to the runnable executable path, choose **Save & check**, and require both status rows to pass before starting the live gate.
+
 ## Deterministic maintenance check
 
 ```bash
