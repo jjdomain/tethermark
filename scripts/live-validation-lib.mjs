@@ -12,6 +12,13 @@ const credentialPatterns = [
   /\bBearer\s+[A-Za-z0-9._~+\/-]+=*\b/gi,
   /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g
 ];
+const nonSecretSentinels = new Set(["true", "false", "null", "none", "enabled", "disabled", "yes", "no"]);
+
+function isUsableSecretValue(value) {
+  return typeof value === "string"
+    && value.trim().length >= 4
+    && !nonSecretSentinels.has(value.trim().toLowerCase());
+}
 
 export function requireLiveValidationOptIn(env = process.env) {
   if (env.TETHERMARK_LIVE_MODEL_VALIDATION !== LIVE_VALIDATION_OPT_IN) {
@@ -68,7 +75,7 @@ function redactString(value, secretValues, pathValues) {
 }
 
 export function redactEvidence(value, options = {}) {
-  const secretValues = [...new Set((options.secretValues ?? []).filter((item) => typeof item === "string" && item.length >= 4))];
+  const secretValues = [...new Set((options.secretValues ?? []).filter(isUsableSecretValue))];
   const pathValues = [...new Set((options.pathValues ?? []).filter((item) => typeof item === "string" && item.length >= 3))]
     .sort((a, b) => b.length - a.length);
   const visit = (item) => {
@@ -85,7 +92,7 @@ export function redactEvidence(value, options = {}) {
 
 export function assertNoSecretValues(value, secretValues) {
   const serialized = JSON.stringify(value);
-  for (const secret of secretValues.filter((item) => typeof item === "string" && item.length >= 4)) {
+  for (const secret of secretValues.filter(isUsableSecretValue)) {
     assert.equal(serialized.includes(secret), false, "Live validation output included a configured secret value.");
   }
   assert.doesNotMatch(serialized, /\bsk-[A-Za-z0-9_-]{8,}\b/, "Live validation output included an API-key-shaped value.");
@@ -94,7 +101,7 @@ export function assertNoSecretValues(value, secretValues) {
 
 export function collectConfiguredSecrets(env = process.env) {
   return [...new Set(Object.entries(env)
-    .filter(([key, value]) => sensitiveKeyPattern.test(key) && typeof value === "string" && value.trim())
+    .filter(([key, value]) => sensitiveKeyPattern.test(key) && isUsableSecretValue(value))
     .map(([, value]) => value))];
 }
 

@@ -14,6 +14,7 @@
 ### Fixed
 
 - Stopped the Codex connection UI from reporting an unusable cached auth file as fully connected and audit-ready.
+- Prevented generic environment sentinels such as `true` from corrupting boolean fields in redacted live-validation evidence.
 
 ## 2026-08-06
 

@@ -8,6 +8,7 @@ import {
   LIVE_VALIDATION_OPT_IN,
   assertNoSecretValues,
   boundedPositiveInt,
+  collectConfiguredSecrets,
   redactEvidence,
   requireLiveValidationOptIn,
   resolveLiveProvider,
@@ -57,6 +58,11 @@ async function main() {
   const bearer = "Bearer phase3.test.token";
   const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJwaGFzZTMifQ.signature";
   const localPath = "D:\\private\\phase3";
+  const configuredSecrets = collectConfiguredSecrets({
+    FEATURE_SECRET_ENABLED: "true",
+    OPENAI_API_KEY: secret
+  });
+  assert.deepEqual(configuredSecrets, [secret]);
   const redacted = redactEvidence({
     api_key: secret,
     nested: [`prefix ${secret}`, bearer, jwt, localPath],
@@ -68,6 +74,7 @@ async function main() {
   assert.equal(serialized.includes(jwt), false);
   assert.equal(serialized.includes(localPath), false);
   assert.match(serialized, /retained/);
+  assert.equal(redactEvidence({ passed: true }, { secretValues: ["true"] }).passed, true);
   assertNoSecretValues(redacted, [secret]);
   assert.equal(safeTerminalReason(new Error(`failed at ${localPath} with ${secret}`), {
     secretValues: [secret], pathValues: [localPath]
