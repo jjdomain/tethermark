@@ -122,6 +122,7 @@ async function createFakeCodexExec(rootDir) {
   const cliPath = path.join(rootDir, "fake-codex-exec.mjs");
   await fs.writeFile(cliPath, [
     "import fs from 'node:fs';",
+    "if (!process.argv.includes('--skip-git-repo-check')) process.exit(3);",
     "const outIndex = process.argv.indexOf('--output-last-message');",
     "if (outIndex < 0) process.exit(2);",
     "fs.writeFileSync(process.argv[outIndex + 1], JSON.stringify({ ok: true, provider: 'openai_codex', credential: 'oauth-local' }));"

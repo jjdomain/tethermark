@@ -111,10 +111,12 @@ Before running, the operator must install Codex CLI explicitly and sign in throu
 The provider invokes:
 
 ```bash
-codex exec --ephemeral --sandbox read-only --output-schema <schema.json> --output-last-message <result.json> --model <model>
+codex exec --ephemeral --skip-git-repo-check --sandbox read-only --output-schema <schema.json> --output-last-message <result.json> --model <model>
 ```
 
 Tethermark sends the agent prompt through stdin and parses the final structured JSON artifact from the output file.
+
+The explicit `--skip-git-repo-check` flag is required because Tethermark stages fixed fixtures and operator-selected source into isolated temporary working directories that may not contain Git metadata. It does not relax the `read-only` Codex sandbox, authorize target execution, or change the workload restriction to explicit local operator runs.
 
 The Community Edition web UI exposes this mode under Settings -> Agent Configuration as an account connection flow:
 

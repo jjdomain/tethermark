@@ -15,6 +15,7 @@
 
 - Stopped the Codex connection UI from reporting an unusable cached auth file as fully connected and audit-ready.
 - Prevented generic environment sentinels and sensitive-key matching from masking non-secret boolean assertions in redacted live-validation evidence.
+- Allowed bounded Codex structured generation from Tethermark's isolated non-Git staging directories while retaining the `read-only` sandbox.
 
 ## 2026-08-06
 

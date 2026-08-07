@@ -365,6 +365,7 @@ async function testOpenAICodexProviderRegistryAndStructuredExec(): Promise<void>
     await fs.mkdir(fakeLocalAppData, { recursive: true });
     await fs.writeFile(fakeCli, [
       "import fs from 'node:fs';",
+      "if (!process.argv.includes('--skip-git-repo-check')) process.exit(3);",
       "const outIndex = process.argv.indexOf('--output-last-message');",
       "if (outIndex < 0) process.exit(2);",
       "fs.writeFileSync(process.argv[outIndex + 1], JSON.stringify({ ok: true, mode: 'oauth' }));",

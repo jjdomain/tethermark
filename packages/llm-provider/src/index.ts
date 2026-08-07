@@ -385,6 +385,7 @@ export class OpenAICodexCliProvider implements ModelProvider {
           "exec",
           "--ephemeral",
           "--json",
+          "--skip-git-repo-check",
           "--sandbox",
           this.sandbox,
           "--output-schema",
