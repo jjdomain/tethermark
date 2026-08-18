@@ -4,7 +4,7 @@ import { loadEnvironment } from "../../../packages/core-engine/src/env.js";
 import { backfillLocalPersistence, cleanupLocalJsonMirrors, compactBundleExports, createEngine, getPersistedRun, listPersistedReviewNotifications, listPersistedReviewWorkflows, normalizeLearningSettings, normalizeProjectId, normalizeWorkspaceId, pruneArtifacts, readPersistedReviewActions, readPersistedReviewWorkflow, reconstructLocalRun, reconstructLocalRuns, resolvePersistedUiSettings, runLearningPipeline, runPostgresMigration, submitPersistedReviewAction, validateLocalPersistence, type ArtifactRetentionKind } from "../../../packages/core-engine/src/index.js";
 import { buildScanRequest, readBooleanFlag, readFlag, readNumberFlag } from "./args.js";
 import { compareBenchmarkReports, formatBenchmarkCaseLine, loadBenchmarkSuite, printBenchmarkCompare, printBenchmarkSummary, runBenchmarkSuite, selectBenchmarkCases } from "./benchmark-suite.js";
-import { buildDoctorReport, printDoctorReport, runOnboarding } from "./doctor.js";
+import { buildDoctorReport, buildStaticScannerDoctorReport, printDoctorReport, runOnboarding } from "./doctor.js";
 import { validateFixtures } from "./fixture-validation.js";
 import { printRuntimeDoctor, runSetupRuntime, validateRuntimeFixtures } from "./setup-runtime.js";
 import { runSetupTools } from "./setup-tools.js";
@@ -19,6 +19,7 @@ npm run scan -- scan path <local-path> [--output <dir> (export copy)] [--policy 
 npm run scan -- scan repo <repo-url> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|build|runtime|validate] [--package <id>] [--db-mode local|postgres|supabase] [--llm-provider openai|openai_codex|mock] [--llm-model <id>] [--llm-api-key <value>] [--llm-workload interactive_operator|unattended_local|external_service] [--llm-max-requests <n>] [--llm-max-tokens <n>]
 npm run scan -- scan endpoint <url> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|runtime|validate] [--package <id>] [--db-mode local|postgres|supabase] [--llm-provider openai|openai_codex|mock] [--llm-model <id>] [--llm-api-key <value>] [--llm-workload interactive_operator|unattended_local|external_service] [--llm-max-requests <n>] [--llm-max-tokens <n>]
 npm run scan -- doctor [--json]
+npm run scan -- static-doctor [--json]
 npm run scan -- onboard [--dry-run] [--skip-doctor] [--skip-fixtures]
 npm run scan -- setup-tools [--dry-run] [--yes] [--tool scorecard,semgrep,trivy]
 npm run scan -- setup-runtime [--dry-run] [--yes]
@@ -619,6 +620,13 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (args[0] === "static-doctor") {
+    const report = buildStaticScannerDoctorReport();
+    printDoctorReport(report, args.includes("--json"));
+    if (report.summary.fail > 0) process.exitCode = 1;
+    return;
+  }
+
   if (args[0] === "onboard") {
     runOnboarding({
       dryRun: args.includes("--dry-run"),
@@ -629,7 +637,7 @@ async function main(): Promise<void> {
   }
 
   if (args[0] === "setup-tools") {
-    runSetupTools({
+    await runSetupTools({
       dryRun: args.includes("--dry-run"),
       yes: args.includes("--yes"),
       tools: readFlag(args, "--tool")
