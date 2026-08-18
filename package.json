@@ -22,6 +22,7 @@
     "smoke:openai-codex-oauth": "npm run build --silent && node scripts/check-openai-codex-oauth.mjs",
     "smoke:openai-codex-oauth:real": "npm run build --silent && node scripts/check-openai-codex-oauth.mjs --real",
     "test:live-validation-harness": "node scripts/check-live-validation-harness.mjs",
+    "test:static-scanners:real": "npm run build --silent && node scripts/check-static-scanner-fixtures.mjs",
     "test:integration:llm:live": "npm run build --silent && node scripts/test-live-llm-integration.mjs --codex",
     "test:integration:llm:api:live": "npm run build --silent && node scripts/test-live-llm-integration.mjs --provider openai",
     "e2e:audit:live": "npm run build --silent && node scripts/e2e-live-audit.mjs --codex",

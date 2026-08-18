@@ -26,6 +26,9 @@ Completed:
 - standards-based audit methodology artifact and control catalog
 - planner-driven framework and control selection for static runs
 - actual static tool execution stage for selected tools with skip/fail reporting
+- checksum-locked, user-isolated Scorecard, Semgrep, and Trivy setup with focused production readiness diagnostics
+- bundled offline Semgrep rules, bounded scanner execution, and fail-closed publishability when required evidence is incomplete
+- retained real-scanner evidence on Windows, Ubuntu, and macOS
 - persisted tool execution artifacts, control results, observations, framework scores, and remediation outputs
 - static clone provenance capture with commit SHA recording for repo targets
 - static sandbox storage reporting for per-run target size and file count
@@ -36,9 +39,6 @@ Completed:
 - local static `scan path ... --mode static` verified on Windows with provider-backed agents and standards-based score artifacts
 
 Not completed:
-- current passing live-provider integration and E2E evidence on the release candidate commit
-- live repo-URL verification on this machine against a real OSS target
-- reliable local execution of Scorecard, Trivy, and Semgrep on this machine
 - cleanup or archival policy for old historical artifact directories already present under `.artifacts`
 - real Python worker execution on this machine
 - real Linux container or microVM execution for isolated build/runtime/validate flows
@@ -212,14 +212,13 @@ Hosted rollout order:
 
 ## Recommended Next Order
 
-1. Install or verify local Scorecard, Trivy, and Semgrep binaries.
-2. Run a real static OSS audit against OpenClaw.
-3. Calibrate control weights and framework scoring against repeated OSS audits.
-4. Add simple cleanup/archive tooling for historical artifact directories.
-5. Implement executable Linux container backend for isolated runtime validation.
-6. Enable real Python workers on Linux.
-7. Deploy first isolated worker host for deeper AI-security audit modes.
-8. Add persistent queue and artifact storage.
+1. Calibrate control weights and framework scoring against repeated OSS audits.
+2. Complete false-positive review and golden-repository evidence for the canonical Phase 5 gate.
+3. Add simple cleanup/archive tooling for historical artifact directories.
+4. Implement executable Linux container backend for isolated runtime validation.
+5. Enable real Python workers on Linux.
+6. Deploy first isolated worker host for deeper AI-security audit modes.
+7. Add persistent queue and artifact storage.
 
 ## Deferred Until Hetzner Is Ready
 

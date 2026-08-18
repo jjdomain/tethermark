@@ -13,6 +13,7 @@ import type {
 } from "./contracts.js";
 import { getPythonWorkerCapability, invokePythonWorker, resolvePythonWorkerAdapter } from "./python-worker.js";
 import { buildToolPathEnv } from "./tool-paths.js";
+import { BUNDLED_SEMGREP_RULESET, BUNDLED_SEMGREP_RULESET_SHA256, BUNDLED_SEMGREP_RULESET_VERSION, resolveStaticToolInvocation } from "./static-tool-policy.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -22,27 +23,6 @@ type ProviderFailure = { category: ProviderFailureCategory; capability: Capabili
 
 let localBinaryExecutionProbe: Promise<ProviderFailure | null> | null = null;
 let bundledSemgrepConfigPath: Promise<string> | null = null;
-
-const BUNDLED_SEMGREP_RULESET = `rules:
-  - id: tethermark.generic.hardcoded-secret
-    message: Potential hardcoded secret or token material in source.
-    severity: WARNING
-    languages:
-      - generic
-    pattern-regex: (?i)(api[_-]?key|secret|token|password)\\s*[:=]\\s*['\\"][A-Za-z0-9_./+=-]{16,}['\\"]
-  - id: tethermark.generic.prompt-injection-surface
-    message: Prompt injection handling is referenced and should have an explicit control.
-    severity: INFO
-    languages:
-      - generic
-    pattern-regex: (?i)prompt\\s+injection
-  - id: tethermark.generic.shell-execution-surface
-    message: Shell or subprocess execution surface should be reviewed for static audit controls.
-    severity: INFO
-    languages:
-      - generic
-    pattern-regex: (?i)(child_process|subprocess|exec\\(|spawn\\(|shell=True)
-`;
 
 function emptyNormalized(resultType: NormalizedEvidenceSummary["result_type"], extra?: Partial<NormalizedEvidenceSummary>): NormalizedEvidenceSummary {
   return {
@@ -118,13 +98,21 @@ function arrayOfStrings(value: unknown): string[] {
   return Array.isArray(value) ? value.map((item) => String(item)) : [];
 }
 
+function boundedEnvInteger(name: string, fallback: number, minimum: number, maximum: number): number {
+  const parsed = Number(process.env[name]);
+  return Number.isFinite(parsed) ? Math.max(minimum, Math.min(maximum, Math.floor(parsed))) : fallback;
+}
+
 async function runCommand(command: string, args: string[], options?: { timeoutMs?: number; shell?: boolean }): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  const configuredTimeout = boundedEnvInteger("HARNESS_STATIC_TOOL_TIMEOUT_MS", options?.timeoutMs ?? 10 * 60 * 1000, 50, 10 * 60 * 1000);
+  const timeoutMs = Math.min(options?.timeoutMs ?? configuredTimeout, configuredTimeout);
+  const maxBuffer = boundedEnvInteger("HARNESS_STATIC_TOOL_MAX_BUFFER_BYTES", 16 * 1024 * 1024, 64 * 1024, 64 * 1024 * 1024);
   try {
     const result = await execFileAsync(command, args, {
       env: { ...process.env, PATH: buildToolPathEnv() },
-      maxBuffer: 16 * 1024 * 1024,
+      maxBuffer,
       shell: options?.shell ?? false,
-      timeout: options?.timeoutMs ?? 10 * 60 * 1000
+      timeout: timeoutMs
     });
     return { exitCode: 0, stdout: result.stdout, stderr: result.stderr };
   } catch (error: any) {
@@ -134,9 +122,9 @@ async function runCommand(command: string, args: string[], options?: { timeoutMs
     return {
       exitCode: typeof error?.code === "number" ? error.code : 1,
       stdout: typeof error?.stdout === "string" ? error.stdout : "",
-      stderr: error?.killed && error?.signal === "SIGTERM"
-        ? `Command timed out after ${options?.timeoutMs ?? 10 * 60 * 1000}ms.`
-        : typeof error?.stderr === "string" ? error.stderr : String(error)
+      stderr: error?.killed
+        ? `Command timed out after ${timeoutMs}ms.`
+        : [typeof error?.stderr === "string" ? error.stderr : "", error?.message ?? String(error)].filter(Boolean).join("\n")
     };
   }
 }
@@ -195,6 +183,9 @@ function classifyCommandFailure(stdout: string, stderr: string): ProviderFailure
   if (/timed out after \d+ms/i.test(combined)) {
     return { category: "runtime_error", capability: "available", message };
   }
+  if (/maxbuffer|stdout maxbuffer length exceeded|stderr maxbuffer length exceeded/i.test(combined)) {
+    return { category: "runtime_error", capability: "available", message: `Scanner output exceeded the configured evidence limit (${message}).` };
+  }
   if (/semgrep\.dev|SSLCertVerificationError|CERTIFICATE_VERIFY_FAILED|certificate verify failed|HTTPSConnectionPool/i.test(combined)) {
     return {
       category: "api_unavailable",
@@ -210,7 +201,7 @@ async function resolveSemgrepConfigPath(): Promise<string> {
   if (configured) return configured;
   if (!bundledSemgrepConfigPath) {
     bundledSemgrepConfigPath = (async () => {
-      const configPath = path.join(os.tmpdir(), "tethermark-semgrep-rules.yml");
+      const configPath = path.join(os.tmpdir(), `tethermark-semgrep-rules-${BUNDLED_SEMGREP_RULESET_VERSION}-${BUNDLED_SEMGREP_RULESET_SHA256.slice(0, 12)}.yml`);
       await fs.writeFile(configPath, BUNDLED_SEMGREP_RULESET, "utf8");
       return configPath;
     })();
@@ -543,6 +534,21 @@ function normalizeRepoUrl(rawUrl: string): string | null {
   return null;
 }
 
+export function normalizePublicScorecardProject(rawUrl: string | null | undefined): string | null {
+  if (!rawUrl) return null;
+  const normalized = normalizeRepoUrl(rawUrl);
+  if (!normalized) return null;
+  try {
+    const url = new URL(normalized);
+    if (url.protocol !== "https:" || url.hostname.toLowerCase() !== "github.com") return null;
+    const segments = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/i, "").split("/");
+    if (segments.length !== 2 || segments.some((segment) => !/^[A-Za-z0-9_.-]+$/.test(segment))) return null;
+    return `github.com/${segments[0]}/${segments[1]}`;
+  } catch {
+    return null;
+  }
+}
+
 async function inferRepoUrl(explicitRepoUrl: string | null, rootPath: string): Promise<string | null> {
   if (explicitRepoUrl) return normalizeRepoUrl(explicitRepoUrl);
   const gitDir = await readGitDir(rootPath);
@@ -712,10 +718,11 @@ export async function executeEvidenceProvider(args: {
       });
     case "scorecard": {
       const localScorecardAvailable = await directoryExists(args.rootPath);
-      const command = localScorecardAvailable
-        ? ["--format", "json", "--local", args.rootPath]
-        : effectiveRepoUrl
-          ? ["--format", "json", "--repo", effectiveRepoUrl]
+      const invocation = resolveStaticToolInvocation("scorecard");
+      const command = effectiveRepoUrl
+        ? ["--format", "json", "--repo", effectiveRepoUrl]
+        : localScorecardAvailable
+          ? ["--format", "json", "--local", args.rootPath]
           : null;
       if (!command) {
         return completedRecord({
@@ -746,7 +753,7 @@ export async function executeEvidenceProvider(args: {
         });
       }
       try {
-        const { exitCode, stdout, stderr } = await runCommand("scorecard", command, { timeoutMs: 3 * 60 * 1000 });
+        const { exitCode, stdout, stderr } = await runCommand(invocation.command, [...invocation.prefix_args, ...command], { timeoutMs: 3 * 60 * 1000 });
         const parsed = parseCommandJson(stdout, stderr);
         const failure = classifyCommandFailure(stdout, stderr);
         if (failure) {
@@ -781,25 +788,25 @@ export async function executeEvidenceProvider(args: {
       }
     }
     case "scorecard_api": {
-      if (!effectiveRepoUrl) {
+      const scorecardProject = normalizePublicScorecardProject(effectiveRepoUrl);
+      if (!scorecardProject) {
         return completedRecord({
           provider_id: "scorecard_api",
           provider_kind: "public_api",
           tool: "scorecard_api",
           status: "skipped",
-          summary: "Scorecard API requires a GitHub repository URL and no repository remote could be inferred.",
+          summary: "Scorecard API fallback is only eligible for a public github.com owner/repository target.",
           artifact_type: "scorecard-api-output",
           parsed: null,
-          failure_category: "runtime_error",
-          capability_status: "unknown",
+          failure_category: "api_unavailable",
+          capability_status: "unavailable",
           fallback_from: args.fallbackFrom ?? null,
-          normalized: emptyNormalized("scorecard", { notes: ["Repository URL could not be inferred."] })
+          normalized: emptyNormalized("scorecard", { notes: ["Target is not eligible for the public GitHub Scorecard API fallback."] })
         });
       }
       try {
-        const encoded = encodeURIComponent(effectiveRepoUrl);
         const signal = AbortSignal.timeout(15 * 1000);
-        const response = await fetch(`https://api.securityscorecards.dev/projects?project=${encoded}`, { signal });
+        const response = await fetch(`https://api.scorecard.dev/projects/${scorecardProject}`, { signal });
         if (!response.ok) {
           const failureCategory = response.status === 404 ? "api_unavailable" : "runtime_error";
           return completedRecord({
@@ -807,7 +814,7 @@ export async function executeEvidenceProvider(args: {
             provider_kind: "public_api",
             tool: "scorecard_api",
             status: "skipped",
-            summary: `Scorecard API unavailable: HTTP ${response.status}`,
+            summary: `Scorecard API unavailable for ${scorecardProject}: HTTP ${response.status}`,
             artifact_type: "scorecard-api-output",
             parsed: null,
             failure_category: failureCategory,
@@ -847,6 +854,7 @@ export async function executeEvidenceProvider(args: {
     case "semgrep": {
       const semgrepConfig = await resolveSemgrepConfigPath();
       const command = ["scan", "--config", semgrepConfig, "--json", "--metrics", "off", args.rootPath];
+      const invocation = resolveStaticToolInvocation("semgrep");
       if (localBinaryBlocked) {
         return skippedUnavailableRecord({
           provider_id: "semgrep",
@@ -860,7 +868,7 @@ export async function executeEvidenceProvider(args: {
         });
       }
       try {
-        const { exitCode, stdout, stderr } = await runCommand("semgrep", command, { shell: false });
+        const { exitCode, stdout, stderr } = await runCommand(invocation.command, [...invocation.prefix_args, ...command], { shell: false });
         const parsed = parseCommandJson(stdout, stderr);
         const failure = classifyCommandFailure(stdout, stderr);
         if (failure) {
@@ -890,6 +898,7 @@ export async function executeEvidenceProvider(args: {
     }
     case "trivy": {
       const command = ["fs", "--format", "json", "--quiet", args.rootPath];
+      const invocation = resolveStaticToolInvocation("trivy");
       if (localBinaryBlocked) {
         return skippedUnavailableRecord({
           provider_id: "trivy",
@@ -903,7 +912,7 @@ export async function executeEvidenceProvider(args: {
         });
       }
       try {
-        const { exitCode, stdout, stderr } = await runCommand("trivy", command);
+        const { exitCode, stdout, stderr } = await runCommand(invocation.command, [...invocation.prefix_args, ...command]);
         const parsed = parseCommandJson(stdout, stderr);
         const failure = classifyCommandFailure(stdout, stderr);
         if (failure) {

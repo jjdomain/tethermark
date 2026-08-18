@@ -1281,7 +1281,8 @@ export class AuditEngine {
       skepticReview,
       remediation,
       auditPackage,
-      auditPolicy
+      auditPolicy,
+      evidenceExecutions: cycle.evidenceExecutions
     });
     await artifactStore.writeJson(runId, "publishability", publishability);
     trace.steps.push({ step: trace.steps.length + 1, actor: "stage_score_and_publishability", action: "score_and_publishability", summary: `Publishability evaluated as ${publishability.publishability_status} with ${publishability.gating_findings.length} gating findings.`, artifacts: ["publishability.json"], timestamp: nowIso() });

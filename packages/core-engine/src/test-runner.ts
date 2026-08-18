@@ -13,7 +13,7 @@ import { validateFixtures } from "../../../apps/cli/src/fixture-validation.js";
 import { buildDockerRuntimeFixtureCreateArgs, RUNTIME_FIXTURE_IMAGE, validateDockerRuntimeFixtureInspect } from "../../../apps/cli/src/runtime-fixtures.js";
 import { describeArtifactType } from "./artifact-policy.js";
 import { pruneArtifacts } from "./artifact-retention.js";
-import { executeEvidenceProvider, normalizeEvidenceSummaryForTests, resetEvidenceProviderCapabilityCacheForTests } from "./evidence-providers.js";
+import { executeEvidenceProvider, normalizeEvidenceSummaryForTests, normalizePublicScorecardProject, resetEvidenceProviderCapabilityCacheForTests } from "./evidence-providers.js";
 import { buildFindingEvaluationSummary } from "./finding-evaluation.js";
 import { buildFindingQualitySummary } from "./finding-quality.js";
 import { createEngine } from "./orchestrator.js";
@@ -47,6 +47,8 @@ import { OpenAICodexCliProvider, OpenAIModelProvider, resolveAgentProviderConfig
 import { executeWithProviderGovernor, resetProviderGovernorForTests, resolveProviderPolicy } from "../../../packages/llm-provider/src/policy.js";
 import { AgentRuntime } from "../../../packages/agent-runtime/src/index.js";
 import { buildRuntimeExecutionPolicy, resolveLocalSandboxBackend } from "../../../packages/validation-runner/src/index.js";
+import { evaluateStaticToolVersion, extractStaticToolVersion, resolveStaticToolReleaseAsset, STATIC_TOOL_POLICIES } from "./static-tool-policy.js";
+import { buildStaticToolsReadiness } from "./static-tools.js";
 
 async function withTempDir<T>(prefix: string, fn: (dir: string) => Promise<T>): Promise<T> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -116,6 +118,121 @@ async function pathExists(filePath: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function testProductionStaticToolPolicy(): Promise<void> {
+  assert.equal(extractStaticToolVersion("GitVersion: v5.5.0\nPlatform: windows/amd64"), "5.5.0");
+  assert.equal(evaluateStaticToolVersion("scorecard", "GitVersion: v5.5.0").pinned, true);
+  assert.equal(evaluateStaticToolVersion("semgrep", "1.171.9").supported, false);
+  assert.equal(evaluateStaticToolVersion("trivy", "Version: 0.73.9").supported, true);
+  assert.equal(evaluateStaticToolVersion("trivy", "Version: 0.74.0").supported, false);
+  assert.ok(resolveStaticToolReleaseAsset("scorecard", "win32", "x64")?.sha256.match(/^[a-f0-9]{64}$/));
+  assert.ok(resolveStaticToolReleaseAsset("trivy", "linux", "x64")?.url.includes(`/v${STATIC_TOOL_POLICIES.trivy.pinned_version}/`));
+  assert.ok(STATIC_TOOL_POLICIES.semgrep.package_sha256?.every((digest) => /^[a-f0-9]{64}$/.test(digest)));
+
+  assert.equal(normalizePublicScorecardProject("https://github.com/ossf/scorecard.git"), "github.com/ossf/scorecard");
+  assert.equal(normalizePublicScorecardProject("git@github.com:NousResearch/hermes-agent.git"), "github.com/NousResearch/hermes-agent");
+  assert.equal(normalizePublicScorecardProject("https://gitlab.com/example/private"), null);
+  assert.equal(normalizePublicScorecardProject("https://github.example.com/example/private"), null);
+  assert.equal(normalizePublicScorecardProject("https://github.com/example/repo/issues"), null);
+}
+
+async function testStaticReadinessRejectsUnsupportedVersions(): Promise<void> {
+  await withTempDir("tethermark-static-readiness-", async (rootDir) => {
+    const writeTool = async (name: string, output: string) => {
+      const filePath = path.join(rootDir, `${name}.mjs`);
+      await fs.writeFile(filePath, `console.log(${JSON.stringify(output)});\n`, "utf8");
+      return filePath;
+    };
+    const scorecardRunner = await writeTool("scorecard", "GitVersion: v5.5.0");
+    const semgrepRunner = await writeTool("semgrep", "1.172.0");
+    const trivyRunner = await writeTool("trivy", "Version: 0.71.2");
+    await withEnv({
+      HARNESS_SCORECARD_COMMAND: process.execPath,
+      HARNESS_SCORECARD_RUNNER: scorecardRunner,
+      HARNESS_SEMGREP_COMMAND: process.execPath,
+      HARNESS_SEMGREP_RUNNER: semgrepRunner,
+      HARNESS_SEMGREP_PYTHON: undefined,
+      HARNESS_TRIVY_COMMAND: process.execPath,
+      HARNESS_TRIVY_RUNNER: trivyRunner,
+      HARNESS_DISABLE_LOCAL_BINARIES: undefined
+    }, async () => {
+      const strict = buildStaticToolsReadiness({ gatePolicy: "require_local_scanners" });
+      assert.equal(strict.status, "blocked");
+      assert.equal(strict.tools.find((tool) => tool.id === "scorecard")?.version_pinned, true);
+      assert.equal(strict.tools.find((tool) => tool.id === "semgrep")?.version_supported, true);
+      assert.equal(strict.tools.find((tool) => tool.id === "trivy")?.status, "blocked");
+      assert.match(strict.tools.find((tool) => tool.id === "trivy")?.summary ?? "", /outside the supported range/);
+      assert.ok(strict.blockers.some((item) => item.includes("Trivy")));
+
+      const warningsOnly = buildStaticToolsReadiness({ gatePolicy: "warn" });
+      assert.equal(warningsOnly.status, "ready_with_warnings");
+      assert.equal(warningsOnly.blockers.length, 0);
+    });
+  });
+}
+
+async function testStaticEvidenceUsesConfiguredScannerInvocations(): Promise<void> {
+  await withTempDir("tethermark-static-invocation-", async (rootDir) => {
+    const targetDir = path.join(rootDir, "target");
+    await fs.mkdir(targetDir, { recursive: true });
+    await fs.writeFile(path.join(targetDir, "app.js"), "const safe = true;\n", "utf8");
+    const scorecardRunner = path.join(rootDir, "fake-scorecard.mjs");
+    const trivyRunner = path.join(rootDir, "fake-trivy.mjs");
+    await fs.writeFile(scorecardRunner, "console.log(JSON.stringify({score: 9, checks: [{name: 'Pinned-Dependencies', score: 9}]}));\n", "utf8");
+    await fs.writeFile(trivyRunner, "console.log(JSON.stringify({Results: []}));\n", "utf8");
+
+    await withEnv({
+      HARNESS_SCORECARD_COMMAND: process.execPath,
+      HARNESS_SCORECARD_RUNNER: scorecardRunner,
+      HARNESS_TRIVY_COMMAND: process.execPath,
+      HARNESS_TRIVY_RUNNER: trivyRunner,
+      HARNESS_DISABLE_LOCAL_BINARIES: undefined
+    }, async () => {
+      resetEvidenceProviderCapabilityCacheForTests();
+      const request = { local_path: targetDir, run_mode: "static", audit_package: "deep-static", llm_provider: "mock" } as const;
+      const scorecard = await executeEvidenceProvider({ providerId: "scorecard", request, rootPath: targetDir, repoUrl: "https://github.com/example/example.git" });
+      const trivy = await executeEvidenceProvider({ providerId: "trivy", request, rootPath: targetDir, repoUrl: null });
+      assert.equal(scorecard.status, "completed", scorecard.summary);
+      assert.equal(scorecard.normalized?.signal_count, 1);
+      assert.equal(trivy.status, "completed", trivy.summary);
+      assert.equal(trivy.normalized?.result_type, "trivy");
+    });
+  });
+}
+
+async function testStaticScannerTimeoutAndOutputFloodFailClosed(): Promise<void> {
+  await withTempDir("tethermark-static-failure-", async (rootDir) => {
+    const targetDir = path.join(rootDir, "target");
+    await fs.mkdir(targetDir, { recursive: true });
+    await fs.writeFile(path.join(targetDir, "app.js"), "const safe = true;\n", "utf8");
+    const toolPath = path.join(rootDir, "fake-semgrep.mjs");
+    const writeFake = async (program: string) => {
+      await fs.writeFile(toolPath, `${program};\n`, "utf8");
+    };
+
+    await withEnv({
+      HARNESS_SEMGREP_PYTHON: process.execPath,
+      HARNESS_SEMGREP_RUNNER: toolPath,
+      HARNESS_STATIC_TOOL_TIMEOUT_MS: "1000",
+      HARNESS_STATIC_TOOL_MAX_BUFFER_BYTES: String(64 * 1024),
+      HARNESS_DISABLE_LOCAL_BINARIES: undefined
+    }, async () => {
+      await writeFake("process.stdout.write('x'.repeat(200000))");
+      resetEvidenceProviderCapabilityCacheForTests();
+      const flooded = await executeEvidenceProvider({ providerId: "semgrep", request: { local_path: targetDir, run_mode: "static", audit_package: "deep-static", llm_provider: "mock" }, rootPath: targetDir, repoUrl: null });
+      assert.equal(flooded.status, "skipped");
+      assert.equal(flooded.failure_category, "runtime_error");
+      assert.match(flooded.summary, /output exceeded/i);
+
+      await writeFake("setTimeout(() => {}, 10000)");
+      resetEvidenceProviderCapabilityCacheForTests();
+      const timedOut = await executeEvidenceProvider({ providerId: "semgrep", request: { local_path: targetDir, run_mode: "static", audit_package: "deep-static", llm_provider: "mock" }, rootPath: targetDir, repoUrl: null });
+      assert.equal(timedOut.status, "skipped");
+      assert.equal(timedOut.failure_category, "runtime_error");
+      assert.match(timedOut.summary, /timed out/i);
+    });
+  });
 }
 
 type MinimalJsonSchema = {
@@ -5348,6 +5465,10 @@ async function main(): Promise<void> {
   delete process.env.LLM_API_KEY;
   delete process.env.OPENAI_API_KEY;
   const tests: Array<[string, () => Promise<void>]> = [
+    ["production static tool version and Scorecard API policy", testProductionStaticToolPolicy],
+    ["static readiness rejects unsupported scanner versions", testStaticReadinessRejectsUnsupportedVersions],
+    ["static evidence uses configured scanner invocations", testStaticEvidenceUsesConfiguredScannerInvocations],
+    ["static scanners fail closed on timeout and output flooding", testStaticScannerTimeoutAndOutputFloodFailClosed],
     ["buildScanRequest parses llm flags", testBuildScanRequestParsesLlmFlags],
     ["OpenAI Codex OAuth provider registry and structured exec", testOpenAICodexProviderRegistryAndStructuredExec],
     ["provider workload policy, budgets, and circuit breaker", testProviderWorkloadPolicyAndBudgets],

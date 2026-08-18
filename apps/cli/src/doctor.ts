@@ -7,6 +7,7 @@ import { buildToolPathEnv, staticToolPathDetails } from "../../../packages/core-
 import { resolvePostgresConnectionConfig } from "../../../packages/core-engine/src/persistence/postgres.js";
 import { buildRuntimeSandboxReadiness } from "../../../packages/validation-runner/src/index.js";
 import { resolveAgentProviderConfig } from "../../../packages/llm-provider/src/index.js";
+import { BUNDLED_SEMGREP_RULESET, BUNDLED_SEMGREP_RULESET_SHA256, BUNDLED_SEMGREP_RULESET_VERSION, evaluateStaticToolVersion, resolveStaticToolInvocation, STATIC_TOOL_POLICIES, type ProductionStaticToolId } from "../../../packages/core-engine/src/static-tool-policy.js";
 
 type CheckStatus = "pass" | "warn" | "fail";
 
@@ -64,19 +65,120 @@ function commandVersion(command: string, args: string[] = ["--version"], shell =
 
 function semgrepProbeArgs(): string[] {
   const root = path.join(os.tmpdir(), "tethermark-semgrep-probe");
-  const configPath = path.join(root, "rules.yml");
+  const configured = envValue("HARNESS_SEMGREP_CONFIG");
+  const configPath = configured ?? path.join(root, `rules-${BUNDLED_SEMGREP_RULESET_VERSION}-${BUNDLED_SEMGREP_RULESET_SHA256.slice(0, 12)}.yml`);
   const targetPath = path.join(root, "target.txt");
   fs.mkdirSync(root, { recursive: true });
-  fs.writeFileSync(configPath, [
-    "rules:",
-    "  - id: tethermark.probe",
-    "    message: Tethermark Semgrep probe.",
-    "    severity: INFO",
-    "    languages: [generic]",
-    "    pattern-regex: tethermark-semgrep-probe"
-  ].join("\n"), "utf8");
-  fs.writeFileSync(targetPath, "tethermark-semgrep-probe\n", "utf8");
+  if (!configured) fs.writeFileSync(configPath, BUNDLED_SEMGREP_RULESET, "utf8");
+  fs.writeFileSync(targetPath, "const token = 'tethermark-doctor-secret-00000000';\n", "utf8");
   return ["scan", "--config", configPath, "--json", "--metrics", "off", targetPath];
+}
+
+function addProductionStaticToolCheck(checks: DoctorCheck[], toolId: ProductionStaticToolId): void {
+  const policy = STATIC_TOOL_POLICIES[toolId];
+  const invocation = resolveStaticToolInvocation(toolId);
+  const versionProbe = run(invocation.command, [...invocation.prefix_args, ...policy.version_args], { timeoutMs: 120_000 });
+  const versionOutput = `${versionProbe.stdout}\n${versionProbe.stderr}`.trim();
+  if (!versionProbe.ok) {
+    checks.push({
+      id: toolId,
+      label: policy.label,
+      status: "fail",
+      summary: `${policy.command} not available: ${versionProbe.error ?? (firstLine(versionOutput) || `exit ${versionProbe.status}`)}.`,
+      details: { command: policy.command, pinned_version: policy.pinned_version, supported_range: `>=${policy.supported_minimum} <${policy.supported_maximum_exclusive}` },
+      fix: [`Run npm run scan -- setup-tools --yes --tool ${toolId}, then rerun doctor.`]
+    });
+    return;
+  }
+  const evaluation = evaluateStaticToolVersion(toolId, versionOutput);
+  if (!evaluation.supported) {
+    checks.push({
+      id: toolId,
+      label: policy.label,
+      status: "fail",
+      summary: evaluation.reason,
+      details: { command: policy.command, detected_version: evaluation.detected_version, pinned_version: policy.pinned_version, supported_range: `>=${policy.supported_minimum} <${policy.supported_maximum_exclusive}` },
+      fix: [`Run npm run scan -- setup-tools --yes --tool ${toolId} to install the production pin.`]
+    });
+    return;
+  }
+  if (toolId === "semgrep") {
+    const functionalProbe = run(invocation.command, [...invocation.prefix_args, ...semgrepProbeArgs()], { timeoutMs: 120_000 });
+    const config = envValue("HARNESS_SEMGREP_CONFIG");
+    const remoteConfig = Boolean(config && /^(https?:|[a-z0-9_.-]+\/)/i.test(config));
+    checks.push({
+      id: toolId,
+      label: policy.label,
+      status: functionalProbe.ok && !remoteConfig ? evaluation.pinned ? "pass" : "warn" : "fail",
+      summary: !functionalProbe.ok
+        ? `Semgrep ${evaluation.detected_version} was found, but the production ruleset probe failed: ${functionalProbe.error ?? (firstLine(`${functionalProbe.stderr}\n${functionalProbe.stdout}`) || `exit ${functionalProbe.status}`)}.`
+        : remoteConfig
+          ? "Semgrep is configured with a remote ruleset; production offline-default readiness requires the bundled or a local ruleset."
+          : `${evaluation.reason} Bundled rules ${BUNDLED_SEMGREP_RULESET_VERSION} executed locally with metrics disabled.`,
+      details: {
+        command: policy.command,
+        detected_version: evaluation.detected_version,
+        pinned_version: policy.pinned_version,
+        ruleset_source: config ?? "bundled",
+        ruleset_version: config ? null : BUNDLED_SEMGREP_RULESET_VERSION,
+        ruleset_sha256: config ? null : BUNDLED_SEMGREP_RULESET_SHA256,
+        metrics: "off",
+        functional_probe: functionalProbe.ok
+      },
+      fix: functionalProbe.ok && !remoteConfig ? undefined : ["Unset HARNESS_SEMGREP_CONFIG to use the bundled offline rules, or point it to a reviewed local file."]
+    });
+    return;
+  }
+  checks.push({
+    id: toolId,
+    label: policy.label,
+    status: evaluation.pinned ? "pass" : "warn",
+    summary: evaluation.reason,
+    details: { command: policy.command, detected_version: evaluation.detected_version, pinned_version: policy.pinned_version, supported_range: `>=${policy.supported_minimum} <${policy.supported_maximum_exclusive}` },
+    fix: evaluation.pinned ? undefined : [`Run npm run scan -- setup-tools --yes --tool ${toolId} to restore the production pin.`]
+  });
+}
+
+function addStaticScannerNetworkCheck(checks: DoctorCheck[]): void {
+  const curl = commandVersion("curl", ["--version"], false, 10_000);
+  if (!curl.available) {
+    checks.push({
+      id: "static-scanner-network",
+      label: "Static Scanner Network",
+      status: "warn",
+      summary: "Network reachability was not probed because curl is unavailable. Semgrep remains offline by default; Scorecard public-repo checks and initial Trivy database setup require network access.",
+      details: { semgrep_network_required: false, scorecard_network_required: true, trivy_initial_database_network_required: true },
+      fix: ["Install curl or independently verify access to api.scorecard.dev and ghcr.io."]
+    });
+    return;
+  }
+  const endpoints = [
+    { id: "scorecard_api", url: "https://api.scorecard.dev/" },
+    { id: "trivy_database_registry", url: "https://ghcr.io/v2/" }
+  ].map((endpoint) => ({
+    ...endpoint,
+    result: run("curl", ["--silent", "--show-error", "--head", "--max-time", "10", "--output", os.devNull, endpoint.url], { timeoutMs: 15_000 })
+  }));
+  const unreachable = endpoints.filter((endpoint) => !endpoint.result.ok);
+  const tokenSource = ["GITHUB_AUTH_TOKEN", "GITHUB_TOKEN", "GH_AUTH_TOKEN", "GH_TOKEN"].find((name) => Boolean(envValue(name))) ?? null;
+  checks.push({
+    id: "static-scanner-network",
+    label: "Static Scanner Network",
+    status: unreachable.length ? "fail" : tokenSource ? "pass" : "warn",
+    summary: unreachable.length
+      ? `Required scanner network endpoints are unreachable: ${unreachable.map((item) => item.url).join(", ")}.`
+      : tokenSource
+        ? `Scorecard API and Trivy registry are reachable; GitHub authentication is configured through ${tokenSource}. Semgrep uses bundled offline rules.`
+        : "Scorecard API and Trivy registry are reachable, but no GitHub token is exported to scanner children; Scorecard may be rate-limited or time out. Semgrep uses bundled offline rules.",
+    details: {
+      endpoints: endpoints.map((endpoint) => ({ id: endpoint.id, url: endpoint.url, reachable: endpoint.result.ok, error: endpoint.result.error ?? (firstLine(endpoint.result.stderr) || null) })),
+      github_token_source: tokenSource,
+      semgrep_network_required: false
+    },
+    fix: unreachable.length
+      ? ["Allow HTTPS access to api.scorecard.dev and ghcr.io, or use cached/local scanner evidence with the resulting coverage limitation recorded."]
+      : tokenSource ? undefined : ["Export GITHUB_AUTH_TOKEN (or GITHUB_TOKEN/GH_TOKEN) before public-repository Scorecard runs to avoid unauthenticated rate limits."]
+  });
 }
 
 function envValue(name: string): string | undefined {
@@ -230,9 +332,10 @@ export function buildDoctorReport(): DoctorReport {
       : "No managed static tools path configured; system PATH will be used.",
     details: toolPathDetails
   });
-  addCommandCheck(checks, { id: "scorecard", label: "OpenSSF Scorecard", command: "scorecard", versionArgs: ["version"], required: true, fix: ["Install OpenSSF Scorecard through an OS-approved package manager or set HARNESS_STATIC_TOOLS_PATH to a trusted bin directory."] });
-  addCommandCheck(checks, { id: "semgrep", label: "Semgrep", command: "semgrep", versionArgs: semgrepProbeArgs(), shell: process.platform === "win32", required: true, timeoutMs: 120_000, fix: ["Install Semgrep with python -m pip install semgrep, pipx install semgrep, or an OS-approved package manager.", "Tethermark uses a bundled local Semgrep ruleset by default; set HARNESS_SEMGREP_CONFIG to use an organization ruleset."] });
-  addCommandCheck(checks, { id: "trivy", label: "Trivy", command: "trivy", required: true, fix: ["Install Trivy through Aqua Security packages, Homebrew, winget, choco, or another OS-approved package manager."] });
+  addProductionStaticToolCheck(checks, "scorecard");
+  addProductionStaticToolCheck(checks, "semgrep");
+  addProductionStaticToolCheck(checks, "trivy");
+  addStaticScannerNetworkCheck(checks);
   addCommandCheck(checks, { id: "docker", label: "Docker", command: "docker", required: false, fix: ["Install Docker or Podman for Linux runtime validation."] });
   addCommandCheck(checks, { id: "podman", label: "Podman", command: "podman", required: false, fix: ["Install Podman or Docker for Linux runtime validation."] });
   const runtimeReadiness = buildRuntimeSandboxReadiness();
@@ -298,6 +401,37 @@ export function buildDoctorReport(): DoctorReport {
     checks,
     summary
   };
+}
+
+export function buildStaticScannerDoctorReport(): DoctorReport {
+  const checks: DoctorCheck[] = [];
+  const toolPathDetails = staticToolPathDetails();
+  checks.push({
+    id: "platform",
+    label: "Platform",
+    status: "pass",
+    summary: `${os.type()} ${os.release()} (${process.platform}/${process.arch}).`,
+    details: { platform: process.platform, arch: process.arch, homedir: os.homedir() }
+  });
+  addCommandCheck(checks, { id: "node", label: "Node.js", command: "node", required: true, fix: ["Install Node.js 20+ from https://nodejs.org/."] });
+  addCommandCheck(checks, { id: "git", label: "Git", command: "git", required: true, fix: ["Install Git and ensure git is on PATH."] });
+  checks.push({
+    id: "static-tools-path",
+    label: "Managed Static Tools Path",
+    status: "pass",
+    summary: toolPathDetails.managed_dirs.length ? `Static tools are resolved from ${toolPathDetails.managed_dirs.join(", ")} before PATH.` : "No managed static tools path configured; system PATH will be used.",
+    details: toolPathDetails
+  });
+  addProductionStaticToolCheck(checks, "scorecard");
+  addProductionStaticToolCheck(checks, "semgrep");
+  addProductionStaticToolCheck(checks, "trivy");
+  addStaticScannerNetworkCheck(checks);
+  checks.push(checkWritableDirectory(path.resolve(process.cwd(), ".artifacts")));
+  const summary = checks.reduce((acc, check) => {
+    acc[check.status] += 1;
+    return acc;
+  }, { pass: 0, warn: 0, fail: 0 });
+  return { generated_at: new Date().toISOString(), platform: process.platform, arch: process.arch, cwd: process.cwd(), checks, summary };
 }
 
 export function printDoctorReport(report: DoctorReport, json = false): void {

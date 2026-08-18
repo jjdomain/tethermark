@@ -16,6 +16,7 @@ export * from "./llm-provider-registry.js";
 export * from "./integration-registry.js";
 export * from "./preflight.js";
 export * from "./static-tools.js";
+export * from "./static-tool-policy.js";
 export * from "../../validation-runner/src/index.js";
 export * from "./tool-runner.js";
 export * from "./standards-audit.js";

@@ -1,6 +1,6 @@
 # Tethermark Community Edition Production Plan — Phases 1–12
 
-Last updated: 2026-08-07
+Last updated: 2026-08-18
 Purpose: durable implementation and release handoff for a fresh Codex task
 Scope: Tethermark Community Edition (CE) in this repository
 
@@ -40,9 +40,13 @@ CE production does **not** require hosted multi-tenancy, enterprise identity, ma
 
 ## Current repository snapshot
 
-Updated on 2026-08-07 after completing Phase 3 Codex-default live validation:
+Updated on 2026-08-18 after completing Phase 4 production static-scanner hardening:
 
-- Branch: `codex/community-edition-phase3-live-validation`, created from merged `main` at `44628cc` after Phases 1 and 2 were merged.
+- Branch: `codex/community-edition-phase4-static-scanners`, created from the completed Phase 3 tree at `1a97b84`.
+- Scorecard `5.5.0`, Semgrep `1.172.0`, and Trivy `0.73.0` are pinned with checksum-locked, user-isolated setup paths and supported-version enforcement. The final Windows `static-doctor` passed eight checks with no failures; its only warning was the absence of an exported GitHub token for avoiding unauthenticated Scorecard rate limits.
+- Real Semgrep and Trivy adversarial-fixture execution passed locally on Windows and in GitHub Actions on Windows, Ubuntu, and macOS. The fixture covers symlinks, hostile filenames, large and binary files, nested repositories, secret-like values, malformed manifests, timeouts, and output flooding. Workflow run `32095194344` retained a separate scanner-evidence artifact for each operating system through 2026-09-17.
+- A real static audit of `NousResearch/hermes-agent` completed repository analysis, Semgrep, and Trivy with 35 dependency vulnerabilities and explicit Scorecard timeout evidence. A separate authenticated Scorecard smoke passed in 43.6 seconds against upstream commit `b3aa561faffd64f05436e429a6415d175e534ec9`; the audit remained internal-only because its full evidence set was incomplete.
+- Phase 4 deterministic verification passed on 2026-08-08: the core suite completed in 81.3 seconds, export and Codex OAuth smoke checks passed, the Pi API E2E passed in 62.1 seconds, and the browser UI E2E passed in 126.6 seconds through triage, remediation, assistant history, approval, and learning workflows.
 - Phase 3's bounded commands, deterministic harness, manual workflow, and redacted evidence writer are implemented on this branch. Both primary real-provider gates passed on implementation commit `1bcf6fd` with local `openai_codex`, `gpt-5.6-sol`, and `chatgpt_session`; API-key validation remains optional secondary evidence.
 - The structured integration gate passed in 6.4 seconds with one request and 14,385 measured tokens. Its redacted summary is `.artifacts/live-validation/live-llm-integration-2026-08-07T19-37-56-515Z.json`.
 - The fixed-fixture E2E passed in 497.1 seconds with eight requests and 194,433 measured tokens. It completed all six required agent roles, produced nine cited findings, 24 control results, six evidence records, and 51 artifacts, then passed persistence, Markdown, SARIF, executive-export, redaction, and static-execution-block assertions. Its redacted summary is `.artifacts/live-validation/live-audit-e2e-2026-08-07T19-37-31-469Z.json`.
@@ -54,7 +58,7 @@ Updated on 2026-08-07 after completing Phase 3 Codex-default live validation:
 - Phase 2 `npm run release:check`: **passed** on 2026-08-03 in 117.2 seconds on the final reviewed tree. Build, the full regression suite, export validation, and all three bundled validation fixtures passed with provider-policy enforcement and retry-attempt accounting enabled.
 - `npm run release:check`: **passed** on 2026-08-02 in 94.4 seconds. Build, tests, export validation, and all three bundled validation fixtures passed.
 - `npm run production:static-release`: **passed** on 2026-08-02 in 303.3 seconds on the final runtime-fixture implementation tree after installing Playwright Chromium and correcting the browser E2E's renamed Audits navigation selector and isolated benchmark-suite staging.
-- Static tool observation during the successful local gate: Scorecard, Semgrep, and Trivy were unavailable in the Pi E2E child processes and were reported as skipped rather than clean passes. Phase 4 must normalize installation and readiness evidence.
+- The prior static-tool availability gap is resolved on Windows. Deterministic Pi E2E jobs intentionally disable local binaries and assert explicit skipped evidence, while the separate real-scanner gate requires executable pinned tools.
 - `npm run production:runtime-readiness`: **passed** on 2026-08-02 in 36.1 seconds with Docker Desktop `29.3.0` on the Linux engine. A digest-pinned Alpine fixture executed with no network, read-only source/root filesystems, bounded writable scratch, non-root execution, dropped capabilities, no-new-privileges, CPU/memory/PID/output limits, exact policy inspection, structured evidence, and verified container/temp cleanup. Independent post-gate checks found no leftover fixture containers or temp roots. `localRuntimeProvider.execute()` remains a blocked placeholder, so real audit-target runtime execution is still Phase 8 work.
 - The real Codex sign-in smoke and both bounded live inference gates now pass with a directly executable signed-in CLI.
 - The Local Runtime Sandbox resolver and policy contracts exist, but `localRuntimeProvider.execute()` still returns a blocked placeholder. The Linux container backend has execution-plan scaffolding but is not yet the finished isolated CE execution path.
@@ -68,7 +72,7 @@ Updated on 2026-08-07 after completing Phase 3 Codex-default live validation:
 | 1 | Recover and stabilize the current branch | **Complete** | None; PR #1 passed final review and required checks |
 | 2 | Lock CE boundaries, provider policy, and safe defaults | **Complete** | None; policy matrix, enforcement, audit fields, and regression coverage are in place |
 | 3 | Separate deterministic CI from real-model release validation | **Complete** | None; both Codex/ChatGPT-session gates passed with redacted evidence on implementation commit `1bcf6fd` |
-| 4 | Make static scanners production dependable | **Partial** | Tool install/readiness and real cross-platform evidence |
+| 4 | Make static scanners production dependable | **Complete** | None; PR #4 passed the three-OS real-scanner matrix and retained all evidence artifacts |
 | 5 | Calibrate audit quality, evidence integrity, and scoring | **Mostly complete** | Golden-repo calibration and false-positive review |
 | 6 | Complete review, remediation, exports, and operator workflows | **Mostly complete** | Manual fresh-user workflow and release evidence |
 | 7 | Implement Admin/System Policies and extensive-scan controls | **Not started** | Schema, persistence, resolver, UI/API, migrations, tests |
@@ -165,7 +169,7 @@ Exit criteria:
 
 ## Phase 4 — Make static scanners production dependable
 
-Status: **Partial**
+Status: **Complete**
 
 Objective: make Scorecard, Semgrep, Trivy, internal analyzers, and their failure semantics reliable on supported operating systems.
 
@@ -173,20 +177,20 @@ Tasks:
 
 - [x] Implement adapters and normalized evidence contracts for OpenSSF Scorecard, Semgrep, and Trivy.
 - [x] Fail or degrade explicitly when local binaries are disabled, missing, blocked, timed out, or return invalid output.
-- [ ] Add a single `doctor`/setup path that verifies exact versions, PATH visibility for child processes, rules/config availability, and network requirements.
-- [ ] Decide and document whether CE bundles tools, downloads pinned releases, uses containers, or requires user installation per platform.
-- [ ] Pin versions/checksums and define supported-version ranges.
-- [ ] Ensure bundled Semgrep rules work offline; do not silently use remote rules or transmit source.
-- [ ] Exercise Scorecard API fallback only for eligible public GitHub targets and mark unavailable network/API evidence accurately.
-- [ ] Add malicious and edge-case fixtures: symlinks, path traversal, large files, binary files, nested repositories, hostile filenames, secret-like values, malformed manifests, and tool timeout/output flooding.
-- [ ] Run real-tool release smoke checks on Windows, Ubuntu, and macOS and retain evidence.
-- [ ] Define minimum evidence coverage for publishable versus internal-only output.
+- [x] Add a single `doctor`/setup path that verifies exact versions, PATH visibility for child processes, rules/config availability, and network requirements.
+- [x] Decide and document whether CE bundles tools, downloads pinned releases, uses containers, or requires user installation per platform.
+- [x] Pin versions/checksums and define supported-version ranges.
+- [x] Ensure bundled Semgrep rules work offline; do not silently use remote rules or transmit source.
+- [x] Exercise Scorecard API fallback only for eligible public GitHub targets and mark unavailable network/API evidence accurately.
+- [x] Add malicious and edge-case fixtures: symlinks, path traversal, large files, binary files, nested repositories, hostile filenames, secret-like values, malformed manifests, and tool timeout/output flooding.
+- [x] Run real-tool release smoke checks on Windows, Ubuntu, and macOS and retain evidence. Workflow run `32095194344` passed all three jobs and retained the platform artifacts through 2026-09-17.
+- [x] Define minimum evidence coverage for publishable versus internal-only output.
 
 Exit criteria:
 
-- A fresh supported machine can install or resolve every required static tool.
-- Readiness matches actual child-process execution.
-- Missing tools cannot create false passes or publishable overclaims.
+- [x] A fresh supported machine can install or resolve every required static tool through checksum-locked/user-isolated setup paths.
+- [x] Readiness matches actual child-process execution, including managed Semgrep's Python runner prefix.
+- [x] Missing, timed-out, flooded, or invalid tools cannot create false passes or publishable overclaims.
 
 ## Phase 5 — Calibrate audit quality, evidence integrity, and scoring
 
@@ -506,13 +510,12 @@ A static-only beta may be cut before Phases 8–9 finish only if it is explicitl
 
 ## Recommended execution order from this snapshot
 
-1. Complete Phase 4 scanner installation/readiness and real-tool evidence.
-2. Complete Phase 5 calibration and false-positive review.
-3. Complete the Phase 6 clean-user review/remediation/export workflow evidence.
-4. Implement Phase 7 System Policies and extensive-scan controls.
-5. Implement Phase 8 real sandbox execution, then Phase 9 executable runtime eval packs.
-6. Complete Phase 10 stress/recovery hardening and Phase 11 packaging/cross-platform security.
-7. Execute Phase 12 release candidate and beta gates.
+1. Complete Phase 5 calibration and false-positive review.
+2. Complete the Phase 6 clean-user review/remediation/export workflow evidence.
+3. Implement Phase 7 System Policies and extensive-scan controls.
+4. Implement Phase 8 real sandbox execution, then Phase 9 executable runtime eval packs.
+5. Complete Phase 10 stress/recovery hardening and Phase 11 packaging/cross-platform security.
+6. Execute Phase 12 release candidate and beta gates.
 
 ## Immediate next-task checklist
 
@@ -524,10 +527,10 @@ git diff origin/main...HEAD
 git diff -- PLANS.md changelog.md docs/community-edition-production-plan-phases-1-12.md docs/provider-workload-policy.md docs/provider-policy-decision-log.md
 ```
 
-Phase 3 is complete. Before starting Phase 4, rerun the deterministic release gate on the completed tracker tree:
+Phases 1 through 4 are complete. Before starting Phase 5, rerun the deterministic release gate on the completed tracker tree:
 
 ```powershell
 npm run release:check
 ```
 
-Then follow the Phase 4 scanner setup, version-pinning, offline-rule, and real-tool evidence tasks above. The live commands in `docs/live-model-validation.md` remain the Phase 3 release-candidate refresh procedure; they are not part of ordinary pull-request CI.
+Then follow the Phase 5 calibration, evidence-integrity, and false-positive-review tasks above. The live commands in `docs/live-model-validation.md` remain the Phase 3 release-candidate refresh procedure; they are not part of ordinary pull-request CI.

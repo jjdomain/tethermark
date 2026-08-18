@@ -1,5 +1,5 @@
 import type { AuditPackageDefinition } from "../audit-packages.js";
-import type { AuditPolicyArtifact, Finding, PublishabilityArtifact, RemediationArtifact, SkepticArtifact } from "../contracts.js";
+import type { AuditPolicyArtifact, EvidenceExecutionRecord, Finding, PublishabilityArtifact, RemediationArtifact, SkepticArtifact } from "../contracts.js";
 
 function hasLowEvidence(skeptic: SkepticArtifact): boolean {
   return skeptic.summary.overall_evidence_sufficiency === "low";
@@ -23,6 +23,7 @@ export function stageScoreAndPublishability(args: {
   remediation: RemediationArtifact;
   auditPackage: AuditPackageDefinition;
   auditPolicy: AuditPolicyArtifact;
+  evidenceExecutions?: EvidenceExecutionRecord[];
 }): PublishabilityArtifact {
   const rationale: string[] = [];
   const gatingFindings = highSeverityFindingIds(args.findings);
@@ -30,6 +31,15 @@ export function stageScoreAndPublishability(args: {
   const lowEvidence = hasLowEvidence(args.skepticReview);
   const highFalsePositiveRisk = hasHighFalsePositiveRisk(args.skepticReview);
   const threshold = args.auditPackage.publishability_threshold;
+  const completedProviders = new Set((args.evidenceExecutions ?? []).filter((item) => item.status === "completed").flatMap((item) => [item.provider_id, item.tool]));
+  const missingMinimumEvidence = args.evidenceExecutions
+    ? [
+        !completedProviders.has("repo_analysis") ? "repo_analysis" : null,
+        !completedProviders.has("semgrep") ? "semgrep" : null,
+        !completedProviders.has("trivy") ? "trivy" : null,
+        !completedProviders.has("scorecard") && !completedProviders.has("scorecard_api") ? "scorecard_or_scorecard_api" : null
+      ].filter((item): item is string => Boolean(item))
+    : [];
 
   if (args.remediation.human_review_required) {
     rationale.push("Remediation stage marked the audit as requiring human review.");
@@ -48,6 +58,9 @@ export function stageScoreAndPublishability(args: {
   }
   if (args.auditPolicy.publication_rules?.length) {
     rationale.push(`Publication rules applied: ${args.auditPolicy.publication_rules[0]}`);
+  }
+  if (missingMinimumEvidence.length) {
+    rationale.push(`Minimum production static evidence is incomplete: ${missingMinimumEvidence.join(", ")}.`);
   }
 
   let publishabilityStatus: PublishabilityArtifact["publishability_status"] = "publishable";
@@ -82,6 +95,13 @@ export function stageScoreAndPublishability(args: {
     recommendedVisibility = "internal";
     publicSummarySafe = false;
     rationale.push("Critical non-public-safe finding combined with low evidence blocks publication pending review.");
+  }
+
+  if (missingMinimumEvidence.length) {
+    publishabilityStatus = "internal_only";
+    humanReviewRequired = true;
+    recommendedVisibility = "internal";
+    publicSummarySafe = false;
   }
 
   if (rationale.length === 0) {

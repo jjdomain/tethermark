@@ -148,7 +148,7 @@ Preview the installer plan:
 npm run scan -- setup-tools --dry-run
 ```
 
-Execute auto-supported package-manager installs:
+Install the production-locked tools after reviewing the plan:
 
 ```bash
 npm run scan -- setup-tools --yes
@@ -160,11 +160,34 @@ Limit to one or more tools:
 npm run scan -- setup-tools --dry-run --tool semgrep,trivy
 ```
 
-The setup command avoids downloading scanner executables into the repository. It prefers package managers such as `winget`, `brew`, `pipx`, `python -m pip --user`, or `choco`, depending on platform availability. Manual steps are printed when a safe automatic install path is not detected.
+The setup strategy is deterministic and user-scoped:
 
-When tools are installed, `setup-tools` records discovered scanner directories in `.env` as `HARNESS_STATIC_TOOLS_PATH`. Start or restart `npm run oss` after setup so the local API and web UI read those paths.
+- OpenSSF Scorecard `5.5.0` and Trivy `0.73.0` are downloaded from their official GitHub releases into the user Tethermark tools directory. Setup verifies the platform archive against the SHA-256 value in `packages/core-engine/src/static-tool-policy.ts` before extraction and verifies the installed executable's version.
+- Semgrep `1.172.0` is downloaded as a platform wheel from PyPI, verified against the official wheel SHA-256 allowlist, and installed into an isolated user Tethermark package directory. A managed runner fixes package precedence and disables Semgrep version checks. Audit commands also pass `--metrics off`.
+- Scanner executables are never written into the source repository. Package-manager versions are not used when they cannot reproduce the production pin.
+- Unsupported operating-system/architecture combinations stop with a manual, checksum-verification instruction instead of downloading an unreviewed artifact.
+
+When tools are installed, `setup-tools` records discovered scanner directories in `.env` as `HARNESS_STATIC_TOOLS_PATH`. Managed Semgrep also records `HARNESS_SEMGREP_PYTHON` and `HARNESS_SEMGREP_RUNNER`, ensuring doctor, readiness, and audit execution use the same direct child-process invocation. Start or restart `npm run oss` after setup so the local API and web UI read those paths.
 
 Semgrep uses a bundled local Tethermark ruleset by default so new installs do not depend on downloading `--config auto` from `semgrep.dev`. Set `HARNESS_SEMGREP_CONFIG` to a local file, directory, or Semgrep config URI only when your deployment intentionally uses an organization-managed ruleset.
+
+Verify only the production static scanner contract:
+
+```bash
+npm run scan -- static-doctor --json
+```
+
+This checks the supported version ranges, exact production pins, child-process invocation, bundled Semgrep ruleset version and SHA-256, `--metrics off` functional execution, Scorecard API reachability, Trivy registry reachability, and exported GitHub authentication. Scorecard public-repository scans should export `GITHUB_AUTH_TOKEN`, `GITHUB_TOKEN`, `GH_AUTH_TOKEN`, or `GH_TOKEN`; a GitHub CLI login is not silently reused.
+
+Minimum public evidence coverage requires completed `repo_analysis`, Semgrep, Trivy, and either local Scorecard or the eligible public-GitHub Scorecard API fallback. If any member is skipped or failed, the audit remains usable internally but its publishability is forced to `internal_only` with human review required.
+
+Run the real adversarial scanner smoke locally with:
+
+```bash
+npm run test:static-scanners:real
+```
+
+The fixture covers symlinks where the host permits them, traversal-like and hostile filenames, large and binary files, nested repositories, secret-like content, malformed manifests, plus deterministic timeout/output-flood failure tests in the regression suite.
 
 ## Local Runtime Sandbox Setup
 
