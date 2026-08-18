@@ -443,11 +443,11 @@ async function installManagedSemgrep(item: SetupCommand): Promise<string> {
     await fsp.writeFile(binary, `#!/bin/sh\nSEMGREP_ENABLE_VERSION_CHECK=0 exec ${quote(item.command)} ${quote(runner)} \"\$@\"\n`, "utf8");
     await fsp.chmod(binary, 0o755);
   }
-  const verification = runCapture(binary, policy.version_args, 120_000);
-  const evaluation = evaluateStaticToolVersion("semgrep", verification.output);
-  if (!verification.ok || !evaluation.pinned) throw new Error(`Semgrep isolated install verification failed: ${evaluation.reason}`);
   process.env.HARNESS_SEMGREP_PYTHON = item.command;
   process.env.HARNESS_SEMGREP_RUNNER = runner;
+  const verification = runCapture(item.command, [runner, ...policy.version_args], 120_000);
+  const evaluation = evaluateStaticToolVersion("semgrep", verification.output);
+  if (!verification.ok || !evaluation.pinned) throw new Error(`Semgrep isolated install verification failed: ${evaluation.reason}`);
   return binDir;
 }
 
