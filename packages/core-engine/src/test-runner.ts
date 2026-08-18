@@ -172,6 +172,35 @@ async function testStaticReadinessRejectsUnsupportedVersions(): Promise<void> {
   });
 }
 
+async function testStaticEvidenceUsesConfiguredScannerInvocations(): Promise<void> {
+  await withTempDir("tethermark-static-invocation-", async (rootDir) => {
+    const targetDir = path.join(rootDir, "target");
+    await fs.mkdir(targetDir, { recursive: true });
+    await fs.writeFile(path.join(targetDir, "app.js"), "const safe = true;\n", "utf8");
+    const scorecardRunner = path.join(rootDir, "fake-scorecard.mjs");
+    const trivyRunner = path.join(rootDir, "fake-trivy.mjs");
+    await fs.writeFile(scorecardRunner, "console.log(JSON.stringify({score: 9, checks: [{name: 'Pinned-Dependencies', score: 9}]}));\n", "utf8");
+    await fs.writeFile(trivyRunner, "console.log(JSON.stringify({Results: []}));\n", "utf8");
+
+    await withEnv({
+      HARNESS_SCORECARD_COMMAND: process.execPath,
+      HARNESS_SCORECARD_RUNNER: scorecardRunner,
+      HARNESS_TRIVY_COMMAND: process.execPath,
+      HARNESS_TRIVY_RUNNER: trivyRunner,
+      HARNESS_DISABLE_LOCAL_BINARIES: undefined
+    }, async () => {
+      resetEvidenceProviderCapabilityCacheForTests();
+      const request = { local_path: targetDir, run_mode: "static", audit_package: "deep-static", llm_provider: "mock" } as const;
+      const scorecard = await executeEvidenceProvider({ providerId: "scorecard", request, rootPath: targetDir, repoUrl: "https://github.com/example/example.git" });
+      const trivy = await executeEvidenceProvider({ providerId: "trivy", request, rootPath: targetDir, repoUrl: null });
+      assert.equal(scorecard.status, "completed", scorecard.summary);
+      assert.equal(scorecard.normalized?.signal_count, 1);
+      assert.equal(trivy.status, "completed", trivy.summary);
+      assert.equal(trivy.normalized?.result_type, "trivy");
+    });
+  });
+}
+
 async function testStaticScannerTimeoutAndOutputFloodFailClosed(): Promise<void> {
   await withTempDir("tethermark-static-failure-", async (rootDir) => {
     const targetDir = path.join(rootDir, "target");
@@ -5438,6 +5467,7 @@ async function main(): Promise<void> {
   const tests: Array<[string, () => Promise<void>]> = [
     ["production static tool version and Scorecard API policy", testProductionStaticToolPolicy],
     ["static readiness rejects unsupported scanner versions", testStaticReadinessRejectsUnsupportedVersions],
+    ["static evidence uses configured scanner invocations", testStaticEvidenceUsesConfiguredScannerInvocations],
     ["static scanners fail closed on timeout and output flooding", testStaticScannerTimeoutAndOutputFloodFailClosed],
     ["buildScanRequest parses llm flags", testBuildScanRequestParsesLlmFlags],
     ["OpenAI Codex OAuth provider registry and structured exec", testOpenAICodexProviderRegistryAndStructuredExec],

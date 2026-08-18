@@ -16,7 +16,7 @@ import {
 import { buildToolPathEnv } from "../../../packages/core-engine/src/tool-paths.js";
 
 type ToolId = ProductionStaticToolId;
-type SetupKind = "detected" | "managed_archive" | "managed_python" | "command" | "manual";
+type SetupKind = "detected" | "managed_archive" | "managed_python" | "manual";
 
 export interface SetupCommand {
   tool: ToolId;
@@ -260,7 +260,6 @@ export function buildSetupToolsPlan(args: { tools?: string } = {}): SetupCommand
   }
   const tools = selectedTools(args.tools);
   const plan: SetupCommand[] = [];
-  const pipx = firstAvailable(["pipx"]);
   const configuredPython = process.env.PYTHON_BIN?.trim();
   const pythonCandidates = process.platform === "win32" ? [configuredPython, "py", "python", "python3"] : [configuredPython, "python3", "python"];
   const python = firstAvailable(pythonCandidates.filter((item): item is string => Boolean(item)));
@@ -277,17 +276,7 @@ export function buildSetupToolsPlan(args: { tools?: string } = {}): SetupCommand
       plan.push(managedArchivePlan(toolId, priorReason));
       continue;
     }
-    if (pipx) {
-      plan.push({
-        tool: "semgrep",
-        label: policy.label,
-        kind: "command",
-        command: pipx.command,
-        args: ["install", "--force", `semgrep==${policy.pinned_version}`],
-        reason: `${priorReason} pipx provides an isolated, exact-version install.`,
-        auto_run: true
-      });
-    } else if (python) {
+    if (python) {
       plan.push({
         tool: "semgrep",
         label: policy.label,
@@ -486,16 +475,7 @@ export async function runSetupTools(args: { tools?: string; yes?: boolean; dryRu
       recordManagedToolPath(installedDirs);
       continue;
     }
-    const result = spawnSync(item.command, item.args, {
-      stdio: "inherit",
-      env: { ...process.env, PATH: buildToolPathEnv() },
-      shell: process.platform === "win32" && /\.(cmd|bat)$/i.test(item.command),
-      windowsHide: true,
-      timeout: 10 * 60_000
-    });
-    if (result.status !== 0 || result.error) {
-      throw new Error(`${item.label} install failed: ${result.error?.message ?? `exit ${result.status}`}`);
-    }
+    throw new Error(`${item.label} has an unsupported automatic setup kind: ${item.kind}`);
   }
 
   const managedDirs = recordManagedToolPath(installedDirs);

@@ -718,6 +718,7 @@ export async function executeEvidenceProvider(args: {
       });
     case "scorecard": {
       const localScorecardAvailable = await directoryExists(args.rootPath);
+      const invocation = resolveStaticToolInvocation("scorecard");
       const command = effectiveRepoUrl
         ? ["--format", "json", "--repo", effectiveRepoUrl]
         : localScorecardAvailable
@@ -752,7 +753,7 @@ export async function executeEvidenceProvider(args: {
         });
       }
       try {
-        const { exitCode, stdout, stderr } = await runCommand("scorecard", command, { timeoutMs: 3 * 60 * 1000 });
+        const { exitCode, stdout, stderr } = await runCommand(invocation.command, [...invocation.prefix_args, ...command], { timeoutMs: 3 * 60 * 1000 });
         const parsed = parseCommandJson(stdout, stderr);
         const failure = classifyCommandFailure(stdout, stderr);
         if (failure) {
@@ -897,6 +898,7 @@ export async function executeEvidenceProvider(args: {
     }
     case "trivy": {
       const command = ["fs", "--format", "json", "--quiet", args.rootPath];
+      const invocation = resolveStaticToolInvocation("trivy");
       if (localBinaryBlocked) {
         return skippedUnavailableRecord({
           provider_id: "trivy",
@@ -910,7 +912,7 @@ export async function executeEvidenceProvider(args: {
         });
       }
       try {
-        const { exitCode, stdout, stderr } = await runCommand("trivy", command);
+        const { exitCode, stdout, stderr } = await runCommand(invocation.command, [...invocation.prefix_args, ...command]);
         const parsed = parseCommandJson(stdout, stderr);
         const failure = classifyCommandFailure(stdout, stderr);
         if (failure) {
