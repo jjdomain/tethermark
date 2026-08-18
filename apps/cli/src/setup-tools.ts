@@ -392,14 +392,15 @@ async function installManagedArchive(item: SetupCommand): Promise<string> {
 async function installManagedSemgrep(item: SetupCommand): Promise<string> {
   const policy = STATIC_TOOL_POLICIES.semgrep;
   const installRoot = path.join(managedToolsRoot(), `semgrep-${policy.pinned_version}`);
-  const packageRoot = path.join(installRoot, "python-packages");
+  const venvRoot = path.join(installRoot, "python-env");
+  const venvPython = path.join(venvRoot, process.platform === "win32" ? "Scripts" : "bin", process.platform === "win32" ? "python.exe" : "python");
   const binDir = path.join(installRoot, "bin");
   const binary = path.join(binDir, process.platform === "win32" ? "semgrep.cmd" : "semgrep");
   const runner = path.join(binDir, "semgrep_runner.py");
   const existing = fs.existsSync(binary) ? runCapture(binary, policy.version_args, 120_000) : null;
   if (existing?.ok && evaluateStaticToolVersion("semgrep", existing.output).pinned) return binDir;
 
-  await fsp.rm(packageRoot, { recursive: true, force: true });
+  await fsp.rm(venvRoot, { recursive: true, force: true });
   await fsp.mkdir(binDir, { recursive: true });
   const downloadRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "tethermark-semgrep-wheel-"));
   try {
@@ -414,7 +415,13 @@ async function installManagedSemgrep(item: SetupCommand): Promise<string> {
     const wheelPath = path.join(downloadRoot, wheels[0]!);
     const wheelDigest = await sha256File(wheelPath);
     if (!policy.package_sha256?.includes(wheelDigest)) throw new Error(`Semgrep wheel checksum is not in the production allowlist: ${wheelDigest}`);
-    const install = spawnSync(item.command, ["-m", "pip", "install", "--disable-pip-version-check", "--target", packageRoot, wheelPath], {
+    const createVenv = spawnSync(item.command, ["-m", "venv", venvRoot], {
+      stdio: "inherit",
+      windowsHide: true,
+      timeout: 2 * 60_000
+    });
+    if (createVenv.status !== 0 || createVenv.error) throw new Error(`Semgrep virtual environment creation failed: ${createVenv.error?.message ?? `exit ${createVenv.status}`}`);
+    const install = spawnSync(venvPython, ["-m", "pip", "install", "--disable-pip-version-check", wheelPath], {
       stdio: "inherit",
       windowsHide: true,
       timeout: 10 * 60_000
@@ -427,7 +434,6 @@ async function installManagedSemgrep(item: SetupCommand): Promise<string> {
     "import sys",
     "import os",
     "os.environ['SEMGREP_ENABLE_VERSION_CHECK'] = '0'",
-    `sys.path.insert(0, ${JSON.stringify(packageRoot)})`,
     "if sys.argv[1:] == ['--version']:",
     "    from importlib.metadata import version",
     "    print(version('semgrep'))",
@@ -440,16 +446,16 @@ async function installManagedSemgrep(item: SetupCommand): Promise<string> {
     await fsp.writeFile(binary, [
       "@echo off",
       "set \"SEMGREP_ENABLE_VERSION_CHECK=0\"",
-      `"${item.command}" "${runner}" %*`
+      `"${venvPython}" "${runner}" %*`
     ].join("\r\n") + "\r\n", "utf8");
   } else {
     const quote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
-    await fsp.writeFile(binary, `#!/bin/sh\nSEMGREP_ENABLE_VERSION_CHECK=0 exec ${quote(item.command)} ${quote(runner)} \"\$@\"\n`, "utf8");
+    await fsp.writeFile(binary, `#!/bin/sh\nSEMGREP_ENABLE_VERSION_CHECK=0 exec ${quote(venvPython)} ${quote(runner)} \"\$@\"\n`, "utf8");
     await fsp.chmod(binary, 0o755);
   }
-  process.env.HARNESS_SEMGREP_PYTHON = item.command;
+  process.env.HARNESS_SEMGREP_PYTHON = venvPython;
   process.env.HARNESS_SEMGREP_RUNNER = runner;
-  const verification = runCapture(item.command, [runner, ...policy.version_args], 120_000);
+  const verification = runCapture(venvPython, [runner, ...policy.version_args], 120_000);
   const evaluation = evaluateStaticToolVersion("semgrep", verification.output);
   if (!verification.ok || !evaluation.pinned) throw new Error(`Semgrep isolated install verification failed: ${evaluation.reason}`);
   return binDir;
