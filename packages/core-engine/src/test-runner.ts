@@ -325,7 +325,7 @@ async function testOpenAICodexProviderRegistryAndStructuredExec(): Promise<void>
   assert.equal(provider?.requires_api_key, false);
   assert.equal(listBuiltinLlmProviderPresets().find((item) => item.id === "openai_codex_local")?.provider_id, "openai_codex");
 
-  const resolved = resolveAgentProviderConfig("planner_agent", { provider: "openai_codex", model: "gpt-5.1-codex" });
+  const resolved = resolveAgentProviderConfig("planner_agent", { provider: "openai_codex", model: "gpt-5.6-sol" });
   assert.equal(resolved.provider, "openai_codex");
   assert.equal(resolved.apiKeySource, "oauth-local");
 
@@ -365,12 +365,13 @@ async function testOpenAICodexProviderRegistryAndStructuredExec(): Promise<void>
     await fs.mkdir(fakeLocalAppData, { recursive: true });
     await fs.writeFile(fakeCli, [
       "import fs from 'node:fs';",
+      "if (!process.argv.includes('--skip-git-repo-check')) process.exit(3);",
       "const outIndex = process.argv.indexOf('--output-last-message');",
       "if (outIndex < 0) process.exit(2);",
       "fs.writeFileSync(process.argv[outIndex + 1], JSON.stringify({ ok: true, mode: 'oauth' }));",
       "process.stdout.write(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 12, cached_input_tokens: 4, output_tokens: 3 } }) + '\\n');"
     ].join("\n"), "utf8");
-    const codex = new OpenAICodexCliProvider("gpt-5.1-codex", process.execPath, "read-only", 10_000, [fakeCli], {
+    const codex = new OpenAICodexCliProvider("gpt-5.6-sol", process.execPath, "read-only", 10_000, [fakeCli], {
       ...process.env,
       APPDATA: fakeAppData,
       CODEX_HOME: path.join(fakeHome, ".codex"),
@@ -406,7 +407,7 @@ async function testOpenAICodexProviderRegistryAndStructuredExec(): Promise<void>
 async function testProviderWorkloadPolicyAndBudgets(): Promise<void> {
   const interactive = resolveProviderPolicy({
     provider: "openai_codex",
-    model: "gpt-5.1-codex",
+    model: "gpt-5.6-sol",
     workloadClass: "interactive_operator",
     credentialClass: "chatgpt_session",
     maxRequests: 2,
@@ -417,7 +418,7 @@ async function testProviderWorkloadPolicyAndBudgets(): Promise<void> {
 
   assert.throws(() => resolveProviderPolicy({
     provider: "openai_codex",
-    model: "gpt-5.1-codex",
+    model: "gpt-5.6-sol",
     workloadClass: "unattended_local",
     credentialClass: "chatgpt_session"
   }), /provider_workload_not_allowed/);
@@ -440,7 +441,7 @@ async function testProviderWorkloadPolicyAndBudgets(): Promise<void> {
     local_path: ".",
     run_mode: "static",
     llm_provider: "openai_codex",
-    llm_model: "gpt-5.1-codex"
+    llm_model: "gpt-5.6-sol"
   }), /provider_workload_not_allowed/);
   const queued = engine.enqueue({
     local_path: ".",
@@ -508,6 +509,35 @@ async function testProviderWorkloadPolicyAndBudgets(): Promise<void> {
     assert.equal(budgetedAttempts, 2, "Each provider retry must consume one request-budget unit");
   } finally {
     await new Promise<void>((resolve, reject) => retryServer.close((error) => error ? reject(error) : resolve()));
+  }
+
+  const timeoutServer = http.createServer((_request, response) => {
+    setTimeout(() => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({ ok: true }) } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }
+      }));
+    }, 200);
+  });
+  await new Promise<void>((resolve) => timeoutServer.listen(0, "127.0.0.1", resolve));
+  try {
+    const timeoutProvider = new OpenAIModelProvider(
+      "test-key",
+      "gpt-4.1",
+      `http://127.0.0.1:${getListeningPort(timeoutServer)}/v1`,
+      25
+    );
+    await assert.rejects(() => timeoutProvider.generateStructured<{ ok: boolean }>({
+      agentName: "planner_agent",
+      schemaName: "timeout_budget",
+      schema: { type: "object", required: ["ok"], properties: { ok: { type: "boolean" } } },
+      systemPrompt: "Return JSON.",
+      userPrompt: "Return ok.",
+      maxRetries: 1
+    }), /OpenAI structured generation failed after 1 attempts/);
+  } finally {
+    await new Promise<void>((resolve, reject) => timeoutServer.close((error) => error ? reject(error) : resolve()));
   }
 
   resetProviderGovernorForTests();
@@ -3635,7 +3665,7 @@ async function testValidateFixturesPassesForBundledTargets(): Promise<void> {
       HARNESS_LOCAL_DB_ROOT: sharedLocalRoot,
       HARNESS_DISABLE_LOCAL_BINARIES: "1",
       HARNESS_DISABLE_PYTHON_WORKERS: "1",
-      AUDIT_LLM_MODEL: "gpt-5.1-codex"
+      AUDIT_LLM_MODEL: "gpt-5.6-sol"
     }, async () => {
       const summary = await validateFixtures({
         rootDir: path.resolve(process.cwd(), "fixtures", "validation-targets"),

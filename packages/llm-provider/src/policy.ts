@@ -37,7 +37,7 @@ type WorkloadDefaults = Omit<ProviderPolicyDecision,
 const DEFAULT_ALLOWED_MODELS: Record<ModelProviderId, string[]> = {
   mock: ["mock-agent-runtime"],
   openai: ["gpt-5.4-mini", "gpt-5.4", "gpt-5.2", "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano"],
-  openai_codex: ["gpt-5.1-codex", "gpt-5.1-codex-mini"]
+  openai_codex: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
 };
 
 const WORKLOAD_DEFAULTS: Record<ProviderWorkloadClass, WorkloadDefaults> = {

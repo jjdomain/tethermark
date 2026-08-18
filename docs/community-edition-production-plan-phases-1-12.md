@@ -1,6 +1,6 @@
 # Tethermark Community Edition Production Plan — Phases 1–12
 
-Last updated: 2026-08-03
+Last updated: 2026-08-07
 Purpose: durable implementation and release handoff for a fresh Codex task
 Scope: Tethermark Community Edition (CE) in this repository
 
@@ -40,16 +40,23 @@ CE production does **not** require hosted multi-tenancy, enterprise identity, ma
 
 ## Current repository snapshot
 
-Updated on 2026-08-03 during Phase 2 provider-policy verification:
+Updated on 2026-08-07 after completing Phase 3 Codex-default live validation:
 
-- Branch: `codex/community-edition-phase2-provider-policy`, created from merged `main` at `83f73a4`.
-- Phase 1 was merged through PR #1; Phase 2 is isolated on the new branch.
+- Branch: `codex/community-edition-phase3-live-validation`, created from merged `main` at `44628cc` after Phases 1 and 2 were merged.
+- Phase 3's bounded commands, deterministic harness, manual workflow, and redacted evidence writer are implemented on this branch. Both primary real-provider gates passed on implementation commit `1bcf6fd` with local `openai_codex`, `gpt-5.6-sol`, and `chatgpt_session`; API-key validation remains optional secondary evidence.
+- The structured integration gate passed in 6.4 seconds with one request and 14,385 measured tokens. Its redacted summary is `.artifacts/live-validation/live-llm-integration-2026-08-07T19-37-56-515Z.json`.
+- The fixed-fixture E2E passed in 497.1 seconds with eight requests and 194,433 measured tokens. It completed all six required agent roles, produced nine cited findings, 24 control results, six evidence records, and 51 artifacts, then passed persistence, Markdown, SARIF, executive-export, redaction, and static-execution-block assertions. Its redacted summary is `.artifacts/live-validation/live-audit-e2e-2026-08-07T19-37-31-469Z.json`.
+- Phase 3 completion `npm run release:check`: **passed** on 2026-08-07 in 79.1 seconds after both live gates and the tracker update. Build, the full regression suite, export validation, all three bundled fixtures, and the fail-closed live-validation harness passed.
+- The Connections/Agent Configuration readiness check now distinguishes a cached ChatGPT authentication session from a runnable Codex CLI. It runs a bounded, no-shell `codex login status` probe, exposes an advanced command override, and blocks the audit-ready state when the CLI is missing, inaccessible, times out, or fails its auth check.
+- Phase 3 `npm run release:check`: **passed** on 2026-08-06 in 124.5 seconds. Build, regression tests (including provider timeout/backoff), export validation, all three bundled fixtures, and the fail-closed live-validation harness passed without a live model call.
+- Phase 3 Codex-default clarification `npm run release:check`: **passed** on 2026-08-07 in 108.6 seconds. The deterministic harness verified the standard live commands resolve to Codex and the explicitly named API commands remain secondary; no live quota was consumed.
+- Phase 3 Codex readiness fix `npm run release:check`: **passed** on 2026-08-07 in 98.2 seconds. The deterministic OAuth smoke also passed the authenticated-session/CLI-unavailable regression; the real workstation smoke correctly remained blocked with `authenticated: true`, `execution_status: command_inaccessible`, and `ready: false`, without invoking a model.
 - Phase 2 `npm run release:check`: **passed** on 2026-08-03 in 117.2 seconds on the final reviewed tree. Build, the full regression suite, export validation, and all three bundled validation fixtures passed with provider-policy enforcement and retry-attempt accounting enabled.
 - `npm run release:check`: **passed** on 2026-08-02 in 94.4 seconds. Build, tests, export validation, and all three bundled validation fixtures passed.
 - `npm run production:static-release`: **passed** on 2026-08-02 in 303.3 seconds on the final runtime-fixture implementation tree after installing Playwright Chromium and correcting the browser E2E's renamed Audits navigation selector and isolated benchmark-suite staging.
 - Static tool observation during the successful local gate: Scorecard, Semgrep, and Trivy were unavailable in the Pi E2E child processes and were reported as skipped rather than clean passes. Phase 4 must normalize installation and readiness evidence.
 - `npm run production:runtime-readiness`: **passed** on 2026-08-02 in 36.1 seconds with Docker Desktop `29.3.0` on the Linux engine. A digest-pinned Alpine fixture executed with no network, read-only source/root filesystems, bounded writable scratch, non-root execution, dropped capabilities, no-new-privileges, CPU/memory/PID/output limits, exact policy inspection, structured evidence, and verified container/temp cleanup. Independent post-gate checks found no leftover fixture containers or temp roots. `localRuntimeProvider.execute()` remains a blocked placeholder, so real audit-target runtime execution is still Phase 8 work.
-- The current real Codex sign-in smoke verifies signed-in readiness only. It does not yet make and validate a live model inference.
+- The real Codex sign-in smoke and both bounded live inference gates now pass with a directly executable signed-in CLI.
 - The Local Runtime Sandbox resolver and policy contracts exist, but `localRuntimeProvider.execute()` still returns a blocked placeholder. The Linux container backend has execution-plan scaffolding but is not yet the finished isolated CE execution path.
 - The governed self-learning v1 path exists for CE and is off by default. Candidate generation/promotion is human governed. Hosted products may extend it, but it is not hosted-only.
 - Local ChatGPT-session credentials are blocked for unattended/background model synthesis. The approved matrix requires API-key or mock credentials for unattended and service work.
@@ -60,7 +67,7 @@ Updated on 2026-08-03 during Phase 2 provider-policy verification:
 |---|---|---|---|
 | 1 | Recover and stabilize the current branch | **Complete** | None; PR #1 passed final review and required checks |
 | 2 | Lock CE boundaries, provider policy, and safe defaults | **Complete** | None; policy matrix, enforcement, audit fields, and regression coverage are in place |
-| 3 | Separate deterministic CI from real-model release validation | **Partial** | No live inference/E2E model gate yet |
+| 3 | Separate deterministic CI from real-model release validation | **Complete** | None; both Codex/ChatGPT-session gates passed with redacted evidence on implementation commit `1bcf6fd` |
 | 4 | Make static scanners production dependable | **Partial** | Tool install/readiness and real cross-platform evidence |
 | 5 | Calibrate audit quality, evidence integrity, and scoring | **Mostly complete** | Golden-repo calibration and false-positive review |
 | 6 | Complete review, remediation, exports, and operator workflows | **Mostly complete** | Manual fresh-user workflow and release evidence |
@@ -134,7 +141,7 @@ Exit criteria:
 
 ## Phase 3 — Separate deterministic CI from real-model validation
 
-Status: **Partial**
+Status: **Complete**
 
 Objective: keep CI deterministic and free while adding deliberate tests that prove real models work.
 
@@ -142,17 +149,18 @@ Tasks:
 
 - [x] Unit and CI suites use mock providers only.
 - [x] Add deterministic Codex ChatGPT-sign-in disconnected/readiness smoke coverage.
-- [ ] Add `test:integration:llm:live` for one bounded structured-output call using the selected live provider.
-- [ ] Add `e2e:audit:codex:live` for a small, fixed repository fixture through planner, threat model, specialists, supervisor, remediation, persistence, and export.
-- [ ] Validate schema conformance, evidence citations, usage accounting, timeout/backoff behavior, and secret redaction—not exact prose.
-- [ ] Require explicit environment opt-in and a low hard request/token budget. Never run live-model tests in ordinary pull-request CI.
-- [ ] Provide a maintainer workflow or self-hosted runner for manual/nightly live checks after the provider/workload policy in Phase 2 is approved.
-- [ ] Preserve a dated, redacted result summary as release evidence.
+- [x] Add `test:integration:llm:live` for one bounded structured-output call using local Codex ChatGPT-session authentication by default; keep API-key coverage explicitly secondary.
+- [x] Add `e2e:audit:codex:live` for a small, fixed repository fixture through planner, threat model, specialists, supervisor, remediation, persistence, and export.
+- [x] Validate schema conformance, evidence citations, usage accounting, timeout/backoff behavior, and secret redaction—not exact prose.
+- [x] Require explicit environment opt-in and a low hard request/token budget. Never run live-model tests in ordinary pull-request CI.
+- [x] Provide a primary local Codex maintainer command and an explicitly secondary API-key workflow after the provider/workload policy in Phase 2 is approved.
+- [x] Write a dated, redacted result summary without raw model output or local source content.
+- [x] Run both live commands against a release-candidate implementation commit and preserve their passing summaries as current release evidence. Both passed on `1bcf6fd` on 2026-08-07.
 
 Exit criteria:
 
 - Deterministic CI remains model-free.
-- A release candidate has current evidence of a real provider inference and a real end-to-end audit.
+- A release candidate has current evidence of a real Codex ChatGPT-session inference and a real end-to-end audit; an API-key-only pass is insufficient.
 - Live tests stop safely at their budget and never retry indefinitely.
 
 ## Phase 4 — Make static scanners production dependable
@@ -366,6 +374,8 @@ Tasks:
 - [x] Provide backend discovery/resolution, readiness statuses, policy construction, and launch gating.
 - [x] Define candidate backends including gVisor, rootless Podman, Podman, Docker, and Docker Desktop.
 - [ ] Implement `localRuntimeProvider.execute()` against the selected backend instead of returning a blocked placeholder.
+- [ ] Keep model-backed planning, supervision, and remediation for operator-started runtime validation on the `openai_codex`/`chatgpt_session` default; require an explicit operator override for API-key routing.
+- [ ] Make the Codex model subprocess inference-only for runtime-validation runs and prove it cannot launch target or host commands; do not treat its `read-only` flag as runtime-isolation evidence.
 - [ ] Implement Docker first for broad CE usability, then rootless Podman and gVisor hardening on Linux.
 - [ ] Never execute untrusted build/runtime commands directly on the host as a fallback.
 - [ ] Use exact argv with shell disabled; validate workdir and mounts against traversal/symlink escape.
@@ -382,6 +392,7 @@ Exit criteria:
 - `production:runtime-readiness` launches and validates fixtures inside a selected backend.
 - Malicious fixtures cannot mutate the source checkout, read host secrets, use unapproved network, or leave processes/resources behind.
 - Unsupported environments fail closed with an actionable static fallback.
+- Release evidence includes a real runtime-validation audit using both the selected isolated backend and the local Codex ChatGPT-session default; API-only model evidence cannot close this gate.
 
 ## Phase 9 — Operationalize runtime evals and Python workers
 
@@ -495,12 +506,12 @@ A static-only beta may be cut before Phases 8–9 finish only if it is explicitl
 
 ## Recommended execution order from this snapshot
 
-1. Implement Phase 7 System Policies because it governs the live-model, extensive-scan, runtime, retention, and learning work that follows.
-2. Close Phase 3 bounded real-model validation and Phase 4 scanner installation/readiness evidence.
-3. Calibrate Phase 5 and finish the Phase 6 clean-user workflow against the new resolved-policy snapshots.
-4. Implement Phase 8 real sandbox execution, then Phase 9 executable runtime eval packs.
-5. Stress and recovery hardening in Phase 10.
-6. Package and cross-platform security work in Phase 11.
+1. Complete Phase 4 scanner installation/readiness and real-tool evidence.
+2. Complete Phase 5 calibration and false-positive review.
+3. Complete the Phase 6 clean-user review/remediation/export workflow evidence.
+4. Implement Phase 7 System Policies and extensive-scan controls.
+5. Implement Phase 8 real sandbox execution, then Phase 9 executable runtime eval packs.
+6. Complete Phase 10 stress/recovery hardening and Phase 11 packaging/cross-platform security.
 7. Execute Phase 12 release candidate and beta gates.
 
 ## Immediate next-task checklist
@@ -513,11 +524,10 @@ git diff origin/main...HEAD
 git diff -- PLANS.md changelog.md docs/community-edition-production-plan-phases-1-12.md docs/provider-workload-policy.md docs/provider-policy-decision-log.md
 ```
 
-For Phase 2, verify the provider-policy implementation before review:
+Phase 3 is complete. Before starting Phase 4, rerun the deterministic release gate on the completed tracker tree:
 
 ```powershell
 npm run release:check
-rg -n -S "training|imitation|model extraction|distillation" apps packages/prompt-registry packages/core-engine/src/persistence/learning.ts
 ```
 
-The next implementation phase is Phase 7. Do not start Phase 8 merely because runtime readiness selects a backend; Phase 8 completion requires an audit target to execute inside that backend with all isolation and cleanup assertions passing.
+Then follow the Phase 4 scanner setup, version-pinning, offline-rule, and real-tool evidence tasks above. The live commands in `docs/live-model-validation.md` remain the Phase 3 release-candidate refresh procedure; they are not part of ordinary pull-request CI.

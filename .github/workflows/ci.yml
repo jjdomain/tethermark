@@ -47,6 +47,9 @@ jobs:
       - name: Validate bundled fixtures
         run: npm run scan -- validate-fixtures
 
+      - name: Verify fail-closed live validation harness
+        run: npm run test:live-validation-harness
+
   oss-smoke:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20

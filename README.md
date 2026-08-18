@@ -200,6 +200,14 @@ For a release-candidate verification pass, run:
 npm run release:check
 ```
 
+Primary real-model release validation uses the local Codex CLI with ChatGPT subscription sign-in. It is separate from ordinary CI and requires an explicit quota acknowledgement:
+
+```bash
+npm run phase3:codex:live
+```
+
+API-key validation remains available only as an explicit secondary path through `npm run phase3:api:live`; it does not replace the Codex acceptance gate. Do not run either command as an ordinary test. See [`docs/live-model-validation.md`](docs/live-model-validation.md) for credential policy, exact opt-in, hard budgets, and redacted evidence handling.
+
 Runtime-specific release gates:
 
 ```bash
@@ -208,6 +216,8 @@ npm run production:harness-readiness
 ```
 
 `production:runtime-readiness` requires both a launchable Local Runtime Sandbox backend and successful execution of an isolated runtime fixture. The Docker fixture uses a digest-pinned image, default-deny networking, a read-only source mount, bounded writable scratch, non-root execution, dropped capabilities, resource limits, and verified cleanup. Evidence is written under `.artifacts/runtime-readiness/`. Static audits are still valid when runtime readiness is blocked; passing this readiness fixture does not by itself mean arbitrary audit targets can execute until the runtime provider path is complete.
+
+When real operator-started runtime validation is implemented, its model-backed planning, supervision, and remediation also default to local Codex with ChatGPT sign-in. Target commands must still execute only inside the selected isolated sandbox. Phase 8 must separately prove that the Codex model subprocess cannot become a host-execution fallback; the provider's `read-only` setting alone is not runtime-isolation evidence. API-key routing is an explicit secondary override, not the Community Edition default.
 
 ### 3. Run a Local Static Audit
 
@@ -377,10 +387,11 @@ If you need enforced auth in Community Edition, use `HARNESS_API_AUTH_MODE=api_k
 The maintainer release checklist lives at [`docs/release-checklist.md`](docs/release-checklist.md). The short version is:
 
 1. `npm run release:check`
-2. `npm run api`
-3. `npm run web`
-4. complete one local scan plus one web-UI review/export smoke path
-5. confirm the documented Community Edition limitations still match reality
+2. complete the primary bounded Codex/ChatGPT-session gates described in [`docs/live-model-validation.md`](docs/live-model-validation.md)
+3. `npm run api`
+4. `npm run web`
+5. complete one local scan plus one web-UI review/export smoke path
+6. confirm the documented Community Edition limitations still match reality
 
 ## Community Edition Auth Model
 
@@ -470,7 +481,7 @@ The Community Edition default for an explicit operator-started local audit is Op
 
 ```bash
 AUDIT_LLM_PROVIDER=openai_codex
-AUDIT_LLM_MODEL=gpt-5.1-codex
+AUDIT_LLM_MODEL=gpt-5.6-sol
 ```
 
 Mock mode is an explicit deterministic-development and CI configuration. It does not validate real model behavior:
@@ -492,12 +503,14 @@ Local Codex ChatGPT-sign-in mode is available for operator-owned runs after the 
 
 ```bash
 AUDIT_LLM_PROVIDER=openai_codex
-AUDIT_LLM_MODEL=gpt-5.1-codex
+AUDIT_LLM_MODEL=gpt-5.6-sol
 AUDIT_LLM_CODEX_COMMAND=codex
 AUDIT_LLM_CODEX_SANDBOX=read-only
 ```
 
 Codex ChatGPT-session mode delegates structured agent steps through `codex exec` and uses the operator's local Codex entitlement subject to provider plan limits. Tethermark does not store ChatGPT access tokens in this mode. It is limited to explicit local operator launches; unattended and service workloads require an API-key provider. See [`docs/LLM_PROVIDER_AND_AGENT_BACKEND_MODES.md`](docs/LLM_PROVIDER_AND_AGENT_BACKEND_MODES.md) for the provider/backend boundary and [`docs/provider-workload-policy.md`](docs/provider-workload-policy.md) for the enforced workload matrix.
+
+In Settings -> Agent Configuration, Tethermark reports cached ChatGPT authentication separately from Codex CLI execution readiness. A cached session alone is not enough: the configured CLI must also complete a bounded `codex login status` check before the UI reports that local audits are ready. Use the advanced Codex CLI command field when the runnable executable is not available as `codex` on the API server's PATH.
 
 Agent-specific overrides are supported for planner, threat model, eval selection, skeptic, and remediation agents.
 

@@ -1,6 +1,6 @@
 # Provider Workload Policy
 
-Last reviewed: 2026-08-03
+Last reviewed: 2026-08-07
 Policy version: `provider-policy.v1`
 
 This policy controls which model provider, credential class, and initiation mode may be used for each Tethermark Community Edition workload. Enforcement lives in `packages/llm-provider/src/policy.ts`; documentation does not override the code.
@@ -9,8 +9,8 @@ This policy controls which model provider, credential class, and initiation mode
 
 | Product use | Workload class | Initiation mode | Allowed provider | Credential class | Default behavior |
 |---|---|---|---|---|---|
-| Explicit local CLI or web launch | `interactive_operator` | `operator` | `openai_codex` | `chatgpt_session` | Allowed after the operator signs in locally |
-| Explicit local CLI or web launch | `interactive_operator` | `operator` | `openai` | `api_key` | Allowed when an API key is configured |
+| Explicit local static or runtime-validation CLI/web launch | `interactive_operator` | `operator` | `openai_codex` | `chatgpt_session` | Community Edition default after the operator signs in locally |
+| Explicit local static or runtime-validation CLI/web launch | `interactive_operator` | `operator` | `openai` | `api_key` | Optional only when the operator explicitly selects it and configures a key |
 | Deterministic development or an offline fixture | Any declared class | matching class | `mock` | `none` | Allowed, but output is never evidence of a real-model audit |
 | Local scheduler, queued automation, or background learning synthesis | `unattended_local` | `background` | `openai` | `api_key` | Allowed within the configured request/token/rate limits |
 | Ordinary pull-request CI | `unattended_local` | `background` | `mock` | `none` | Required; live credentials are removed by the test runner |
@@ -27,6 +27,7 @@ OpenAI documents enterprise Codex access tokens for trusted non-interactive work
 - `external_service` means a downstream worker, hosted integration, service account, or trusted live CI workflow starts the work.
 - API clients that omit a workload class on an asynchronous request are classified as `unattended_local`.
 - CLI scans and synchronous local API launches default to `interactive_operator`.
+- Operator-started runtime validation inherits the `openai_codex`/`chatgpt_session` default. Selecting an isolated runtime backend never silently switches the model provider to API-key mode.
 
 ## Enforcement
 
@@ -46,7 +47,7 @@ Provider controls can be tuned with:
 
 ```env
 AUDIT_LLM_ALLOWED_MODELS_OPENAI=gpt-5.4-mini,gpt-5.4,gpt-5.2,gpt-4.1
-AUDIT_LLM_ALLOWED_MODELS_OPENAI_CODEX=gpt-5.1-codex,gpt-5.1-codex-mini
+AUDIT_LLM_ALLOWED_MODELS_OPENAI_CODEX=gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna
 AUDIT_LLM_MAX_CONCURRENCY_OPENAI=2
 AUDIT_LLM_MAX_CONCURRENCY_OPENAI_CODEX=1
 AUDIT_LLM_MIN_REQUEST_INTERVAL_MS_OPENAI=250

@@ -17,7 +17,7 @@ function log(message) {
 
 function codexRealModeFixGuide(status) {
   const command = status?.command ? `\n  command: ${status.command}` : "";
-  const detail = status?.detail ? `\n  detail: ${status.detail}` : "";
+  const detail = status?.execution_note ? `\n  status: ${status.execution_status ?? "not_ready"}\n  detail: ${status.execution_note}` : "";
   return [
     "Real Codex OAuth smoke requires an authenticated local Codex CLI session.",
     command,
@@ -86,21 +86,19 @@ async function closeServer(server) {
 
 async function createFakeCodexCommand(rootDir) {
   if (process.platform === "win32") {
-    const commandPath = path.join(rootDir, "fake-codex.cmd");
-    await fs.writeFile(commandPath, [
-      "@echo off",
-      "if \"%1\"==\"login\" if \"%2\"==\"status\" (",
-      "  if \"%FAKE_CODEX_CONNECTED%\"==\"1\" (",
-      "    echo Authenticated with ChatGPT OAuth",
-      "    exit /b 0",
-      "  )",
-      "  echo Not logged in",
-      "  exit /b 1",
-      ")",
-      "echo fake codex command",
-      "exit /b 0"
-    ].join("\r\n"), "utf8");
-    return commandPath;
+    // `spawn(..., { shell: false })` intentionally rejects cmd wrappers on
+    // Windows. Node can act as a native fake command by loading `login` from
+    // the isolated working directory when the API invokes `node login status`.
+    await fs.writeFile(path.join(rootDir, "login"), [
+      "if (process.argv[2] !== 'status') process.exit(2);",
+      "if (process.env.FAKE_CODEX_CONNECTED === '1') {",
+      "  console.log('Authenticated with ChatGPT OAuth');",
+      "  process.exit(0);",
+      "}",
+      "console.error('Not logged in');",
+      "process.exit(1);"
+    ].join("\n"), "utf8");
+    return process.execPath;
   }
   const commandPath = path.join(rootDir, "fake-codex");
   await fs.writeFile(commandPath, [
@@ -124,6 +122,7 @@ async function createFakeCodexExec(rootDir) {
   const cliPath = path.join(rootDir, "fake-codex-exec.mjs");
   await fs.writeFile(cliPath, [
     "import fs from 'node:fs';",
+    "if (!process.argv.includes('--skip-git-repo-check')) process.exit(3);",
     "const outIndex = process.argv.indexOf('--output-last-message');",
     "if (outIndex < 0) process.exit(2);",
     "fs.writeFileSync(process.argv[outIndex + 1], JSON.stringify({ ok: true, provider: 'openai_codex', credential: 'oauth-local' }));"
@@ -165,7 +164,7 @@ async function main() {
     process.env.HARNESS_ENABLE_LOCAL_OAUTH_CONNECT = "0";
     delete process.env.HARNESS_LOCAL_OAUTH_CONNECT_DRY_RUN;
     process.env.AUDIT_LLM_PROVIDER = "openai_codex";
-    process.env.AUDIT_LLM_CODEX_STATUS_TIMEOUT_MS = process.env.AUDIT_LLM_CODEX_STATUS_TIMEOUT_MS ?? "60000";
+    process.env.AUDIT_LLM_CODEX_STATUS_TIMEOUT_MS = process.env.AUDIT_LLM_CODEX_STATUS_TIMEOUT_MS ?? "10000";
     process.env.PORT = "0";
 
     if (!realMode) {
@@ -209,9 +208,17 @@ async function main() {
     const initialStatus = await api("GET", "/llm-providers/openai_codex/status");
     if (realMode) {
       assert.equal(initialStatus.connected, true, `${codexRealModeFixGuide(initialStatus)}\n\nStatus payload:\n${JSON.stringify(initialStatus, null, 2)}`);
+      assert.equal(initialStatus.authenticated, true);
+      assert.equal(initialStatus.command_available, true, `${codexRealModeFixGuide(initialStatus)}\n\nStatus payload:\n${JSON.stringify(initialStatus, null, 2)}`);
+      assert.equal(initialStatus.executable_ready, true, `${codexRealModeFixGuide(initialStatus)}\n\nStatus payload:\n${JSON.stringify(initialStatus, null, 2)}`);
+      assert.equal(initialStatus.ready, true, `${codexRealModeFixGuide(initialStatus)}\n\nStatus payload:\n${JSON.stringify(initialStatus, null, 2)}`);
       assert.match(String(initialStatus.credential_source ?? ""), /codex_auth_file|cli/);
     } else {
       assert.equal(initialStatus.connected, false);
+      assert.equal(initialStatus.authenticated, false);
+      assert.equal(initialStatus.command_available, true);
+      assert.equal(initialStatus.executable_ready, false);
+      assert.equal(initialStatus.ready, false);
       assert.equal(initialStatus.status, "not_connected");
     }
 
@@ -233,6 +240,8 @@ async function main() {
       process.env.FAKE_CODEX_CONNECTED = "0";
       const firstRunStatus = await api("GET", "/llm-providers/openai_codex/status");
       assert.equal(firstRunStatus.connected, false);
+      assert.equal(firstRunStatus.authenticated, false);
+      assert.equal(firstRunStatus.ready, false);
       assert.equal(firstRunStatus.status, "not_connected");
       assert.doesNotMatch(String(firstRunStatus.note ?? ""), /timed out/i);
 
@@ -249,16 +258,33 @@ async function main() {
       }), "utf8");
       const connectedStatus = await api("GET", "/llm-providers/openai_codex/status");
       assert.equal(connectedStatus.connected, true);
-      assert.equal(connectedStatus.status, "connected");
+      assert.equal(connectedStatus.authenticated, true);
+      assert.equal(connectedStatus.command_available, true);
+      assert.equal(connectedStatus.executable_ready, true);
+      assert.equal(connectedStatus.ready, true);
+      assert.equal(connectedStatus.status, "ready");
+
+      log("checking authenticated-session/CLI-unavailable distinction");
+      process.env.AUDIT_LLM_CODEX_COMMAND = path.join(workRoot, "missing-codex-command");
+      const unavailableStatus = await api("GET", "/llm-providers/openai_codex/status");
+      assert.equal(unavailableStatus.connected, true);
+      assert.equal(unavailableStatus.authenticated, true);
+      assert.equal(unavailableStatus.command_available, false);
+      assert.equal(unavailableStatus.executable_ready, false);
+      assert.equal(unavailableStatus.ready, false);
+      assert.equal(unavailableStatus.status, "authenticated_cli_unavailable");
+      assert.equal(unavailableStatus.execution_status, "command_missing");
+      assert.match(String(unavailableStatus.note ?? ""), /blocked/i);
+      process.env.AUDIT_LLM_CODEX_COMMAND = await createFakeCodexCommand(workRoot);
 
       log("checking structured Codex provider execution with fake OAuth command");
       const { OpenAICodexCliProvider, resolveAgentProviderConfig } = await import(pathToFileURL(distLlmProvider).href);
-      const resolved = resolveAgentProviderConfig("planner_agent", { provider: "openai_codex", model: "gpt-5.1-codex" });
+      const resolved = resolveAgentProviderConfig("planner_agent", { provider: "openai_codex", model: "gpt-5.6-sol" });
       assert.equal(resolved.provider, "openai_codex");
       assert.equal(resolved.apiKeySource, "oauth-local");
       assert.equal(resolved.apiKey, undefined);
       const fakeExec = await createFakeCodexExec(workRoot);
-      const provider = new OpenAICodexCliProvider("gpt-5.1-codex", process.execPath, "read-only", 10_000, [fakeExec]);
+      const provider = new OpenAICodexCliProvider("gpt-5.6-sol", process.execPath, "read-only", 10_000, [fakeExec]);
       const result = await provider.generateStructured({
         agentName: "planner_agent",
         schemaName: "codex_oauth_smoke",
@@ -280,7 +306,7 @@ async function main() {
       assert.deepEqual(result.parsed, { ok: true, provider: "openai_codex", credential: "oauth-local" });
       assert.equal(result.provider, "openai_codex");
     } else {
-      log("real Codex OAuth session is connected; skipping live structured exec to avoid unbounded subscription usage");
+      log("real Codex OAuth session and CLI are ready; skipping live structured exec to avoid unbounded subscription usage");
     }
 
     log("passed");
@@ -299,5 +325,5 @@ async function main() {
 
 main().catch((error) => {
   console.error("[tethermark:codex-oauth-smoke] failed", error instanceof Error ? error.stack ?? error.message : error);
-  process.exit(1);
+  process.exitCode = 1;
 });

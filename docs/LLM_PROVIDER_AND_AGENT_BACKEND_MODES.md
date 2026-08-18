@@ -100,7 +100,7 @@ Configuration:
 
 ```env
 AUDIT_LLM_PROVIDER=openai_codex
-AUDIT_LLM_MODEL=gpt-5.1-codex
+AUDIT_LLM_MODEL=gpt-5.6-sol
 AUDIT_LLM_CODEX_COMMAND=codex
 AUDIT_LLM_CODEX_SANDBOX=read-only
 AUDIT_LLM_CODEX_TIMEOUT_MS=600000
@@ -111,10 +111,12 @@ Before running, the operator must install Codex CLI explicitly and sign in throu
 The provider invokes:
 
 ```bash
-codex exec --ephemeral --sandbox read-only --output-schema <schema.json> --output-last-message <result.json> --model <model>
+codex exec --ephemeral --skip-git-repo-check --sandbox read-only --output-schema <schema.json> --output-last-message <result.json> --model <model>
 ```
 
 Tethermark sends the agent prompt through stdin and parses the final structured JSON artifact from the output file.
+
+The explicit `--skip-git-repo-check` flag is required because Tethermark stages fixed fixtures and operator-selected source into isolated temporary working directories that may not contain Git metadata. It does not relax the `read-only` Codex sandbox, authorize target execution, or change the workload restriction to explicit local operator runs.
 
 The Community Edition web UI exposes this mode under Settings -> Agent Configuration as an account connection flow:
 
@@ -125,17 +127,19 @@ The Community Edition web UI exposes this mode under Settings -> Agent Configura
 
 Do not make non-technical users copy CLI commands in the primary path. Keep the Codex command path as an advanced optional setting for custom installs only. In `auth=none` local mode the connection action is enabled by default. In an authenticated deployment, set `HARNESS_ENABLE_LOCAL_OAUTH_CONNECT=1` before exposing that action, because it launches a local process on the API host.
 
-The OpenAI Codex status endpoint only reads local Codex auth metadata:
+The OpenAI Codex status endpoint combines local Codex auth metadata with a bounded CLI readiness probe:
 
 1. `CODEX_HOME/auth.json`, when `CODEX_HOME` is set.
 2. The default Codex home, such as `%USERPROFILE%\.codex\auth.json` on Windows or `~/.codex/auth.json` on Unix-like systems.
-The status response must not expose access tokens, refresh tokens, ID tokens, or API keys. It may expose non-secret readiness metadata such as `connected`, `auth_mode`, `credential_source`, expiry, and ChatGPT plan type.
+3. The configured Codex command invoked directly, without a shell, as `codex login status`; the check is capped at 10 seconds by default and 30 seconds maximum.
+
+The status response must not expose access tokens, refresh tokens, ID tokens, API keys, or raw CLI output. It exposes separate non-secret fields for `authenticated`, `command_available`, `executable_ready`, and aggregate `ready`. This distinction prevents a cached auth file from being presented as audit-ready when the API process cannot launch the CLI. The probe never invokes a model, downloads a package, or installs software.
 
 The `chatgpt_session` credential class is restricted to `interactive_operator` local work. Page loads and read endpoints never invoke a model. Scheduled learning, unattended queue clients, completed-run hooks, hosted workers, and leaderboard scanning must use an API-key provider behind request/token budgets, rate pacing, concurrency limits, exponential backoff, a circuit breaker, and non-secret audit logs. The full enforced matrix is in [Provider Workload Policy](./provider-workload-policy.md); the dated official-source review is in [Provider Policy Decision Log](./provider-policy-decision-log.md).
 
 Governed learning is disabled by default and requires a versioned operator-consent setting. LLM synthesis requires a separate opt-in, source excerpts are excluded by default, and ChatGPT-session synthesis is allowed only from the explicit `Run learning now` action. Existing settings written before this safety boundary do not count as consent until the operator reviews and saves them again.
 
-For first-run machines, the compatibility command `npm run smoke:openai-codex-oauth` isolates `CODEX_HOME` and verifies the disconnected state is clean and actionable. For already-authenticated workstations, `npm run smoke:openai-codex-oauth:real` verifies that the local Codex ChatGPT session is detected without invoking a live model call.
+For first-run machines, the compatibility command `npm run smoke:openai-codex-oauth` isolates `CODEX_HOME` and verifies the disconnected state is clean and actionable. For already-authenticated workstations, `npm run smoke:openai-codex-oauth:real` verifies both the local Codex ChatGPT session and a runnable CLI without invoking a live model call.
 
 ## Product Boundary
 

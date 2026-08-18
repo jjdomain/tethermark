@@ -1,5 +1,41 @@
 ﻿# Changelog
 
+## 2026-08-07
+
+### Changed
+
+- Made the standard Phase 3 live integration and E2E commands use local Codex ChatGPT-session authentication; API-key validation now has explicitly named secondary commands and cannot satisfy the primary release gate.
+- Clarified that future operator-started runtime-validation audits retain the same Codex/ChatGPT-session model default while target execution remains isolated in the runtime backend.
+- Relabeled the hosted manual workflow as optional API interoperability coverage rather than the Community Edition default validation path.
+- Split cached ChatGPT authentication from Codex CLI execution readiness in the API and Agent Configuration UI, added a bounded `codex login status` probe, and exposed an advanced runnable-command override.
+- Migrated the active ChatGPT-session Codex model catalog from deprecated GPT-5.1 Codex models to GPT-5.6 Sol, Terra, and Luna, with Sol as the default.
+- Recalibrated Phase 3 measured token ceilings for the fixed instruction/tool context emitted by current Codex CLI releases while retaining hard request, timeout, fixture, schema, and redaction bounds.
+- Raised the fixed-fixture E2E per-stage timeout to its existing 180-second hard maximum after current GPT-5.6 Sol supervisor validation exceeded the former 90-second default.
+- Moved the multi-minute live E2E onto the persisted asynchronous run API and recalibrated its six-stage measured-token ceiling without weakening request, duration, fixture, or execution bounds.
+
+### Fixed
+
+- Stopped the Codex connection UI from reporting an unusable cached auth file as fully connected and audit-ready.
+- Prevented generic environment sentinels and sensitive-key matching from masking non-secret boolean assertions in redacted live-validation evidence.
+- Allowed bounded Codex structured generation from Tethermark's isolated non-Git staging directories while retaining the `read-only` sandbox.
+
+### Verified
+
+- Completed Phase 3 with passing Codex/ChatGPT-session structured integration and fixed-fixture E2E evidence on GPT-5.6 Sol, followed by a green deterministic release check.
+
+## 2026-08-06
+
+### Added
+
+- Added explicit, bounded live-model integration and fixed-fixture audit E2E commands covering structured output, all required agent stages, persistence, exports, usage accounting, evidence citations, timeouts, and redaction.
+- Added a deterministic fail-closed live-validation harness to the normal release check and a dispatch-only protected GitHub workflow for API-key validation.
+- Added dated redacted evidence summaries and maintainer documentation without retaining raw model output or local source content.
+
+### Changed
+
+- Added a request timeout to the OpenAI provider and made provider-policy budget failures bypass retry wrapping.
+- Kept live-model gates outside ordinary push and pull-request CI; mock remains mandatory there.
+
 ## 2026-08-03
 
 ### Added

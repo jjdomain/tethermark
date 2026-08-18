@@ -1,5 +1,23 @@
 # Provider Policy Decision Log
 
+## 2026-08-07 — Codex subscription is the live and runtime-validation default
+
+Status: approved clarification for Community Edition `provider-policy.v1`
+
+### Official sources reviewed
+
+- [OpenAI Codex authentication](https://learn.chatgpt.com/docs/auth), reviewed 2026-08-07. Codex supports ChatGPT subscription sign-in for local work and reuses the cached session.
+- [OpenAI Codex non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode), reviewed 2026-08-07. `codex exec` supports JSONL usage events and JSON Schema-constrained final output while reusing saved CLI authentication.
+
+### Decision
+
+1. The primary Phase 3 live integration and E2E gates use `openai_codex` with `chatgpt_session`; API-key passes are secondary interoperability evidence and cannot close the primary gate.
+2. Operator-started Community Edition runtime-validation audits use the same Codex/ChatGPT-session default for model-backed planning, supervision, and remediation.
+3. Runtime target execution remains confined to the selected isolated backend. Phase 8 must separately make the Codex model subprocess inference-only for this path and prove it cannot execute the target or become a host-command fallback; `read-only` alone is insufficient evidence.
+4. API-key routing requires an explicit operator override. Ordinary CI remains mock-only, and unattended ChatGPT-session use remains rejected.
+
+This clarification changes the validation command defaults and release evidence requirement without weakening the existing workload-class enforcement.
+
 ## 2026-08-03 — Credential and workload boundary
 
 Status: approved for Community Edition `provider-policy.v1`
