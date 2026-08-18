@@ -428,6 +428,10 @@ async function installManagedSemgrep(item: SetupCommand): Promise<string> {
     "import os",
     "os.environ['SEMGREP_ENABLE_VERSION_CHECK'] = '0'",
     `sys.path.insert(0, ${JSON.stringify(packageRoot)})`,
+    "if sys.argv[1:] == ['--version']:",
+    "    from importlib.metadata import version",
+    "    print(version('semgrep'))",
+    "    raise SystemExit(0)",
     "sys.argv.insert(1, '--legacy')",
     "from semgrep.console_scripts.entrypoint import main",
     "main()"
