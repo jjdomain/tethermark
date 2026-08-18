@@ -261,7 +261,10 @@ export function buildSetupToolsPlan(args: { tools?: string } = {}): SetupCommand
   const tools = selectedTools(args.tools);
   const plan: SetupCommand[] = [];
   const configuredPython = process.env.PYTHON_BIN?.trim();
-  const pythonCandidates = process.platform === "win32" ? [configuredPython, "py", "python", "python3"] : [configuredPython, "python3", "python"];
+  const actionsPython = process.env.Python3_ROOT_DIR?.trim();
+  const pythonCandidates = process.platform === "win32"
+    ? [configuredPython, actionsPython ? path.join(actionsPython, "python.exe") : undefined, "python", "py", "python3"]
+    : [configuredPython, "python3", "python"];
   const python = firstAvailable(pythonCandidates.filter((item): item is string => Boolean(item)));
 
   for (const toolId of tools) {
