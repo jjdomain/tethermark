@@ -1,6 +1,6 @@
 # Tethermark Community Edition Production Plan — Phases 1–12
 
-Last updated: 2026-08-08
+Last updated: 2026-08-18
 Purpose: durable implementation and release handoff for a fresh Codex task
 Scope: Tethermark Community Edition (CE) in this repository
 
@@ -40,11 +40,11 @@ CE production does **not** require hosted multi-tenancy, enterprise identity, ma
 
 ## Current repository snapshot
 
-Updated on 2026-08-08 after implementing Phase 4 production static-scanner hardening:
+Updated on 2026-08-18 after completing Phase 4 production static-scanner hardening:
 
 - Branch: `codex/community-edition-phase4-static-scanners`, created from the completed Phase 3 tree at `1a97b84`.
 - Scorecard `5.5.0`, Semgrep `1.172.0`, and Trivy `0.73.0` are pinned with checksum-locked, user-isolated setup paths and supported-version enforcement. The final Windows `static-doctor` passed eight checks with no failures; its only warning was the absence of an exported GitHub token for avoiding unauthenticated Scorecard rate limits.
-- Real Semgrep and Trivy adversarial-fixture execution passed on Windows in 110.5 seconds. The fixture covers symlinks, hostile filenames, large and binary files, nested repositories, secret-like values, malformed manifests, timeouts, and output flooding. A three-OS GitHub Actions matrix now installs the pinned scanners, runs the doctor and real fixture, and retains evidence for 30 days; Ubuntu and macOS evidence remains pending branch publication.
+- Real Semgrep and Trivy adversarial-fixture execution passed locally on Windows and in GitHub Actions on Windows, Ubuntu, and macOS. The fixture covers symlinks, hostile filenames, large and binary files, nested repositories, secret-like values, malformed manifests, timeouts, and output flooding. Workflow run `32095194344` retained a separate scanner-evidence artifact for each operating system through 2026-09-17.
 - A real static audit of `NousResearch/hermes-agent` completed repository analysis, Semgrep, and Trivy with 35 dependency vulnerabilities and explicit Scorecard timeout evidence. A separate authenticated Scorecard smoke passed in 43.6 seconds against upstream commit `b3aa561faffd64f05436e429a6415d175e534ec9`; the audit remained internal-only because its full evidence set was incomplete.
 - Phase 4 deterministic verification passed on 2026-08-08: the core suite completed in 81.3 seconds, export and Codex OAuth smoke checks passed, the Pi API E2E passed in 62.1 seconds, and the browser UI E2E passed in 126.6 seconds through triage, remediation, assistant history, approval, and learning workflows.
 - Phase 3's bounded commands, deterministic harness, manual workflow, and redacted evidence writer are implemented on this branch. Both primary real-provider gates passed on implementation commit `1bcf6fd` with local `openai_codex`, `gpt-5.6-sol`, and `chatgpt_session`; API-key validation remains optional secondary evidence.
@@ -72,7 +72,7 @@ Updated on 2026-08-08 after implementing Phase 4 production static-scanner harde
 | 1 | Recover and stabilize the current branch | **Complete** | None; PR #1 passed final review and required checks |
 | 2 | Lock CE boundaries, provider policy, and safe defaults | **Complete** | None; policy matrix, enforcement, audit fields, and regression coverage are in place |
 | 3 | Separate deterministic CI from real-model release validation | **Complete** | None; both Codex/ChatGPT-session gates passed with redacted evidence on implementation commit `1bcf6fd` |
-| 4 | Make static scanners production dependable | **Partial** | Ubuntu/macOS real-scanner CI evidence after branch publication |
+| 4 | Make static scanners production dependable | **Complete** | None; PR #4 passed the three-OS real-scanner matrix and retained all evidence artifacts |
 | 5 | Calibrate audit quality, evidence integrity, and scoring | **Mostly complete** | Golden-repo calibration and false-positive review |
 | 6 | Complete review, remediation, exports, and operator workflows | **Mostly complete** | Manual fresh-user workflow and release evidence |
 | 7 | Implement Admin/System Policies and extensive-scan controls | **Not started** | Schema, persistence, resolver, UI/API, migrations, tests |
@@ -169,7 +169,7 @@ Exit criteria:
 
 ## Phase 4 — Make static scanners production dependable
 
-Status: **Implementation complete; cross-platform CI evidence pending branch publication**
+Status: **Complete**
 
 Objective: make Scorecard, Semgrep, Trivy, internal analyzers, and their failure semantics reliable on supported operating systems.
 
@@ -183,7 +183,7 @@ Tasks:
 - [x] Ensure bundled Semgrep rules work offline; do not silently use remote rules or transmit source.
 - [x] Exercise Scorecard API fallback only for eligible public GitHub targets and mark unavailable network/API evidence accurately.
 - [x] Add malicious and edge-case fixtures: symlinks, path traversal, large files, binary files, nested repositories, hostile filenames, secret-like values, malformed manifests, and tool timeout/output flooding.
-- [ ] Run real-tool release smoke checks on Windows, Ubuntu, and macOS and retain evidence. Windows passed locally; the three-OS artifact-retaining GitHub Actions matrix is implemented and must run after publication.
+- [x] Run real-tool release smoke checks on Windows, Ubuntu, and macOS and retain evidence. Workflow run `32095194344` passed all three jobs and retained the platform artifacts through 2026-09-17.
 - [x] Define minimum evidence coverage for publishable versus internal-only output.
 
 Exit criteria:
@@ -510,13 +510,12 @@ A static-only beta may be cut before Phases 8–9 finish only if it is explicitl
 
 ## Recommended execution order from this snapshot
 
-1. Complete Phase 4 scanner installation/readiness and real-tool evidence.
-2. Complete Phase 5 calibration and false-positive review.
-3. Complete the Phase 6 clean-user review/remediation/export workflow evidence.
-4. Implement Phase 7 System Policies and extensive-scan controls.
-5. Implement Phase 8 real sandbox execution, then Phase 9 executable runtime eval packs.
-6. Complete Phase 10 stress/recovery hardening and Phase 11 packaging/cross-platform security.
-7. Execute Phase 12 release candidate and beta gates.
+1. Complete Phase 5 calibration and false-positive review.
+2. Complete the Phase 6 clean-user review/remediation/export workflow evidence.
+3. Implement Phase 7 System Policies and extensive-scan controls.
+4. Implement Phase 8 real sandbox execution, then Phase 9 executable runtime eval packs.
+5. Complete Phase 10 stress/recovery hardening and Phase 11 packaging/cross-platform security.
+6. Execute Phase 12 release candidate and beta gates.
 
 ## Immediate next-task checklist
 
@@ -528,10 +527,10 @@ git diff origin/main...HEAD
 git diff -- PLANS.md changelog.md docs/community-edition-production-plan-phases-1-12.md docs/provider-workload-policy.md docs/provider-policy-decision-log.md
 ```
 
-Phase 3 is complete. Before starting Phase 4, rerun the deterministic release gate on the completed tracker tree:
+Phases 1 through 4 are complete. Before starting Phase 5, rerun the deterministic release gate on the completed tracker tree:
 
 ```powershell
 npm run release:check
 ```
 
-Then follow the Phase 4 scanner setup, version-pinning, offline-rule, and real-tool evidence tasks above. The live commands in `docs/live-model-validation.md` remain the Phase 3 release-candidate refresh procedure; they are not part of ordinary pull-request CI.
+Then follow the Phase 5 calibration, evidence-integrity, and false-positive-review tasks above. The live commands in `docs/live-model-validation.md` remain the Phase 3 release-candidate refresh procedure; they are not part of ordinary pull-request CI.

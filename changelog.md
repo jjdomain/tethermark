@@ -1,5 +1,28 @@
 ﻿# Changelog
 
+## 2026-08-18
+
+### Added
+
+- Added checksum-locked, user-isolated setup for OpenSSF Scorecard 5.5.0, Semgrep 1.172.0, and Trivy 0.73.0 with supported-version enforcement.
+- Added a focused static-scanner doctor, bundled offline Semgrep rules, adversarial real-scanner fixtures, and retained Windows/Ubuntu/macOS CI evidence.
+
+### Changed
+
+- Restricted Scorecard API fallback to canonical public GitHub repositories and required completed repository analysis, Semgrep, Trivy, and Scorecard evidence before output can be considered publicly publishable.
+- Marked Community Edition Phase 4 complete after PR #4 passed deterministic checks, OSS smoke checks, and the three-platform real-scanner matrix.
+
+### Security
+
+- Added bounded scanner time and output limits plus explicit failure records for missing, blocked, unsupported, timed-out, flooded, malformed, or unavailable scanner evidence.
+
+### Verified
+
+- `npm test`
+- `npm run exports:check --silent`
+- `npm run test:static-scanners:real`
+- GitHub Actions workflow run `32095194344` with retained Windows, Ubuntu, and macOS scanner artifacts through 2026-09-17.
+
 ## 2026-08-07
 
 ### Changed
