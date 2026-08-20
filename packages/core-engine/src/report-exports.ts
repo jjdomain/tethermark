@@ -198,6 +198,70 @@ function summarizeControlCoverage(controlResults?: Array<Record<string, any>>): 
   };
 }
 
+function summarizeValidationCompleteness(args: {
+  evaluations: FindingEvaluationSummary;
+  toolExecutions?: Array<Record<string, any>>;
+  controlResults?: Array<Record<string, any>>;
+  stageExecutions?: Array<Record<string, any>>;
+  agentInvocations?: Array<Record<string, any>>;
+}): Record<string, unknown> {
+  const toolExecutions = Array.isArray(args.toolExecutions) ? args.toolExecutions : [];
+  const stageExecutions = Array.isArray(args.stageExecutions) ? args.stageExecutions : [];
+  const agentInvocations = Array.isArray(args.agentInvocations) ? args.agentInvocations : [];
+  const controlCoverage = summarizeControlCoverage(args.controlResults);
+  const incompleteTools = toolExecutions
+    .filter((item) => item.status !== "completed")
+    .map((item) => ({
+      provider_id: String(item.provider_id ?? item.tool ?? "unknown"),
+      status: String(item.status ?? "unknown"),
+      reason: item.failure_category ? String(item.failure_category) : null
+    }));
+  const incompleteStages = stageExecutions
+    .filter((item) => !["success", "completed", "reused"].includes(String(item.status ?? "unknown")))
+    .map((item) => ({
+      stage_name: String(item.stage_name ?? "unknown"),
+      status: String(item.status ?? "unknown")
+    }));
+  const incompleteModelInvocations = agentInvocations
+    .filter((item) => item.status !== "completed")
+    .map((item) => ({
+      agent_name: String(item.agent_name ?? "unknown"),
+      stage_name: item.stage_name ? String(item.stage_name) : null,
+      provider: String(item.provider ?? "unknown"),
+      model: String(item.model ?? "unknown"),
+      status: String(item.status ?? "unknown"),
+      terminal_reason: item.terminal_reason ? String(item.terminal_reason) : null
+    }));
+  const runtimeBlocked = Number(args.evaluations.runtime_validation_blocked_count ?? 0);
+  const runtimeFailed = Number(args.evaluations.runtime_validation_failed_count ?? 0);
+  const incomplete = Boolean(
+    incompleteTools.length
+    || incompleteStages.length
+    || incompleteModelInvocations.length
+    || controlCoverage.notAssessed.length
+    || runtimeBlocked
+    || runtimeFailed
+    || args.evaluations.sandbox_execution?.attention_required
+  );
+  return {
+    status: incomplete ? "incomplete" : "complete",
+    prominent_warning: incomplete
+      ? "Validation is incomplete. Skipped, blocked, or failed tools, model calls, stages, controls, or runtime checks must not be interpreted as a clean result."
+      : null,
+    incomplete_tool_count: incompleteTools.length,
+    incomplete_tools: incompleteTools,
+    incomplete_stage_count: incompleteStages.length,
+    incomplete_stages: incompleteStages,
+    incomplete_model_invocation_count: incompleteModelInvocations.length,
+    incomplete_model_invocations: incompleteModelInvocations,
+    not_assessed_control_count: controlCoverage.notAssessed.length,
+    not_assessed_controls: controlCoverage.notAssessed,
+    runtime_blocked_count: runtimeBlocked,
+    runtime_failed_count: runtimeFailed,
+    sandbox_attention_required: Boolean(args.evaluations.sandbox_execution?.attention_required)
+  };
+}
+
 export function buildExecutiveSummaryPayload(args: {
   run: ReportRunSummaryRecord;
   summary: Record<string, unknown>;
@@ -206,6 +270,10 @@ export function buildExecutiveSummaryPayload(args: {
   reviewDecision: PersistedReviewDecisionRecord | null;
   remediation: PersistedRemediationMemoRecord | null;
   resolvedConfiguration: PersistedResolvedConfigurationRecord | null;
+  toolExecutions?: Array<Record<string, any>>;
+  controlResults?: Array<Record<string, any>>;
+  stageExecutions?: Array<Record<string, any>>;
+  agentInvocations?: Array<Record<string, any>>;
 }): Record<string, unknown> {
   const topFindings = [...args.findings]
     .map((finding) => {
@@ -249,6 +317,7 @@ export function buildExecutiveSummaryPayload(args: {
       runtime_followup_outcome: item.runtime_followup_outcome,
       next_action: item.next_action
     }));
+  const validationCompleteness = summarizeValidationCompleteness(args);
   return {
     run_id: args.run.id,
     status: args.run.status,
@@ -259,6 +328,7 @@ export function buildExecutiveSummaryPayload(args: {
     target_class: args.resolvedConfiguration?.initial_target_class ?? null,
     publishability_status: args.reviewDecision?.publishability_status ?? null,
     human_review_required: Boolean(args.reviewDecision?.human_review_required),
+    validation_completeness: validationCompleteness,
     finding_count: args.findings.length,
     top_findings: topFindings,
     runtime_validation: {
@@ -285,6 +355,7 @@ export function buildExecutiveSummaryPayload(args: {
     remediation_summary: args.remediation?.summary ?? null,
     remediation_checklist: toArray(args.remediation?.checklist_json),
     outstanding_actions: [
+      ...(validationCompleteness.status === "incomplete" ? ["validation_incomplete"] : []),
       ...(args.reviewDecision?.human_review_required ? ["human_review_required"] : []),
       ...(args.evaluations.findings_needing_validation_count ? [`${args.evaluations.findings_needing_validation_count} findings need validation`] : []),
       ...(args.evaluations.runtime_followup_required_count ? [`${args.evaluations.runtime_followup_required_count} runtime follow-up items require action`] : []),
@@ -301,6 +372,10 @@ export function buildExecutiveMarkdownReport(args: {
   reviewDecision: PersistedReviewDecisionRecord | null;
   remediation: PersistedRemediationMemoRecord | null;
   resolvedConfiguration: PersistedResolvedConfigurationRecord | null;
+  toolExecutions?: Array<Record<string, any>>;
+  controlResults?: Array<Record<string, any>>;
+  stageExecutions?: Array<Record<string, any>>;
+  agentInvocations?: Array<Record<string, any>>;
 }): string {
   const executive = buildExecutiveSummaryPayload(args);
   const lines: string[] = [];
@@ -314,6 +389,13 @@ export function buildExecutiveMarkdownReport(args: {
   lines.push(`- Target Class: ${executive.target_class ?? "n/a"}`);
   lines.push(`- Publishability: ${executive.publishability_status ?? "n/a"}`);
   lines.push(`- Human Review Required: ${executive.human_review_required ? "yes" : "no"}`);
+  const validationCompleteness = executive.validation_completeness as Record<string, any>;
+  lines.push(`- Validation Completeness: ${String(validationCompleteness.status ?? "unknown")}`);
+  if (validationCompleteness.status === "incomplete") {
+    lines.push("");
+    lines.push(`> **VALIDATION INCOMPLETE:** ${String(validationCompleteness.prominent_warning)}`);
+    lines.push(`> Incomplete tools: ${String(validationCompleteness.incomplete_tool_count ?? 0)}; stages: ${String(validationCompleteness.incomplete_stage_count ?? 0)}; model calls: ${String(validationCompleteness.incomplete_model_invocation_count ?? 0)}; not-assessed controls: ${String(validationCompleteness.not_assessed_control_count ?? 0)}; runtime blocked/failed: ${String(validationCompleteness.runtime_blocked_count ?? 0)}/${String(validationCompleteness.runtime_failed_count ?? 0)}.`);
+  }
   lines.push("");
   lines.push(`## Top Findings`);
   lines.push("");
@@ -365,10 +447,13 @@ export function buildMarkdownRunReport(args: {
   resolvedConfiguration: PersistedResolvedConfigurationRecord | null;
   toolExecutions?: Array<Record<string, any>>;
   controlResults?: Array<Record<string, any>>;
+  stageExecutions?: Array<Record<string, any>>;
+  agentInvocations?: Array<Record<string, any>>;
 }): string {
   const lines: string[] = [];
   const toolCoverage = summarizeToolExecutions(args.toolExecutions);
   const controlCoverage = summarizeControlCoverage(args.controlResults);
+  const validationCompleteness = summarizeValidationCompleteness(args);
   lines.push(`# AI Security Audit Report`);
   lines.push("");
   lines.push(`- Run ID: ${args.run.id}`);
@@ -381,6 +466,28 @@ export function buildMarkdownRunReport(args: {
   lines.push(`- Human Review Required: ${args.reviewDecision?.human_review_required ? "yes" : "no"}`);
   lines.push(`- Target Class: ${args.resolvedConfiguration?.initial_target_class ?? "n/a"}`);
   lines.push("");
+  if (validationCompleteness.status === "incomplete") {
+    lines.push(`## VALIDATION INCOMPLETE`);
+    lines.push("");
+    lines.push(String(validationCompleteness.prominent_warning));
+    lines.push("");
+    lines.push(`- Incomplete Tools: ${validationCompleteness.incomplete_tool_count}`);
+    lines.push(`- Incomplete Model Calls: ${validationCompleteness.incomplete_model_invocation_count}`);
+    lines.push(`- Incomplete Stages: ${validationCompleteness.incomplete_stage_count}`);
+    lines.push(`- Not-Assessed Controls: ${validationCompleteness.not_assessed_control_count}`);
+    lines.push(`- Runtime Blocked: ${validationCompleteness.runtime_blocked_count}`);
+    lines.push(`- Runtime Failed: ${validationCompleteness.runtime_failed_count}`);
+    for (const item of validationCompleteness.incomplete_tools as Array<Record<string, unknown>>) {
+      lines.push(`- Tool ${String(item.provider_id)}: ${String(item.status)}${item.reason ? ` (${String(item.reason)})` : ""}`);
+    }
+    for (const item of validationCompleteness.incomplete_model_invocations as Array<Record<string, unknown>>) {
+      lines.push(`- Model ${String(item.agent_name)} / ${String(item.model)}: ${String(item.status)}${item.terminal_reason ? ` (${String(item.terminal_reason)})` : ""}`);
+    }
+    for (const item of validationCompleteness.incomplete_stages as Array<Record<string, unknown>>) {
+      lines.push(`- Stage ${String(item.stage_name)}: ${String(item.status)}`);
+    }
+    lines.push("");
+  }
   lines.push(`## Static Coverage`);
   lines.push("");
   lines.push(`- Tools Completed: ${toolCoverage.completed.join(", ") || "none"}`);

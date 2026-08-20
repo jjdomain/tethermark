@@ -8,6 +8,10 @@
 - Target Class: tool_using_multi_turn_agent
 - Publishability: review_required
 - Human Review Required: yes
+- Validation Completeness: incomplete
+
+> **VALIDATION INCOMPLETE:** Validation is incomplete. Skipped, blocked, or failed tools, model calls, stages, controls, or runtime checks must not be interpreted as a clean result.
+> Incomplete tools: 0; stages: 0; model calls: 0; not-assessed controls: 0; runtime blocked/failed: 1/0.
 
 ## Top Findings
 
@@ -29,6 +33,7 @@
 
 ## Outstanding Actions
 
+- validation_incomplete
 - human_review_required
 - 1 findings need validation
 - 1 runtime follow-up items require action

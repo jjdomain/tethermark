@@ -1,6 +1,7 @@
 import type { AgentRuntime } from "../../../agent-runtime/src/index.js";
 import { buildEvalSelectionContext } from "../agent-context-builders.js";
 import type { AuditPolicyArtifact, AuditRequest, EvalSelectionArtifact, MethodologyArtifact, PlannerArtifact, RepoContextArtifact, SandboxSession, StandardControlDefinition, TargetDescriptor, TargetProfileArtifact, ThreatModelArtifact } from "../contracts.js";
+import { buildFixedCalibrationEvidenceSelection } from "../evidence-selection-policy.js";
 
 export async function stageSelectEvidence(args: {
   runId: string;
@@ -18,6 +19,13 @@ export async function stageSelectEvidence(args: {
   agentRuntime: AgentRuntime;
   skepticFeedback?: unknown;
 }): Promise<EvalSelectionArtifact> {
+  const fixedCalibrationSelection = buildFixedCalibrationEvidenceSelection({
+    request: args.request,
+    plannerArtifact: args.plannerArtifact,
+    controlCatalog: args.controlCatalog
+  });
+  if (fixedCalibrationSelection) return fixedCalibrationSelection;
+
   const call = await args.agentRuntime.callAgent<EvalSelectionArtifact>({
     runId: args.runId,
     agentName: "eval_selection_agent",

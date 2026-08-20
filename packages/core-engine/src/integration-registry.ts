@@ -60,7 +60,8 @@ const BUILTIN_INTEGRATIONS: IntegrationDefinition[] = [
     mode: "webhook",
     notes: [
       "Only sends events explicitly selected in settings.",
-      "Secret signing is optional but recommended when posting to shared receivers."
+      "With a signing secret, each event includes an HMAC SHA-256 signature over the exact request body.",
+      "Without a signing secret, events are untrusted and must be limited to a loopback or otherwise trusted local receiver."
     ],
     credential_fields: [
       {
@@ -70,7 +71,7 @@ const BUILTIN_INTEGRATIONS: IntegrationDefinition[] = [
         secret: false,
         required: false,
         placeholder: "https://example.internal/hooks/audit",
-        help_text: "Target URL for signed audit event delivery.",
+        help_text: "Target URL for audit event delivery. Configure a signing secret for any non-local receiver.",
         env_var: null,
         location: "integrations"
       },
@@ -162,7 +163,9 @@ function describeIntegrationStatus(
         ? "GitHub draft export is enabled. This installation prepares drafts only and does not post to GitHub automatically. Use Tethermark Cloud for automatic posting."
         : "GitHub draft export is disabled."
       : enabled
-        ? "Generic webhook delivery is configured."
+        ? fields.some((field) => field.id === "generic_webhook_secret" && field.configured)
+          ? "Generic webhook delivery is configured with HMAC SHA-256 signing."
+          : "Generic webhook delivery is unsigned and must be treated as untrusted/local-only."
         : "Generic webhook delivery is disabled.",
     fields
   };

@@ -1,0 +1,18 @@
+{
+  "id": "ordinary-app-mixed",
+  "expected_target_class": "runnable_local_app",
+  "expected_findings": [
+    "security_policy",
+    "dependency_maintenance",
+    "dependency_locking"
+  ],
+  "expected_likely_controls": [
+    "openssf.security_policy",
+    "openssf.dependency_update_tool",
+    "openssf.pinned_dependencies"
+  ],
+  "expected_human_review_required": true,
+  "notes": [
+    "This fixture represents a runnable ordinary application with mixed repository posture."
+  ]
+}

@@ -1,20 +1,67 @@
 ﻿# Changelog
 
+## 2026-08-20
+
+### Added
+
+- Added Community Edition operator guidance for first run, ChatGPT/Codex sign-in, readiness, review, remediation, runtime follow-up, exports, restart recovery, backup, upgrade, and troubleshooting, with a retained Phase 6 walkthrough record and screenshots.
+- Added same-major additive compatibility metadata to versioned export envelopes and backward-compatibility tests for legacy 1.x readers and rejected 2.x contracts.
+- Added explicit validation-completeness summaries to executive JSON, executive Markdown, and full Markdown reports so skipped tools, mock or failed model stages, not-assessed controls, and runtime gaps cannot look like clean passes.
+- Added generic webhook security guidance distinguishing signed delivery from explicitly untrusted local-only callbacks.
+
+### Changed
+
+- Moved web UI audit launch to the durable asynchronous job endpoint, with a disabled `Launching Audit...` state and automatic handoff to the run or Jobs view.
+- Updated GitHub SARIF guidance for SARIF 2.1.0, current upload actions, permissions, manual upload, and remediation-link behavior.
+
+### Verified
+
+- Completed the isolated Phase 6 operator walkthrough through review, remediation ownership, pending runtime follow-up, exports, and restart recovery without launching another live-model calibration run.
+- Verified SARIF 2.1.0 output with one run and ten results, executive export compatibility metadata, and prominent incomplete-validation reporting.
+- `npm test --silent`
+- `npm run e2e:static-pi-ui --silent`
+- `npm run exports:check --silent`
+
 ## 2026-08-18
 
 ### Added
 
 - Added checksum-locked, user-isolated setup for OpenSSF Scorecard 5.5.0, Semgrep 1.172.0, and Trivy 0.73.0 with supported-version enforcement.
 - Added a focused static-scanner doctor, bundled offline Semgrep rules, adversarial real-scanner fixtures, and retained Windows/Ubuntu/macOS CI evidence.
+- Added a deterministic Community Edition calibration suite spanning good, mixed, risky, ordinary, runnable, agentic, and MCP targets with versioned seed expectations and acceptance thresholds.
+- Added external-ground-truth benchmark pairs for reviewed `GHSA-3q26-f695-pp76` / `CVE-2025-53107`, `GHSA-vjqx-cfc4-9h6v` / `CVE-2026-27735`, `GHSA-rhm9-gp5p-5248` / `CVE-2024-51751`, and `GHSA-rvqx-wpfh-mfx7` / `CVE-2025-3248`, pinned to vulnerable and direct fixed commits for command injection, MCP repository-boundary traversal, Gradio file-payload path-validation bypass, and Langflow unauthenticated code validation.
+- Added per-run version manifests for methodology, static baseline, control catalog, policy, audit-package catalog, prompt set, tool versions/capabilities, and model identities.
+- Added subscription-authenticated benchmark workload/budget flags, repeated `--case` selection, execution-configuration capture, and a cross-model `benchmark variance` gate that permits model identity changes while rejecting other audit-input mismatches.
+- Added bounded, credential/path-redacted benchmark finding summaries with evidence references, control mappings, and post-supervisor integrity diagnostics.
+- Added bounded, credential/path-redacted benchmark control-status and dimension-score summaries so each final score remains traceable after the temporary audit database is removed.
+- Added a versioned fixed static calibration evidence plan and retained plan/attempt summaries; benchmark cases now fail if correction or execution omits a planned provider.
+- Added deterministic reconciliation regressions for selective lane replacement, stale control finding references, model-requested deletion of heuristic findings, and model-requested control downgrades.
+- Added a fixed-Gradio source-review packet for the five Terra-only findings, including recommended manual false-positive labels, pinned-source verification, an independent-human sign-off block, and separate triage for the audio-debugger command-execution pattern.
 
 ### Changed
 
 - Restricted Scorecard API fallback to canonical public GitHub repositories and required completed repository analysis, Semgrep, Trivy, and Scorecard evidence before output can be considered publicly publishable.
 - Marked Community Edition Phase 4 complete after PR #4 passed deterministic checks, OSS smoke checks, and the three-platform real-scanner matrix.
+- Added benchmark citation, traceability, false-positive/false-negative, duplicate, conflict, score-drift, and repeat-stability metrics; comparisons now reject dry runs, pending labels, or mismatched audit inputs.
+- Made benchmark runs bypass cached stage reuse, corrected MCP/agentic control scoping in the deterministic planner, and detect imported or promisified `child_process.exec` shell invocation patterns.
+- Added deterministic detection and control mapping for the reviewed MCP `git_add` repository-boundary vulnerability, and made finding reconciliation preserve stricter control failures and lower awarded scores.
+- Added deterministic detection and control mapping for Gradio's reviewed FileData metadata-validation bypass, and refined target classification so generic `plugin` filenames no longer imply an MCP surface.
+- Added an OWASP API2:2023 sensitive-operation authentication control and endpoint-specific deterministic detection for Langflow's reviewed code-validation flaw; unrelated API operations remain explicitly unassessed by that evaluator.
+- Constrained planner target classes to the supported taxonomy and made deterministic static-assessable candidate controls plus deterministic agentic/MCP classification a safety floor that model output cannot suppress or downgrade.
+- Made variance analysis distinguish same-model repeats from cross-model runs, apply the stricter repeat-score threshold when appropriate, and report finding-count/category drift.
+- Made static-runtime-overclaim fallback detection distinguish affirmative runtime claims from explicit negations such as "runtime impact was not established."
+- Made calibration evidence selection bypass model choice, map repository analysis, Scorecard, Semgrep, and Trivy to every applicable control, and prevent supervisor correction from narrowing the set.
+- Made selective correction remove findings from the replaced lane even when the rerun generates different finding IDs, rebuilt control finding references from final findings, and required deterministic integrity approval before model supervision can delete heuristic findings.
+- Constrained selective correction merges to findings and controls owned by the rerun lane, preventing global standards recomputation from duplicating reused-lane findings or replacing off-lane control results.
+- Made supervisor control-downgrade actions advisory unless a deterministic control-quality validator explicitly approves the affected control IDs.
+- Required final findings to retain support from at least one assessed mapped control, consolidated equivalent agent execution claims across framework mappings, and required path-local agent-to-execution or source-to-prompt/tool evidence for agentic failures.
+- Preserved direct non-agent shell execution as application-security triage observations and excluded fixture-only `validation-expectations.json` files from audit evidence.
 
 ### Security
 
 - Added bounded scanner time and output limits plus explicit failure records for missing, blocked, unsupported, timed-out, flooded, malformed, or unavailable scanner evidence.
+- Required statically evidenced findings to retain a file/line or persisted artifact citation.
+- Static finding integrity no longer treats dependency-advisory impact text such as "potential command execution" or an explicit "no runtime execution" disclaimer as proof that a static audit claimed dynamic execution. Affirmative executed, reproduced, or runtime-validated claims remain blocking without runtime evidence.
 
 ### Verified
 
@@ -22,6 +69,25 @@
 - `npm run exports:check --silent`
 - `npm run test:static-scanners:real`
 - GitHub Actions workflow run `32095194344` with retained Windows, Ubuntu, and macOS scanner artifacts through 2026-09-17.
+- Two deterministic four-case calibration runs with 100% citation/control traceability, zero duplicate/conflict groups, and zero score spread.
+- Strict external calibration passed the original six reviewed vulnerable/fixed commits across three advisories and two target classes, with zero advisory-scoped false negatives and false positives.
+- The fourth Langflow vulnerable/fixed pair passed both strict gates: the vulnerable revision produced one critical advisory match with a failed authentication control and zero false negatives, while the direct fixed revision passed the control with zero advisory-scoped false positives.
+- The guarded Langflow ChatGPT-subscription pilot passed vulnerable and fixed cross-model variance plus same-model Sol repeat gates. Vulnerable Sol/Terra/Sol-repeat results were 65/65/65 with seven findings each; fixed results were 71/71/71 with six findings each. Every score and finding-count spread was zero, with exactly one advisory match on vulnerable snapshots and zero advisory-scoped false positives on fixed snapshots.
+- An initial vulnerable Langflow Sol run deliberately remains failed evidence: selective correction expanded seven findings to thirteen, duplicated the advisory match, and created six duplicate groups. The lane-owned merge fix and regression restored the strict gate on the guarded rerun.
+- A fresh strict model-free `external-reviewed-agentic-v1@2026.08.19-v4` refresh passed all eight cases. Git MCP vulnerable/fixed scored 55/70 with 10/6 findings, official MCP Git 63/72 with 6/5, Gradio 56/68 with 7/6, and Langflow 64/70 with 7/6; all four reviewed vulnerable/fixed distinctions passed with zero integrity blockers.
+- The guarded Git MCP ChatGPT-subscription pilot passed vulnerable and fixed Sol/Terra cross-model gates plus same-model Sol repeats. Vulnerable Sol/Terra/Sol-repeat runs scored 55/55/55 with ten findings each and one `CVE-2025-53107` match; fixed runs scored 70/70/70 with six findings each and zero advisory-scoped false positives. All four variance reports had zero score and finding-count spread.
+- The official MCP Git path-traversal ChatGPT-subscription pilot passed vulnerable and fixed Sol/Terra cross-model gates plus same-model Sol repeats. Vulnerable Sol/Terra/Sol-repeat runs scored 65/65/65 with six findings each and one `CVE-2026-27735` match; fixed runs scored 73/73/73 with five findings each and zero advisory-scoped false positives. All four variance reports had zero score and finding-count spread with no integrity blockers.
+- The consolidated eight-snapshot controlled matrix passed every cross-model and same-model score gate with maximum spread 1. The final vulnerable-Gradio suite-v4 Sol repeat passed at 57/56 with seven findings per run and zero finding-count spread; comparison against the older suite-v3 report was correctly rejected for suite-version, evidence-plan, and control-catalog mismatches. Existing acceptance thresholds and scoring weights remain unchanged because four advisory families and unresolved fixed-Gradio unrelated-finding drift are insufficient evidence for responsible weight tuning.
+- A scanner-enabled diagnostic Git MCP Sol run remains failed evidence because five Trivy advisory titles were misclassified as static runtime overclaims. The fixed-plan scanner-disabled rerun passed, and a deterministic regression now proves advisory impact metadata and negated runtime disclaimers are not affirmative runtime claims.
+- A bounded ChatGPT-subscription cross-model pilot on the reviewed vulnerable Gradio commit passed with Sol/Terra scores of 56/57 (spread 1), zero advisory-scoped false negatives/positives, full citation/control traceability, and zero duplicate/conflict groups. Finding counts differed 2/7, so broader variance calibration remains open.
+- The matching fixed-Gradio pilot produced zero advisory-scoped false positives for both models, but deliberately remains a failed calibration gate: Sol passed at 27 with one finding, Terra failed at 68 with six findings and a static-runtime-overclaim integrity issue, and the 41-point cross-model spread exceeded the threshold of 3.
+- A second fixed-Gradio Sol/Terra pair passed at 68/68 with zero advisory-scoped false positives. Cross-model score variance passed, but same-model stability remains blocked: Sol repeated at 27/68, and Terra repeated at 68/68 while changing from a failed six-finding result to a passing two-finding result.
+- A third fixed-Gradio Sol run scored 68 with one partially supported build-integrity finding and zero advisory-scoped false positives. Its retained dimension contributions sum to 67.9 before rounding; evidence-provider selection still differed from the preceding Sol repeat, so repeat stability remains open.
+- Two fixed-Gradio Sol runs under the versioned plan passed at 68/68 with one finding each. The first exposed a correction-path downgrade to repository analysis only; after correction enforcement, the final run retained all four planned provider attempts plus Scorecard API fallback. Variance passed with zero score and finding-count spread while reporting the attempted-provider drift.
+- A fixed-plan Terra run passed at 68 with six fully summarized, partially supported deterministic findings and zero integrity blockers. Comparison with the retained two-finding summary isolated model-requested heuristic deletion as the remaining count-changing boundary; the older six-finding report itself predates summaries and cannot be reconstructed finding-by-finding.
+- The guarded fixed-plan vulnerable-Gradio Sol/Terra pair passed formal cross-model variance at 56/57 with identical seven-finding sets, zero advisory-scoped false negatives/positives, and no integrity blockers. Six findings outside `CVE-2024-51751` remain partially supported and are explicitly excluded from external-ground-truth calibration claims.
+- Post-review fixed-Gradio Sol/Terra/Sol-repeat runs passed at 87/87/87 with one shared `build_integrity` finding. Formal cross-model and same-model variance both passed with zero score and finding-count spread; the five disputed agentic findings were absent. The project owner approved the AI-adjudicated labels for engineering use and moving forward without an independent-human-review claim.
+- `npm run release:check` with local binaries and Python workers explicitly disabled for deterministic, model-free verification; all five validation fixtures passed.
 
 ## 2026-08-07
 

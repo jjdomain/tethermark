@@ -37,8 +37,26 @@ Completed:
 - Linux static sandbox backend
 - Linux container-backend scaffold
 - local static `scan path ... --mode static` verified on Windows with provider-backed agents and standards-based score artifacts
+- versioned deterministic regression suite for good, mixed, risky, ordinary, runnable, agentic, and MCP targets
+- four external-ground-truth vulnerable/fixed calibration pairs from reviewed `CVE-2025-53107`, `CVE-2026-27735`, `CVE-2024-51751`, and `CVE-2025-3248`, with strict known-finding FP/FN gates for command injection, MCP repository-boundary traversal, AI application file-payload path validation, and unauthenticated code validation
+- per-run methodology/prompt/catalog/policy/package/tool/model version manifests, citation requirements, calibration metrics, and fail-closed benchmark comparison rules
+- first bounded ChatGPT-subscription Sol/Terra variance pilot on reviewed Gradio ground truth; both models passed after deterministic scope-floor hardening, with scores 56/57 but finding counts 2/7
+- matching fixed-Gradio Sol/Terra runs both avoided the reviewed finding, but failed the cross-model stability gate: scores diverged 27/68, Sol left two expected controls unassessed, and Terra failed a static-runtime-overclaim integrity check
+- redacted finding-level benchmark summaries plus a second fixed-Gradio pair; the repeat aligned Sol/Terra at 68/68 but exposed historical same-model instability (Sol 27/68 and Terra findings 6/2), prompting control-level traceability and deterministic evidence-plan work
+- redacted control-status and dimension-contribution summaries plus a third fixed-Gradio Sol run at 68; the score is now fully traceable, and a negated-runtime-claim false positive was fixed, but evidence-provider selection still varied between repeats
+- versioned fixed static calibration evidence planning across repository analysis, Scorecard, Semgrep, and Trivy, enforced through supervisor correction and retained in reports; controlled Sol repeats passed at 68/68 with one finding each and zero score/finding-count spread
+- deterministic final-finding reconciliation that replaces stale selectively rerun lane findings, rebuilds control finding references, and requires deterministic integrity approval before a model can delete heuristic findings; a reviewable fixed-plan Terra run passed at 68 with six partially supported findings and zero integrity blockers
+- deterministic control-result reconciliation that keeps model-requested downgrades advisory until independently approved; guarded vulnerable-Gradio Sol/Terra calibration passed formal variance at 56/57 with identical seven-finding sets and zero advisory-scoped false negatives or false positives
+- lane-owned selective correction that rejects globally recomputed off-lane findings and controls; guarded Langflow vulnerable/fixed Sol/Terra and Sol-repeat gates passed at 65/65/65 and 71/71/71 with zero score or finding-count spread and zero advisory-scoped false negatives or false positives
+- fresh strict eight-case external-ground-truth refresh under control catalog v4, followed by guarded Git MCP vulnerable/fixed Sol/Terra plus Sol-repeat gates at 55/55/55 and 70/70/70, and official MCP Git vulnerable/fixed Sol/Terra plus Sol-repeat gates at 65/65/65 and 73/73/73; every score/finding-count spread is zero with zero advisory-scoped false negatives or false positives
+- consolidated eight-snapshot controlled variance matrix: all cross-model and same-model score gates pass with maximum spread 1, and every repeat finding-count spread is zero; the vulnerable-Gradio v4 repeat passed at 57/56 with seven findings each, while a v3/v4 comparison was correctly rejected as non-equivalent; thresholds and weights remain unchanged pending broader reviewed advisories and independent review of unrelated findings
+- AI-assisted source review packet for the five Terra-only fixed-Gradio findings, with recommended manual false-positive labels, pinned-source evidence, a separate audio-debugger command-execution triage note, and an explicit independent-human signature block
+- reviewed-finding safeguards that require assessed-control support, path-local agent execution evidence, and prompt dataflow; consolidate duplicate framework claims; preserve non-agent shell sinks for appsec triage; and exclude fixture expectation metadata from audit evidence. Fresh fixed-Gradio Sol/Terra/Sol-repeat runs converged at 87 with one finding, and both formal variance gates passed with zero score and finding-count spread
+- project-owner approval to use the fixed-Gradio AI-adjudicated labels and move forward without representing them as independent human ground truth
+- static finding integrity distinguishes scanner advisory impact metadata from claims of executed or reproduced runtime behavior; explicit runtime assertions still fail closed
 
 Not completed:
+- broader independently reviewed advisory coverage beyond the current four advisories and vulnerability classes, followed by multi-case/repeat model variance and weight/threshold calibration
 - cleanup or archival policy for old historical artifact directories already present under `.artifacts`
 - real Python worker execution on this machine
 - real Linux container or microVM execution for isolated build/runtime/validate flows
@@ -212,13 +230,14 @@ Hosted rollout order:
 
 ## Recommended Next Order
 
-1. Calibrate control weights and framework scoring against repeated OSS audits.
-2. Complete false-positive review and golden-repository evidence for the canonical Phase 5 gate.
-3. Add simple cleanup/archive tooling for historical artifact directories.
-4. Implement executable Linux container backend for isolated runtime validation.
-5. Enable real Python workers on Linux.
-6. Deploy first isolated worker host for deeper AI-security audit modes.
-7. Add persistent queue and artifact storage.
+Community Edition Phase 6 is complete. The next product-plan milestone is Phase 7: Admin/System Policies and extensive-scan controls.
+
+1. Implement the local versioned System Policy domain and resolution rules described in the production plan.
+2. Add simple cleanup/archive tooling for historical artifact directories.
+3. Implement executable Linux container backend for isolated runtime validation.
+4. Enable real Python workers on Linux.
+5. Deploy first isolated worker host for deeper AI-security audit modes.
+6. Add persistent queue and artifact storage.
 
 ## Deferred Until Hetzner Is Ready
 

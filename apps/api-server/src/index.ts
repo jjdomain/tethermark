@@ -5,7 +5,7 @@ import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
 import { listenWithFriendlyErrors } from "../../shared/src/listen.js";
-import { compareBenchmarkReports, loadBenchmarkSuite, runBenchmarkSuite, selectBenchmarkCases } from "../../cli/src/benchmark-suite.js";
+import { compareBenchmarkReports, listBenchmarkSuites, loadBenchmarkSuite, runBenchmarkSuite, selectBenchmarkCases } from "../../cli/src/benchmark-suite.js";
 import { buildRuntimeSetupPlan, executeRuntimeSetupPlan, runtimeSetupCommandLine } from "../../cli/src/setup-runtime.js";
 import { describeArtifactType } from "../../../packages/core-engine/src/artifact-policy.js";
 import { loadEnvironment } from "../../../packages/core-engine/src/env.js";
@@ -82,6 +82,7 @@ import {
   buildMarkdownRunReport,
   buildExecutiveMarkdownReport,
   buildExecutiveSummaryPayload,
+  buildTethermarkExportEnvelope,
   buildSarifRunReport,
   emitGenericWebhookEvent,
   normalizeGenericWebhookConfig,
@@ -174,7 +175,6 @@ loadEnvironment();
 
 const engine = createEngine();
 const TETHERMARK_VERSION = process.env.TETHERMARK_VERSION ?? "0.2.0";
-const EXPORT_SCHEMA_VERSION = "1.0.0";
 const assistantToolRegistry = createDefaultAssistantToolRegistry();
 const assistantContextBuilder = new DefaultAssistantContextBuilder();
 const assistantProvider = new LlmBackedAssistantProvider(new EvidenceGroundedAssistantProvider());
@@ -330,13 +330,11 @@ function buildRuntimeFollowupCsv(followups: Array<Record<string, any>>): string 
 }
 
 function buildExportEnvelope<T>(schemaName: string, payload: T) {
-  return {
-    schema_name: schemaName,
-    schema_version: EXPORT_SCHEMA_VERSION,
-    generated_at: new Date().toISOString(),
-    tethermark_version: TETHERMARK_VERSION,
+  return buildTethermarkExportEnvelope({
+    schemaName,
+    tethermarkVersion: TETHERMARK_VERSION,
     payload
-  };
+  });
 }
 
 function canGovernLearning(context: { roles: ReviewActorRole[] }): boolean {
@@ -4442,9 +4440,9 @@ export function createApiServer(): http.Server {
 
   if (req.method === "GET" && url.pathname === "/benchmarks/suites") {
     try {
-      const suite = await loadBenchmarkSuite("ai-agent-static-v1");
+      const suites = await listBenchmarkSuites();
       sendJson(res, 200, {
-        suites: [{
+        suites: suites.map((suite) => ({
           suite_id: suite.suite_id,
           suite_version: suite.suite_version,
           title: suite.title,
@@ -4455,7 +4453,7 @@ export function createApiServer(): http.Server {
           default_case_count: selectBenchmarkCases(suite, {}).length,
           extended_case_count: selectBenchmarkCases(suite, { includeExtended: true }).length,
           runtime_pending_case_count: suite.cases.filter((item) => item.tier === "runtime_pending").length
-        }]
+        }))
       });
     } catch (error) {
       sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
@@ -5164,7 +5162,7 @@ export function createApiServer(): http.Server {
         return;
       }
       if (runSubresource.resource === "report-markdown" || runSubresource.resource === "report-sarif" || runSubresource.resource === "report-executive") {
-        const [summary, findings, workflow, actions, comments, dispositions, supervisorReview, reviewDecision, remediation, resolvedConfiguration, sandboxExecution, evidenceRecords, runtimeFollowups, toolExecutions, controlResults] = await Promise.all([
+        const [summary, findings, workflow, actions, comments, dispositions, supervisorReview, reviewDecision, remediation, resolvedConfiguration, sandboxExecution, evidenceRecords, runtimeFollowups, toolExecutions, controlResults, stageExecutions, agentInvocations] = await Promise.all([
           buildRunSummary(runSubresource.runId),
           readPersistedFindings(runSubresource.runId),
           readPersistedReviewWorkflow(runSubresource.runId),
@@ -5179,7 +5177,9 @@ export function createApiServer(): http.Server {
           readPersistedEvidenceRecords(runSubresource.runId),
           listPersistedRuntimeFollowups({ runId: runSubresource.runId }),
           readPersistedToolExecutions(runSubresource.runId),
-          readPersistedControlResults(runSubresource.runId)
+          readPersistedControlResults(runSubresource.runId),
+          readPersistedStageExecutions(runSubresource.runId),
+          readPersistedAgentInvocations(runSubresource.runId)
         ]);
         const evaluations = buildFindingEvaluationSummary({ workflow, findings, actions, comments, dispositions, supervisorReview, sandboxExecution: sandboxExecution as any, evidenceRecords, runtimeFollowups });
         if (runSubresource.resource === "report-executive") {
@@ -5196,7 +5196,11 @@ export function createApiServer(): http.Server {
                 evaluations,
                 reviewDecision,
                 remediation,
-                resolvedConfiguration
+                resolvedConfiguration,
+                toolExecutions,
+                controlResults,
+                stageExecutions,
+                agentInvocations
               })
             });
             return;
@@ -5212,7 +5216,11 @@ export function createApiServer(): http.Server {
               evaluations,
               reviewDecision,
               remediation,
-              resolvedConfiguration
+              resolvedConfiguration,
+              toolExecutions,
+              controlResults,
+              stageExecutions,
+              agentInvocations
             })),
             report_executive: buildExecutiveSummaryPayload({
               run,
@@ -5221,7 +5229,11 @@ export function createApiServer(): http.Server {
               evaluations,
               reviewDecision,
               remediation,
-              resolvedConfiguration
+              resolvedConfiguration,
+              toolExecutions,
+              controlResults,
+              stageExecutions,
+              agentInvocations
             })
           });
           return;
@@ -5240,7 +5252,9 @@ export function createApiServer(): http.Server {
               remediation,
               resolvedConfiguration,
               toolExecutions: toolExecutions as any,
-              controlResults: controlResults as any
+              controlResults: controlResults as any,
+              stageExecutions: stageExecutions as any,
+              agentInvocations: agentInvocations as any
             })
           });
           return;

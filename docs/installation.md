@@ -53,6 +53,8 @@ npm run oss
 
 The web UI opens at `http://127.0.0.1:8788`.
 
+For the complete first-run, audit, review, remediation, export, restart, backup, and upgrade path, follow [Community Edition Operator Workflow](./operator-workflow.md). The bounded release walkthrough is recorded in [Phase 6 Operator Workflow Evidence](./phase6-operator-workflow-evidence.md).
+
 The Community Edition assistant is enabled by default and runs locally against persisted Tethermark audit data. It supports selected run and target-history Q&A, deterministic evidence-grounded fallback answers, draft outputs, and confirmed local actions. If no usable assistant/global LLM is configured, the assistant drawer remains available and shows fallback/limitations rather than requiring a separate enable flag. Tethermark Cloud project/workspace/org scopes and external connector sends are not enabled in Community Edition. Community Edition does not create GitHub issues or receive GitHub webhooks; paste manual external issue or PR links into local remediation items when needed. To surface findings in GitHub code scanning from Community Edition, export SARIF and upload it with GitHub Actions; see [GitHub SARIF Upload](./github-sarif-upload.md).
 
 ## Community Edition Remediation Workflow

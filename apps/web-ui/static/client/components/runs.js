@@ -615,6 +615,7 @@ function LaunchAuditModalComponent({
   preflightCheckedAt,
   preflightAcceptedAt,
   preflightLoading,
+  launchLoading,
   applyProviderPreset,
   runPreflight,
   acceptPreflight,
@@ -1441,9 +1442,11 @@ function LaunchAuditModalComponent({
     h("div", { key: "buttons", className: "flex flex-wrap gap-3" }, [
       h(Button, {
         key: "launch",
-        disabled: !requiredFieldsReady || !launchReadiness.canLaunch,
+        disabled: launchLoading || !requiredFieldsReady || !launchReadiness.canLaunch,
         onClick: launchRun
-      }, !requiredFieldsReady
+      }, launchLoading
+        ? "Launching Audit..."
+        : !requiredFieldsReady
         ? "Complete Required Fields"
         : launchReadiness.requiresReadinessReview && !preflightSummary
           ? "Run Audit Readiness First"

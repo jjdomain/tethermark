@@ -1,0 +1,14 @@
+{
+  "id": "mcp-tool-boundary-risky",
+  "expected_target_class": "mcp_server_plugin_skill_package",
+  "expected_findings": [
+    "mcp_permission_surface"
+  ],
+  "expected_likely_controls": [
+    "owasp_agentic.tool_misuse_boundary"
+  ],
+  "expected_human_review_required": true,
+  "notes": [
+    "This fixture represents a risky MCP file-tool surface without a demonstrated prompt-to-execution path."
+  ]
+}

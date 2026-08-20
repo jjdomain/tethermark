@@ -13,7 +13,7 @@ export interface CommitDiffGateArtifact {
   previous_run_id: string | null;
   current_commit_sha: string | null;
   previous_commit_sha: string | null;
-  comparison_mode: "no_prior_run" | "policy_changed" | "same_commit" | "git_diff" | "git_diff_unavailable" | "non_git_target";
+  comparison_mode: "no_prior_run" | "reuse_disabled" | "policy_changed" | "same_commit" | "git_diff" | "git_diff_unavailable" | "non_git_target";
   changed_files: string[];
   stage_decisions: {
     planner: "reuse" | "rerun";
@@ -38,12 +38,21 @@ async function findPreviousComparableRun(target: TargetDescriptor, runMode: stri
     .filter((entry) => entry.run_id !== currentRunId && entry.run_mode === runMode)
     .sort((left, right) => right.updated_at.localeCompare(left.updated_at));
 
-  for (const entry of candidates) {
-    const previousTarget = await readJson<any>(path.join(entry.artifact_dir, "target.json"));
-    if (!previousTarget) continue;
-    if (previousTarget.target_type !== target.target_type) continue;
-    if (previousTarget.snapshot?.value === target.snapshot.value) {
-      return { run_id: entry.run_id, artifact_dir: entry.artifact_dir };
+  const batchSize = 32;
+  for (let offset = 0; offset < candidates.length; offset += batchSize) {
+    const batch = candidates.slice(offset, offset + batchSize);
+    const previousTargets = await Promise.all(
+      batch.map((entry) => readJson<any>(path.join(entry.artifact_dir, "target.json")))
+    );
+
+    for (let index = 0; index < batch.length; index += 1) {
+      const entry = batch[index];
+      const previousTarget = previousTargets[index];
+      if (!previousTarget) continue;
+      if (previousTarget.target_type !== target.target_type) continue;
+      if (previousTarget.snapshot?.value === target.snapshot.value) {
+        return { run_id: entry.run_id, artifact_dir: entry.artifact_dir };
+      }
     }
   }
   return null;
@@ -64,10 +73,21 @@ async function tryGitDiff(rootPath: string, previousCommit: string, currentCommi
 
 export async function computeCommitDiffGate(args: {
   currentRunId: string;
-  request: { run_mode?: string };
+  request: { run_mode?: string; hints?: Record<string, unknown> };
   target: TargetDescriptor;
   auditPolicy: AuditPolicyArtifact;
 }): Promise<CommitDiffGateArtifact> {
+  if (args.request.hints?.disable_stage_reuse === true) {
+    return {
+      previous_run_id: null,
+      current_commit_sha: args.target.snapshot.commit_sha,
+      previous_commit_sha: null,
+      comparison_mode: "reuse_disabled",
+      changed_files: [],
+      stage_decisions: { planner: "rerun", threat_model: "rerun", eval_selection: "rerun" },
+      rationale: ["Stage reuse was disabled for this run so benchmark evidence is produced by the current engine and configuration."]
+    };
+  }
   const previous = await findPreviousComparableRun(args.target, args.request.run_mode ?? "static", args.currentRunId);
   if (!previous) {
     return {

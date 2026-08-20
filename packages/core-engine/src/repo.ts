@@ -9,6 +9,12 @@ const TEXT_FILE_RE = /\.(ts|tsx|js|jsx|mjs|cjs|py|json|md|yml|yaml|toml)$/i;
 const SKIP_NAMES = new Set([".git", "node_modules", ".artifacts", ".npm-cache", ".legacy-js-archive", "dist", "build", "__pycache__", ".venv"]);
 const MAX_SIGNAL_FILE_BYTES = 192 * 1024;
 
+function isMcpPluginSkillIndicator(file: string): boolean {
+  return /(^|[\/_.-])(?:mcp|modelcontextprotocol)(?=$|[\/_.-])/i.test(file)
+    || /(^|\/)SKILL\.md$/i.test(file)
+    || /(^|\/)(?:\.codex-plugin\/)?plugin\.json$/i.test(file);
+}
+
 async function walk(root: string, current = root, acc: string[] = []): Promise<string[]> {
   const entries = await fs.readdir(current, { withFileTypes: true });
   for (const entry of entries) {
@@ -267,15 +273,26 @@ export async function analyzeTarget(target: TargetDescriptor): Promise<AnalysisS
   const root = target.local_path ?? process.cwd();
   const files = await walk(root);
   const agenticSignals = await detectAgenticSignals(root, files);
+  const frameworkManifestTexts = await Promise.all(files
+    .filter((file) => /(^|\/)(package\.json|requirements(\.dev)?\.txt|pyproject\.toml|poetry\.lock|Pipfile)$/i.test(file))
+    .map((file) => readSmallText(root, file)));
+  const frameworkDependencyText = frameworkManifestTexts.join("\n");
+  const frameworkDependencies = {
+    fastapi: /(?:^|\W)fastapi(?:\W|$)/i.test(frameworkDependencyText),
+    django: /(?:^|\W)django(?:\W|$)/i.test(frameworkDependencyText),
+    flask: /(?:^|\W)flask(?:\W|$)/i.test(frameworkDependencyText),
+    express: /(?:^|\W)express(?:\W|$)/i.test(frameworkDependencyText)
+  };
   const frameworks = unique(files.flatMap((file) => {
     const lower = file.toLowerCase();
     return [
       lower.includes("next") ? "Next.js" : "",
       lower.includes("react") ? "React" : "",
-      lower.includes("fastapi") ? "FastAPI" : "",
-      lower.includes("django") ? "Django" : "",
-      lower.includes("flask") ? "Flask" : "",
-      lower.includes("mcp") ? "MCP" : "",
+      lower.includes("fastapi") || frameworkDependencies.fastapi ? "FastAPI" : "",
+      lower.includes("django") || frameworkDependencies.django ? "Django" : "",
+      lower.includes("flask") || frameworkDependencies.flask ? "Flask" : "",
+      frameworkDependencies.express ? "Express" : "",
+      isMcpPluginSkillIndicator(file) ? "MCP" : "",
       agenticSignals.aiFrameworks.includes("openai_sdk") ? "OpenAI SDK" : "",
       agenticSignals.aiFrameworks.includes("langchain") ? "LangChain" : "",
       agenticSignals.aiFrameworks.includes("langgraph") ? "LangGraph" : "",
@@ -291,7 +308,7 @@ export async function analyzeTarget(target: TargetDescriptor): Promise<AnalysisS
   }));
   const entryPoints = files.filter((file) => /(index|main|app|server|cli)\.(ts|js|py)$/i.test(file));
   const mcpIndicators = unique([
-    ...files.filter((file) => /mcp|plugin|skill/i.test(file)),
+    ...files.filter(isMcpPluginSkillIndicator),
     ...(agenticSignals.aiFrameworks.includes("mcp") ? agenticSignals.signalFiles : [])
   ]);
   const toolExecutionIndicators = unique([

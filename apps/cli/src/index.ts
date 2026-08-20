@@ -2,8 +2,8 @@ import process from "node:process";
 
 import { loadEnvironment } from "../../../packages/core-engine/src/env.js";
 import { backfillLocalPersistence, cleanupLocalJsonMirrors, compactBundleExports, createEngine, getPersistedRun, listPersistedReviewNotifications, listPersistedReviewWorkflows, normalizeLearningSettings, normalizeProjectId, normalizeWorkspaceId, pruneArtifacts, readPersistedReviewActions, readPersistedReviewWorkflow, reconstructLocalRun, reconstructLocalRuns, resolvePersistedUiSettings, runLearningPipeline, runPostgresMigration, submitPersistedReviewAction, validateLocalPersistence, type ArtifactRetentionKind } from "../../../packages/core-engine/src/index.js";
-import { buildScanRequest, readBooleanFlag, readFlag, readNumberFlag } from "./args.js";
-import { compareBenchmarkReports, formatBenchmarkCaseLine, loadBenchmarkSuite, printBenchmarkCompare, printBenchmarkSummary, runBenchmarkSuite, selectBenchmarkCases } from "./benchmark-suite.js";
+import { buildScanRequest, readBooleanFlag, readFlag, readFlags, readNumberFlag } from "./args.js";
+import { analyzeBenchmarkVariance, compareBenchmarkReports, formatBenchmarkCaseLine, loadBenchmarkSuite, printBenchmarkCompare, printBenchmarkSummary, printBenchmarkVariance, runBenchmarkSuite, selectBenchmarkCases } from "./benchmark-suite.js";
 import { buildDoctorReport, buildStaticScannerDoctorReport, printDoctorReport, runOnboarding } from "./doctor.js";
 import { validateFixtures } from "./fixture-validation.js";
 import { printRuntimeDoctor, runSetupRuntime, validateRuntimeFixtures } from "./setup-runtime.js";
@@ -26,8 +26,9 @@ npm run scan -- setup-runtime [--dry-run] [--yes]
 npm run scan -- runtime-doctor [--json]
 npm run scan -- validate-runtime-fixtures
 npm run scan -- benchmark list [--suite <id|file.json>] [--case <id>] [--include-extended] [--include-runtime-pending] [--json]
-npm run scan -- benchmark run [--suite <id|file.json>] [--case <id>] [--include-extended] [--include-runtime-pending] [--execute] [--strict] [--output <dir>] [--persistence-root <dir>] [--db-mode local|postgres|supabase] [--llm-provider openai|mock] [--llm-model <id>]
+npm run scan -- benchmark run [--suite <id|file.json>] [--case <id>]... [--include-extended] [--include-runtime-pending] [--execute] [--strict] [--output <dir>] [--persistence-root <dir>] [--db-mode local|postgres|supabase] [--llm-provider openai|openai_codex|mock] [--llm-model <id>] [--llm-workload interactive_operator|unattended_local|external_service] [--llm-credential-class chatgpt_session|api_key|enterprise_access_token|none] [--llm-max-requests <n>] [--llm-max-tokens <n>] [--audit-max-agent-calls <n>] [--audit-max-tokens <n>] [--audit-max-reruns <n>]
 npm run scan -- benchmark compare --baseline <report.json> --current <report.json>
+npm run scan -- benchmark variance --report <report.json> --report <report.json> [...]
   npm run scan -- migrate local-db [--root <dir>] [--dry-run]
   npm run scan -- migrate postgres [--database-url <url>] [--output <file.sql>] [--psql-command <path>] [--dry-run]
   npm run scan -- migrate supabase [--database-url <url>] [--output <file.sql>] [--psql-command <path>] [--dry-run]
@@ -453,7 +454,7 @@ async function runBenchmark(args: string[]): Promise<void> {
   if (command === "run") {
     const summary = await runBenchmarkSuite({
       suitePath: readFlag(args, "--suite"),
-      caseId: readFlag(args, "--case"),
+      caseIds: readFlags(args, "--case"),
       includeExtended: args.includes("--include-extended"),
       includeRuntimePending: args.includes("--include-runtime-pending"),
       execute: args.includes("--execute"),
@@ -462,7 +463,14 @@ async function runBenchmark(args: string[]): Promise<void> {
       persistenceRoot: readFlag(args, "--persistence-root"),
       dbMode: readFlag(args, "--db-mode") as any,
       llmProvider: readFlag(args, "--llm-provider") as any,
-      llmModel: readFlag(args, "--llm-model") ?? undefined
+      llmModel: readFlag(args, "--llm-model") ?? undefined,
+      llmWorkloadClass: readFlag(args, "--llm-workload") as any,
+      llmCredentialClass: readFlag(args, "--llm-credential-class") as any,
+      llmMaxRequests: readNumberFlag(args, "--llm-max-requests"),
+      llmMaxTokens: readNumberFlag(args, "--llm-max-tokens"),
+      auditMaxAgentCalls: readNumberFlag(args, "--audit-max-agent-calls"),
+      auditMaxTotalTokens: readNumberFlag(args, "--audit-max-tokens"),
+      auditMaxRerunRounds: readNumberFlag(args, "--audit-max-reruns")
     });
     printBenchmarkSummary(summary);
     if (summary.failed_cases > 0) process.exitCode = 1;
@@ -479,6 +487,19 @@ async function runBenchmark(args: string[]): Promise<void> {
     }
     const result = await compareBenchmarkReports({ baselinePath, currentPath });
     printBenchmarkCompare(result);
+    if (!result.passed) process.exitCode = 1;
+    return;
+  }
+
+  if (command === "variance") {
+    const reportPaths = readFlags(args, "--report");
+    if (reportPaths.length < 2) {
+      usage();
+      process.exitCode = 1;
+      return;
+    }
+    const result = await analyzeBenchmarkVariance({ reportPaths });
+    printBenchmarkVariance(result);
     if (!result.passed) process.exitCode = 1;
     return;
   }

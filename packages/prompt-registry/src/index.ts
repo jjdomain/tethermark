@@ -14,8 +14,8 @@ const plannerSchema = {
       type: "object",
       additionalProperties: false,
       properties: {
-        semantic_class: { type: "string" },
-        final_class: { type: "string" },
+        semantic_class: { type: "string", enum: ["repo_posture_only", "runnable_local_app", "hosted_endpoint_black_box", "tool_using_multi_turn_agent", "mcp_server_plugin_skill_package"] },
+        final_class: { type: "string", enum: ["repo_posture_only", "runnable_local_app", "hosted_endpoint_black_box", "tool_using_multi_turn_agent", "mcp_server_plugin_skill_package"] },
         secondary_traits: { type: "array", items: { type: "string" } },
         confidence: { type: "number" },
         evidence: { type: "array", items: { type: "string" } },
@@ -209,6 +209,8 @@ Rules:
 - static mode means read-only analysis only; controls requiring execution should be deferred, not failed
 - do not invent tool results or control outcomes
 - include only control IDs from the provided control catalog
+- use only one of the target classes allowed by the output schema; do not invent a more descriptive class name
+- deterministic static-assessable controls in the supplied candidate catalog are a minimum audit floor and must remain applicable; model judgment may add context but must not suppress them
 - when operator control constraints are provided, treat them as hard bounds on framework and control selection while still choosing the best in-scope audit shape within those bounds
 - prefer planner-selected scope by default; do not expand or narrow scope arbitrarily without evidence or an explicit operator constraint
 - provide semantic_class, final_class, confidence, and evidence for your classification review

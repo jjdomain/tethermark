@@ -10,11 +10,14 @@ Every versioned JSON export includes:
 - `schema_version`
 - `generated_at`
 - `tethermark_version`
+- `compatibility`
 - `payload`
 
 Current schema version:
 
 - `1.0.0`
+
+`compatibility` declares the schema contract, major version, minimum reader schema version, and `same-major-additive` policy. A reader may accept additive changes within major version 1. Legacy 1.x envelopes that predate the compatibility field remain accepted; a future major version must be handled as a separate contract.
 
 ## Export Schemas
 
@@ -205,3 +208,4 @@ Downstream consumers should treat the following value sets as stable contract va
 - SARIF export remains SARIF-native and is not wrapped in the Tethermark envelope.
 - Markdown exports remain text-first and are not wrapped in the Tethermark envelope.
 - New schema versions should be additive where possible and should bump `schema_version` when compatibility changes.
+- Readers should ignore unknown additive fields within a supported major version and reject an unsupported major version.

@@ -4,6 +4,7 @@ import type {
   CorrectionPlanArtifact,
   CorrectionResultArtifact,
   Finding,
+  FindingQualitySummary,
   MethodologyArtifact,
   SkepticAction,
   SkepticArtifact
@@ -27,15 +28,41 @@ export function hasSkepticActions(skeptic: SkepticArtifact): boolean {
   return skeptic.actions.length > 0;
 }
 
-export function applyUnsupportedFindingDrops(findings: any[], skeptic: SkepticArtifact): any[] {
+export function applyUnsupportedFindingDrops(findings: Finding[], skeptic: SkepticArtifact, findingQuality?: FindingQualitySummary | null): Finding[] {
   const dropped = new Set(getSkepticActionsByType(skeptic.actions, "drop_findings").flatMap((action) => action.finding_ids ?? []));
-  return findings.filter((finding) => !dropped.has(finding.finding_id));
+  const qualityByFindingId = new Map((findingQuality?.findings ?? []).map((item) => [item.finding_id, item]));
+  return findings.filter((finding) => {
+    if (!dropped.has(finding.finding_id)) return true;
+    if (finding.source !== "heuristic") return false;
+    const quality = qualityByFindingId.get(finding.finding_id);
+    if (!quality) return true;
+    return !(
+      quality.evidence_support_verdict === "unsupported"
+      || quality.control_mapping_verdict === "wrong_control"
+      || quality.control_mapping_verdict === "missing_control"
+      || quality.integrity_blocking === true
+    );
+  });
 }
 
-export function applyControlDowngrades(controlResults: any[], skeptic: SkepticArtifact): any[] {
+export function retainFindingsSupportedByFinalControls(findings: Finding[], controlResults: ControlResult[]): Finding[] {
+  const controlById = new Map(controlResults.map((control) => [control.control_id, control]));
+  return findings.filter((finding) => {
+    const mappedControls = finding.control_ids.map((controlId) => controlById.get(controlId)).filter((control): control is ControlResult => Boolean(control));
+    if (mappedControls.length === 0) return true;
+    return !mappedControls.every((control) => control.assessability === "not_assessed");
+  });
+}
+
+export function applyControlDowngrades(
+  controlResults: any[],
+  skeptic: SkepticArtifact,
+  deterministicallyApprovedControlIds: readonly string[] = []
+): any[] {
   const markNotAssessed = new Set(getSkepticActionsByType(skeptic.actions, "downgrade_controls").flatMap((action) => action.control_ids ?? []));
+  const approved = new Set(deterministicallyApprovedControlIds);
   return controlResults.map((control) => {
-    if (!markNotAssessed.has(control.control_id)) return control;
+    if (!markNotAssessed.has(control.control_id) || !approved.has(control.control_id)) return control;
     return {
       ...control,
       assessability: "not_assessed",
@@ -171,6 +198,9 @@ export function mergeSelectiveAssessmentCycle(args: {
   const updatedProviderIds = new Set(args.patchCycle.evidenceExecutions.map((item: any) => item.provider_id));
   const updatedControlIds = new Set(args.patchCycle.laneResults.flatMap((lane: any) => lane.control_results.map((control: ControlResult) => control.control_id)));
   const updatedFindingIds = new Set(args.patchCycle.laneResults.flatMap((lane: any) => lane.findings.map((finding: Finding) => finding.finding_id)));
+  const replacedBaseFindingIds = new Set(args.baseCycle.laneResults
+    .filter((lane: any) => updatedLaneNames.has(lane.lane_name))
+    .flatMap((lane: any) => lane.findings.map((finding: Finding) => finding.finding_id)));
 
   const reusedLaneNames = args.baseCycle.laneResults.filter((item: any) => !updatedLaneNames.has(item.lane_name)).map((item: any) => item.lane_name);
   const reusedProviderIds = args.baseCycle.evidenceExecutions.filter((item: any) => !updatedProviderIds.has(item.provider_id)).map((item: any) => item.provider_id);
@@ -181,8 +211,16 @@ export function mergeSelectiveAssessmentCycle(args: {
     ...args.baseCycle.evidenceRecords.filter((item: any) => item.source_type !== "tool" || !updatedProviderIds.has(item.source_id)),
     ...args.patchCycle.evidenceRecords.filter((item: any) => item.source_type !== "analysis" && item.source_type !== "repo_context")
   ], (item: any) => item.evidence_id ?? `${item.source_type}:${item.source_id}:${item.summary}`);
-  const mergedControlResults = mergeLaneArtifacts({ current: args.patchCycle.controlResults, reused: args.baseCycle.controlResults.filter((item: any) => !updatedControlIds.has(item.control_id)), key: (item: any) => item.control_id });
-  const mergedFindings = mergeLaneArtifacts({ current: args.patchCycle.findings, reused: args.baseCycle.findings.filter((item: any) => !updatedFindingIds.has(item.finding_id)), key: (item: any) => item.finding_id });
+  const mergedControlResults = mergeLaneArtifacts({
+    current: args.patchCycle.controlResults.filter((item: any) => updatedControlIds.has(item.control_id)),
+    reused: args.baseCycle.controlResults.filter((item: any) => !updatedControlIds.has(item.control_id)),
+    key: (item: any) => item.control_id
+  });
+  const mergedFindings = mergeLaneArtifacts({
+    current: args.patchCycle.findings.filter((item: any) => updatedFindingIds.has(item.finding_id)),
+    reused: args.baseCycle.findings.filter((item: any) => !replacedBaseFindingIds.has(item.finding_id) && !updatedFindingIds.has(item.finding_id)),
+    key: (item: any) => item.finding_id
+  });
   const mergedLaneSpecialistOutputs = mergeLaneArtifacts({ current: args.patchCycle.laneSpecialistOutputs ?? [], reused: (args.baseCycle.laneSpecialistOutputs ?? []).filter((item: any) => !updatedLaneNames.has(item.lane_name)), key: (item: any) => item.lane_name });
   const mergedObservations = dedupeBySignature([
     ...args.baseCycle.observations,

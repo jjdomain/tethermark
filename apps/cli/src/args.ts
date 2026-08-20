@@ -8,6 +8,14 @@ export function readFlag(args: string[], name: string): string | undefined {
   return index >= 0 ? args[index + 1] : undefined;
 }
 
+export function readFlags(args: string[], name: string): string[] {
+  const values: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === name && args[index + 1]) values.push(args[index + 1]!);
+  }
+  return values;
+}
+
 export function readBooleanFlag(args: string[], name: string): boolean | undefined {
   const raw = readFlag(args, name);
   if (!raw) return undefined;

@@ -17,6 +17,8 @@ export interface AuditPackageDefinition {
   publishability_threshold: "low" | "medium" | "high";
 }
 
+export const AUDIT_PACKAGE_CATALOG_VERSION = "2026-08-18.audit-packages.v1";
+
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const VALID_LANES = new Set(AUDIT_LANES.map((item) => item.lane_name));
 const VALID_RUN_MODES = new Set(["static", "build", "runtime", "validate"]);

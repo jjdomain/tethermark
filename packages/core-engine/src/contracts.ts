@@ -764,7 +764,7 @@ export interface StandardControlDefinition {
   static_assessable: boolean;
   baseline_dimension: BaselineDimensionKey;
   catalog: "external_standard" | "harness_internal";
-  applicability: Array<"all" | "repo" | "agentic" | "mcp" | "ci" | "dependency" | "container">;
+  applicability: Array<"all" | "repo" | "agentic" | "mcp" | "api" | "ci" | "dependency" | "container">;
 }
 
 export interface BaselineDimensionScore {
@@ -828,6 +828,27 @@ export interface ScoreSummary {
   leaderboard_summary: string;
 }
 
+export interface RunVersionManifest {
+  schema_version: "2026-08-18.run-versions.v1";
+  methodology_version: string;
+  static_baseline_version: string;
+  control_catalog_version: string;
+  policy_version: string;
+  audit_package_catalog_version: string;
+  audit_package_id: AuditPackageId;
+  prompt_set_version: string;
+  tool_versions: Array<{
+    tool_id: string;
+    version: string | null;
+    status: "available" | "missing" | "blocked" | "unknown";
+  }>;
+  model_identities: Array<{
+    provider: string;
+    model: string;
+    credential_class: "chatgpt_session" | "api_key" | "enterprise_access_token" | "none";
+  }>;
+}
+
 export interface MethodologyArtifact {
   version: string;
   summary: string;
@@ -850,7 +871,7 @@ export interface CommitDiffGateArtifact {
   previous_run_id: string | null;
   current_commit_sha: string | null;
   previous_commit_sha: string | null;
-  comparison_mode: "no_prior_run" | "policy_changed" | "same_commit" | "git_diff" | "git_diff_unavailable" | "non_git_target";
+  comparison_mode: "no_prior_run" | "reuse_disabled" | "policy_changed" | "same_commit" | "git_diff" | "git_diff_unavailable" | "non_git_target";
   changed_files: string[];
   stage_decisions: {
     planner: "reuse" | "rerun";
@@ -1088,6 +1109,7 @@ export interface AuditResult {
   static_score: number;
   observations: AuditObservation[];
   score_summary: ScoreSummary;
+  version_manifest?: RunVersionManifest;
   skeptic_review: SkepticArtifact;
   finding_quality: FindingQualitySummary;
   correction_plan?: CorrectionPlanArtifact | null;

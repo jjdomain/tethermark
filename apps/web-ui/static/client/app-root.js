@@ -2351,6 +2351,7 @@ function LaunchAuditModal({
   preflightCheckedAt,
   preflightAcceptedAt,
   preflightLoading,
+  launchLoading,
   applyProviderPreset,
   runPreflight,
   acceptPreflight,
@@ -2378,6 +2379,7 @@ function LaunchAuditModal({
       preflightCheckedAt,
       preflightAcceptedAt,
       preflightLoading,
+      launchLoading,
       applyProviderPreset,
       runPreflight,
       acceptPreflight,
@@ -2520,9 +2522,9 @@ function LaunchAuditModal({
       h(Button, { key: "preflight", variant: "outline", onClick: runPreflight, disabled: !requiredFieldsReady }, preflightLoading ? "Running Preflight..." : "Run Preflight"),
       h(Button, {
         key: "launch",
-        disabled: !requiredFieldsReady || !launchReadiness.canLaunch,
+        disabled: launchLoading || !requiredFieldsReady || !launchReadiness.canLaunch,
         onClick: launchRun
-      }, !requiredFieldsReady ? "Complete Required Fields" : preflightSummary && !launchReadiness.accepted ? "Accept Preflight First" : "Start Run")
+      }, launchLoading ? "Launching Audit..." : !requiredFieldsReady ? "Complete Required Fields" : preflightSummary && !launchReadiness.accepted ? "Accept Preflight First" : "Start Run")
       ]),
       h("div", { key: "times", className: "mt-3 flex flex-wrap gap-x-6 gap-y-2 text-sm text-slate-500" }, [
       h("div", { key: "checked" }, `Checked: ${formatDate(preflightCheckedAt)}`),
@@ -3438,6 +3440,7 @@ function App() {
   });
   const [preflightSummary, setPreflightSummary] = useState(null);
   const [preflightLoading, setPreflightLoading] = useState(false);
+  const [launchLoading, setLaunchLoading] = useState(false);
   const [preflightStale, setPreflightStale] = useState(true);
   const [preflightCheckedAt, setPreflightCheckedAt] = useState(null);
   const [preflightAcceptedAt, setPreflightAcceptedAt] = useState(null);
@@ -5050,23 +5053,31 @@ function triageDecisionFromReviewSummary(summary) {
   }
 
   function launchRun() {
-    if (!launchReadiness.canLaunch) return;
+    if (launchLoading || !launchReadiness.canLaunch) return;
+    setLaunchLoading(true);
+    const request = buildLaunchRunRequest(runForm, requestContext, {
+      preflightCheckedAt,
+      preflightAcceptedAt,
+      preflightStale
+    }, effectiveSettings, llmRegistry, auditPackages);
     act(
-      () => api("/runs", {
+      () => api("/runs/async", {
         method: "POST",
-        body: JSON.stringify(buildLaunchRunRequest(runForm, requestContext, {
-          preflightCheckedAt,
-          preflightAcceptedAt,
-          preflightStale
-        }, effectiveSettings, llmRegistry, auditPackages))
+        body: JSON.stringify({
+          request,
+          start_immediately: true
+        })
       }, requestContext).then((payload) => {
         setLaunchModalOpen(false);
-        if (payload?.run?.id) {
-          setSelectedRunId(payload.run.id);
+        if (payload?.job?.current_run_id) {
+          setSelectedRunId(payload.job.current_run_id);
           setView("runs");
+        } else {
+          setView("system");
+          setSystemSubpage("jobs");
         }
-      }),
-      "Run launched."
+      }).finally(() => setLaunchLoading(false)),
+      "Audit job queued."
     );
   }
 
@@ -6126,19 +6137,9 @@ function triageDecisionFromReviewSummary(summary) {
           }, "Apply Recommended Profile"),
           h(Button, {
             key: "button",
-            disabled: !launchReadiness.canLaunch,
-            onClick: () => act(
-              () => api("/runs", {
-                method: "POST",
-                body: JSON.stringify(buildLaunchRunRequest(runForm, requestContext, {
-                  preflightCheckedAt,
-                  preflightAcceptedAt,
-                  preflightStale
-                }, effectiveSettings, llmRegistry, auditPackages))
-              }, requestContext),
-              "Run launched."
-            )
-          }, preflightSummary && !launchReadiness.accepted ? "Accept Preflight First" : "Start Run")
+            disabled: launchLoading || !launchReadiness.canLaunch,
+            onClick: launchRun
+          }, launchLoading ? "Launching Audit..." : preflightSummary && !launchReadiness.accepted ? "Accept Preflight First" : "Start Run")
         ]),
         h("div", { key: "preflight-state", className: "mt-3 grid gap-2 md:grid-cols-2 text-sm text-muted" }, [
           h("div", { key: "checked" }, "checked: " + formatDate(preflightCheckedAt)),
@@ -7644,6 +7645,7 @@ function triageDecisionFromReviewSummary(summary) {
     preflightCheckedAt,
     preflightAcceptedAt,
     preflightLoading,
+    launchLoading,
     applyProviderPreset,
     runPreflight,
     acceptPreflight,
@@ -9060,6 +9062,9 @@ function triageDecisionFromReviewSummary(summary) {
           h("div", { key: "fields", className: "mt-4 grid gap-4" }, [
             ...getIntegrationCredentialFields(integrationRegistry, "generic_webhook").map((field) => renderIntegrationCredentialField("generic_webhook", field)),
             !webhookConfigured ? h("div", { key: "skip", className: "rounded-xl border border-border bg-card px-3 py-2 text-sm opacity-90" }, "Skip this unless another system gave you a webhook URL to receive audit events.") : null,
+            webhookConfigured && !String(settings.integrations_json.generic_webhook_secret || "").trim()
+              ? h("div", { key: "unsigned-warning", className: "rounded-xl border border-amber-400/60 bg-amber-50 px-3 py-2 text-sm text-amber-950" }, "Unsigned webhook: treat delivery as untrusted and use only a loopback or otherwise trusted local receiver. Add a signing secret before sending to a shared or remote system.")
+              : null,
             h("div", { key: "events" }, [
               h("div", { key: "label", className: "mb-2 text-sm font-medium text-current" }, "Events To Send"),
               h("div", { key: "checks", className: "grid gap-2 sm:grid-cols-2" }, genericWebhookEventOptions.map(([value, label]) => h("label", { key: value, className: "flex items-center gap-2 rounded-xl border border-current/20 px-3 py-2" }, [
@@ -9076,7 +9081,7 @@ function triageDecisionFromReviewSummary(summary) {
         ])
       ])
     ]),
-    h(Card, { key: "async-callback", title: "Job Completion Callback", description: "Optional callback URL for background job completion. Most users can leave this blank.", className: "border-border bg-card shadow-sm" }, [
+    h(Card, { key: "async-callback", title: "Job Completion Callback", description: "Optional unsigned callback for trusted local automation only. Remote receivers must treat this payload as untrusted. Most users should leave it blank.", className: "border-border bg-card shadow-sm" }, [
       h("div", { key: "grid", className: "grid gap-4 md:grid-cols-2" }, [
         h(Field, { key: "completion-webhook", label: "Completion Callback URL" }, h(Input, {
           value: settings.integrations_json.completion_webhook_url || "",

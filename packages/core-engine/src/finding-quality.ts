@@ -222,6 +222,18 @@ function deriveEvidenceSupport(args: {
   return { verdict: "unsupported", reasons };
 }
 
+function containsAffirmativeRuntimeAssertion(text: string): boolean {
+  const runtimeAssertion = /\b(?:runtime|executed|reproduced|dynamic validation|sandbox reproduction|service unhealthy|build failure|test failure)\b/i;
+  const negatedRuntimeAssertion = [
+    /\b(?:does|do|did|is|are|was|were|has|have|had|can|could|would|will|may|might)\s+not\b.{0,100}\b(?:runtime|executed|reproduced|dynamic validation|sandbox reproduction|service unhealthy|build failure|test failure)\b/i,
+    /\b(?:no|never|neither|without|lacks?|insufficient|cannot|can't)\b.{0,100}\b(?:runtime|executed|reproduced|dynamic validation|sandbox reproduction|service unhealthy|build failure|test failure)\b/i,
+    /\b(?:runtime|executed|reproduced|dynamic validation|sandbox reproduction|service unhealthy|build failure|test failure)\b.{0,100}\b(?:not|never|neither|unconfirmed|unproven|unsupported|unknown)\b/i
+  ];
+  const statements = text.split(/(?<=[.!?;])\s+|[\r\n]+/).map((item) => item.trim()).filter(Boolean);
+  return statements.some((statement) => runtimeAssertion.test(statement)
+    && !negatedRuntimeAssertion.some((pattern) => pattern.test(statement)));
+}
+
 function detectUnsupportedClaims(finding: Finding, request: AuditRequest, matchedEvidence: EvidenceRecord[]): string[] {
   const runMode = request.run_mode ?? "static";
   const text = findingText(finding).toLowerCase();
@@ -229,10 +241,15 @@ function detectUnsupportedClaims(finding: Finding, request: AuditRequest, matche
   const claims: string[] = [];
   const staticOnly = runMode === "static";
   const maybeEvidenceSupportsRuntime = /runtime|test|build|execution|sandbox|probe|dynamic/.test(evidenceBlob);
-  if (staticOnly && /runtime|execut(?:e|ed|ion)|sandbox reproduction|dynamic validation|service unhealthy|build failure|test failure/.test(text) && !maybeEvidenceSupportsRuntime) {
+  if (staticOnly && containsAffirmativeRuntimeAssertion(text) && !maybeEvidenceSupportsRuntime) {
     claims.push("Runtime or execution behavior is claimed from a static-only run without runtime evidence.");
   }
-  if (/\b(exploitable|exploitation|arbitrary code execution|rce|privilege escalation|data exfiltration)\b/.test(text) && !/\b(poc|exploit|runtime|execution|trace|validated|reproduced)\b/.test(evidenceBlob)) {
+  const staticDependencyAdvisory = finding.source === "tool"
+    && finding.category === "dependency_or_misconfig"
+    && /^(?:trivy|semgrep|scorecard):/i.test(finding.title);
+  if (/\b(exploitable|exploitation|arbitrary code execution|rce|privilege escalation|data exfiltration)\b/.test(text)
+    && !staticDependencyAdvisory
+    && !/\b(poc|exploit|runtime|execution|trace|validated|reproduced)\b/.test(evidenceBlob)) {
     claims.push("Exploitability is claimed without direct exploit, runtime, or reproduction evidence.");
   }
   if (/\b(secret leak|credential leak|api key exposed|token exposed)\b/.test(text) && !/\b(secret|credential|api key|token|trivy|semgrep|leak)\b/.test(evidenceBlob)) {

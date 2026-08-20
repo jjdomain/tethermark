@@ -30,7 +30,7 @@ const BASELINE_DIMENSIONS: StaticBaselineMethodology["dimensions"] = [
     weight: 0.20,
     title: "AI Data Exposure",
     summary: "Static indicators of sensitive data exposure, unsafe prompt or tool handling, and leakage risks in AI-enabled systems.",
-    frameworks: ["OWASP LLM Applications", "NIST AI RMF", "NIST SP 800-218A"]
+    frameworks: ["OWASP LLM Applications", "OWASP API Security", "NIST AI RMF", "NIST SP 800-218A"]
   },
   {
     dimension: "observability_auditability",
@@ -196,6 +196,18 @@ const EXTERNAL_CONTROL_CATALOG: StandardControlDefinition[] = [
     applicability: ["all", "repo", "agentic"]
   },
   {
+    control_id: "owasp_api.sensitive_operation_authentication",
+    framework: "OWASP API Security",
+    standard_ref: "OWASP API Security Top 10 2023 / API2:2023 Broken Authentication",
+    title: "Authenticate sensitive API operations",
+    description: "API operations that accept code or invoke other sensitive application capabilities require an authenticated identity before processing caller input.",
+    weight: 10,
+    static_assessable: true,
+    baseline_dimension: "ai_data_exposure",
+    catalog: "external_standard",
+    applicability: ["api"]
+  },
+  {
     control_id: "owasp_agentic.tool_misuse_boundary",
     framework: "OWASP Agentic Applications",
     standard_ref: "OWASP Agentic Applications / Tool misuse boundaries",
@@ -331,6 +343,30 @@ const HARNESS_INTERNAL_CONTROL_CATALOG: StandardControlDefinition[] = [
     applicability: ["mcp"]
   },
   {
+    control_id: "harness_internal.mcp_path_boundaries",
+    framework: "Harness Internal Controls",
+    standard_ref: "Harness Internal / MCP filesystem path boundaries",
+    title: "Constrain MCP filesystem operations to their repository boundary",
+    description: "MCP filesystem and source-control tools validate caller-supplied paths before reading, staging, writing, or exporting files.",
+    weight: 8,
+    static_assessable: true,
+    baseline_dimension: "agentic_guardrails",
+    catalog: "harness_internal",
+    applicability: ["mcp"]
+  },
+  {
+    control_id: "harness_internal.file_payload_path_validation",
+    framework: "Harness Internal Controls",
+    standard_ref: "Harness Internal / File payload path validation",
+    title: "Validate file payload metadata before resolving server-side paths",
+    description: "AI application and agent interfaces validate caller-supplied file payload metadata before treating paths as trusted server-managed files.",
+    weight: 8,
+    static_assessable: true,
+    baseline_dimension: "ai_data_exposure",
+    catalog: "harness_internal",
+    applicability: ["agentic", "mcp"]
+  },
+  {
     control_id: "harness_internal.browser_automation_safety",
     framework: "Harness Internal Controls",
     standard_ref: "Harness Internal / Browser automation safety",
@@ -358,6 +394,8 @@ const HARNESS_INTERNAL_CONTROL_CATALOG: StandardControlDefinition[] = [
 
 const CONTROL_CATALOG: StandardControlDefinition[] = [...EXTERNAL_CONTROL_CATALOG, ...HARNESS_INTERNAL_CONTROL_CATALOG];
 
+export const CONTROL_CATALOG_VERSION = "2026-08-19.control-catalog.v4";
+
 function isAgentic(targetClass: TargetClass): boolean {
   return targetClass === "tool_using_multi_turn_agent" || targetClass === "mcp_server_plugin_skill_package";
 }
@@ -374,10 +412,15 @@ function hasContainerSurface(analysis: AnalysisSummary): boolean {
   return analysis.container_files.length > 0;
 }
 
+function hasApiSurface(analysis: AnalysisSummary): boolean {
+  return analysis.frameworks.some((framework) => ["fastapi", "flask", "django", "express"].includes(framework.toLowerCase()));
+}
+
 function isApplicable(control: StandardControlDefinition, analysis: AnalysisSummary, targetClass: TargetClass): boolean {
   if (control.applicability.includes("all")) return true;
   if (control.applicability.includes("agentic") && isAgentic(targetClass)) return true;
   if (control.applicability.includes("mcp") && targetClass === "mcp_server_plugin_skill_package") return true;
+  if (control.applicability.includes("api") && hasApiSurface(analysis)) return true;
   if (control.applicability.includes("ci") && hasCi(analysis)) return true;
   if (control.applicability.includes("dependency") && hasDependencySurface(analysis)) return true;
   if (control.applicability.includes("container") && hasContainerSurface(analysis)) return true;
@@ -426,6 +469,11 @@ export function getMethodologyArtifact(): MethodologyArtifact {
         framework: "OWASP Agentic Applications",
         purpose: "Agent-specific tool and action safety boundaries.",
         scoring_notes: ["Applied only to tool-using or MCP-style targets."]
+      },
+      {
+        framework: "OWASP API Security",
+        purpose: "API authentication controls for sensitive AI-application operations.",
+        scoring_notes: ["Endpoint-specific deterministic evaluators are assessed only when the relevant sensitive API surface is present."]
       },
       {
         framework: "MITRE ATLAS",

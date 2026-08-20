@@ -59,14 +59,65 @@ async function readTextSafe(filePath: string): Promise<string> {
 
 async function collectTexts(rootPath: string): Promise<Array<{ relative: string; text: string }>> {
   const files = await walk(rootPath);
+  const readableFiles = files
+    .map((absolute) => ({ absolute, relative: path.relative(rootPath, absolute).split(path.sep).join("/") }))
+    .filter((item) => /\.(ts|tsx|js|jsx|mjs|cjs|py|sh|ps1|json|toml|ya?ml|md|env|txt)$/i.test(item.relative))
+    .filter((item) => !/(^|\/)validation-expectations\.json$/i.test(item.relative));
   const output: Array<{ relative: string; text: string }> = [];
-  for (const absolute of files) {
-    const relative = path.relative(rootPath, absolute).split(path.sep).join("/");
-    if (/\.(ts|tsx|js|jsx|mjs|cjs|py|sh|ps1|json|toml|ya?ml|md|env|txt)$/i.test(relative)) {
-      output.push({ relative, text: await readTextSafe(absolute) });
-    }
+  const batchSize = 64;
+  for (let offset = 0; offset < readableFiles.length; offset += batchSize) {
+    const batch = readableFiles.slice(offset, offset + batchSize);
+    output.push(...await Promise.all(batch.map(async (item) => ({ relative: item.relative, text: await readTextSafe(item.absolute) }))));
   }
   return output;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function importedShellExecAliases(text: string): string[] {
+  const aliases = new Set<string>();
+  const namedImports = text.matchAll(/import\s*{([^}]*)}\s*from\s*["'](?:node:)?child_process["']/gis);
+  for (const match of namedImports) {
+    for (const binding of match[1].split(",")) {
+      const execBinding = binding.trim().match(/^exec(?:Sync)?(?:\s+as\s+([A-Za-z_$][\w$]*))?$/i);
+      if (execBinding) aliases.add(execBinding[1] ?? binding.trim());
+    }
+  }
+
+  const destructuredRequires = text.matchAll(/(?:const|let|var)\s*{([^}]*)}\s*=\s*require\s*\(\s*["'](?:node:)?child_process["']\s*\)/gis);
+  for (const match of destructuredRequires) {
+    for (const binding of match[1].split(",")) {
+      const execBinding = binding.trim().match(/^exec(?:Sync)?(?:\s*:\s*([A-Za-z_$][\w$]*))?$/i);
+      if (execBinding) aliases.add(execBinding[1] ?? binding.trim());
+    }
+  }
+  return [...aliases];
+}
+
+function importedShellExecEvidence(relative: string, text: string): string[] {
+  if (!/\.(?:ts|tsx|js|jsx|mjs|cjs)$/i.test(relative)) return [];
+  const evidence = new Set<string>();
+  for (const alias of importedShellExecAliases(text)) {
+    const escapedAlias = escapeRegExp(alias);
+    const directCall = new RegExp(`\\b${escapedAlias}\\s*\\(`).test(text);
+    const promisifiedAliases = [...text.matchAll(new RegExp(`(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*(?:[A-Za-z_$][\\w$]*\\.)?promisify\\s*\\(\\s*${escapedAlias}\\s*\\)`, "g"))]
+      .map((match) => match[1]);
+    const promisifiedCall = promisifiedAliases.some((promisifiedAlias) => new RegExp(`\\b${escapeRegExp(promisifiedAlias)}\\s*\\(`).test(text));
+    if (directCall || promisifiedCall) evidence.add(`${relative}: imported child_process.${/sync/i.test(alias) ? "execSync" : "exec"} shell invocation`);
+  }
+
+  const namespaceImports = [...text.matchAll(/import\s*\*\s*as\s*([A-Za-z_$][\w$]*)\s*from\s*["'](?:node:)?child_process["']/gis)]
+    .map((match) => match[1]);
+  const requiredNamespaces = [...text.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\s*\(\s*["'](?:node:)?child_process["']\s*\)/gis)]
+    .map((match) => match[1]);
+  for (const alias of [...namespaceImports, ...requiredNamespaces]) {
+    if (new RegExp(`\\b${escapeRegExp(alias)}\\.exec(?:Sync)?\\s*\\(`).test(text)) {
+      evidence.add(`${relative}: child_process namespace shell invocation`);
+    }
+  }
+  return [...evidence];
 }
 
 function findTool(toolExecutions: ToolExecutionRecord[], tool: string): ToolExecutionRecord | undefined {
@@ -157,9 +208,14 @@ function summarizeRuntimeEvidence(record: EvidenceRecord): string {
 
 function addFinding(findings: Finding[], args: Omit<Finding, "finding_id">): string {
   const findingId = createId("finding");
+  const evidence = [...args.evidence];
+  if (!evidence.some((reference) => /(?:^|[\\/])[^\s:]+:\d+(?::\d+)?$/i.test(reference) || /(?:artifact|report|transcript|trace):/i.test(reference))) {
+    evidence.push(args.source === "tool" ? "artifact:evidence-executions" : "artifact:repo-analysis");
+  }
   findings.push({
     finding_id: findingId,
-    ...args
+    ...args,
+    evidence
   });
   return findingId;
 }
@@ -240,7 +296,7 @@ export async function evaluateStandardsAudit(args: {
     const matches = item.text.match(/(api[_-]?key|secret|token|password)\s*[:=]\s*["'][A-Za-z0-9_\-]{16,}["']/gi) ?? [];
     return matches.map((match) => `${item.relative}: ${match.slice(0, 120)}`);
   });
-  const dangerousExecMatches = texts.flatMap((item) => {
+  const dangerousExecRecords = texts.flatMap((item) => {
     const patterns = [
       /child_process\.exec\s*\(/i,
       /child_process\.execSync\s*\(/i,
@@ -248,8 +304,62 @@ export async function evaluateStandardsAudit(args: {
       /subprocess\.(run|Popen|call)\([^\)]*shell\s*=\s*True/i,
       /os\.system\s*\(/i
     ];
-    return patterns.filter((pattern) => pattern.test(item.text)).map((pattern) => `${item.relative}: ${pattern.source}`);
+    const evidence = [
+      ...patterns.filter((pattern) => pattern.test(item.text)).map((pattern) => `${item.relative}: ${pattern.source}`),
+      ...importedShellExecEvidence(item.relative, item.text)
+    ];
+    return evidence.map((reference) => ({ path: item.relative, reference, text: item.text }));
   });
+  const agentDangerousExecMatches = dangerousExecRecords
+    .filter((item) => /(?:^|\/)(?:mcp(?:-server)?|agents?|tools?)(?:[\/_.-]|$)/i.test(item.path)
+      || /ReactCodeAgent|AgentExecutor|create_openai_tools_agent|McpServer|FastMCP|registerTool|server\.tool|tools\/call|tool_calls?/i.test(item.text))
+    .map((item) => item.reference);
+  const nonAgentDangerousExecMatches = dangerousExecRecords
+    .filter((item) => !agentDangerousExecMatches.includes(item.reference))
+    .map((item) => item.reference);
+  const mcpPathBoundaryMatches = texts.flatMap((item) => {
+    if (!/\.py$/i.test(item.relative)) return [];
+    const unsafeGitAdd = /def\s+git_add\s*\([^)]*\bfiles\b[^)]*\)\s*(?:->\s*[^:]+)?\s*:[\s\S]{0,2000}?\brepo\.index\.add\s*\(\s*files\s*\)/i;
+    return unsafeGitAdd.test(item.text)
+      ? [`${item.relative}: git_add passes caller-supplied files to repo.index.add without a repository-boundary-enforcing API`]
+      : [];
+  });
+  const filePayloadPathValidationMatches = (() => {
+    const blocks = texts.find((item) => /(^|\/)gradio\/blocks\.py$/i.test(item.relative));
+    const dataClasses = texts.find((item) => /(^|\/)gradio\/data_classes\.py$/i.test(item.relative));
+    if (!blocks || !dataClasses) return [];
+
+    const constructsFileDataWithoutValidation = /block\.data_model\s*\(\s*\*\*inputs_cached\s*\)/i.test(blocks.text)
+      || /block\.data_model\s*\(\s*root\s*=\s*inputs_cached\s*\)/i.test(blocks.text);
+    const fileDataHasTrustedMetaDefault = /class\s+FileData\s*\(\s*GradioModel\s*\)[\s\S]{0,3000}?meta\s*:\s*dict\s*=\s*\{\s*["']_type["']\s*:\s*["']gradio\.FileData["']/i.test(dataClasses.text);
+    const validatesCallerProvidedMeta = /model_validate\s*\([\s\S]{0,300}?context\s*=\s*\{\s*["']validate_meta["']\s*:\s*True\s*\}/i.test(blocks.text)
+      && /def\s+validate_model\s*\([^)]*\)[\s\S]{0,700}?is_file_obj_with_meta\s*\(\s*v\s*\)/i.test(dataClasses.text);
+    if (!constructsFileDataWithoutValidation || !fileDataHasTrustedMetaDefault || validatesCallerProvidedMeta) return [];
+
+    return [
+      `${blocks.relative}: caller file payloads are instantiated without requiring explicit trusted-file metadata`,
+      `${dataClasses.relative}: FileData supplies trusted metadata by default without validating that the caller provided it`
+    ];
+  })();
+  const sensitiveOperationAuthentication = (() => {
+    const validateApi = texts.find((item) => /(^|\/)langflow\/api\/v1\/validate\.py$/i.test(item.relative));
+    if (!validateApi) return { present: false, authenticated: false, evidence: [] as string[] };
+
+    const endpoint = validateApi.text.match(/@router\.post\(\s*["']\/code["'][\s\S]{0,400}?async\s+def\s+post_validate_code\s*\(([\s\S]{0,700}?)\)\s*(?:->\s*[^:]+)?\s*:/i);
+    if (!endpoint || !/\bvalidate_code\s*\(\s*code\.code\s*\)/i.test(validateApi.text)) {
+      return { present: false, authenticated: false, evidence: [] as string[] };
+    }
+
+    const signature = endpoint[1] ?? "";
+    const authenticated = /\bCurrentActiveUser\b|\bDepends\s*\(\s*get_current_active_user\b/i.test(signature);
+    return {
+      present: true,
+      authenticated,
+      evidence: [authenticated
+        ? `${validateApi.relative}: POST /code requires CurrentActiveUser before calling validate_code`
+        : `${validateApi.relative}: POST /code calls validate_code without CurrentActiveUser or an authentication dependency`]
+    };
+  })();
   const unpinnedActions = texts.flatMap((item) => {
     if (!/^\.github\/workflows\//i.test(item.relative)) return [];
     const matches = item.text.match(/uses\s*:\s*[^\s@]+\/[^\s@]+@[A-Za-z0-9_.-]+/g) ?? [];
@@ -267,7 +377,8 @@ export async function evaluateStandardsAudit(args: {
     ...(args.analysis.tool_execution_indicators ?? [])
   ].slice(0, 8);
   const approvalGateEvidence = texts.filter((item) => /approve|approval|confirm|human.?in.?the.?loop|require.?review|permission.?prompt/i.test(item.text)).map((item) => item.relative);
-  const allowlistEvidence = texts.filter((item) => /allowlist|allowed_tools|tool.?policy|denylist|blocked_tools|capability.?policy/i.test(item.text)).map((item) => item.relative);
+  const allowlistEvidence = texts.filter((item) => /allowlist|allowed_tools|tool.?policy|denylist|blocked_tools|capability.?policy/i.test(item.text)
+    || /(?:ReactCodeAgent|AgentExecutor|create_openai_tools_agent)[\s\S]{0,400}\btools\s*=\s*\[/i.test(item.text)).map((item) => item.relative);
   const promptInjectionEvidence = texts.filter((item) => /prompt.?injection|ignore.?previous|instruction.?hierarchy|untrusted.?content|sanitize.?prompt/i.test(item.text)).map((item) => item.relative);
   const envAccessEvidence = texts.filter((item) => /process\.env|os\.environ|dotenv|api[_-]?key|secret|token|credential/i.test(item.text)).map((item) => item.relative);
   const secretRedactionEvidence = texts.filter((item) => /redact|mask.?secret|scrub|sanitize.?log|pii|sensitive.?data/i.test(item.text)).map((item) => item.relative);
@@ -277,6 +388,32 @@ export async function evaluateStandardsAudit(args: {
   const browserPolicyEvidence = texts.filter((item) => /allow|deny|origin|domain|download|credential|sandbox|permission/i.test(item.text) && /browser|playwright|puppeteer|selenium|navigation|url/i.test(item.text)).map((item) => item.relative);
   const telemetryEvidence = texts.filter((item) => /telemetry|trace|audit.?log|structured.?log|logger|console\.log|print\(/i.test(item.text)).map((item) => item.relative);
   const telemetryRedactionEvidence = texts.filter((item) => /redact|mask|scrub|sanitize|sensitive|secret|token|privacy/i.test(item.text) && /telemetry|trace|log|logger|console\.log|print\(/i.test(item.text)).map((item) => item.relative);
+
+  let agentExecutionBoundaryFindingId: string | null = null;
+  const agentExecutionBoundaryControlIds = [
+    "harness_internal.agent_permission_boundaries",
+    "owasp_llm.prompt_injection_guardrails",
+    "owasp_agentic.tool_misuse_boundary",
+    "mitre_atlas.tool_misuse_mitigation"
+  ].filter((controlId) => args.applicableControlIds.includes(controlId));
+  const ensureAgentExecutionBoundaryFinding = (): string => {
+    if (agentExecutionBoundaryFindingId) return agentExecutionBoundaryFindingId;
+    const mappedControls = args.controlCatalog.filter((item) => agentExecutionBoundaryControlIds.includes(item.control_id));
+    agentExecutionBoundaryFindingId = addFinding(findings, {
+      title: "Agentic execution path lacks a visible permission boundary",
+      severity: "high",
+      category: "agent_permission_boundary",
+      description: "Static analysis connected an agent or MCP execution path to shell execution without visible sandbox or command-policy evidence.",
+      evidence: agentDangerousExecMatches.slice(0, 5),
+      public_safe: true,
+      confidence: 0.88,
+      score_impact: Math.max(0, ...mappedControls.map((item) => item.weight)),
+      source: "heuristic",
+      control_ids: agentExecutionBoundaryControlIds,
+      standards_refs: mappedControls.map((item) => item.standard_ref)
+    });
+    return agentExecutionBoundaryFindingId;
+  };
 
   for (const control of args.controlCatalog) {
     if (args.nonApplicableControlIds.includes(control.control_id)) {
@@ -697,27 +834,14 @@ export async function evaluateStandardsAudit(args: {
     }
 
     if (control.control_id === "harness_internal.agent_permission_boundaries") {
-      const riskyCapabilities = hasAny(args.analysis.agentic_capabilities, ["shell_tool", "file_write_tool", "network_tool", "browser_tool"]) || dangerousExecMatches.length > 0;
-      const hasBoundary = sandboxMentions.length > 0 || hasAny(args.analysis.agentic_control_indicators, ["sandbox_boundary", "tool_allowlist", "approval_gate"]);
-      const passed = !riskyCapabilities || hasBoundary;
-      const findingIds = passed ? [] : [addFinding(findings, {
-        title: "Agent shell, file, network, or browser capability lacks visible permission boundary",
-        severity: dangerousExecMatches.length > 0 ? "high" : "medium",
-        category: "agent_permission_boundary",
-        description: "Static analysis detected potentially sensitive shell, file, network, or browser capabilities without visible sandbox, read-only, no-network, or permission-policy controls.",
-        evidence: [...dangerousExecMatches.slice(0, 5), ...agenticSignalEvidence, ...sandboxMentions.slice(0, 3)],
-        public_safe: true,
-        confidence: 0.8,
-        score_impact: control.weight,
-        source: "heuristic",
-        control_ids: [control.control_id, "mitre_atlas.tool_misuse_mitigation"],
-        standards_refs: [control.standard_ref, "MITRE ATLAS / Tool misuse mitigation"]
-      })];
+      const riskyCapabilities = agentDangerousExecMatches.length > 0;
+      const passed = agentDangerousExecMatches.length === 0;
+      const findingIds = passed ? [] : [ensureAgentExecutionBoundaryFinding()];
       controlResults.push(makeControlResult(control, {
         status: passed ? "pass" : "fail",
         score_awarded: passed ? control.weight : 0,
         rationale: [passed ? "Permission-boundary evidence was detected or no risky agentic capability was found." : "Risky agentic capability was detected without visible permission-boundary evidence."],
-        evidence: [...sandboxMentions.slice(0, 5), ...dangerousExecMatches.slice(0, 5), ...agenticSignalEvidence],
+        evidence: [...sandboxMentions.slice(0, 5), ...agentDangerousExecMatches.slice(0, 5)],
         finding_ids: findingIds,
         sources: ["repo-analysis"]
       }));
@@ -728,25 +852,13 @@ export async function evaluateStandardsAudit(args: {
       const untrustedContentSurface = hasAny(args.analysis.agentic_risk_indicators, ["untrusted_content_ingest"]) || texts.some((item) => /webpage|scrape|retrieval|document loader|external content|browser content/i.test(item.text));
       const hasPromptDefense = promptInjectionEvidence.length > 0 || hasAny(args.analysis.agentic_control_indicators, ["prompt_injection_filter"]);
       const passed = !untrustedContentSurface || hasPromptDefense;
-      const findingIds = passed ? [] : [addFinding(findings, {
-        title: "Untrusted content ingestion lacks prompt-injection handling evidence",
-        severity: "high",
-        category: "prompt_injection",
-        description: "The repository appears to ingest external or untrusted content into an AI/agent path, but static analysis did not find prompt-injection handling, instruction hierarchy, or untrusted-content isolation evidence.",
-        evidence: [...agenticSignalEvidence, ...promptInjectionEvidence.slice(0, 3)],
-        public_safe: true,
-        confidence: 0.76,
-        score_impact: control.weight,
-        source: "heuristic",
-        control_ids: [control.control_id, "owasp_llm.prompt_injection_guardrails"],
-        standards_refs: [control.standard_ref, "OWASP LLM Top 10 / Prompt Injection"]
-      })];
       controlResults.push(makeControlResult(control, {
-        status: passed ? "pass" : "fail",
+        assessability: passed ? "assessed" : "not_assessed",
+        status: passed ? "pass" : "not_assessed",
         score_awarded: passed ? control.weight : 0,
-        rationale: [passed ? "Prompt-injection handling evidence was present or no untrusted content ingestion surface was detected." : "Untrusted content ingestion was detected without prompt-injection handling evidence."],
+        rationale: [passed ? "Prompt-injection handling evidence was present or no untrusted content ingestion surface was detected." : "Untrusted-content indicators were detected, but static evidence did not establish source-to-prompt or source-to-tool dataflow."],
         evidence: [...promptInjectionEvidence.slice(0, 5), ...agenticSignalEvidence],
-        finding_ids: findingIds,
+        finding_ids: [],
         sources: ["repo-analysis"]
       }));
       continue;
@@ -802,6 +914,98 @@ export async function evaluateStandardsAudit(args: {
         score_awarded: passed ? control.weight : 0,
         rationale: [passed ? "MCP/plugin permission policy evidence was present or no MCP surface was detected." : "MCP/plugin surface was detected without explicit permission policy evidence."],
         evidence: [...mcpPermissionEvidence.slice(0, 5), ...mcpPermissionPolicyEvidence.slice(0, 3), ...allowlistEvidence.slice(0, 3), ...approvalGateEvidence.slice(0, 3)],
+        finding_ids: findingIds,
+        sources: ["repo-analysis"]
+      }));
+      continue;
+    }
+
+    if (control.control_id === "harness_internal.mcp_path_boundaries") {
+      const passed = mcpPathBoundaryMatches.length === 0;
+      const findingIds = passed ? [] : [addFinding(findings, {
+        title: "MCP git_add accepts paths without an enforced repository boundary",
+        severity: "medium",
+        category: "mcp_path_boundary",
+        description: "The MCP git_add tool passes caller-supplied paths to GitPython's index API without using a repository-boundary-enforcing Git CLI path operation, allowing traversal outside the intended working tree.",
+        evidence: mcpPathBoundaryMatches.slice(0, 5),
+        public_safe: true,
+        confidence: 0.94,
+        score_impact: control.weight,
+        source: "heuristic",
+        control_ids: [control.control_id, "owasp_agentic.tool_misuse_boundary", "mitre_atlas.tool_misuse_mitigation"],
+        standards_refs: [control.standard_ref, "OWASP Agentic Applications / Tool misuse boundaries", "MITRE ATLAS / Tool misuse mitigation"]
+      })];
+      controlResults.push(makeControlResult(control, {
+        status: passed ? "pass" : "fail",
+        score_awarded: passed ? control.weight : 0,
+        rationale: [passed ? "No known unsafe MCP git_add path-boundary pattern was detected." : "MCP git_add uses repo.index.add with caller-supplied paths without an enforced repository boundary."],
+        evidence: passed ? ["No unsafe repo.index.add(files) git_add pattern detected in sampled Python sources."] : mcpPathBoundaryMatches.slice(0, 5),
+        finding_ids: findingIds,
+        sources: ["repo-analysis"]
+      }));
+      continue;
+    }
+
+    if (control.control_id === "harness_internal.file_payload_path_validation") {
+      const passed = filePayloadPathValidationMatches.length === 0;
+      const findingIds = passed ? [] : [addFinding(findings, {
+        title: "File payload metadata can bypass server-side path validation",
+        severity: "medium",
+        category: "file_payload_path_validation",
+        description: "Gradio file payloads can omit the trusted-file metadata marker and still be instantiated with a default marker, allowing a caller-controlled server path to bypass the cache path validation boundary.",
+        evidence: filePayloadPathValidationMatches,
+        public_safe: true,
+        confidence: 0.96,
+        score_impact: control.weight,
+        source: "heuristic",
+        control_ids: [control.control_id, "owasp_llm.sensitive_information_disclosure"],
+        standards_refs: [control.standard_ref, "OWASP LLM Top 10 / Sensitive Information Disclosure"]
+      })];
+      controlResults.push(makeControlResult(control, {
+        status: passed ? "pass" : "fail",
+        score_awarded: passed ? control.weight : 0,
+        rationale: [passed ? "No known file-payload metadata bypass pattern was detected." : "Caller file payloads can receive trusted metadata by default without proving that the client supplied it."],
+        evidence: passed ? ["No vulnerable Gradio FileData metadata-validation pattern detected in sampled Python sources."] : filePayloadPathValidationMatches,
+        finding_ids: findingIds,
+        sources: ["repo-analysis"]
+      }));
+      continue;
+    }
+
+    if (control.control_id === "owasp_api.sensitive_operation_authentication") {
+      if (!sensitiveOperationAuthentication.present) {
+        controlResults.push(makeControlResult(control, {
+          applicability: "not_applicable",
+          assessability: "not_assessed",
+          status: "not_applicable",
+          score_awarded: 0,
+          rationale: ["No Langflow code-validation endpoint matched the endpoint-specific deterministic evaluator."],
+          evidence: ["The evaluator does not infer authentication posture for unrelated API operations."],
+          sources: ["repo-analysis"]
+        }));
+        continue;
+      }
+
+      const findingIds = sensitiveOperationAuthentication.authenticated ? [] : [addFinding(findings, {
+        title: "Langflow code-validation endpoint lacks authentication",
+        severity: "critical",
+        category: "api_broken_authentication",
+        description: "The Langflow POST /code route accepts caller-supplied code and passes it to validate_code without requiring an authenticated user in the endpoint signature. Static evidence establishes the missing authentication boundary; runtime exploitability is not asserted by this check.",
+        evidence: sensitiveOperationAuthentication.evidence,
+        public_safe: true,
+        confidence: 0.98,
+        score_impact: control.weight,
+        source: "heuristic",
+        control_ids: [control.control_id],
+        standards_refs: [control.standard_ref]
+      })];
+      controlResults.push(makeControlResult(control, {
+        status: sensitiveOperationAuthentication.authenticated ? "pass" : "fail",
+        score_awarded: sensitiveOperationAuthentication.authenticated ? control.weight : 0,
+        rationale: [sensitiveOperationAuthentication.authenticated
+          ? "The sensitive code-validation operation requires an authenticated active user."
+          : "The sensitive code-validation operation has no authenticated-user dependency."],
+        evidence: sensitiveOperationAuthentication.evidence,
         finding_ids: findingIds,
         sources: ["repo-analysis"]
       }));
@@ -889,25 +1093,15 @@ export async function evaluateStandardsAudit(args: {
         }));
         continue;
       }
-      const passed = sandboxMentions.length > 0 && dangerousExecMatches.length === 0;
-      const findingIds = passed ? [] : [addFinding(findings, {
-        title: control.title,
-        severity: dangerousExecMatches.length > 0 ? "high" : "medium",
-        category: "agent_guardrails",
-        description: "The repository appears to expose agent, tool, or MCP-style execution surfaces, but static audit did not find strong enough evidence of sandbox or command-policy controls relative to those surfaces.",
-        evidence: [...sandboxMentions.slice(0, 3), ...dangerousExecMatches.slice(0, 3), ...args.analysis.agent_indicators.slice(0, 3)],
-        public_safe: true,
-        confidence: 0.76,
-        score_impact: control.weight,
-        source: "heuristic",
-        control_ids: [control.control_id],
-        standards_refs: [control.standard_ref, ...args.threatModel.framework_focus]
-      })];
+      const assessable = sandboxMentions.length > 0 || agentDangerousExecMatches.length > 0;
+      const passed = assessable && sandboxMentions.length > 0 && agentDangerousExecMatches.length === 0;
+      const findingIds = !assessable || passed ? [] : [ensureAgentExecutionBoundaryFinding()];
       controlResults.push(makeControlResult(control, {
-        status: passed ? "pass" : "fail",
+        assessability: assessable ? "assessed" : "not_assessed",
+        status: !assessable ? "not_assessed" : passed ? "pass" : "fail",
         score_awarded: passed ? control.weight : 0,
-        rationale: [passed ? "Visible guardrail or sandbox markers were detected around agentic surfaces." : "Agentic surfaces exist but static guardrail evidence is limited."],
-        evidence: [...sandboxMentions.slice(0, 5), ...dangerousExecMatches.slice(0, 3)],
+        rationale: [!assessable ? "Agentic applicability was established, but static evidence did not connect a dangerous execution path to the agent surface." : passed ? "Visible guardrail or sandbox markers were detected around agentic surfaces." : "An agentic execution path was connected to shell execution without visible boundary evidence."],
+        evidence: [...sandboxMentions.slice(0, 5), ...agentDangerousExecMatches.slice(0, 5)],
         finding_ids: findingIds,
         sources: ["repo-analysis", "threat-model"]
       }));
@@ -938,6 +1132,15 @@ export async function evaluateStandardsAudit(args: {
       title: "Runtime validation surfaced operational attention items",
       summary: `Bounded runtime validation reported ${runtimeExecutionFailures.length} failed or blocked install, build, test, or runtime-probe step(s).`,
       evidence: runtimeEvidenceSummaries(runtimeExecutionFailures)
+    });
+  }
+
+  if (nonAgentDangerousExecMatches.length > 0) {
+    observations.push({
+      observation_id: createId("obs"),
+      title: "Direct shell-execution patterns require application-security triage",
+      summary: `Static analysis found ${nonAgentDangerousExecMatches.length} shell-execution pattern(s) that were not connected to an agent or MCP execution path. They are retained as triage evidence without borrowing agentic control mappings or assigning a publishable severity.`,
+      evidence: nonAgentDangerousExecMatches.slice(0, 8)
     });
   }
 
