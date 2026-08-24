@@ -6,7 +6,7 @@ import { buildScanRequest, readBooleanFlag, readFlag, readFlags, readNumberFlag 
 import { analyzeBenchmarkVariance, compareBenchmarkReports, formatBenchmarkCaseLine, loadBenchmarkSuite, printBenchmarkCompare, printBenchmarkSummary, printBenchmarkVariance, runBenchmarkSuite, selectBenchmarkCases } from "./benchmark-suite.js";
 import { buildDoctorReport, buildStaticScannerDoctorReport, printDoctorReport, runOnboarding } from "./doctor.js";
 import { validateFixtures } from "./fixture-validation.js";
-import { printRuntimeDoctor, runSetupRuntime, validateRuntimeFixtures } from "./setup-runtime.js";
+import { parseVerifiableRuntimeBackend, printRuntimeDoctor, runSetupRuntime, validateRuntimeFixtures } from "./setup-runtime.js";
 import { runSetupTools } from "./setup-tools.js";
 
 loadEnvironment();
@@ -15,16 +15,16 @@ function usage(): void {
   console.log(`Tethermark CLI
 
 Usage:
-npm run scan -- scan path <local-path> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|build|runtime|validate] [--package <id>] [--db-mode local|postgres|supabase] [--llm-provider openai|openai_codex|mock] [--llm-model <id>] [--llm-api-key <value>] [--llm-workload interactive_operator|unattended_local|external_service] [--llm-max-requests <n>] [--llm-max-tokens <n>]
-npm run scan -- scan repo <repo-url> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|build|runtime|validate] [--package <id>] [--db-mode local|postgres|supabase] [--llm-provider openai|openai_codex|mock] [--llm-model <id>] [--llm-api-key <value>] [--llm-workload interactive_operator|unattended_local|external_service] [--llm-max-requests <n>] [--llm-max-tokens <n>]
-npm run scan -- scan endpoint <url> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|runtime|validate] [--package <id>] [--db-mode local|postgres|supabase] [--llm-provider openai|openai_codex|mock] [--llm-model <id>] [--llm-api-key <value>] [--llm-workload interactive_operator|unattended_local|external_service] [--llm-max-requests <n>] [--llm-max-tokens <n>]
+npm run scan -- scan path <local-path> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|build|runtime|validate] [--package <id>] [--db-mode local|postgres|supabase] [--llm-provider openai|openai_codex|mock] [--llm-model <id>] [--llm-api-key <value>] [--accept-runtime-warning true] [--llm-workload interactive_operator|unattended_local|external_service] [--llm-max-requests <n>] [--llm-max-tokens <n>]
+npm run scan -- scan repo <repo-url> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|build|runtime|validate] [--package <id>] [--db-mode local|postgres|supabase] [--llm-provider openai|openai_codex|mock] [--llm-model <id>] [--llm-api-key <value>] [--accept-runtime-warning true] [--llm-workload interactive_operator|unattended_local|external_service] [--llm-max-requests <n>] [--llm-max-tokens <n>]
+npm run scan -- scan endpoint <url> [--output <dir> (export copy)] [--policy <file.json>] [--policy-pack <id|file.json>] [--mode static|runtime|validate] [--package <id>] [--db-mode local|postgres|supabase] [--llm-provider openai|openai_codex|mock] [--llm-model <id>] [--llm-api-key <value>] [--accept-runtime-warning true] [--llm-workload interactive_operator|unattended_local|external_service] [--llm-max-requests <n>] [--llm-max-tokens <n>]
 npm run scan -- doctor [--json]
 npm run scan -- static-doctor [--json]
 npm run scan -- onboard [--dry-run] [--skip-doctor] [--skip-fixtures]
 npm run scan -- setup-tools [--dry-run] [--yes] [--tool scorecard,semgrep,trivy]
 npm run scan -- setup-runtime [--dry-run] [--yes]
-npm run scan -- runtime-doctor [--json]
-npm run scan -- validate-runtime-fixtures
+npm run scan -- runtime-doctor [--json] [--backend gvisor_container|rootless_podman|podman|docker|docker_desktop]
+npm run scan -- validate-runtime-fixtures [--backend gvisor_container|rootless_podman|podman|docker|docker_desktop]
 npm run scan -- benchmark list [--suite <id|file.json>] [--case <id>] [--include-extended] [--include-runtime-pending] [--json]
 npm run scan -- benchmark run [--suite <id|file.json>] [--case <id>]... [--include-extended] [--include-runtime-pending] [--execute] [--strict] [--output <dir>] [--persistence-root <dir>] [--db-mode local|postgres|supabase] [--llm-provider openai|openai_codex|mock] [--llm-model <id>] [--llm-workload interactive_operator|unattended_local|external_service] [--llm-credential-class chatgpt_session|api_key|enterprise_access_token|none] [--llm-max-requests <n>] [--llm-max-tokens <n>] [--audit-max-agent-calls <n>] [--audit-max-tokens <n>] [--audit-max-reruns <n>]
 npm run scan -- benchmark compare --baseline <report.json> --current <report.json>
@@ -101,7 +101,9 @@ function printStaticReadinessSummary(result: any): void {
   if (missingSelected.length) {
     console.log(`Selected tools without execution records: ${missingSelected.join(", ")}`);
   }
-  console.log("Confidence limits: static mode does not execute target behavior; skipped tools and not-assessed controls reduce confidence and are not clean passes.");
+  console.log(result.sandbox?.run_mode === "static"
+    ? "Confidence limits: static mode does not execute target behavior; skipped tools and not-assessed controls reduce confidence and are not clean passes."
+    : "Confidence limits: runtime target behavior is bounded by the resolved sandbox plan; blocked, failed, skipped, and not-assessed checks reduce confidence and are not clean passes.");
 }
 
 async function runScan(args: string[]): Promise<void> {
@@ -675,12 +677,12 @@ async function main(): Promise<void> {
   }
 
   if (args[0] === "runtime-doctor") {
-    printRuntimeDoctor(args.includes("--json"));
+    printRuntimeDoctor(args.includes("--json"), parseVerifiableRuntimeBackend(readFlag(args, "--backend")));
     return;
   }
 
   if (args[0] === "validate-runtime-fixtures") {
-    const result = await validateRuntimeFixtures();
+    const result = await validateRuntimeFixtures({ backend: parseVerifiableRuntimeBackend(readFlag(args, "--backend")) });
     console.log(JSON.stringify({ runtime_fixture_validation: result }, null, 2));
     if (!result.passed) process.exitCode = 1;
     return;

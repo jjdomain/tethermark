@@ -19,6 +19,7 @@ import { buildFindingEvaluationSummary } from "./finding-evaluation.js";
 import { buildFindingQualitySummary } from "./finding-quality.js";
 import { createEngine, updateControlResultsWithFindings } from "./orchestrator.js";
 import { buildHeuristicTargetProfile } from "./planner.js";
+import { assertAuditRequestProviderPolicy } from "./provider-policy.js";
 import { buildPreflightSummary } from "./preflight.js";
 import { analyzeTarget } from "./repo.js";
 import { resetPythonWorkerCapabilityCacheForTests } from "./python-worker.js";
@@ -52,10 +53,31 @@ import { SqliteAssistantStorage } from "./persistence/assistant.js";
 import { OpenAICodexCliProvider, OpenAIModelProvider, resolveAgentProviderConfig } from "../../../packages/llm-provider/src/index.js";
 import { executeWithProviderGovernor, resetProviderGovernorForTests, resolveProviderPolicy } from "../../../packages/llm-provider/src/policy.js";
 import { AgentRuntime } from "../../../packages/agent-runtime/src/index.js";
-import { buildRuntimeExecutionPolicy, resolveLocalSandboxBackend } from "../../../packages/validation-runner/src/index.js";
+import { buildRuntimeExecutionPolicy, createLocalRuntimeProvider, LOCAL_RUNTIME_IMAGES, resolveLocalSandboxBackend } from "../../../packages/validation-runner/src/index.js";
 import { evaluateStaticToolVersion, extractStaticToolVersion, resolveStaticToolReleaseAsset, STATIC_TOOL_POLICIES } from "./static-tool-policy.js";
 import { buildStaticToolsReadiness } from "./static-tools.js";
 import { applyDeterministicPlannerFloor } from "./stages/stage-plan-scope.js";
+import {
+  applyResolvedSystemPolicyToRequest,
+  archivePersistedSystemPolicy,
+  createPersistedSystemPolicy,
+  createPersistedSystemPolicyVersion,
+  ensureBuiltinSystemPolicies,
+  exportSystemPolicy,
+  getBuiltinSystemPolicyTemplate,
+  getPersistedSystemPolicy,
+  importSystemPolicy,
+  listBuiltinSystemPolicyTemplates,
+  listPersistedSystemPolicies,
+  persistPolicyResolutionSnapshot,
+  publishPersistedSystemPolicy,
+  readPersistedPolicyResolutionSnapshot,
+  resolvePersistedSystemPolicy,
+  rollbackPersistedSystemPolicy,
+  setDefaultPersistedSystemPolicy,
+  upsertPersistedSystemPolicyBinding,
+  validateSystemPolicyDefinition
+} from "./system-policies.js";
 
 async function withTempDir<T>(prefix: string, fn: (dir: string) => Promise<T>): Promise<T> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -441,6 +463,9 @@ async function testBuildScanRequestParsesLlmFlags(): Promise<void> {
   assert.equal(parsed.request.llm_api_key, "test-key");
   assert.equal(parsed.request.llm_workload_class, "interactive_operator");
   assert.ok(parsed.request.local_path);
+  const runtimeParsed = buildScanRequest(["scan", "path", ".", "--mode", "runtime", "--accept-runtime-warning", "true"]);
+  assert.equal(typeof (runtimeParsed.request.hints as any)?.runtime_sandbox_accepted_at, "string");
+  assert.equal((runtimeParsed.request.hints as any)?.launch_intent?.source_surface, "cli");
 }
 
 async function testOpenAICodexProviderRegistryAndStructuredExec(): Promise<void> {
@@ -490,6 +515,10 @@ async function testOpenAICodexProviderRegistryAndStructuredExec(): Promise<void>
     await fs.writeFile(fakeCli, [
       "import fs from 'node:fs';",
       "if (!process.argv.includes('--skip-git-repo-check')) process.exit(3);",
+      "if (!process.argv.includes('--ignore-user-config') || !process.argv.includes('--ignore-rules')) process.exit(4);",
+      "for (const feature of ['shell_tool','code_mode_host','apps','browser_use','browser_use_external','computer_use','multi_agent','hooks','plugins']) { const index = process.argv.indexOf(feature); if (index < 1 || process.argv[index - 1] !== '--disable') process.exit(5); }",
+      "if (!process.cwd().includes('tethermark-codex-')) process.exit(6);",
+      "if (process.env.OPENAI_API_KEY || process.env.AUDIT_LLM_API_KEY || process.env.LLM_API_KEY) process.exit(7);",
       "const outIndex = process.argv.indexOf('--output-last-message');",
       "if (outIndex < 0) process.exit(2);",
       "fs.writeFileSync(process.argv[outIndex + 1], JSON.stringify({ ok: true, mode: 'oauth' }));",
@@ -501,7 +530,8 @@ async function testOpenAICodexProviderRegistryAndStructuredExec(): Promise<void>
       CODEX_HOME: path.join(fakeHome, ".codex"),
       HOME: fakeHome,
       LOCALAPPDATA: fakeLocalAppData,
-      USERPROFILE: fakeHome
+      USERPROFILE: fakeHome,
+      OPENAI_API_KEY: "must-not-reach-codex-subprocess"
     });
     const result = await codex.generateStructured<{ ok: boolean; mode: string }>({
       agentName: "planner_agent",
@@ -529,6 +559,33 @@ async function testOpenAICodexProviderRegistryAndStructuredExec(): Promise<void>
 }
 
 async function testProviderWorkloadPolicyAndBudgets(): Promise<void> {
+  const runtimeDefault = assertAuditRequestProviderPolicy({ local_path: ".", run_mode: "runtime" });
+  assert.equal(runtimeDefault.llm_provider, "openai_codex");
+  assert.equal(runtimeDefault.llm_credential_class, "chatgpt_session");
+  assert.throws(() => assertAuditRequestProviderPolicy({
+    local_path: ".",
+    run_mode: "runtime",
+    llm_provider: "openai",
+    llm_model: "gpt-5.4-mini",
+    llm_credential_class: "api_key"
+  }), /runtime_api_key_override_confirmation_required/);
+  const acceptedApiOverride = assertAuditRequestProviderPolicy({
+    local_path: ".",
+    run_mode: "runtime",
+    llm_provider: "openai",
+    llm_model: "gpt-5.4-mini",
+    llm_credential_class: "api_key",
+    llm_api_key: "test-key",
+    hints: { runtime_model_api_override: { accepted_at: "2026-08-21T00:00:00.000Z", accepted_by: "test-operator" } }
+  });
+  assert.equal(acceptedApiOverride.llm_provider, "openai");
+  assert.throws(() => assertAuditRequestProviderPolicy({
+    local_path: ".",
+    run_mode: "runtime",
+    llm_provider: "openai_codex",
+    llm_api_key: "must-not-route"
+  }), /runtime_codex_chatgpt_session_rejects_api_key/);
+
   const interactive = resolveProviderPolicy({
     provider: "openai_codex",
     model: "gpt-5.6-sol",
@@ -3637,6 +3694,231 @@ async function testRuntimeSandboxBackendResolution(): Promise<void> {
   assert.equal(defaultPolicy.filesystem.block_host_mounts, true);
 }
 
+async function testLocalRuntimeProviderExecutesExactArgvInContainer(): Promise<void> {
+  await withTempDir("harness-local-runtime-provider-", async (rootDir) => {
+    const targetDir = path.join(rootDir, "target");
+    const artifactDir = path.join(rootDir, "artifacts");
+    await fs.mkdir(targetDir);
+    await fs.mkdir(artifactDir);
+    await fs.writeFile(path.join(targetDir, "package.json"), "{}\n");
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const provider = createLocalRuntimeProvider({
+      runCommand: async (command, args) => {
+        calls.push({ command, args: [...args] });
+        const stdout = args[0] === "volume" && args[1] === "create"
+          ? "workspace-volume\n"
+          : args[0] === "start" && args.some((item) => item.includes("-quota-"))
+            ? "1\t/workspace\n"
+            : args[0] === "inspect" && args.includes("{{json .State}}")
+              ? '{"OOMKilled":false,"Pid":0,"ExitCode":0}\n'
+              : args[0] === "stats"
+                ? '{"CPUPerc":"0.00%","MemUsage":"1MiB / 2GiB","MemPerc":"0.05%","PIDs":"1","BlockIO":"0B / 0B","NetIO":"0B / 0B"}\n'
+                : "";
+        return { exit_code: 0, stdout, stderr: "", timed_out: false };
+      }
+    });
+    const policy = buildRuntimeExecutionPolicy({ selectedBackend: "docker" });
+    const request = {
+      run_id: "run_provider_exact_argv",
+      target_dir: targetDir,
+      artifact_dir: artifactDir,
+      policy,
+      detected_stack: ["node"],
+      steps: [{
+        step_id: "test-node",
+        phase: "test" as const,
+        adapter: "node_npm",
+        command: ["node", "--test"],
+        requires_network: false,
+        enabled: true,
+        artifact_context: { stack: "node" }
+      }]
+    };
+    const plan = await provider.plan(request);
+    assert.equal(plan.image, LOCAL_RUNTIME_IMAGES.node);
+    assert.equal(plan.image_digest?.startsWith("sha256:"), true);
+    const result = await provider.execute(request, plan);
+    assert.equal(result.status, "completed", JSON.stringify(result));
+    assert.equal(result.steps[0]?.execution_runtime, "container");
+    assert.deepEqual(result.steps[0]?.command, ["node", "--test"]);
+    assert.equal(result.cleanup.containers_removed, true);
+    assert.equal(result.cleanup.workspace_volume_removed, true);
+    assert.equal((await provider.collectArtifacts(request.run_id)).some((item) => item.artifact_type === "runtime_execution"), true);
+    assert.equal(calls.every((item) => item.command === "docker"), true);
+    const targetCreate = calls.find((item) => item.args[0] === "create" && item.args.includes("node") && item.args.includes("--test"));
+    assert.ok(targetCreate);
+    assert.equal(targetCreate.args.includes("--read-only"), true);
+    assert.equal(targetCreate.args.includes("--cap-drop"), true);
+    assert.equal(targetCreate.args.includes("ALL"), true);
+    assert.equal(targetCreate.args.includes("no-new-privileges"), true);
+    assert.equal(targetCreate.args.includes("--network"), true);
+    assert.equal(targetCreate.args[targetCreate.args.indexOf("--network") + 1], "none");
+    assert.equal(targetCreate.args.includes("65532:65532"), true);
+    assert.equal(targetCreate.args.includes("--ulimit"), true);
+    assert.equal(targetCreate.args.some((item) => item.startsWith("fsize=")), true);
+    assert.equal(targetCreate.args.includes("TETHERMARK_RUNTIME_CREDENTIAL_MODE=synthetic"), true);
+    assert.equal(targetCreate.args.includes("TETHERMARK_FAKE_SECRET=tm_fake_runtime_validation_only"), true);
+    assert.equal(targetCreate.args.some((item) => item.startsWith("type=volume") && item.includes("target=/artifacts")), true);
+    assert.equal(targetCreate.args.some((item) => item.startsWith("type=bind") && item.includes("target=/artifacts")), false);
+    assert.equal(result.steps[0]?.resource_summary?.quota_exceeded, false);
+    assert.equal(result.steps[0]?.resource_summary?.oom_killed, false);
+    assert.equal(targetCreate.args.some((item) => item.includes(`source=${path.resolve(targetDir)}`)), false);
+    const stageCreate = calls.find((item) => item.args[0] === "create" && item.args.some((arg) => arg.includes("find . -type f")));
+    assert.ok(stageCreate);
+    assert.equal(stageCreate.args.includes("65532:65532"), true);
+    assert.equal(stageCreate.args.some((item) => item.includes(`source=${path.resolve(targetDir)}`) && item.endsWith("readonly")), true);
+    const volumeCreate = calls.find((item) => item.args[0] === "volume" && item.args[1] === "create");
+    assert.ok(volumeCreate);
+    assert.equal(volumeCreate.args.includes("type=tmpfs"), true);
+    assert.equal(volumeCreate.args.some((item) => item.startsWith("o=size=") && item.includes("uid=65532")), true);
+    assert.equal(calls.filter((item) => item.args[0] === "volume" && item.args[1] === "create").length, 2);
+    const collectorCreate = calls.find((item) => item.args[0] === "create" && item.args.some((arg) => arg.includes("find . -type f")) && item.args.some((arg) => arg.includes("target=/output")));
+    assert.ok(collectorCreate);
+    assert.equal(calls.some((item) => item.args[0] === "volume" && item.args[1] === "rm"), true);
+  });
+}
+
+async function testLocalRuntimeProviderFailsClosedOnWorkspaceQuota(): Promise<void> {
+  await withTempDir("harness-local-runtime-quota-", async (rootDir) => {
+    const targetDir = path.join(rootDir, "target");
+    const artifactDir = path.join(rootDir, "artifacts");
+    await fs.mkdir(targetDir);
+    await fs.mkdir(artifactDir);
+    await fs.writeFile(path.join(targetDir, "package.json"), "{}\n");
+    const policy = buildRuntimeExecutionPolicy({
+      selectedBackend: "docker",
+      settings: { max_workspace_bytes: 2048, max_file_bytes: 1024 }
+    });
+    const request = {
+      run_id: "run_provider_workspace_quota",
+      target_dir: targetDir,
+      artifact_dir: artifactDir,
+      policy,
+      detected_stack: ["node"],
+      steps: [{
+        step_id: "test-quota",
+        phase: "test" as const,
+        command: ["node", "--test"],
+        requires_network: false,
+        enabled: true
+      }]
+    };
+    const provider = createLocalRuntimeProvider({
+      runCommand: async (_command, args) => {
+        const stdout = args[0] === "start" && args.some((item) => item.includes("-quota-"))
+          ? "3\t/workspace\n"
+          : args[0] === "inspect" && args.includes("{{json .State}}")
+            ? '{"OOMKilled":false,"Pid":0,"ExitCode":0}\n'
+            : args[0] === "stats"
+              ? "{}\n"
+              : "";
+        return { exit_code: 0, stdout, stderr: "", timed_out: false };
+      }
+    });
+    const result = await provider.execute(request, await provider.plan(request));
+    assert.equal(result.status, "failed");
+    assert.equal(result.steps[0]?.resource_summary?.quota_exceeded, true);
+    assert.match(result.steps[0]?.summary ?? "", /workspace or artifact quota/i);
+
+    const sourceLimitedPolicy = buildRuntimeExecutionPolicy({ selectedBackend: "docker", settings: { max_workspace_bytes: 1 } });
+    const sourceLimitedRequest = { ...request, run_id: "run_provider_source_quota", policy: sourceLimitedPolicy };
+    const sourceLimitedProvider = createLocalRuntimeProvider({
+      runCommand: async () => { throw new Error("container runtime must not start for oversized source"); }
+    });
+    const sourceLimitedResult = await sourceLimitedProvider.execute(sourceLimitedRequest, await sourceLimitedProvider.plan(sourceLimitedRequest));
+    assert.equal(sourceLimitedResult.status, "blocked");
+    assert.match(sourceLimitedResult.steps[0]?.summary ?? "", /runtime_workspace_quota_exceeded/i);
+  });
+}
+
+async function testLocalRuntimeProviderUsesInternalAllowlistedEgressProxy(): Promise<void> {
+  await withTempDir("harness-local-runtime-egress-", async (rootDir) => {
+    const targetDir = path.join(rootDir, "target");
+    const artifactDir = path.join(rootDir, "artifacts");
+    await fs.mkdir(targetDir);
+    await fs.mkdir(artifactDir);
+    await fs.writeFile(path.join(targetDir, "package.json"), "{}\n");
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const provider = createLocalRuntimeProvider({
+      runCommand: async (command, args) => {
+        calls.push({ command, args: [...args] });
+        const stdout = args[0] === "start" && args.some((item) => item.includes("-quota-"))
+          ? "1\t/workspace\n"
+          : args[0] === "inspect" && args.includes("{{json .State}}")
+            ? '{"OOMKilled":false,"Pid":0,"ExitCode":0}\n'
+            : args[0] === "stats" ? "{}\n" : "";
+        return { exit_code: 0, stdout, stderr: "", timed_out: false };
+      }
+    });
+    const policy = buildRuntimeExecutionPolicy({
+      selectedBackend: "docker",
+      settings: {
+        network_policy: "allowlist",
+        dependency_install_network: "allowed",
+        runtime_probe_network: "allowed",
+        outbound_allowlist: ["registry.npmjs.org"]
+      }
+    });
+    const request = {
+      run_id: "run_egress",
+      target_dir: targetDir,
+      artifact_dir: artifactDir,
+      policy,
+      detected_stack: ["node"],
+      steps: [{
+        step_id: "install-allowlist",
+        phase: "install" as const,
+        command: ["npm", "view", "is-number", "version"],
+        requires_network: true,
+        enabled: true
+      }, {
+        step_id: "runtime-external-allowlist",
+        phase: "runtime_probe" as const,
+        command: ["node", "server.js"],
+        requires_network: true,
+        enabled: true,
+        artifact_context: { external_network: true }
+      }, {
+        step_id: "synthetic-tool",
+        phase: "test" as const,
+        command: ["node", "synthetic-service-client.js"],
+        requires_network: false,
+        enabled: true,
+        artifact_context: { synthetic_services: ["fake_tool_api"] }
+      }]
+    };
+    const result = await provider.execute(request, await provider.plan(request));
+    assert.equal(result.status, "completed", JSON.stringify(result));
+    assert.equal(result.steps[0]?.network_mode, "bridge");
+    assert.equal(result.steps[1]?.network_mode, "bridge");
+    assert.equal(result.steps[2]?.network_mode, "bridge");
+    assert.equal(calls.some((item) => item.args[0] === "network" && item.args[1] === "create" && item.args.includes("--internal")), true);
+    assert.equal(calls.some((item) => item.args[0] === "network" && item.args[1] === "connect" && item.args.includes("bridge")), true);
+    const targetCreate = calls.find((item) => item.args[0] === "create" && item.args.includes("npm") && item.args.includes("view"));
+    assert.ok(targetCreate);
+    assert.equal(targetCreate.args.includes("HTTPS_PROXY=http://tethermark-egress-proxy:8080"), true);
+    assert.notEqual(targetCreate.args[targetCreate.args.indexOf("--network") + 1], "none");
+    const syntheticCreate = calls.find((item) => item.args[0] === "create" && item.args.includes("synthetic-service-client.js"));
+    assert.ok(syntheticCreate);
+    assert.equal(syntheticCreate.args.includes("TETHERMARK_FAKE_SERVICE_URL=http://tethermark-fake-service:8081"), true);
+    assert.equal(syntheticCreate.args.includes("HTTP_PROXY=http://tethermark-egress-proxy:8080"), false);
+    assert.notEqual(syntheticCreate.args[syntheticCreate.args.indexOf("--network") + 1], targetCreate.args[targetCreate.args.indexOf("--network") + 1]);
+    assert.equal(calls.some((item) => item.args[0] === "network" && item.args[1] === "rm"), true);
+
+    const invalidPolicy = buildRuntimeExecutionPolicy({
+      selectedBackend: "docker",
+      settings: { network_policy: "allowlist", dependency_install_network: "allowed", outbound_allowlist: ["http://not-a-host"] }
+    });
+    const invalidRequest = { ...request, run_id: "run_bad_egress", policy: invalidPolicy, steps: [request.steps[0]] };
+    const invalidProvider = createLocalRuntimeProvider({
+      runCommand: async () => ({ exit_code: 0, stdout: "", stderr: "", timed_out: false })
+    });
+    const invalidResult = await invalidProvider.execute(invalidRequest, await invalidProvider.plan(invalidRequest));
+    assert.equal(invalidResult.status, "blocked");
+    assert.match(invalidResult.steps[0]?.summary ?? "", /runtime_egress_allowlist_invalid/i);
+  });
+}
+
 async function testRuntimeSandboxApiEndpoints(): Promise<void> {
   await withTempDir("harness-runtime-sandbox-api-", async (rootDir) => {
     const savedEnv = new Map<string, string | undefined>([
@@ -4465,12 +4747,24 @@ async function testRuntimeReadinessFixturePolicy(): Promise<void> {
   assert.equal(args.includes(RUNTIME_FIXTURE_IMAGE), true);
   assert.equal(args.some((item) => item.startsWith("type=bind") && item.includes("target=/workspace") && item.endsWith(",readonly")), true);
   assert.equal(args.some((item) => item.startsWith("type=bind") && item.includes("target=/output") && !item.endsWith(",readonly")), true);
+  const gvisorArgs = buildDockerRuntimeFixtureCreateArgs({
+    containerName: "tethermark-runtime-policy-gvisor-test",
+    sourceRoot,
+    outputRoot,
+    backend: "gvisor_container"
+  });
+  assert.equal(gvisorArgs.includes("--runtime") && gvisorArgs.includes("runsc"), true);
 
   const inspection = {
     Config: {
       Image: RUNTIME_FIXTURE_IMAGE,
       User: "65532:65532",
-      Env: ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "TETHERMARK_RUNTIME_FIXTURE=1"]
+      Env: [
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "TETHERMARK_RUNTIME_FIXTURE=1",
+        "TETHERMARK_RUNTIME_CREDENTIAL_MODE=synthetic",
+        "TETHERMARK_FAKE_SECRET=tm_fake_runtime_validation_only"
+      ]
     },
     HostConfig: {
       AutoRemove: false,
@@ -4483,7 +4777,8 @@ async function testRuntimeReadinessFixturePolicy(): Promise<void> {
       Privileged: false,
       ReadonlyRootfs: true,
       SecurityOpt: ["no-new-privileges"],
-      Tmpfs: { "/tmp": "rw,noexec,nosuid,nodev,size=16777216" }
+      Tmpfs: { "/tmp": "rw,noexec,nosuid,nodev,size=16777216" },
+      Ulimits: [{ Name: "fsize", Soft: 1024 * 1024, Hard: 1024 * 1024 }]
     },
     Mounts: [
       { Destination: "/workspace", RW: false, Source: sourceRoot, Type: "bind" },
@@ -4492,11 +4787,16 @@ async function testRuntimeReadinessFixturePolicy(): Promise<void> {
   };
   const assertions = validateDockerRuntimeFixtureInspect(inspection, { sourceRoot, outputRoot });
   assert.equal(Object.values(assertions).every(Boolean), true, JSON.stringify(assertions));
+  const gvisorAssertions = validateDockerRuntimeFixtureInspect({
+    ...inspection,
+    HostConfig: { ...inspection.HostConfig, Runtime: "runsc" }
+  }, { sourceRoot, outputRoot, backend: "gvisor_container" });
+  assert.equal(gvisorAssertions.selected_runtime_matches_backend, true);
   const secretAssertions = validateDockerRuntimeFixtureInspect({
     ...inspection,
     Config: { ...inspection.Config, Env: [...inspection.Config.Env, "OPENAI_API_KEY=must-not-pass"] }
   }, { sourceRoot, outputRoot });
-  assert.equal(secretAssertions.no_secret_environment, false);
+  assert.equal(secretAssertions.no_real_secret_environment, false);
   const writableSourceAssertions = validateDockerRuntimeFixtureInspect({
     ...inspection,
     Mounts: [
@@ -4512,7 +4812,6 @@ async function testLinuxContainerSandboxBuildsExecutionPlan(): Promise<void> {
     const sourceDir = path.join(rootDir, "source");
     const sandboxRoot = path.join(rootDir, "sandboxes");
     await fs.mkdir(path.join(sourceDir, "tests"), { recursive: true });
-    process.env.HARNESS_ENABLE_HOST_SANDBOX_EXECUTION = "1";
     await fs.writeFile(path.join(sourceDir, "package.json"), JSON.stringify({
       name: "runtime-target",
       private: true,
@@ -4524,14 +4823,14 @@ async function testLinuxContainerSandboxBuildsExecutionPlan(): Promise<void> {
     }, null, 2));
     await fs.writeFile(path.join(sourceDir, "package-lock.json"), JSON.stringify({ name: "runtime-target", lockfileVersion: 3 }, null, 2));
     await fs.writeFile(path.join(sourceDir, "Dockerfile"), "FROM node:20-alpine\n");
-    try {
-      const backend = new LinuxContainerSandboxBackend(sandboxRoot);
-      const sandbox = await backend.create("run_container_plan", {
+    const backend = new LinuxContainerSandboxBackend(sandboxRoot);
+    const sandbox = await backend.create("run_container_plan", {
         local_path: sourceDir,
         run_mode: "runtime",
         audit_package: "runtime-validated",
-        llm_provider: "mock"
-      });
+        llm_provider: "mock",
+        hints: { runtime_sandbox: { execute_target: false } }
+    });
 
       const executionPlan = sandbox.execution_plan;
       const executionResults = sandbox.execution_results;
@@ -4550,7 +4849,7 @@ async function testLinuxContainerSandboxBuildsExecutionPlan(): Promise<void> {
       assert.equal(executionPlan?.steps.find((step) => step.step_id === "runtime-node")?.artifact_context?.script_name, "start");
       assert.equal(sandbox.command_policy.allowed_command_prefixes.includes("npm ci --ignore-scripts"), true);
       assert.equal(sandbox.enforcement_notes.some((item) => /Derived 4 bounded execution step/.test(item)), true);
-      assert.equal(sandbox.enforcement_notes.some((item) => /Local runtime execution is enabled/.test(item)), true);
+      assert.equal(sandbox.enforcement_notes.some((item) => /explicitly disabled/.test(item)), true);
       assert.equal(executionResults?.length, 4);
       assert.equal(executionResults?.every((item) => item.status === "completed" || item.status === "failed" || item.status === "blocked"), true);
       const buildResult = executionResults?.find((item) => item.step_id === "build-node") ?? null;
@@ -4559,38 +4858,21 @@ async function testLinuxContainerSandboxBuildsExecutionPlan(): Promise<void> {
       assert.ok(buildResult);
       assert.ok(testResult);
       assert.ok(runtimeResult);
-      assert.equal(buildResult?.execution_runtime, "host_bounded");
+      assert.equal(buildResult?.execution_runtime, "container");
       assert.equal(buildResult?.adapter, "node_npm");
       assert.equal(runtimeResult?.adapter, "http_service");
       assert.equal(buildResult?.normalized_artifact?.type, "build");
       assert.equal(runtimeResult?.normalized_artifact?.type, "runtime_probe");
       assert.equal(buildResult?.normalized_artifact?.details_json?.package_manager, "npm");
       assert.equal(runtimeResult?.normalized_artifact?.details_json?.artifact_role, "service_probe");
-      assert.equal(typeof buildResult?.duration_ms, "number");
-      const boundedExecutionFailureSummary = /blocked by the current host|failed|not available for bounded host execution|could not connect to a healthy endpoint/i;
-      if (runtimeResult?.normalized_artifact?.details_json?.probe) {
-        assert.equal(Array.isArray((runtimeResult.normalized_artifact.details_json.probe as any).attempted_targets), true);
-        assert.equal(typeof (runtimeResult.normalized_artifact.details_json.probe as any).classification, "string");
-        assert.equal(Array.isArray((runtimeResult.normalized_artifact.details_json.probe as any).discovered_endpoints), true);
-      }
-      if (buildResult?.status === "completed") {
-        assert.equal(await pathExists(path.join(sandbox.target_dir, "build.ok")), true);
-      } else {
-        assert.match(buildResult?.summary ?? "", boundedExecutionFailureSummary);
-        if (buildResult?.stderr_excerpt) {
-          assert.match(buildResult.stderr_excerpt, /spawn EPERM|not available/i);
-        }
-      }
-      if (testResult?.status === "completed") {
-        assert.equal(await pathExists(path.join(sandbox.target_dir, "test.ok")), true);
-      } else {
-        assert.match(testResult?.summary ?? "", boundedExecutionFailureSummary);
-      }
-      if (runtimeResult?.status === "completed") {
-        assert.equal(await pathExists(path.join(sandbox.target_dir, "runtime.ok")), true);
-      } else {
-        assert.match(runtimeResult?.summary ?? "", boundedExecutionFailureSummary);
-      }
+      assert.equal(buildResult?.duration_ms, undefined);
+      assert.equal(buildResult?.status, "blocked");
+      assert.equal(testResult?.status, "blocked");
+      assert.equal(runtimeResult?.status, "blocked");
+      assert.match(buildResult?.summary ?? "", /explicitly disabled/i);
+      assert.equal(await pathExists(path.join(sandbox.target_dir, "build.ok")), false);
+      assert.equal(await pathExists(path.join(sandbox.target_dir, "test.ok")), false);
+      assert.equal(await pathExists(path.join(sandbox.target_dir, "runtime.ok")), false);
 
       const persistedPlan = JSON.parse(await fs.readFile(path.join(sandbox.root_dir, "artifacts", "execution-plan.json"), "utf8"));
       const persistedResults = JSON.parse(await fs.readFile(path.join(sandbox.root_dir, "artifacts", "execution-results.json"), "utf8"));
@@ -4600,14 +4882,11 @@ async function testLinuxContainerSandboxBuildsExecutionPlan(): Promise<void> {
       assert.equal(Array.isArray(persistedResults), true);
       assert.equal(persistedResults.length, 4);
       assert.ok(persistedResults.find((item: any) => item.step_id === "build-node"));
-      assert.equal(typeof persistedResults.find((item: any) => item.step_id === "build-node")?.duration_ms, "number");
+      assert.equal(persistedResults.find((item: any) => item.step_id === "build-node")?.execution_runtime, "container");
       assert.equal(persistedResults.find((item: any) => item.step_id === "build-node")?.normalized_artifact?.type, "build");
       assert.equal(persistedResults.find((item: any) => item.step_id === "runtime-node")?.adapter, "http_service");
       assert.equal(persistedPlan.steps.find((item: any) => item.step_id === "runtime-node")?.artifact_context?.script_name, "start");
       assert.equal(persistedResults.find((item: any) => item.step_id === "runtime-node")?.normalized_artifact?.details_json?.stack, "node");
-    } finally {
-      delete process.env.HARNESS_ENABLE_HOST_SANDBOX_EXECUTION;
-    }
   });
 }
 
@@ -4636,7 +4915,8 @@ async function testLinuxContainerSandboxBuildsPythonRuntimeProbePlan(): Promise<
       local_path: sourceDir,
       run_mode: "runtime",
       audit_package: "runtime-validated",
-      llm_provider: "mock"
+      llm_provider: "mock",
+      hints: { runtime_sandbox: { execute_target: false } }
     });
 
     const executionPlan = sandbox.execution_plan;
@@ -4664,7 +4944,8 @@ async function testLinuxContainerSandboxDetectsPythonFrameworkProbeDefaults(): P
       local_path: sourceDir,
       run_mode: "runtime",
       audit_package: "runtime-validated",
-      llm_provider: "mock"
+      llm_provider: "mock",
+      hints: { runtime_sandbox: { execute_target: false } }
     });
 
     const executionPlan = sandbox.execution_plan;
@@ -4692,7 +4973,8 @@ async function testLinuxContainerSandboxBuildsDjangoRuntimeCommand(): Promise<vo
       local_path: sourceDir,
       run_mode: "runtime",
       audit_package: "runtime-validated",
-      llm_provider: "mock"
+      llm_provider: "mock",
+      hints: { runtime_sandbox: { execute_target: false } }
     });
 
     const executionPlan = sandbox.execution_plan;
@@ -4726,7 +5008,8 @@ async function testLinuxContainerSandboxDetectsNodeEntrypointWithoutScripts(): P
       local_path: sourceDir,
       run_mode: "runtime",
       audit_package: "runtime-validated",
-      llm_provider: "mock"
+      llm_provider: "mock",
+      hints: { runtime_sandbox: { execute_target: false } }
     });
 
     const executionPlan = sandbox.execution_plan;
@@ -6489,6 +6772,251 @@ async function testConcurrentLearningRunsRespectAttemptBudget(): Promise<void> {
   });
 }
 
+async function testSystemPolicyLifecycleAndResolution(): Promise<void> {
+  await withTempDir("tethermark-system-policy-", async (rootDir) => {
+    const policies = await ensureBuiltinSystemPolicies("default", rootDir);
+    assert.equal(policies.length, 4);
+    assert.equal(policies.find((item) => item.is_default)?.id, "agentic-static-safe");
+    assert.ok(policies.every((item) => item.status === "active" && item.active_version_id));
+    assert.ok(listBuiltinSystemPolicyTemplates().every((item) => validateSystemPolicyDefinition(item.definition).valid));
+    assert.deepEqual(listBuiltinSystemPolicyTemplates().map((item) => ({ id: item.id, checksum: validateSystemPolicyDefinition(item.definition).checksum, controls: item.definition.required_control_ids.length, audit_package: item.definition.default_audit_package })), [
+      { id: "baseline-static-safe", checksum: "82ca6819ddf11f3c2997dde2d594ab39c771a5e15115a8444448c215a1a31396", controls: 10, audit_package: "baseline-static" },
+      { id: "agentic-static-safe", checksum: "851ecf474ef14db447f7640041b23c957ba30ebc223a8dfb9c8b11564ad0c204", controls: 27, audit_package: "agentic-static" },
+      { id: "extensive-static-safe", checksum: "4fa13cb2a3040df6754262d1c5193c373072e441afaf65a2b0df666abe2f7047", controls: 39, audit_package: "deep-static" },
+      { id: "extensive-runtime-local-safe", checksum: "83ca5b53e83b95ad4aa88ce605490c23d4fac4c45c87cb4d61071ec24b054a1f", controls: 39, audit_package: "runtime-validated" }
+    ]);
+    const runtimeTemplate = getBuiltinSystemPolicyTemplate("extensive-runtime-local-safe")!;
+    assert.ok(runtimeTemplate.definition.required_control_ids.includes("runtime.indirect_prompt_injection_resistance"));
+    assert.ok(runtimeTemplate.definition.required_control_ids.includes("runtime.security_telemetry_completeness"));
+    assert.equal(runtimeTemplate.definition.runtime.no_host_fallback, true);
+    const goldenResolutionMatrix: Array<{ template_id: string; target_class: string; checksum: string }> = [];
+    for (const policyTemplate of listBuiltinSystemPolicyTemplates()) {
+      await setDefaultPersistedSystemPolicy(policyTemplate.id, "test-admin", "default", rootDir);
+      for (const targetClass of ["repo_posture_only", "runnable_local_app", "hosted_endpoint_black_box", "tool_using_multi_turn_agent", "mcp_server_plugin_skill_package"] as const) {
+        const resolved = await resolvePersistedSystemPolicy({
+          request: { local_path: rootDir, audit_package: policyTemplate.definition.default_audit_package, run_mode: policyTemplate.definition.runtime.allowed ? "runtime" : "static", llm_provider: "mock", workspace_id: "default", project_id: "golden-matrix" },
+          target_class: targetClass,
+          rootDirOrOptions: rootDir
+        });
+        assert.equal(resolved?.policy_id, policyTemplate.id);
+        assert.equal(resolved?.target_class, targetClass);
+        goldenResolutionMatrix.push({ template_id: policyTemplate.id, target_class: targetClass, checksum: resolved!.checksum });
+      }
+    }
+    assert.equal(goldenResolutionMatrix.length, 20);
+    assert.equal(new Set(goldenResolutionMatrix.map((item) => `${item.template_id}:${item.target_class}:${item.checksum}`)).size, 20);
+    await setDefaultPersistedSystemPolicy("agentic-static-safe", "test-admin", "default", rootDir);
+
+    const template = getBuiltinSystemPolicyTemplate("baseline-static-safe");
+    assert.ok(template);
+    const created = await createPersistedSystemPolicy({
+      id: "custom-baseline",
+      name: "Custom Baseline",
+      definition: template.definition,
+      actor_id: "test-admin",
+      reason: "lifecycle test",
+      workspace_id: "default"
+    }, rootDir);
+    const firstVersion = created.versions[0];
+    assert.equal(validateSystemPolicyDefinition(firstVersion.definition_json).valid, true);
+    await publishPersistedSystemPolicy("custom-baseline", "test-admin", "publish v1", "default", rootDir);
+
+    const secondDefinition = structuredClone(firstVersion.definition_json);
+    secondDefinition.providers.maximum_agent_calls = 6;
+    const secondVersion = await createPersistedSystemPolicyVersion("custom-baseline", {
+      definition: secondDefinition,
+      actor_id: "test-admin",
+      reason: "reduce call budget",
+      workspace_id: "default"
+    }, rootDir);
+    assert.notEqual(secondVersion.checksum, firstVersion.checksum);
+    await publishPersistedSystemPolicy("custom-baseline", "test-admin", "publish v2", "default", rootDir);
+    await setDefaultPersistedSystemPolicy("custom-baseline", "test-admin", "default", rootDir);
+
+    const snapshot = await resolvePersistedSystemPolicy({
+      request: { local_path: rootDir, audit_package: "baseline-static", llm_provider: "mock", workspace_id: "default", project_id: "default" },
+      target_class: "repo_posture_only",
+      run_id: "run-policy-test",
+      rootDirOrOptions: rootDir
+    });
+    assert.ok(snapshot);
+    assert.equal(snapshot.policy_id, "custom-baseline");
+    assert.equal(snapshot.policy_version_id, secondVersion.id);
+    assert.equal(snapshot.definition_json.providers.maximum_agent_calls, 6);
+    const repeatedSnapshot = await resolvePersistedSystemPolicy({
+      request: { local_path: rootDir, audit_package: "baseline-static", llm_provider: "mock", workspace_id: "default", project_id: "default" },
+      target_class: "repo_posture_only",
+      run_id: "different-run-id",
+      rootDirOrOptions: rootDir
+    });
+    assert.equal(repeatedSnapshot?.checksum, snapshot.checksum, "Equivalent policy resolution must have a deterministic semantic checksum");
+    assert.throws(() => applyResolvedSystemPolicyToRequest({
+      local_path: rootDir,
+      hints: { planner_control_constraints: { excluded_control_ids: [snapshot.applicable_required_control_ids[0]] } }
+    }, snapshot), /system_policy_required_control_cannot_be_excluded/);
+    const boundedRequest = applyResolvedSystemPolicyToRequest({ local_path: rootDir, hints: { audit_package_overrides: { enabled_lanes: ["runtime_validation"], max_agent_calls: 999, publishability_threshold: "low" } } }, snapshot);
+    assert.equal((boundedRequest.hints as any).audit_package_overrides.enabled_lanes, undefined);
+    assert.equal((boundedRequest.hints as any).audit_package_overrides.max_agent_calls, 6);
+    assert.equal((boundedRequest.hints as any).audit_package_overrides.publishability_threshold, "medium");
+    const automaticallyBoundRuntimePolicy = await resolvePersistedSystemPolicy({
+      request: { local_path: rootDir, audit_package: "runtime-validated", run_mode: "runtime", llm_provider: "mock", workspace_id: "default", project_id: "default" },
+      rootDirOrOptions: rootDir
+    });
+    assert.equal(automaticallyBoundRuntimePolicy?.policy_id, "extensive-runtime-local-safe");
+    await assert.rejects(() => resolvePersistedSystemPolicy({
+      request: { local_path: rootDir, audit_package: "baseline-static", llm_provider: "mock", llm_max_requests: 7, workspace_id: "default", project_id: "default" },
+      rootDirOrOptions: rootDir
+    }), /system_policy_agent_call_budget_exceeded/);
+
+    await upsertPersistedSystemPolicyBinding({ policy_id: "agentic-static-safe", binding_type: "project", project_id: "agent-project", priority: 500, actor_id: "test-admin", workspace_id: "default" }, rootDir);
+    const projectSnapshot = await resolvePersistedSystemPolicy({
+      request: { local_path: rootDir, audit_package: "agentic-static", llm_provider: "mock", workspace_id: "default", project_id: "agent-project" },
+      rootDirOrOptions: rootDir
+    });
+    assert.equal(projectSnapshot?.policy_id, "agentic-static-safe");
+    await upsertPersistedSystemPolicyBinding({ id: "ambiguous-a", policy_id: "agentic-static-safe", binding_type: "project", project_id: "ambiguous-project", priority: 700, actor_id: "test-admin", workspace_id: "default" }, rootDir);
+    await upsertPersistedSystemPolicyBinding({ id: "ambiguous-b", policy_id: "custom-baseline", binding_type: "project", project_id: "ambiguous-project", priority: 700, actor_id: "test-admin", workspace_id: "default" }, rootDir);
+    await assert.rejects(() => resolvePersistedSystemPolicy({ request: { local_path: rootDir, llm_provider: "mock", workspace_id: "default", project_id: "ambiguous-project" }, rootDirOrOptions: rootDir }), /ambiguous_system_policy_bindings/);
+
+    await upsertPersistedSystemPolicyBinding({ id: "runtime-policy-binding", policy_id: "extensive-runtime-local-safe", binding_type: "project", project_id: "runtime-project", priority: 900, actor_id: "test-admin", workspace_id: "default" }, rootDir);
+    const runtimeSnapshot = await resolvePersistedSystemPolicy({ request: { local_path: rootDir, audit_package: "runtime-validated", run_mode: "runtime", llm_provider: "mock", workspace_id: "default", project_id: "runtime-project" }, rootDirOrOptions: rootDir });
+    assert.ok(runtimeSnapshot);
+    const isolatedRequest = applyResolvedSystemPolicyToRequest({ local_path: rootDir, run_mode: "runtime", hints: { runtime_sandbox: { require_isolation: false, no_host_fallback: false, network_policy: "allow" } } }, runtimeSnapshot);
+    assert.equal((isolatedRequest.hints as any).runtime_sandbox.require_isolation, true);
+    assert.equal((isolatedRequest.hints as any).runtime_sandbox.no_host_fallback, true);
+    assert.equal((isolatedRequest.hints as any).runtime_sandbox.network_policy, "deny");
+
+    const persistedSnapshot = await persistPolicyResolutionSnapshot(snapshot, "run-policy-test", rootDir);
+    assert.equal((await readPersistedPolicyResolutionSnapshot("run-policy-test", rootDir))?.checksum, persistedSnapshot.checksum);
+    await assert.rejects(() => persistPolicyResolutionSnapshot({ ...snapshot, checksum: "mutated" }, "run-policy-test", rootDir), /policy_resolution_snapshot_is_immutable/);
+
+    const rolledBack = await rollbackPersistedSystemPolicy("custom-baseline", firstVersion.id, "test-admin", "rollback test", "default", rootDir);
+    assert.equal(rolledBack.policy.active_version_id, firstVersion.id);
+    assert.equal(rolledBack.versions.find((item) => item.id === firstVersion.id)?.state, "published");
+    await setDefaultPersistedSystemPolicy("agentic-static-safe", "test-admin", "default", rootDir);
+    const archived = await archivePersistedSystemPolicy("custom-baseline", "test-admin", "archive test", "default", rootDir);
+    assert.equal(archived.policy.status, "archived");
+
+    const exported = exportSystemPolicy((await getPersistedSystemPolicy("custom-baseline", "default", rootDir))!);
+    const imported = await importSystemPolicy(exported, "test-admin", "import-workspace", rootDir);
+    assert.equal(imported.policy.id, "custom-baseline");
+    assert.equal(imported.policy.workspace_id, "import-workspace");
+
+    const concurrentResults = await Promise.all([
+      listPersistedSystemPolicies("default", rootDir),
+      getPersistedSystemPolicy("agentic-static-safe", "default", rootDir),
+      readPersistedPolicyResolutionSnapshot("run-policy-test", rootDir)
+    ]);
+    assert.ok(concurrentResults.every(Boolean));
+
+    const backupRoot = path.join(rootDir, "restored");
+    await fs.mkdir(backupRoot, { recursive: true });
+    await fs.copyFile(path.join(rootDir, "harness.sqlite"), path.join(backupRoot, "harness.sqlite"));
+    assert.equal((await getPersistedSystemPolicy("agentic-static-safe", "default", backupRoot))?.policy.status, "active");
+
+    const db = await openSqliteDatabase(rootDir);
+    try {
+      assert.equal(readSqliteTable<any>(db, "system_policies").length, 6);
+      assert.ok(readSqliteTable<any>(db, "system_policy_versions").length >= 7);
+      assert.equal(readSqliteTable<any>(db, "policy_resolution_snapshots").length, 1);
+      assert.ok(readSqliteTable<any>(db, "policy_change_events").length >= 10);
+    } finally { db.close(); }
+  });
+}
+
+async function testSystemPolicyAdminApi(): Promise<void> {
+  await withWorkspaceTempDir("system-policy-api-", async (rootDir) => {
+    await withEnv({ HARNESS_API_AUTH_MODE: "none", HARNESS_LOCAL_DB_ROOT: path.join(rootDir, "state") }, async () => withWorkingDir(rootDir, async () => {
+      const apiServer = createApiServer();
+      await new Promise<void>((resolve, reject) => {
+        apiServer.once("error", reject);
+        apiServer.listen(0, "127.0.0.1", () => resolve());
+      });
+      const address = apiServer.address();
+      assert.ok(address && typeof address !== "string");
+      const baseUrl = `http://127.0.0.1:${address.port}`;
+      const headers = { "content-type": "application/json", "x-harness-workspace": "default", "x-harness-project": "default", "x-harness-actor": "api-admin" };
+      try {
+        const catalogResponse = await fetch(`${baseUrl}/system/policies`, { headers });
+        const catalog = await catalogResponse.json() as any;
+        assert.equal(catalogResponse.status, 200, JSON.stringify(catalog));
+        assert.equal(catalog.templates.length, 4);
+        assert.equal(catalog.policies.filter((item: any) => item.is_default).length, 1);
+
+        const createResponse = await fetch(`${baseUrl}/system/policies`, { method: "POST", headers, body: JSON.stringify({ id: "api-policy", name: "API Policy", template_id: "baseline-static-safe" }) });
+        assert.equal(createResponse.status, 201);
+        assert.equal((await createResponse.json() as any).system_policy.policy.status, "draft");
+        const validationResponse = await fetch(`${baseUrl}/system/policies/api-policy/validate`, { method: "POST", headers, body: "{}" });
+        assert.equal(validationResponse.status, 200);
+        assert.equal((await validationResponse.json() as any).validation.valid, true);
+        assert.equal((await fetch(`${baseUrl}/system/policies/api-policy/publish`, { method: "POST", headers, body: JSON.stringify({ reason: "api test" }) })).status, 200);
+        assert.equal((await fetch(`${baseUrl}/system/policies/api-policy/set-default`, { method: "POST", headers, body: "{}" })).status, 200);
+
+        const previewResponse = await fetch(`${baseUrl}/system/policies/resolve-preview`, { method: "POST", headers, body: JSON.stringify({ request: { local_path: rootDir, audit_package: "baseline-static", llm_provider: "mock" } }) });
+        assert.equal(previewResponse.status, 200);
+        const preview = await previewResponse.json() as any;
+        assert.equal(preview.resolved_policy.policy_id, "api-policy");
+        assert.ok(preview.effective_request.hints.system_policy.resolved_snapshot.checksum);
+        assert.equal((await fetch(`${baseUrl}/system/policies/api-policy/export`, { headers })).status, 200);
+        assert.equal((await fetch(`${baseUrl}/system/controls`, { headers })).status, 200);
+        assert.equal((await fetch(`${baseUrl}/system/audit-packages`, { headers })).status, 200);
+      } finally {
+        await new Promise<void>((resolve, reject) => apiServer.close((error) => error ? reject(error) : resolve()));
+      }
+    }));
+    await withEnv({ HARNESS_API_AUTH_MODE: "api_key", HARNESS_API_KEY: "phase7-test-key", HARNESS_LOCAL_DB_ROOT: path.join(rootDir, "key-state") }, async () => withWorkingDir(rootDir, async () => {
+      const apiServer = createApiServer();
+      await new Promise<void>((resolve, reject) => {
+        apiServer.once("error", reject);
+        apiServer.listen(0, "127.0.0.1", () => resolve());
+      });
+      const address = apiServer.address();
+      assert.ok(address && typeof address !== "string");
+      const baseUrl = `http://127.0.0.1:${address.port}`;
+      try {
+        assert.equal((await fetch(`${baseUrl}/system/policies`)).status, 401);
+        assert.equal((await fetch(`${baseUrl}/system/policies`, { headers: { "x-api-key": "wrong" } })).status, 401);
+        assert.equal((await fetch(`${baseUrl}/system/policies`, { headers: { "x-api-key": "phase7-test-key" } })).status, 200);
+      } finally {
+        await new Promise<void>((resolve, reject) => apiServer.close((error) => error ? reject(error) : resolve()));
+      }
+    }));
+  });
+}
+
+async function testExtensiveStaticPolicyCoverage(): Promise<void> {
+  await withWorkspaceTempDir("extensive-policy-e2e-", async (rootDir) => {
+    const stateRoot = path.join(rootDir, "state");
+    const fixturePath = path.resolve(process.cwd(), "fixtures", "validation-targets", "agent-tool-boundary-risky");
+    await withEnv({ HARNESS_LOCAL_DB_ROOT: stateRoot, HARNESS_DISABLE_LOCAL_BINARIES: "1" }, async () => {
+      await ensureBuiltinSystemPolicies("default", stateRoot);
+      await setDefaultPersistedSystemPolicy("extensive-static-safe", "test-admin", "default", stateRoot);
+      const result = await createEngine().run({
+        local_path: fixturePath,
+        run_mode: "static",
+        audit_package: "deep-static",
+        llm_provider: "mock",
+        workspace_id: "default",
+        project_id: "extensive-e2e"
+      });
+      const snapshot = await readPersistedPolicyResolutionSnapshot(result.run_id, stateRoot);
+      assert.ok(snapshot);
+      assert.equal(snapshot.policy_id, "extensive-static-safe");
+      const controlById = new Map(result.control_results.map((control) => [control.control_id, control]));
+      const plannedNonAssessed = new Set([...result.run_plan.deferred_control_ids, ...result.run_plan.non_applicable_control_ids]);
+      for (const controlId of snapshot.applicable_required_control_ids) {
+        assert.ok(controlById.has(controlId) || plannedNonAssessed.has(controlId), `Extensive policy control ${controlId} must be assessed or explicitly planned as not assessed/not applicable`);
+      }
+      for (const control of result.control_results.filter((item) => item.control_id.startsWith("runtime."))) {
+        assert.notEqual(control.status, "pass", `${control.control_id} cannot pass without runtime evidence`);
+        assert.ok(control.rationale.length || control.evidence.length, `${control.control_id} must retain a reason or evidence reference`);
+      }
+      assert.ok(result.publishability.human_review_required, "Incomplete extensive evidence must require review");
+      assert.equal(result.publishability.publishability_status, "blocked", "Blocking evidence policy must block publication when required deterministic tools are unavailable");
+    });
+  });
+}
+
 async function main(): Promise<void> {
   // The regression suite is always offline and deterministic. Live provider
   // validation is isolated in explicitly named smoke commands.
@@ -6537,6 +7065,9 @@ async function main(): Promise<void> {
     ["web ui and persisted ui settings api", testWebUiAndPersistedUiSettingsApi],
     ["preflight api summarizes readiness", testPreflightApiSummarizesReadiness],
     ["runtime sandbox backend resolution", testRuntimeSandboxBackendResolution],
+    ["local runtime provider executes exact argv in container", testLocalRuntimeProviderExecutesExactArgvInContainer],
+    ["local runtime provider fails closed on workspace quota", testLocalRuntimeProviderFailsClosedOnWorkspaceQuota],
+    ["local runtime provider uses internal allowlisted egress proxy", testLocalRuntimeProviderUsesInternalAllowlistedEgressProxy],
     ["runtime sandbox api endpoints", testRuntimeSandboxApiEndpoints],
     ["api project scoping and actor-owned review actions", testApiProjectScopingAndActorOwnedReviewActions],
     ["assistant storage and capability gating", testAssistantStorageAndCapabilities],
@@ -6544,6 +7075,9 @@ async function main(): Promise<void> {
     ["assistant api scopes actions and target history", testAssistantApiScopesActionsAndTargetHistory],
     ["learning api lifecycle", testLearningApiLifecycle],
     ["concurrent learning runs respect attempt budget", testConcurrentLearningRunsRespectAttemptBudget],
+    ["system policy lifecycle and deterministic resolution", testSystemPolicyLifecycleAndResolution],
+    ["system policy administration api", testSystemPolicyAdminApi],
+    ["extensive static policy coverage is explicit", testExtensiveStaticPolicyCoverage],
       ["validateFixtures passes for bundled targets", testValidateFixturesPassesForBundledTargets],
       ["product benchmark suite dry-run", testProductBenchmarkSuiteDryRun],
       ["fixed calibration evidence plan is deterministic", testFixedCalibrationEvidencePlanIsDeterministic],

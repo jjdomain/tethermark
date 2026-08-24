@@ -42,7 +42,7 @@ function getPolicyPackLabel(policyPacks, policyPackId) {
 }
 
 const auditPackageDisplayOrder = ["baseline-static", "agentic-static", "deep-static", "runtime-validated"];
-const hiddenOssAuditPackages = new Set(["premium-comprehensive"]);
+const hiddenOssAuditPackages = new Set();
 const noProjectSelectValue = "__select_project__";
 const auditPackageDescriptions = {
   "baseline-static": "Lightweight repository and supply-chain posture review.",

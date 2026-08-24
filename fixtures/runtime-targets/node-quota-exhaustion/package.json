@@ -1,0 +1,8 @@
+{
+  "name": "tethermark-runtime-quota-exhaustion",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test": "node quota-exhaust.js"
+  }
+}

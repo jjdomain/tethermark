@@ -1,6 +1,6 @@
 import type { HandoffRecord } from "../../handoff-contracts/src/index.js";
 import type { AgentInvocationRecord } from "../../trace-recorder/src/index.js";
-import type { LocalSandboxBackendResolution, RuntimeExecutionPolicy, RuntimeSandboxReadiness } from "../../validation-runner/src/index.js";
+import type { LocalSandboxBackendResolution, RuntimeExecutionPolicy, RuntimeSandboxReadiness, RuntimeValidationPlan, RuntimeValidationResult } from "../../validation-runner/src/index.js";
 
 export type TargetKind = "path" | "repo" | "endpoint";
 export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
@@ -37,7 +37,7 @@ export type SkepticActionType =
 export type HarnessEventLevel = "debug" | "info" | "warn" | "error";
 export type HarnessMetricKind = "counter" | "gauge" | "histogram";
 export type DatabaseMode = "local" | "postgres" | "supabase";
-export type AuditPackageId = "baseline-static" | "agentic-static" | "deep-static" | "runtime-validated" | "premium-comprehensive";
+export type AuditPackageId = "baseline-static" | "agentic-static" | "deep-static" | "runtime-validated" | "comprehensive-local";
 export type HumanReviewStatus = "not_required" | "review_required" | "in_review" | "approved" | "rejected" | "requires_rerun";
 export type ProviderReadinessStatus = "available" | "blocked" | "conditional" | "deferred";
 export type PreflightReadinessStatus = "ready" | "ready_with_warnings" | "blocked";
@@ -157,6 +157,8 @@ export interface SandboxExecutionArtifact {
   runtime: ContainerWorkspaceContract["runtime"] | "unconfigured";
   plan: SandboxExecutionPlan;
   results: SandboxExecutionResult[];
+  provider_plan?: RuntimeValidationPlan | null;
+  provider_result?: RuntimeValidationResult | null;
   runtime_sandbox?: {
     provider_id: "local_runtime";
     selected_backend: string;
@@ -192,6 +194,8 @@ export interface SandboxSession {
   runtime_sandbox_readiness?: RuntimeSandboxReadiness;
   runtime_backend_resolution?: LocalSandboxBackendResolution;
   runtime_execution_policy?: RuntimeExecutionPolicy;
+  runtime_provider_plan?: RuntimeValidationPlan;
+  runtime_provider_result?: RuntimeValidationResult;
   source_provenance: SandboxSourceProvenance;
   storage_usage: SandboxStorageUsage;
 }
@@ -762,6 +766,9 @@ export interface StandardControlDefinition {
   description: string;
   weight: number;
   static_assessable: boolean;
+  runtime_assessable?: boolean;
+  audit_lane?: "repo_posture" | "supply_chain" | "agentic_controls" | "data_exposure" | "runtime_validation";
+  evidence_provider_ids?: string[];
   baseline_dimension: BaselineDimensionKey;
   catalog: "external_standard" | "harness_internal";
   applicability: Array<"all" | "repo" | "agentic" | "mcp" | "api" | "ci" | "dependency" | "container">;

@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import type { DatabaseMode } from "../contracts.js";
 import type { BundleExportPolicy } from "./bundle-exports.js";
 import { buildPostgresMigrationSql, buildPsqlProcessEnv, resolvePostgresConnectionConfig } from "./postgres.js";
-import { SELF_LEARNING_TABLE_DEFINITIONS } from "./schema-manifest.js";
+import { PERSISTENCE_TABLE_DEFINITIONS } from "./schema-manifest.js";
 
 const require = createRequire(import.meta.url);
 const initSqlJs: any = require("sql.js/dist/sql-wasm.js");
@@ -60,7 +60,7 @@ export interface PersistenceMetadata {
 
 export type LocalPersistenceMetadata = PersistenceMetadata;
 
-export const PERSISTENCE_SCHEMA_VERSION = "1.2.0";
+export const PERSISTENCE_SCHEMA_VERSION = "1.3.0";
 
 function wasmPath(): string {
   return require.resolve("sql.js/dist/sql-wasm.wasm");
@@ -146,7 +146,7 @@ function flushRemoteUpserts(db: RemoteRecordDatabase): void {
       parent_key=EXCLUDED.parent_key,
       payload_json=EXCLUDED.payload_json
   `;
-  const relationalSql = SELF_LEARNING_TABLE_DEFINITIONS
+  const relationalSql = PERSISTENCE_TABLE_DEFINITIONS
     .map((definition) => {
       const matching = db.pendingUpserts.filter((record) => record.tableName === definition.name);
       if (!matching.length) return "";
@@ -533,7 +533,7 @@ function upsertSqliteRecordSchemas(db: any): void {
       fields_json=excluded.fields_json,
       updated_at=excluded.updated_at
   `);
-  for (const definition of SELF_LEARNING_TABLE_DEFINITIONS) {
+  for (const definition of PERSISTENCE_TABLE_DEFINITIONS) {
     statement.run([
       definition.name,
       definition.description,
@@ -617,7 +617,7 @@ export function readSqliteTable<T>(db: any, tableName: string): T[] {
 export function deleteSqliteRecord(args: { db: any; tableName: string; recordKey: string }): boolean {
   if (isRemoteDatabase(args.db)) {
     flushRemoteUpserts(args.db);
-    const definition = SELF_LEARNING_TABLE_DEFINITIONS.find((item) => item.name === args.tableName && item.primary_key.length === 1);
+    const definition = PERSISTENCE_TABLE_DEFINITIONS.find((item) => item.name === args.tableName && item.primary_key.length === 1);
     const relationalDelete = definition
       ? `DELETE FROM ${definition.name} WHERE ${definition.primary_key[0]} = ${sqlLiteral(args.recordKey)};`
       : "";

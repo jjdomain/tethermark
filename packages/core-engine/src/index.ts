@@ -41,6 +41,7 @@ export * from "./persistence/finding-dispositions.js";
 export * from "./agent-context-builders.js";
 export * from "./audit-lanes.js";
 export * from "./audit-packages.js";
+export * from "./system-policies.js";
 export * from "./stages/stage-score-and-publishability.js";
 export * from "./stages/stage-apply-policy-overrides.js";
 export * from "./stages/stage-resolve-config.js";

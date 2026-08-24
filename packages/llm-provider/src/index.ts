@@ -262,11 +262,12 @@ function appendLimited(current: string, chunk: Buffer, limit = 20_000): string {
   return next.length > limit ? next.slice(next.length - limit) : next;
 }
 
-function runProcess(command: string, args: string[], stdin: string, timeoutMs: number, env?: NodeJS.ProcessEnv): Promise<ProcessResult> {
+function runProcess(command: string, args: string[], stdin: string, timeoutMs: number, env?: NodeJS.ProcessEnv, cwd?: string): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       stdio: ["pipe", "pipe", "pipe"],
       env,
+      cwd,
       windowsHide: true
     });
     let stdout = "";
@@ -299,6 +300,16 @@ function runProcess(command: string, args: string[], stdin: string, timeoutMs: n
     });
     child.stdin.end(stdin);
   });
+}
+
+function buildCodexInferenceEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const allowed = [
+    "PATH", "PATHEXT", "SystemRoot", "SYSTEMROOT", "WINDIR", "ComSpec", "COMSPEC",
+    "TEMP", "TMP", "TMPDIR", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "CODEX_HOME",
+    "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY", "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS",
+    "LANG", "LC_ALL"
+  ];
+  return Object.fromEntries(allowed.flatMap((key) => source[key] === undefined ? [] : [[key, source[key]]])) as NodeJS.ProcessEnv;
 }
 
 function resolveCodexCommand(command: string, prefixArgs: string[]): { command: string; prefixArgs: string[] } {
@@ -384,17 +395,37 @@ export class OpenAICodexCliProvider implements ModelProvider {
           ...this.resolvedPrefixArgs,
           "exec",
           "--ephemeral",
+          "--ignore-user-config",
+          "--ignore-rules",
+          "--disable", "shell_tool",
+          "--disable", "code_mode_host",
+          "--disable", "apps",
+          "--disable", "browser_use",
+          "--disable", "browser_use_external",
+          "--disable", "computer_use",
+          "--disable", "multi_agent",
+          "--disable", "hooks",
+          "--disable", "plugins",
           "--json",
           "--skip-git-repo-check",
           "--sandbox",
           this.sandbox,
+          "--cd",
+          tempDir,
           "--output-schema",
           schemaPath,
           "--output-last-message",
           outputPath
         ];
         if (this.modelName) args.push("--model", this.modelName);
-        const result = await runProcess(this.resolvedCommand, args, buildCodexPrompt(request), this.timeoutMs, this.processEnv);
+        const result = await runProcess(
+          this.resolvedCommand,
+          args,
+          buildCodexPrompt(request),
+          this.timeoutMs,
+          buildCodexInferenceEnvironment(this.processEnv ?? process.env),
+          tempDir
+        );
         const attemptUsage = extractCodexUsage(result.stdout);
         if (attemptUsage.total_tokens != null) {
           hasUsage = true;

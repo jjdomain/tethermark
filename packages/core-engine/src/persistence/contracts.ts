@@ -515,6 +515,7 @@ export interface PersistedRuntimeValidationRunRecord {
   readiness_status: "ready" | "ready_with_warnings" | "blocked";
   policy_json: unknown;
   plan_json: unknown;
+  provider_execution_json: unknown;
   result_count: number;
   created_at: string;
 }
@@ -536,6 +537,7 @@ export interface PersistedRuntimeValidationStepRecord {
   stdout_excerpt: string | null;
   stderr_excerpt: string | null;
   artifact_json: unknown;
+  provider_result_json: unknown;
   checked_at: string;
 }
 

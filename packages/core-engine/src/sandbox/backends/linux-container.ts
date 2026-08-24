@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 
-import { buildRuntimeExecutionPolicy, buildRuntimeSandboxReadiness } from "../../../../validation-runner/src/index.js";
+import { buildRuntimeExecutionPolicy, buildRuntimeSandboxReadiness, localRuntimeProvider } from "../../../../validation-runner/src/index.js";
 import type { AuditRequest, ContainerWorkspaceContract, SandboxExecutionPlan, SandboxExecutionResult, SandboxExecutionStep, SandboxSession } from "../../contracts.js";
 import { createId } from "../../utils.js";
 import { buildSourceProvenance, cloneRepo, collectStorageUsage, inferGitRepoUrl, mirrorDirectory, resolvePinnedCheckoutRef } from "./shared.js";
@@ -613,11 +613,12 @@ async function buildExecutionPlan(targetDir: string, runMode: NonNullable<AuditR
     const testScript = firstScriptName(scripts, ["test", "test:ci", "test:unit"]);
     if (testScript) {
       const command = resolveNodeScriptCommand(nodePackageManager, testScript);
+      const needsJestSerialFlag = /\bjest\b/i.test(String(scripts[testScript] ?? ""));
       steps.push({
         step_id: "test-node",
         phase: "test",
         adapter: "node_npm",
-        command: testScript === "test"
+        command: testScript === "test" && needsJestSerialFlag
           ? (hasPnpmLock ? ["pnpm", "run", "test", "--", "--runInBand"] : hasYarnLock ? ["yarn", "test", "--runInBand"] : ["npm", "run", "test", "--", "--runInBand"])
           : command,
         rationale: `package.json defines a ${testScript} script suitable for bounded execution.`,
@@ -1155,9 +1156,73 @@ export class LinuxContainerSandboxBackend {
 
     const storageUsage = await collectStorageUsage(targetDir);
     const executionPlan = await buildExecutionPlan(targetDir, runMode);
-    const executionResults = await evaluateExecutionPlan(targetDir, executionPlan, runtime);
+    const providerRequest = {
+      run_id: runId,
+      target_dir: targetDir,
+      artifact_dir: artifactDir,
+      policy: runtimePolicy,
+      detected_stack: executionPlan.detected_stack,
+      steps: executionPlan.steps
+    };
+    const providerPlan = await localRuntimeProvider.plan(providerRequest);
+    const executeTarget = runtimeSettings?.execute_target !== false;
+    const providerResult = executeTarget
+      ? await localRuntimeProvider.execute(providerRequest, providerPlan)
+      : {
+          provider_id: "local_runtime" as const,
+          selected_backend: providerPlan.selected_backend,
+          status: "blocked" as const,
+          artifacts: [],
+          cleanup: { containers_removed: true, workspace_volume_removed: true, errors: [] },
+          steps: providerPlan.steps.map((step) => ({
+            step_id: step.step_id,
+            status: step.enabled ? "blocked" as const : "skipped" as const,
+            checked_at: new Date().toISOString(),
+            started_at: null,
+            completed_at: null,
+            duration_ms: null,
+            execution_runtime: "container" as const,
+            summary: "Target execution was explicitly disabled for this runtime plan.",
+            exit_code: null,
+            stdout_excerpt: null,
+            stderr_excerpt: null,
+            timed_out: false,
+            container_name: null,
+            image: providerPlan.image,
+            command: step.command,
+            network_mode: "none" as const,
+            adapter: step.adapter,
+            artifact_context: step.artifact_context
+          }))
+        };
+    const executionResults: SandboxExecutionResult[] = providerResult.steps.map((result) => {
+      const step = executionPlan.steps.find((item) => item.step_id === result.step_id)!;
+      return {
+        step_id: result.step_id,
+        status: result.status,
+        checked_at: result.checked_at,
+        started_at: result.started_at ?? undefined,
+        completed_at: result.completed_at ?? undefined,
+        duration_ms: result.duration_ms ?? undefined,
+        execution_runtime: "container",
+        summary: result.summary,
+        exit_code: result.exit_code,
+        stdout_excerpt: result.stdout_excerpt,
+        stderr_excerpt: result.stderr_excerpt,
+        adapter: step.adapter,
+        normalized_artifact: buildNormalizedArtifact(step, {
+          status: result.status,
+          summary: result.summary,
+          exitCode: result.exit_code,
+          stdout: result.stdout_excerpt,
+          stderr: result.stderr_excerpt
+        })
+      };
+    });
     await fs.writeFile(path.join(artifactDir, "execution-plan.json"), JSON.stringify(executionPlan, null, 2));
     await fs.writeFile(path.join(artifactDir, "execution-results.json"), JSON.stringify(executionResults, null, 2));
+    await fs.writeFile(path.join(artifactDir, "runtime-provider-plan.json"), JSON.stringify(providerPlan, null, 2));
+    await fs.writeFile(path.join(artifactDir, "runtime-provider-artifacts.json"), JSON.stringify(providerResult.artifacts, null, 2));
 
     return {
       sandbox_id: sandboxId,
@@ -1172,15 +1237,15 @@ export class LinuxContainerSandboxBackend {
         `Derived ${executionPlan.steps.length} bounded execution step(s) for ${runMode} mode.`,
         `Execution readiness is ${executionPlan.readiness_status}.`,
         `Resolved local runtime backend: ${runtimeReadiness.resolution.selected_backend}.`,
-        isHostSandboxExecutionEnabled()
-          ? "Local runtime execution is enabled; derived steps were attempted with per-step timeouts."
-          : "Local runtime execution is disabled; execution results reflect readiness probes only.",
+        executeTarget
+          ? `Local runtime execution used the ${providerPlan.selected_backend} isolated container provider without host fallback.`
+          : "Local runtime target execution was explicitly disabled for plan inspection.",
         "Repository provenance and storage usage are captured before execution phases."
       ],
       command_policy: {
         allow_install_commands: true,
         allow_target_execution: true,
-        allow_network_egress: runMode !== "validate",
+        allow_network_egress: runtimePolicy.network_policy !== "none",
         allowed_command_prefixes: [...new Set([
           ...executionPlan.steps.map((step) => step.command.slice(0, 3).join(" ")),
           "python -m",
@@ -1205,21 +1270,21 @@ export class LinuxContainerSandboxBackend {
       },
       container_workspace: {
         runtime,
-        image: "ghcr.io/jjdomain/tethermark/linux-runner:latest",
+        image: providerPlan.image ?? "unavailable",
         workspace_mount: "/workspace/target",
         artifact_mount: "/workspace/artifacts",
-        network_mode: runMode === "validate" ? "none" : "bounded",
+        network_mode: "none",
         notes: [
           "Mount target directory read-only by default during build/runtime execution.",
           "Mount artifact directory read-write for logs, traces, and exported evidence.",
-          isHostSandboxExecutionEnabled()
-            ? "Current OSS implementation can execute bounded step attempts on the host when explicitly enabled."
-            : "Current OSS implementation derives bounded execution steps and readiness without running them unless host execution is explicitly enabled.",
-          "Future implementation should enforce CPU, memory, PID, and network caps at container launch."
+          "Target commands execute only inside the selected local container backend; host execution is not a fallback.",
+          "Container launch enforces read-only root filesystems, a staged workspace volume, non-root execution, dropped capabilities, no-new-privileges, CPU/memory/PID/output/time limits, and default-deny network."
         ]
       },
       execution_plan: executionPlan,
       execution_results: executionResults,
+      runtime_provider_plan: providerPlan,
+      runtime_provider_result: providerResult,
       runtime_sandbox_readiness: runtimeReadiness,
       runtime_backend_resolution: runtimeReadiness.resolution,
       runtime_execution_policy: runtimePolicy,

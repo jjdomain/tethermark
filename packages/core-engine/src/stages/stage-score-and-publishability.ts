@@ -24,6 +24,8 @@ export function stageScoreAndPublishability(args: {
   auditPackage: AuditPackageDefinition;
   auditPolicy: AuditPolicyArtifact;
   evidenceExecutions?: EvidenceExecutionRecord[];
+  requiredEvidenceProviderIds?: string[];
+  evidenceFailurePolicy?: "block" | "internal_only";
 }): PublishabilityArtifact {
   const rationale: string[] = [];
   const gatingFindings = highSeverityFindingIds(args.findings);
@@ -40,6 +42,10 @@ export function stageScoreAndPublishability(args: {
         !completedProviders.has("scorecard") && !completedProviders.has("scorecard_api") ? "scorecard_or_scorecard_api" : null
       ].filter((item): item is string => Boolean(item))
     : [];
+  const missingPolicyEvidence = [...new Set(args.requiredEvidenceProviderIds ?? [])].filter((providerId) => {
+    if (providerId === "scorecard") return !completedProviders.has("scorecard") && !completedProviders.has("scorecard_api");
+    return !completedProviders.has(providerId);
+  });
 
   if (args.remediation.human_review_required) {
     rationale.push("Remediation stage marked the audit as requiring human review.");
@@ -61,6 +67,9 @@ export function stageScoreAndPublishability(args: {
   }
   if (missingMinimumEvidence.length) {
     rationale.push(`Minimum production static evidence is incomplete: ${missingMinimumEvidence.join(", ")}.`);
+  }
+  if (missingPolicyEvidence.length) {
+    rationale.push(`System policy required evidence is incomplete: ${missingPolicyEvidence.join(", ")}.`);
   }
 
   let publishabilityStatus: PublishabilityArtifact["publishability_status"] = "publishable";
@@ -99,6 +108,13 @@ export function stageScoreAndPublishability(args: {
 
   if (missingMinimumEvidence.length) {
     publishabilityStatus = "internal_only";
+    humanReviewRequired = true;
+    recommendedVisibility = "internal";
+    publicSummarySafe = false;
+  }
+
+  if (missingPolicyEvidence.length) {
+    publishabilityStatus = args.evidenceFailurePolicy === "block" ? "blocked" : "internal_only";
     humanReviewRequired = true;
     recommendedVisibility = "internal";
     publicSummarySafe = false;

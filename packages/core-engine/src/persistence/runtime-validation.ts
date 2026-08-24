@@ -76,6 +76,10 @@ export async function persistRuntimeValidationRecords(args: {
       readiness_status: readinessStatus,
       policy_json: runtimeSandbox.policy,
       plan_json: args.sandboxExecution?.plan ?? null,
+      provider_execution_json: {
+        plan: args.sandboxExecution?.provider_plan ?? null,
+        result: args.sandboxExecution?.provider_result ?? null
+      },
       result_count: args.sandboxExecution?.results?.length ?? 0,
       created_at: now
     };
@@ -108,6 +112,7 @@ export async function persistRuntimeValidationRecords(args: {
         stdout_excerpt: result.stdout_excerpt ?? null,
         stderr_excerpt: result.stderr_excerpt ?? null,
         artifact_json: result.normalized_artifact ?? null,
+        provider_result_json: args.sandboxExecution?.provider_result?.steps?.find((item) => item.step_id === result.step_id) ?? null,
         checked_at: result.checked_at
       };
       upsertSqliteRecord({

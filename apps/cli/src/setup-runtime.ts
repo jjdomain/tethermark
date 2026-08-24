@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 
-import { buildRuntimeSandboxReadiness, buildRuntimeSetupCommands } from "../../../packages/validation-runner/src/index.js";
+import { buildRuntimeSandboxReadiness, buildRuntimeSetupCommands, type LocalSandboxBackendId, type RuntimeSandboxReadiness } from "../../../packages/validation-runner/src/index.js";
 import { executeRuntimeReadinessFixture, type RuntimeFixtureExecutionResult } from "./runtime-fixtures.js";
 
 export interface RuntimeSetupCommand {
@@ -26,6 +26,32 @@ export interface RuntimeSetupExecutionSummary {
   plan: RuntimeSetupCommand[];
   executed: RuntimeSetupExecutionResult[];
   skipped: RuntimeSetupCommand[];
+}
+
+const VERIFIABLE_RUNTIME_BACKENDS = new Set<LocalSandboxBackendId>([
+  "gvisor_container",
+  "rootless_podman",
+  "podman",
+  "docker",
+  "docker_desktop"
+]);
+
+export function parseVerifiableRuntimeBackend(value: string | undefined): LocalSandboxBackendId | undefined {
+  if (!value) return undefined;
+  if (!VERIFIABLE_RUNTIME_BACKENDS.has(value as LocalSandboxBackendId)) {
+    throw new Error(`Unsupported runtime verification backend '${value}'. Expected one of: ${[...VERIFIABLE_RUNTIME_BACKENDS].join(", ")}.`);
+  }
+  return value as LocalSandboxBackendId;
+}
+
+function runtimeReadinessForBackend(backend?: LocalSandboxBackendId): RuntimeSandboxReadiness {
+  return buildRuntimeSandboxReadiness(backend ? {
+    settings: {
+      resolution_mode: "pinned",
+      preferred_backend: backend,
+      allowed_backends: [backend]
+    }
+  } : {});
 }
 
 function commandExists(command: string): boolean {
@@ -235,8 +261,8 @@ export function executeRuntimeSetupPlan(): RuntimeSetupExecutionSummary {
   };
 }
 
-export function printRuntimeDoctor(json = false): void {
-  const readiness = buildRuntimeSandboxReadiness();
+export function printRuntimeDoctor(json = false, backend?: LocalSandboxBackendId): void {
+  const readiness = runtimeReadinessForBackend(backend);
   if (json) {
     console.log(JSON.stringify({ runtime_sandbox: readiness }, null, 2));
     return;
@@ -291,7 +317,7 @@ export function runSetupRuntime(args: { dryRun?: boolean; yes?: boolean } = {}):
   console.log("Runtime setup command finished. Start the runtime if required, then run npm run scan -- runtime-doctor.");
 }
 
-export async function validateRuntimeFixtures(): Promise<{
+export async function validateRuntimeFixtures(options: { backend?: LocalSandboxBackendId } = {}): Promise<{
   passed: boolean;
   backend_launchable: boolean;
   fixture_execution_status: "blocked" | "failed" | "completed";
@@ -300,7 +326,7 @@ export async function validateRuntimeFixtures(): Promise<{
   blockers: string[];
   fixture: RuntimeFixtureExecutionResult | null;
 }> {
-  const readiness = buildRuntimeSandboxReadiness();
+  const readiness = runtimeReadinessForBackend(options.backend);
   const backendLaunchable = readiness.resolution.readiness_status !== "blocked";
   const blockers = [...readiness.resolution.blockers];
   const fixture = backendLaunchable ? await executeRuntimeReadinessFixture(readiness) : null;

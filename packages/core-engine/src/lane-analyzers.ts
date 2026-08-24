@@ -87,7 +87,7 @@ function supplyChainAnalyzer(args: LaneAnalyzerInput): LaneAnalyzerOutput {
       evidence: args.analysis.dependency_manifests.slice(0, 10)
     });
   }
-  if (args.auditPackageId === "deep-static" || args.auditPackageId === "premium-comprehensive") {
+  if (args.auditPackageId === "deep-static" || args.auditPackageId === "comprehensive-local") {
     const deepPackage = analyzeDeepPackageSurface({
       analysis: args.analysis,
       toolExecutions: executions,

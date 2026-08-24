@@ -28,7 +28,8 @@ function resolveAuditPackageDir(): string {
   const candidates = [
     path.resolve(process.cwd(), "packages", "core-engine", "audit-packages"),
     path.resolve(MODULE_DIR, "..", "audit-packages"),
-    path.resolve(MODULE_DIR, "..", "..", "..", "packages", "core-engine", "audit-packages")
+    path.resolve(MODULE_DIR, "..", "..", "..", "packages", "core-engine", "audit-packages"),
+    path.resolve(MODULE_DIR, "..", "..", "..", "..", "packages", "core-engine", "audit-packages")
   ];
   for (const candidate of candidates) {
     if (fs.existsSync(candidate)) return candidate;

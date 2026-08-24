@@ -12,6 +12,7 @@ const FIXTURE_MEMORY_BYTES = 128 * 1024 * 1024;
 const FIXTURE_PIDS_LIMIT = 64;
 const FIXTURE_NANO_CPUS = 1_000_000_000;
 const FIXTURE_TMPFS_BYTES = 16 * 1024 * 1024;
+const FIXTURE_MAX_FILE_BYTES = 1024 * 1024;
 const FIXTURE_TIMEOUT_MS = 60_000;
 const COMMAND_OUTPUT_LIMIT_BYTES = 256 * 1024;
 const SOURCE_MARKER = "tethermark-runtime-source-v1";
@@ -24,12 +25,15 @@ const CONTAINER_SCRIPT = [
   "test \"$(cat /tmp/runtime-fixture.tmp)\" = 'temporary-write-ok'",
   "test \"$(awk '/^CapEff:/ { print $2 }' /proc/self/status)\" = '0000000000000000'",
   "test \"$(awk '/^NoNewPrivs:/ { print $2 }' /proc/self/status)\" = '1'",
+  "test -z \"${TETHERMARK_HOST_SECRET-}\"",
+  "test \"${TETHERMARK_FAKE_SECRET-}\" = 'tm_fake_runtime_validation_only'",
+  "if dd if=/dev/zero of=/tmp/oversized.bin bs=1048576 count=2 2>/dev/null; then echo 'file-size limit unexpectedly allowed oversized file' >&2; exit 34; fi",
   "command -v wget >/dev/null",
   "if wget -q -T 2 -O /tmp/network-response http://example.com 2>/dev/null; then echo 'network request unexpectedly succeeded' >&2; exit 32; fi",
   "printf 'ready' > /output/ready",
   "attempt=0",
   "while [ ! -f /output/continue ]; do attempt=$((attempt + 1)); [ \"$attempt\" -lt 30 ] || exit 33; sleep 1; done",
-  "printf '%s' '{\"source_readonly\":true,\"writable_tmpfs\":true,\"network_blocked\":true,\"capabilities_dropped\":true,\"no_new_privileges\":true}' > /output/result.json",
+  "printf '%s' '{\"source_readonly\":true,\"writable_tmpfs\":true,\"network_blocked\":true,\"capabilities_dropped\":true,\"no_new_privileges\":true,\"host_secret_blocked\":true,\"synthetic_credential_only\":true,\"file_size_blocked\":true}' > /output/result.json",
   "echo 'tethermark-runtime-fixture-complete'"
 ].join("\n");
 
@@ -44,12 +48,12 @@ export interface RuntimeFixtureExecutionResult {
   schema_version: 1;
   passed: boolean;
   backend_id: LocalSandboxBackendId;
-  runtime_command: "docker" | null;
+  runtime_command: "docker" | "podman" | null;
   image: string;
   image_digest: string;
   container_name: string | null;
   create_command: {
-    command: "docker";
+    command: "docker" | "podman";
     args: string[];
   } | null;
   resource_policy: {
@@ -63,6 +67,7 @@ export interface RuntimeFixtureExecutionResult {
     pids_limit: number;
     nano_cpus: number;
     tmpfs_bytes: number;
+    max_file_bytes: number;
   };
   started_at: string;
   completed_at: string;
@@ -82,13 +87,14 @@ export interface RuntimeFixtureExecutionResult {
   error: string | null;
 }
 
-interface DockerFixturePaths {
+interface RuntimeFixturePaths {
   tempRoot: string;
   sourceRoot: string;
   outputRoot: string;
 }
 
 interface DockerInspectShape {
+  ImageName?: string;
   Config?: {
     Image?: string;
     User?: string;
@@ -97,6 +103,8 @@ interface DockerInspectShape {
   HostConfig?: {
     AutoRemove?: boolean;
     CapDrop?: string[] | null;
+    CpuPeriod?: number;
+    CpuQuota?: number;
     Init?: boolean | null;
     Memory?: number;
     NanoCpus?: number;
@@ -104,8 +112,10 @@ interface DockerInspectShape {
     PidsLimit?: number | null;
     Privileged?: boolean;
     ReadonlyRootfs?: boolean;
+    Runtime?: string;
     SecurityOpt?: string[] | null;
     Tmpfs?: Record<string, string> | null;
+    Ulimits?: Array<{ Name?: string; Soft?: number; Hard?: number }> | null;
   };
   Mounts?: Array<{
     Destination?: string;
@@ -185,11 +195,11 @@ async function waitForFile(filePath: string, timeoutMs: number): Promise<void> {
   throw new Error(`Runtime fixture did not signal readiness within ${timeoutMs}ms.`);
 }
 
-async function ensurePinnedImage(): Promise<void> {
-  const inspection = await runCommand("docker", ["image", "inspect", RUNTIME_FIXTURE_IMAGE], { allowFailure: true, timeoutMs: 15_000 });
+async function ensurePinnedImage(runtimeCommand: "docker" | "podman"): Promise<void> {
+  const inspection = await runCommand(runtimeCommand, ["image", "inspect", RUNTIME_FIXTURE_IMAGE], { allowFailure: true, timeoutMs: 15_000 });
   if (inspection.exit_code === 0) return;
-  await runCommand("docker", ["pull", RUNTIME_FIXTURE_IMAGE], { timeoutMs: 180_000 });
-  const afterPull = await runCommand("docker", ["image", "inspect", RUNTIME_FIXTURE_IMAGE], { allowFailure: true, timeoutMs: 15_000 });
+  await runCommand(runtimeCommand, ["pull", RUNTIME_FIXTURE_IMAGE], { timeoutMs: 180_000 });
+  const afterPull = await runCommand(runtimeCommand, ["image", "inspect", RUNTIME_FIXTURE_IMAGE], { allowFailure: true, timeoutMs: 15_000 });
   if (afterPull.exit_code !== 0) throw new Error("Pinned runtime fixture image was not available after pull.");
 }
 
@@ -197,8 +207,9 @@ export function buildDockerRuntimeFixtureCreateArgs(input: {
   containerName: string;
   sourceRoot: string;
   outputRoot: string;
+  backend?: LocalSandboxBackendId;
 }): string[] {
-  return [
+  const args = [
     "create",
     "--name", input.containerName,
     "--network", "none",
@@ -208,10 +219,13 @@ export function buildDockerRuntimeFixtureCreateArgs(input: {
     "--pids-limit", String(FIXTURE_PIDS_LIMIT),
     "--memory", String(FIXTURE_MEMORY_BYTES),
     "--cpus", "1",
+    "--ulimit", `fsize=${FIXTURE_MAX_FILE_BYTES}:${FIXTURE_MAX_FILE_BYTES}`,
     "--init",
     "--user", "65532:65532",
     "--workdir", "/workspace",
     "--env", "TETHERMARK_RUNTIME_FIXTURE=1",
+    "--env", "TETHERMARK_RUNTIME_CREDENTIAL_MODE=synthetic",
+    "--env", "TETHERMARK_FAKE_SECRET=tm_fake_runtime_validation_only",
     "--tmpfs", `/tmp:rw,noexec,nosuid,nodev,size=${FIXTURE_TMPFS_BYTES}`,
     "--mount", `type=bind,source=${path.resolve(input.sourceRoot)},target=/workspace,readonly`,
     "--mount", `type=bind,source=${path.resolve(input.outputRoot)},target=/output`,
@@ -220,20 +234,31 @@ export function buildDockerRuntimeFixtureCreateArgs(input: {
     "-c",
     CONTAINER_SCRIPT
   ];
+  if (input.backend === "gvisor_container") args.splice(3, 0, "--runtime", "runsc");
+  return args;
 }
 
 export function validateDockerRuntimeFixtureInspect(inspection: DockerInspectShape, expected: {
   sourceRoot: string;
   outputRoot: string;
+  backend?: LocalSandboxBackendId;
 }): Record<string, boolean> {
   const mounts = inspection.Mounts ?? [];
   const sourceMount = mounts.find((item) => item.Destination === "/workspace");
   const outputMount = mounts.find((item) => item.Destination === "/output");
   const env = inspection.Config?.Env ?? [];
   const secretEnvPattern = /^(?:.*(?:API_KEY|TOKEN|SECRET|PASSWORD|CREDENTIALS?))=/i;
+  const approvedSyntheticEnvironment = new Set([
+    "TETHERMARK_RUNTIME_CREDENTIAL_MODE=synthetic",
+    "TETHERMARK_FAKE_SECRET=tm_fake_runtime_validation_only"
+  ]);
   const tmpfs = inspection.HostConfig?.Tmpfs?.["/tmp"] ?? "";
+  const cpuLimited = inspection.HostConfig?.NanoCpus === FIXTURE_NANO_CPUS
+    || (Number(inspection.HostConfig?.CpuPeriod) > 0
+      && Number(inspection.HostConfig?.CpuQuota) / Number(inspection.HostConfig?.CpuPeriod) === 1);
+  const ulimits = inspection.HostConfig?.Ulimits ?? [];
   return {
-    pinned_image: inspection.Config?.Image === RUNTIME_FIXTURE_IMAGE,
+    pinned_image: inspection.Config?.Image === RUNTIME_FIXTURE_IMAGE || inspection.ImageName === RUNTIME_FIXTURE_IMAGE,
     non_root_user: inspection.Config?.User === "65532:65532",
     network_disabled: inspection.HostConfig?.NetworkMode === "none",
     root_filesystem_readonly: inspection.HostConfig?.ReadonlyRootfs === true,
@@ -242,18 +267,23 @@ export function validateDockerRuntimeFixtureInspect(inspection: DockerInspectSha
     unprivileged_container: inspection.HostConfig?.Privileged === false,
     pids_limited: inspection.HostConfig?.PidsLimit === FIXTURE_PIDS_LIMIT,
     memory_limited: inspection.HostConfig?.Memory === FIXTURE_MEMORY_BYTES,
-    cpu_limited: inspection.HostConfig?.NanoCpus === FIXTURE_NANO_CPUS,
+    cpu_limited: cpuLimited,
     init_enabled: inspection.HostConfig?.Init === true,
     tmpfs_bounded: tmpfs.includes("noexec") && tmpfs.includes("nosuid") && tmpfs.includes("nodev") && tmpfs.includes(`size=${FIXTURE_TMPFS_BYTES}`),
     source_mount_readonly: sourceMount?.Type === "bind" && sourceMount.RW === false && normalizePathForComparison(sourceMount.Source ?? "") === normalizePathForComparison(expected.sourceRoot),
     output_mount_writable: outputMount?.Type === "bind" && outputMount.RW === true && normalizePathForComparison(outputMount.Source ?? "") === normalizePathForComparison(expected.outputRoot),
     only_expected_host_mounts: mounts.length === 2 && mounts.every((item) => item.Destination === "/workspace" || item.Destination === "/output"),
-    no_secret_environment: !env.some((item) => secretEnvPattern.test(item)),
-    explicit_cleanup_required: inspection.HostConfig?.AutoRemove === false
+    synthetic_credential_injected: env.includes("TETHERMARK_FAKE_SECRET=tm_fake_runtime_validation_only"),
+    no_real_secret_environment: !env.some((item) => secretEnvPattern.test(item) && !approvedSyntheticEnvironment.has(item)),
+    file_size_limited: ulimits.some((item) => /(?:^|_)fsize$/i.test(item.Name ?? "") && item.Soft === FIXTURE_MAX_FILE_BYTES && item.Hard === FIXTURE_MAX_FILE_BYTES),
+    explicit_cleanup_required: inspection.HostConfig?.AutoRemove === false,
+    selected_runtime_matches_backend: expected.backend === "gvisor_container"
+      ? inspection.HostConfig?.Runtime === "runsc"
+      : inspection.HostConfig?.Runtime !== "runsc"
   };
 }
 
-async function createFixturePaths(): Promise<DockerFixturePaths> {
+async function createFixturePaths(): Promise<RuntimeFixturePaths> {
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "tethermark-runtime-fixture-"));
   const sourceRoot = path.join(tempRoot, "source");
   const outputRoot = path.join(tempRoot, "output");
@@ -276,8 +306,10 @@ async function writeEvidence(result: RuntimeFixtureExecutionResult): Promise<str
   }
 }
 
-function selectedRuntimeCommand(backend: LocalSandboxBackendId): "docker" | null {
-  return backend === "docker" || backend === "docker_desktop" ? "docker" : null;
+function selectedRuntimeCommand(backend: LocalSandboxBackendId): "docker" | "podman" | null {
+  if (backend === "docker" || backend === "docker_desktop" || backend === "gvisor_container") return "docker";
+  if (backend === "podman" || backend === "rootless_podman") return "podman";
+  return null;
 }
 
 export async function executeRuntimeReadinessFixture(readiness: RuntimeSandboxReadiness): Promise<RuntimeFixtureExecutionResult> {
@@ -303,7 +335,8 @@ export async function executeRuntimeReadinessFixture(readiness: RuntimeSandboxRe
       memory_bytes: FIXTURE_MEMORY_BYTES,
       pids_limit: FIXTURE_PIDS_LIMIT,
       nano_cpus: FIXTURE_NANO_CPUS,
-      tmpfs_bytes: FIXTURE_TMPFS_BYTES
+      tmpfs_bytes: FIXTURE_TMPFS_BYTES,
+      max_file_bytes: FIXTURE_MAX_FILE_BYTES
     },
     started_at: startedAt.toISOString(),
     completed_at: startedAt.toISOString(),
@@ -314,31 +347,33 @@ export async function executeRuntimeReadinessFixture(readiness: RuntimeSandboxRe
     evidence_path: null,
     error: null
   };
-  let paths: DockerFixturePaths | null = null;
+  let paths: RuntimeFixturePaths | null = null;
   let containerCreated = false;
   try {
     if (!runtimeCommand) throw new Error(`Runtime readiness fixtures are not implemented for backend ${backend}.`);
     if (!readiness.launchable || readiness.resolution.readiness_status === "blocked") {
       throw new Error(`Runtime backend ${backend} is not launchable.`);
     }
-    await ensurePinnedImage();
+    await ensurePinnedImage(runtimeCommand);
     paths = await createFixturePaths();
     const containerName = `tethermark-runtime-readiness-${process.pid}-${Date.now()}`.toLowerCase();
     result.container_name = containerName;
     const createArgs = buildDockerRuntimeFixtureCreateArgs({
       containerName,
       sourceRoot: paths.sourceRoot,
-      outputRoot: paths.outputRoot
+      outputRoot: paths.outputRoot,
+      backend
     });
     result.create_command = { command: runtimeCommand, args: createArgs };
     const createResult = await runCommand(runtimeCommand, createArgs);
     containerCreated = createResult.exit_code === 0;
     const inspectResult = await runCommand(runtimeCommand, ["inspect", containerName]);
     const inspection = (JSON.parse(inspectResult.stdout) as DockerInspectShape[])[0];
-    if (!inspection) throw new Error("Docker inspect returned no fixture container record.");
+    if (!inspection) throw new Error(`${runtimeCommand} inspect returned no fixture container record.`);
     Object.assign(result.assertions, validateDockerRuntimeFixtureInspect(inspection, {
       sourceRoot: paths.sourceRoot,
-      outputRoot: paths.outputRoot
+      outputRoot: paths.outputRoot,
+      backend
     }));
     const failedConfigAssertions = Object.entries(result.assertions).filter(([, passed]) => !passed).map(([name]) => name);
     if (failedConfigAssertions.length) throw new Error(`Runtime fixture container policy assertions failed: ${failedConfigAssertions.join(", ")}`);
@@ -351,7 +386,7 @@ export async function executeRuntimeReadinessFixture(readiness: RuntimeSandboxRe
     result.command = execution;
     const containerResultPath = path.join(paths.outputRoot, "result.json");
     const containerResult = JSON.parse(await fs.readFile(containerResultPath, "utf8")) as Record<string, unknown>;
-    for (const key of ["source_readonly", "writable_tmpfs", "network_blocked", "capabilities_dropped", "no_new_privileges"]) {
+    for (const key of ["source_readonly", "writable_tmpfs", "network_blocked", "capabilities_dropped", "no_new_privileges", "host_secret_blocked", "synthetic_credential_only", "file_size_blocked"]) {
       result.assertions[`executed_${key}`] = containerResult[key] === true;
     }
     result.assertions.container_exit_zero = execution.exit_code === 0 && !execution.timed_out;

@@ -138,6 +138,22 @@ import {
   buildRuntimeSandboxReadiness,
   getRuntimeSandboxProviders,
   normalizeRuntimeSandboxSettings,
+  archivePersistedSystemPolicy,
+  createPersistedSystemPolicy,
+  createPersistedSystemPolicyVersion,
+  deactivatePersistedSystemPolicyBinding,
+  ensureBuiltinSystemPolicies,
+  exportSystemPolicy,
+  getPersistedSystemPolicy,
+  importSystemPolicy,
+  listBuiltinSystemPolicyTemplates,
+  publishPersistedSystemPolicy,
+  resolveAndApplySystemPolicy,
+  readPersistedPolicyResolutionSnapshot,
+  rollbackPersistedSystemPolicy,
+  setDefaultPersistedSystemPolicy,
+  upsertPersistedSystemPolicyBinding,
+  validatePersistedSystemPolicy,
   canCommentOnReview,
   canExportReviewAudit,
   canPerformReviewAction,
@@ -272,6 +288,7 @@ type RunSubresource =
   | "summary"
   | "preflight"
   | "launch-intent"
+  | "resolved-system-policy"
   | "outbound-approval"
   | "outbound-send"
   | "outbound-delivery"
@@ -352,6 +369,7 @@ function buildRunExportIndex(runId: string, compareToRunId: string | null) {
       { export_type: "finding_evaluations", format: "json", filename: `${runId}-finding-evaluations.json`, route: `/runs/${encodeURIComponent(runId)}/finding-evaluations`, schema_name: "finding_evaluations.v1" },
       { export_type: "finding_quality", format: "json", filename: `${runId}-finding-quality.json`, route: `/runs/${encodeURIComponent(runId)}/finding-quality`, schema_name: "finding_quality.v1" },
       { export_type: "review_audit", format: "json", filename: `${runId}-review-audit.json`, route: `/runs/${encodeURIComponent(runId)}/review-audit`, schema_name: "review_audit.v1" },
+      { export_type: "resolved_system_policy", format: "json", filename: `${runId}-resolved-system-policy.json`, route: `/runs/${encodeURIComponent(runId)}/resolved-system-policy`, schema_name: "resolved_system_policy.v1" },
       { export_type: "learning_candidates", format: "json", filename: `${runId}-learning-candidates.json`, route: `/runs/${encodeURIComponent(runId)}/learning`, schema_name: "learning_candidates.v1" },
       ...(compareToRunId ? [
         { export_type: "run_comparison", format: "json", filename: `${runId}-vs-${compareToRunId}-comparison.json`, route: `/runs/${encodeURIComponent(runId)}/report-compare?compare_to=${encodeURIComponent(compareToRunId)}&format=json`, schema_name: "run_comparison.v1" },
@@ -1850,7 +1868,7 @@ function buildScopedTargetStats(targets: PersistedTargetListItem[]) {
 }
 
 function matchRunSubresource(url: URL): { runId: string; resource: RunSubresource } | null {
-  const match = url.pathname.match(/^\/runs\/([^/]+)\/(observability|observations|events|metrics|observability-summary|maintenance|lane-plans|lane-results|lane-specialists|lane-reuse-decisions|evidence-records|findings|control-results|tool-executions|tool-adapters|agent-invocations|agent-trace|artifact-index|score-summary|dimension-scores|usage-summary|review-decision|review-workflow|review-actions|review-comments|review-summary|runtime-followups|remediation-items|learning|exports|finding-dispositions|finding-evaluations|finding-integrity-pre-supervisor|post-supervisor-integrity|finding-quality|webhook-deliveries|report-markdown|report-sarif|report-executive|report-compare|sandbox-execution|runtime-validation|review-audit|outbound-preview|outbound-approval|outbound-send|outbound-verification|outbound-delivery|supervisor-review|remediation|summary|preflight|launch-intent|commit-diff|persistence|stage-executions|publishability|policy-application|resolved-config|correction-plan|correction-result)$/);
+  const match = url.pathname.match(/^\/runs\/([^/]+)\/(observability|observations|events|metrics|observability-summary|maintenance|lane-plans|lane-results|lane-specialists|lane-reuse-decisions|evidence-records|findings|control-results|tool-executions|tool-adapters|agent-invocations|agent-trace|artifact-index|score-summary|dimension-scores|usage-summary|review-decision|review-workflow|review-actions|review-comments|review-summary|runtime-followups|remediation-items|learning|exports|finding-dispositions|finding-evaluations|finding-integrity-pre-supervisor|post-supervisor-integrity|finding-quality|webhook-deliveries|report-markdown|report-sarif|report-executive|report-compare|sandbox-execution|runtime-validation|review-audit|outbound-preview|outbound-approval|outbound-send|outbound-verification|outbound-delivery|supervisor-review|remediation|summary|preflight|launch-intent|resolved-system-policy|commit-diff|persistence|stage-executions|publishability|policy-application|resolved-config|correction-plan|correction-result)$/);
   if (!match) return null;
   return { runId: match[1] ?? "", resource: match[2] as RunSubresource };
 }
@@ -2021,6 +2039,17 @@ function matchUiDocument(url: URL): { documentId: string } | null {
   const match = url.pathname.match(/^\/ui\/documents\/([^/]+)$/);
   if (!match) return null;
   return { documentId: decodeURIComponent(match[1] ?? "") };
+}
+
+function matchSystemPolicy(url: URL): { policyId: string; action: "detail" | "validate" | "publish" | "archive" | "rollback" | "set-default" | "export" | "bindings" } | null {
+  const match = url.pathname.match(/^\/system\/policies\/([^/]+?)(?:\/(validate|publish|archive|rollback|set-default|export|bindings))?$/);
+  if (!match) return null;
+  return { policyId: decodeURIComponent(match[1]), action: (match[2] || "detail") as "detail" | "validate" | "publish" | "archive" | "rollback" | "set-default" | "export" | "bindings" };
+}
+
+function matchSystemPolicyBinding(url: URL): { bindingId: string } | null {
+  const match = url.pathname.match(/^\/system\/policy-bindings\/([^/]+)$/);
+  return match ? { bindingId: decodeURIComponent(match[1]) } : null;
 }
 
 function matchUiProject(url: URL): { projectId: string } | null {
@@ -2496,6 +2525,135 @@ export function createApiServer(): http.Server {
     return;
   }
   const context = auth.context;
+
+  if (req.method === "GET" && url.pathname === "/system/controls") {
+    sendJson(res, 200, { control_catalog: getControlCatalog() });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/system/audit-packages") {
+    sendJson(res, 200, { audit_packages: listBuiltinAuditPackages() });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/system/policies") {
+    try {
+      const policies = await ensureBuiltinSystemPolicies(context.workspaceId);
+      const details = (await Promise.all(policies.map((policy) => getPersistedSystemPolicy(policy.id, context.workspaceId)))).filter(Boolean);
+      sendJson(res, 200, { policies, policy_details: details, templates: listBuiltinSystemPolicyTemplates(), control_catalog: getControlCatalog(), audit_packages: listBuiltinAuditPackages(), auth: buildAuthInfo() });
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/system/policies") {
+    if (!context.roles.includes("admin")) {
+      sendJson(res, 403, { error: "forbidden", required_roles: ["admin"] });
+      return;
+    }
+    try {
+      const body = await readJson<{ id?: string; name?: string; description?: string; template_id?: any; definition?: unknown; reason?: string }>(req);
+      if (!body.name) throw new Error("system_policy_name_required");
+      const policy = await createPersistedSystemPolicy({ ...body, name: body.name, actor_id: context.actorId, workspace_id: context.workspaceId });
+      sendJson(res, 201, { system_policy: policy });
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/system/policies/import") {
+    if (!context.roles.includes("admin")) {
+      sendJson(res, 403, { error: "forbidden", required_roles: ["admin"] });
+      return;
+    }
+    try {
+      const body = await readJson<{ payload?: unknown } & Record<string, unknown>>(req);
+      const policy = await importSystemPolicy(body.payload ?? body, context.actorId, context.workspaceId);
+      sendJson(res, 201, { system_policy: policy });
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/system/policies/resolve-preview") {
+    try {
+      const body = await readJson<{ request?: AuditRequest; target_class?: any }>(req);
+      if (!body.request) throw new Error("request_required");
+      const configured = await applySettingsToAuditRequest(body.request, context);
+      const resolved = await resolveAndApplySystemPolicy(configured, { target_class: body.target_class ?? null });
+      sendJson(res, 200, { resolved_policy: resolved.snapshot, effective_request: resolved.request });
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
+  const systemPolicyRoute = matchSystemPolicy(url);
+  if (systemPolicyRoute) {
+    try {
+      if (req.method === "GET" && systemPolicyRoute.action === "detail") {
+        const detail = await getPersistedSystemPolicy(systemPolicyRoute.policyId, context.workspaceId);
+        if (!detail) { sendJson(res, 404, { error: "system_policy_not_found" }); return; }
+        sendJson(res, 200, { system_policy: detail });
+        return;
+      }
+      if (req.method === "GET" && systemPolicyRoute.action === "export") {
+        const detail = await getPersistedSystemPolicy(systemPolicyRoute.policyId, context.workspaceId);
+        if (!detail) { sendJson(res, 404, { error: "system_policy_not_found" }); return; }
+        sendJson(res, 200, exportSystemPolicy(detail));
+        return;
+      }
+      if (!context.roles.includes("admin")) { sendJson(res, 403, { error: "forbidden", required_roles: ["admin"] }); return; }
+      const body = req.method === "POST" || req.method === "PATCH" ? await readJson<Record<string, any>>(req) : {};
+      if (req.method === "PATCH" && systemPolicyRoute.action === "detail") {
+        const version = await createPersistedSystemPolicyVersion(systemPolicyRoute.policyId, { definition: body.definition, reason: String(body.reason || "edited in policy administration"), actor_id: context.actorId, workspace_id: context.workspaceId });
+        sendJson(res, 200, { policy_version: version });
+        return;
+      }
+      if (req.method === "POST" && systemPolicyRoute.action === "validate") {
+        sendJson(res, 200, { validation: await validatePersistedSystemPolicy(systemPolicyRoute.policyId, context.workspaceId, context.actorId) });
+        return;
+      }
+      if (req.method === "POST" && systemPolicyRoute.action === "publish") {
+        sendJson(res, 200, { system_policy: await publishPersistedSystemPolicy(systemPolicyRoute.policyId, context.actorId, String(body.reason || "published"), context.workspaceId) });
+        return;
+      }
+      if (req.method === "POST" && systemPolicyRoute.action === "archive") {
+        sendJson(res, 200, { system_policy: await archivePersistedSystemPolicy(systemPolicyRoute.policyId, context.actorId, String(body.reason || "archived"), context.workspaceId) });
+        return;
+      }
+      if (req.method === "POST" && systemPolicyRoute.action === "rollback") {
+        sendJson(res, 200, { system_policy: await rollbackPersistedSystemPolicy(systemPolicyRoute.policyId, String(body.version_id || ""), context.actorId, String(body.reason || "rollback"), context.workspaceId) });
+        return;
+      }
+      if (req.method === "POST" && systemPolicyRoute.action === "set-default") {
+        sendJson(res, 200, { system_policy: await setDefaultPersistedSystemPolicy(systemPolicyRoute.policyId, context.actorId, context.workspaceId) });
+        return;
+      }
+      if (req.method === "POST" && systemPolicyRoute.action === "bindings") {
+        sendJson(res, 201, { binding: await upsertPersistedSystemPolicyBinding({ ...body, policy_id: systemPolicyRoute.policyId, actor_id: context.actorId, workspace_id: context.workspaceId } as any) });
+        return;
+      }
+      sendJson(res, 405, { error: "method_not_allowed" });
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
+  const systemPolicyBindingRoute = matchSystemPolicyBinding(url);
+  if (systemPolicyBindingRoute && req.method === "DELETE") {
+    if (!context.roles.includes("admin")) { sendJson(res, 403, { error: "forbidden", required_roles: ["admin"] }); return; }
+    try {
+      sendJson(res, 200, { binding: await deactivatePersistedSystemPolicyBinding(systemPolicyBindingRoute.bindingId, context.actorId, context.workspaceId) });
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
 
   if (req.method === "GET" && url.pathname === "/assistant/capabilities") {
     const productMode = resolveAssistantProductMode();
@@ -2996,9 +3154,10 @@ export function createApiServer(): http.Server {
   if (req.method === "POST" && url.pathname === "/preflight") {
     try {
       const body = await readJson<{ request?: AuditRequest } & AuditRequest>(req);
-      const request = await applySettingsToAuditRequest((body.request && typeof body.request === "object" ? body.request : body) as AuditRequest, context);
-      const summary = await buildPreflightSummary(request);
-      sendJson(res, 200, { preflight: summary });
+      const configured = await applySettingsToAuditRequest((body.request && typeof body.request === "object" ? body.request : body) as AuditRequest, context);
+      const resolved = await resolveAndApplySystemPolicy(configured);
+      const summary = await buildPreflightSummary(resolved.request);
+      sendJson(res, 200, { preflight: summary, resolved_policy: resolved.snapshot });
     } catch (error) {
       sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
     }
@@ -3151,8 +3310,10 @@ export function createApiServer(): http.Server {
         sendJson(res, 400, { error: "request_required" });
         return;
       }
+      const configured = await applySettingsToAuditRequest(body.request, context);
+      const resolved = await resolveAndApplySystemPolicy(configured);
       const job = await asyncJobs.createJob({
-        request: await applySettingsToAuditRequest(body.request, context),
+        request: resolved.request,
         startImmediately: body.start_immediately,
         completionWebhookUrl: body.completion_webhook_url ?? null
       });
@@ -5458,6 +5619,11 @@ export function createApiServer(): http.Server {
       }
       if (runSubresource.resource === "launch-intent") {
         sendJson(res, 200, { run_id: runSubresource.runId, launch_intent: await readPersistedStageArtifact(runSubresource.runId, "launch-intent") });
+        return;
+      }
+      if (runSubresource.resource === "resolved-system-policy") {
+        const resolvedPolicy = await readPersistedPolicyResolutionSnapshot(runSubresource.runId);
+        sendJson(res, 200, { run_id: runSubresource.runId, export_schema: buildExportEnvelope("resolved_system_policy.v1", resolvedPolicy), resolved_system_policy: resolvedPolicy });
         return;
       }
       if (runSubresource.resource === "sandbox-execution") {

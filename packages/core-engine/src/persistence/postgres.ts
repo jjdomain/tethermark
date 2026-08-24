@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 
-import { SELF_LEARNING_POSTGRES_DDL, SELF_LEARNING_TABLE_DEFINITIONS } from "./schema-manifest.js";
+import { PERSISTENCE_POSTGRES_DDL, PERSISTENCE_TABLE_DEFINITIONS } from "./schema-manifest.js";
 
 export interface PostgresConnectionConfig {
   database_url: string | null;
@@ -45,7 +45,7 @@ export function resolvePostgresConnectionConfig(): PostgresConnectionConfig {
 }
 
 export function buildPostgresRecordStoreDdl(): string {
-  const schemaRows = SELF_LEARNING_TABLE_DEFINITIONS.map((definition) => {
+  const schemaRows = PERSISTENCE_TABLE_DEFINITIONS.map((definition) => {
     const description = definition.description.replace(/'/g, "''");
     const primaryKeyJson = JSON.stringify(definition.primary_key).replace(/'/g, "''");
     const fieldsJson = JSON.stringify(definition.fields).replace(/'/g, "''");
@@ -94,7 +94,7 @@ export function buildPostgresMigrationSql(): string {
     "-- Default OSS runtime remains SQLite; this migration prepares a remote Postgres-compatible store.",
     "BEGIN;",
     buildPostgresRecordStoreDdl(),
-    SELF_LEARNING_POSTGRES_DDL,
+    PERSISTENCE_POSTGRES_DDL,
     "COMMIT;",
     ""
   ].join("\n\n");

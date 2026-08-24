@@ -53,6 +53,13 @@ export function buildScanRequest(args: string[]): { request: AuditRequest; targe
     db_mode: readFlag(args, "--db-mode") as AuditRequest["db_mode"] | undefined
   };
 
+  if (readBooleanFlag(args, "--accept-runtime-warning") === true) {
+    request.hints = {
+      runtime_sandbox_accepted_at: new Date().toISOString(),
+      launch_intent: { source_surface: "cli", preflight_accepted_at: new Date().toISOString() }
+    };
+  }
+
   if (targetType === "path" && targetValue) request.local_path = path.resolve(targetValue);
   else if (targetType === "repo" && targetValue) request.repo_url = targetValue;
   else if (targetType === "endpoint" && targetValue) request.endpoint_url = targetValue;

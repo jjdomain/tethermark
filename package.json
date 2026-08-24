@@ -33,6 +33,7 @@
     "production:static-readiness": "npm run build --silent && npm test --silent && npm run exports:check --silent && npm run smoke:openai-codex-oauth --silent && npm run e2e:static-pi --silent && npm run e2e:static-pi-ui --silent",
     "production:static-release": "npm run production:static-readiness",
     "production:runtime-readiness": "npm run build --silent && node dist/apps/cli/src/index.js runtime-doctor --json && node dist/apps/cli/src/index.js validate-runtime-fixtures && npm run exports:check --silent",
+    "production:runtime-native": "npm run build --silent && node scripts/check-native-runtime.mjs",
     "production:harness-readiness": "npm run production:static-readiness && npm run production:runtime-readiness",
     "scan": "npm run build --silent && node dist/apps/cli/src/index.js",
     "scan:self": "npm run build --silent && node dist/apps/cli/src/index.js scan path . --output ./.artifacts/runs/self-scan-ts --mode static",

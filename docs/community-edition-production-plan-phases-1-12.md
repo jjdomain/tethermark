@@ -78,9 +78,10 @@ Updated on 2026-08-20 during Phase 5 calibration work from merged Phase 4:
 - `npm run release:check`: **passed** on 2026-08-02 in 94.4 seconds. Build, tests, export validation, and all three bundled validation fixtures passed.
 - `npm run production:static-release`: **passed** on 2026-08-02 in 303.3 seconds on the final runtime-fixture implementation tree after installing Playwright Chromium and correcting the browser E2E's renamed Audits navigation selector and isolated benchmark-suite staging.
 - The prior static-tool availability gap is resolved on Windows. Deterministic Pi E2E jobs intentionally disable local binaries and assert explicit skipped evidence, while the separate real-scanner gate requires executable pinned tools.
-- `npm run production:runtime-readiness`: **passed** on 2026-08-02 in 36.1 seconds with Docker Desktop `29.3.0` on the Linux engine. A digest-pinned Alpine fixture executed with no network, read-only source/root filesystems, bounded writable scratch, non-root execution, dropped capabilities, no-new-privileges, CPU/memory/PID/output limits, exact policy inspection, structured evidence, and verified container/temp cleanup. Independent post-gate checks found no leftover fixture containers or temp roots. `localRuntimeProvider.execute()` remains a blocked placeholder, so real audit-target runtime execution is still Phase 8 work.
+- `npm run production:runtime-readiness`: **passed** on 2026-08-02 in 36.1 seconds with Docker Desktop `29.3.0` on the Linux engine. A digest-pinned Alpine fixture executed with no network, read-only source/root filesystems, bounded writable scratch, non-root execution, dropped capabilities, no-new-privileges, CPU/memory/PID/output limits, exact policy inspection, structured evidence, and verified container/temp cleanup. On 2026-08-21, `localRuntimeProvider.execute()` also completed real digest-pinned Node target tests and service startup through Docker Desktop with exact argv, non-root execution, default-deny network, source immutability, cancellation cleanup, and zero leftover containers/volumes.
+- `npm run production:runtime-native -- --backend docker_desktop`: **passed** on 2026-08-24 on Windows 11 x64 with Docker Desktop `4.66.0`, Docker engine `29.3.0`, and the WSL2 Linux engine. The pinned backend passed the malicious readiness fixture plus real Node test, artifact, and bounded-service execution; every step used exact argv and default-deny networking, quota accounting completed, artifact collection succeeded, and no Tethermark container, volume, or network remained.
 - The real Codex sign-in smoke and both bounded live inference gates now pass with a directly executable signed-in CLI.
-- The Local Runtime Sandbox resolver and policy contracts exist, but `localRuntimeProvider.execute()` still returns a blocked placeholder. The Linux container backend has execution-plan scaffolding but is not yet the finished isolated CE execution path.
+- The Local Runtime Sandbox resolver, policy contracts, and Docker-first execution provider are implemented. Docker now enforces per-file limits plus separate hard tmpfs workspace and artifact-scratch quotas, safely collects regular artifact files, persists resource summaries, injects synthetic-only fixture credentials/services, passes the malicious readiness fixture, and routes explicitly governed dependency-install or external runtime-probe egress through an internal-network allowlisting proxy. Remaining Phase 8 work is verified Podman/gVisor and macOS/Linux fixtures.
 - The governed self-learning v1 path exists for CE and is off by default. Candidate generation/promotion is human governed. Hosted products may extend it, but it is not hosted-only.
 - Local ChatGPT-session credentials are blocked for unattended/background model synthesis. The approved matrix requires API-key or mock credentials for unattended and service work.
 
@@ -94,8 +95,8 @@ Updated on 2026-08-20 during Phase 5 calibration work from merged Phase 4:
 | 4 | Make static scanners production dependable | **Complete** | None; PR #4 passed the three-OS real-scanner matrix and retained all evidence artifacts |
 | 5 | Calibrate audit quality, evidence integrity, and scoring | **Complete** | Current four-advisory release set passes; future ground-truth expansion triggers recalibration |
 | 6 | Complete review, remediation, exports, and operator workflows | **Complete** | Completed 2026-08-20; see `docs/phase6-operator-workflow-evidence.md` |
-| 7 | Implement Admin/System Policies and extensive-scan controls | **Not started** | Schema, persistence, resolver, UI/API, migrations, tests |
-| 8 | Execute local runtime scans in a real isolated sandbox | **Partial** | Readiness fixture passes; provider execution is still blocked/scaffolded |
+| 7 | Implement Admin/System Policies and extensive-scan controls | **Complete for the policy plane** | Executable runtime enforcement is tracked in Phase 8 |
+| 8 | Execute local runtime scans in a real isolated sandbox | **In progress** | Windows Docker Desktop passed; native Linux Docker/Podman/gVisor workflow evidence and a real-Mac Docker Desktop pass remain |
 | 9 | Operationalize runtime evals and Python workers | **Partial** | Garak/Inspect/PyRIT adapters are not a verified production pipeline |
 | 10 | Harden persistence, jobs, maintenance, and governed learning | **Mostly complete** | Stress/recovery tests, retention automation, learning consumption decision |
 | 11 | Package, secure, and verify cross-platform installation | **Partial** | Fresh-machine installers, SBOM/signing, hardened deployment profiles |
@@ -114,7 +115,7 @@ Completed or evidenced:
 - Recovered branch is on GitHub and previously had green GitHub checks.
 - Provider/learning production-boundary hardening exists in commit `9a430b1`.
 - Deterministic release check passed on 2026-08-02.
-- Runtime readiness now executes a real isolated Docker Desktop fixture and persists assertion/cleanup evidence; real audit-target execution remains an owned Phase 8 follow-up.
+- Runtime readiness and real audit-target execution now run through Docker Desktop with persisted plan/result/cleanup evidence and no host fallback. Broader Phase 8 backend and egress hardening remains open.
 
 Remaining tasks:
 
@@ -316,9 +317,18 @@ Exit criteria:
 
 ## Phase 7 — Implement Admin/System Policies and extensive-scan controls
 
-Status: **Not started**
+Status: **Complete for the policy plane; executable runtime enforcement continues in Phase 8**
 
 Objective: replace the current read-only built-in policy view with a local, versioned Admin module that resolves and freezes the controls for every scan.
+
+Completion evidence:
+
+- Added the five policy persistence tables to SQLite and Postgres/Supabase manifests, with schema version `1.3.0`.
+- Added four published safe templates, immutable checksummed versions, bindings, lifecycle history, deterministic preview/resolution, and immutable per-run snapshots.
+- Added the complete local admin API and System -> Policy UI, including template creation, cloning, editing, grouped controls, validation, comparison, publication, default selection, archive, rollback, import/export, bindings, evidence-readiness warnings, and run-version usage.
+- Renamed `premium-comprehensive` to the neutral `comprehensive-local` package.
+- Extended the catalog from 28 to 39 controls with 11 explicit runtime-evaluation controls. Before Phase 8 executes their isolated probes, these controls remain `not_assessed`; they are never inferred as passing from static evidence.
+- Added lifecycle, API-key authorization, backup/restore, deterministic template/matrix, non-weakening, immutable snapshot, ambiguity, and extensive-static coverage regressions.
 
 ### 7.1 Domain model
 
@@ -330,7 +340,7 @@ Keep these concepts distinct:
 - **Policy pack:** portable executable control/rule bundle referenced by a system policy.
 - **Resolved scan policy:** immutable snapshot of catalog version + package + system policy version + bindings + target applicability written before execution.
 
-The current `premium-comprehensive` package must be reviewed for CE naming/scope. Rename it to a neutral local name or hide it from CE; do not imply a hosted billing tier inside the open-source product.
+The former `premium-comprehensive` package is now named `comprehensive-local`; the CE product no longer implies a hosted billing tier.
 
 ### 7.2 Persistence and resolution
 
@@ -384,7 +394,7 @@ Current required-when-applicable catalog groups:
 | Internal auditability and evidence | `harness_internal.audit_traceability`, `harness_internal.security_logging`, `harness_internal.eval_harness_presence`, `harness_internal.architecture_evidence` |
 | Internal agent/tool/data boundaries | `harness_internal.agent_tool_allowlist`, `harness_internal.agent_permission_boundaries`, `harness_internal.untrusted_content_prompt_injection`, `harness_internal.secret_env_isolation`, `harness_internal.mcp_plugin_permissions`, `harness_internal.browser_automation_safety`, `harness_internal.telemetry_log_redaction` |
 
-The present catalog has 28 definitions. Before runtime production, extend it with explicit executable runtime controls for prompt injection, indirect injection, tool authorization/misuse, secret retrieval, data exfiltration, memory/cross-session leakage, MCP/plugin boundary abuse, unsafe output handling, excessive agency, denial/resource exhaustion, and security telemetry. Map each to the applicable OWASP LLM/Agentic, OWASP API Security, MITRE ATLAS, NIST AI RMF, and internal eval-pack references. Do not pretend the current static definitions alone constitute runtime coverage.
+The catalog now has 39 definitions, including explicit runtime controls for prompt injection, indirect injection, tool authorization/misuse, secret retrieval, data exfiltration, memory/cross-session leakage, MCP/plugin boundary abuse, unsafe output handling, excessive agency, denial/resource exhaustion, and security telemetry. They are mapped to applicable OWASP LLM/Agentic, OWASP API Security, MITRE ATLAS, NIST AI RMF, and internal runtime-evaluation references. Phase 8 must supply executable isolated evidence; static definitions alone do not constitute runtime coverage.
 
 ### 7.5 Operational guardrails for every extensive scan
 
@@ -409,20 +419,20 @@ Built-in safe templates:
 - `baseline-static-safe`: low-cost repository posture, no runtime.
 - `agentic-static-safe`: static agent/data controls, no runtime.
 - `extensive-static-safe`: all applicable catalog controls, `deep-static` envelope, high publishability threshold, required review on incomplete evidence.
-- `extensive-runtime-local-safe`: all extensive-static requirements plus executable runtime controls and a launchable isolated local backend.
+- `extensive-runtime-local-safe`: all extensive-static requirements plus executable runtime controls; it requires a launchable isolated local backend and blocks rather than falling back to host execution.
 
 ### 7.6 Tests and exit criteria
 
 Tests:
 
-- [ ] Schema validation, checksums, immutable published versions, rollback, archive, and import/export round trips.
-- [ ] Resolution precedence and negative tests proving a run cannot weaken required controls or isolation.
-- [ ] API authorization and full UI create/edit/validate/publish/default/preview workflow.
-- [ ] SQLite migration, backup/restore, restart, and concurrent read/write tests.
-- [ ] Golden resolved-policy snapshots for each built-in template and target class.
-- [ ] Extensive-scan E2E proving every applicable control is assessed or explicitly not assessed with a reason.
+- [x] Schema validation, checksums, immutable published versions, rollback, archive, and import/export round trips.
+- [x] Resolution precedence and negative tests proving a run cannot weaken required controls or isolation.
+- [x] API authorization and full UI create/edit/validate/publish/default/preview workflow.
+- [x] SQLite migration, backup/restore, restart, and concurrent read/write tests.
+- [x] Golden policy definitions and a deterministic resolved-policy matrix for every built-in template and target class.
+- [x] Extensive-scan E2E proving every applicable control is assessed or explicitly not assessed with a reason.
 - [x] Provider workload tests proving disallowed background/ChatGPT-session or budget combinations fail before model calls. Covered by Phase 2 provider-policy regressions.
-- [ ] Runtime tests proving no unisolated host fallback and no secret/network policy escape.
+- [x] Policy-level runtime tests prove per-run input cannot enable host fallback or loosen isolation/network policy. Container execution and escape tests remain Phase 8 exit work.
 
 Exit criteria:
 
@@ -433,7 +443,7 @@ Exit criteria:
 
 ## Phase 8 — Execute local runtime scans in a real isolated sandbox
 
-Status: **Partial**
+Status: **In progress — Docker execution milestone complete**
 
 Objective: turn the current readiness/policy scaffold into actual local isolated execution.
 
@@ -441,18 +451,20 @@ Tasks:
 
 - [x] Provide backend discovery/resolution, readiness statuses, policy construction, and launch gating.
 - [x] Define candidate backends including gVisor, rootless Podman, Podman, Docker, and Docker Desktop.
-- [ ] Implement `localRuntimeProvider.execute()` against the selected backend instead of returning a blocked placeholder.
-- [ ] Keep model-backed planning, supervision, and remediation for operator-started runtime validation on the `openai_codex`/`chatgpt_session` default; require an explicit operator override for API-key routing.
-- [ ] Make the Codex model subprocess inference-only for runtime-validation runs and prove it cannot launch target or host commands; do not treat its `read-only` flag as runtime-isolation evidence.
+- [x] Implement `localRuntimeProvider.execute()` against the selected backend instead of returning a blocked placeholder.
+- [x] Keep model-backed planning, supervision, and remediation for operator-started runtime validation on the `openai_codex`/`chatgpt_session` default; require an explicit operator override for API-key routing.
+- [x] Make the Codex model subprocess inference-only for runtime-validation runs and prove it cannot launch target or host commands; do not treat its `read-only` flag as runtime-isolation evidence.
 - [ ] Implement Docker first for broad CE usability, then rootless Podman and gVisor hardening on Linux.
-- [ ] Never execute untrusted build/runtime commands directly on the host as a fallback.
-- [ ] Use exact argv with shell disabled; validate workdir and mounts against traversal/symlink escape.
-- [ ] Mount the target read-only and a separate artifacts/scratch directory read-write.
-- [ ] Enforce CPU, memory, PID, wall-time, stdout/stderr, file-size, and process-tree limits.
-- [ ] Default network to none; implement explicit dependency-install and runtime allowlist phases.
-- [ ] Inject only synthetic/fake credentials and fake service/tool backends for adversarial checks.
-- [ ] Capture image/template digest, backend/version, exact command, policy, timestamps, exit status, resource summary, artifacts, and cleanup result.
-- [ ] Prove cancellation kills descendants and cleanup removes containers, volumes, temp data, and credentials.
+- [x] Never execute untrusted build/runtime commands directly on the host as a fallback.
+- [x] Use exact argv with shell disabled; validate workdir and mounts against traversal/symlink escape.
+- [x] Mount the target read-only and a separate artifacts/scratch directory read-write.
+- [x] Enforce CPU, memory, PID, wall-time, stdout/stderr, file-size, and process-tree limits.
+- [x] Default network to none and implement explicit Docker dependency-install egress through an internal network plus destination-validating proxy; invalid/unlisted/private destinations fail closed.
+- [x] Add a separately governed runtime-probe allowlist phase; ordinary service probes remain network-none, while only probes explicitly marked as needing external network can use it.
+- [x] Inject only named synthetic/fake credentials; no host or model-provider credential is inherited by target containers.
+- [x] Add a deterministic fake service/tool backend on a separate internal-only network, inject only synthetic URLs/secrets, and preserve bounded request traces for the executable eval packs in Phase 9.
+- [x] Capture image/template digest, backend/version, exact command, policy, timestamps, exit status, resource summary, artifacts, and cleanup result.
+- [x] Prove cancellation kills descendants and cleanup removes containers, volumes, temp data, and credentials for the Docker execution path.
 - [ ] Add Windows Docker Desktop, macOS Docker Desktop, Linux Docker/Podman, and hardened Linux gVisor fixtures.
 
 Exit criteria:
@@ -461,6 +473,20 @@ Exit criteria:
 - Malicious fixtures cannot mutate the source checkout, read host secrets, use unapproved network, or leave processes/resources behind.
 - Unsupported environments fail closed with an actionable static fallback.
 - Release evidence includes a real runtime-validation audit using both the selected isolated backend and the local Codex ChatGPT-session default; API-only model evidence cannot close this gate.
+
+Docker milestone evidence (2026-08-21):
+
+- `run_node-smoke_65ca1de0-6b93-4bc4-a46f-be7825daf9df` completed the `comprehensive-local` audit through Docker Desktop and `openai_codex`/`chatgpt_session`.
+- The digest-pinned Node image completed the fixture test and service-start steps as non-root container execution; the dependency-install step failed closed because default policy denied outbound network.
+- A direct isolation probe proved outbound HTTP was blocked, source content remained unchanged, the process UID was `65532`, and cleanup left zero containers and volumes.
+- A cancellation probe terminated a spawned descendant tree and settled in under one second with zero leftover containers or volumes.
+- An inference-only Codex probe attempted to induce a host file write; the file was not created. Shell, code-mode host, apps, browser, computer-use, multi-agent, hooks, and plugins were disabled, the working directory was ephemeral, and API-key environment variables were not inherited.
+- On 2026-08-22, the Docker readiness fixture additionally proved host-secret exclusion, exact synthetic-credential injection, kernel-enforced per-file limits, source immutability, blocked outbound networking, and verified cleanup. A direct provider run persisted Docker state/stats plus measured workspace/artifact usage and completed with zero leftovers.
+- A live Docker dependency-install probe reached allowlisted `registry.npmjs.org` through the internal-network proxy. A second probe to unlisted `example.com` received the proxy's `403 Forbidden`; both attempts removed the target, proxy, network, and workspace volume.
+- A live aggregate-quota fixture filled the 1 MiB tmpfs-backed workspace with individually sub-limit files, received `ENOSPC`, recorded the exact 1 MiB usage, and cleaned up successfully. A persistent constrained keeper container holds the tmpfs mount across isolated staging and execution containers; source staging copies only regular files and directories, skipping symlinks and special files.
+- The same live fixture filled a separate 1 MiB artifact-scratch tmpfs and received `ENOSPC`. A successful probe wrote an artifact inside that volume; a controlled collector copied only regular directories/files to the host run directory before both volumes were removed.
+- A live runtime-probe egress check reached allowlisted `registry.npmjs.org` only after both `runtime_probe_network` authorization and explicit `external_network` step metadata were present. It reused the internal proxy policy and cleaned up all resources.
+- A live synthetic-tool probe used an internal-only network with no egress proxy, retrieved the fixed fake secret, invoked the deterministic fake tool, and exported redacted method/path/body-hash traces plus the client result through the capped artifact collector.
 
 ## Phase 9 — Operationalize runtime evals and Python workers
 
@@ -575,7 +601,7 @@ A static-only beta may be cut before Phases 8–9 finish only if it is explicitl
 ## Recommended execution order from this snapshot
 
 1. Implement Phase 7 System Policies and extensive-scan controls.
-2. Implement Phase 8 real sandbox execution, then Phase 9 executable runtime eval packs.
+2. Finish Phase 8 quotas, bounded egress, malicious isolation fixtures, and supported-platform backend verification; only then begin Phase 9 executable runtime eval packs.
 3. Complete Phase 10 stress/recovery hardening and Phase 11 packaging/cross-platform security.
 4. Execute Phase 12 release candidate and beta gates.
 
