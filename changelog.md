@@ -1,5 +1,23 @@
 ﻿# Changelog
 
+## 2026-08-24
+
+### Added
+
+- Added a hash-locked Python `>=3.11 <3.14` worker bootstrap, managed virtual environment, environment manifest, setup/doctor CLI commands, and six-job Windows/Linux/macOS Python 3.11/3.13 verification matrix.
+- Added a machine-readable Python worker self-check that explicitly reports the current Inspect, Garak, and PyRIT implementation boundary as scaffold-only.
+
+### Changed
+
+- Closed Community Edition Phase 8 after native Windows Docker Desktop and Linux Docker/rootless-Podman/gVisor execution passed; executable real-Mac validation is project-owner deferred and excluded from certified runtime claims.
+- Python worker dispatch now requires the verified managed environment instead of treating an importable source tree as production worker readiness.
+- Removed committed Python bytecode caches and added repository ignore rules for generated Python cache files.
+
+### Verified
+
+- Managed worker setup and `worker-doctor` passed locally with Python 3.12.10 and the recorded lock digest.
+- Native Runtime Verification, CI, and Static Audit Release Gate passed on the final Phase 8 runtime implementation tree.
+
 ## 2026-08-20
 
 ### Added

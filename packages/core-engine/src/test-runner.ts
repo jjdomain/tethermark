@@ -23,6 +23,7 @@ import { assertAuditRequestProviderPolicy } from "./provider-policy.js";
 import { buildPreflightSummary } from "./preflight.js";
 import { analyzeTarget } from "./repo.js";
 import { resetPythonWorkerCapabilityCacheForTests } from "./python-worker.js";
+import { inspectPythonWorkerEnvironment, isSupportedPythonWorkerVersion, parsePythonVersion, parsePythonWorkerLock, pythonWorkerVenvExecutable, resolvePythonWorkerExecutable } from "./python-worker-environment.js";
 import { resolveAssessmentEvidenceProviderIds } from "./stages/stage-assess-controls.js";
 import { applyControlDowngrades, applyUnsupportedFindingDrops, mergeSelectiveAssessmentCycle, retainFindingsSupportedByFinalControls } from "./stages/stage-corrections.js";
 import { createPersistenceStore } from "./persistence/backend.js";
@@ -4897,6 +4898,48 @@ async function testLinuxContainerSandboxBuildsExecutionPlan(): Promise<void> {
   });
 }
 
+async function testPythonWorkerEnvironmentContract(): Promise<void> {
+  assert.equal(isSupportedPythonWorkerVersion(parsePythonVersion("Python 3.11.9")), true);
+  assert.equal(isSupportedPythonWorkerVersion(parsePythonVersion("3.13.2")), true);
+  assert.equal(isSupportedPythonWorkerVersion(parsePythonVersion("Python 3.10.14")), false);
+  assert.equal(isSupportedPythonWorkerVersion(parsePythonVersion("Python 3.14.0")), false);
+  const lock = parsePythonWorkerLock([
+    "packaging==26.3 \\",
+    "    --hash=sha256:abc",
+    "pip==26.2.1 \\",
+    "    --hash=sha256:def"
+  ].join("\n"));
+  assert.deepEqual(lock, { packaging: "26.3", pip: "26.2.1" });
+
+  await withTempDir("tethermark-python-worker-environment-", async (rootDir) => {
+    const workerRoot = path.join(rootDir, "workers", "python");
+    await fs.mkdir(workerRoot, { recursive: true });
+    await fs.writeFile(path.join(workerRoot, "requirements.lock"), "pip==26.2.1 \\\n    --hash=sha256:def\n", "utf8");
+    const inspection = inspectPythonWorkerEnvironment(rootDir);
+    assert.equal(inspection.ready, false);
+    assert.equal(inspection.lock_sha256?.length, 64);
+    assert.ok(inspection.errors.some((item) => item.includes("virtual environment")));
+  });
+
+  await withTempDir("tethermark-python-worker-resolution-", async (rootDir) => {
+    const originalPythonBin = process.env.PYTHON_BIN;
+    const originalVenv = process.env.HARNESS_PYTHON_WORKER_VENV;
+    try {
+      delete process.env.HARNESS_PYTHON_WORKER_VENV;
+      process.env.PYTHON_BIN = "bootstrap-python";
+      const managed = pythonWorkerVenvExecutable(path.join(rootDir, ".tethermark", "python-worker"));
+      await fs.mkdir(path.dirname(managed), { recursive: true });
+      await fs.writeFile(managed, "", "utf8");
+      assert.equal(resolvePythonWorkerExecutable(rootDir), managed);
+    } finally {
+      if (originalPythonBin === undefined) delete process.env.PYTHON_BIN;
+      else process.env.PYTHON_BIN = originalPythonBin;
+      if (originalVenv === undefined) delete process.env.HARNESS_PYTHON_WORKER_VENV;
+      else process.env.HARNESS_PYTHON_WORKER_VENV = originalVenv;
+    }
+  });
+}
+
 async function testLinuxContainerSandboxBuildsPythonRuntimeProbePlan(): Promise<void> {
   await withTempDir("harness-container-python-plan-", async (rootDir) => {
     const sourceDir = path.join(rootDir, "source");
@@ -7096,6 +7139,7 @@ async function main(): Promise<void> {
       ["product benchmark api endpoints", testProductBenchmarkApiEndpoints],
       ["local binary providers short-circuit when spawn is blocked", testLocalBinaryProvidersShortCircuitWhenSpawnBlocked],
       ["python worker providers report blocked runtime capability when disabled", testPythonWorkerProvidersReportBlockedWhenDisabled],
+      ["python worker environment contract", testPythonWorkerEnvironmentContract],
       ["repo analysis provider emits normalized locations", testRepoAnalysisProviderEmitsNormalizedLocations],
       ["scorecard and trivy normalization emit symbol locations", testScorecardAndTrivyNormalizationEmitSymbolLocations],
       ["runtime readiness fixture enforces container policy", testRuntimeReadinessFixturePolicy],

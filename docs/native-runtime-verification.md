@@ -32,7 +32,7 @@ Evidence is written under `.artifacts/runtime-native/<platform>-<backend>/native
 - Ubuntu 24.04 with gVisor `runsc` registered in Docker
 - macOS 15 host-boundary verification
 
-The macOS job intentionally expects the Docker Desktop backend to be blocked. GitHub's macOS runner proves native installation/build behavior and the absence of a false runtime selection, but cannot prove Docker Desktop execution because the hosted runner cannot provide the required nested Linux VM. A real Mac with Docker Desktop must run the `docker_desktop` executable command before Tethermark advertises macOS runtime validation as release-certified.
+The macOS job intentionally expects the Docker Desktop backend to be blocked. GitHub's macOS runner proves native installation/build behavior and the absence of a false runtime selection, but cannot prove Docker Desktop execution because the hosted runner cannot provide the required nested Linux VM. The project owner accepted deferral of the real-Mac executable gate on 2026-08-24, so macOS Docker Desktop runtime execution is excluded from the current release-certified evidence rather than inferred from the boundary job.
 
 Windows GitHub-hosted runners have the same product-boundary role because they do not provide Docker Desktop. The executable Windows gate runs on a maintainer Windows machine with Docker Desktop's Linux engine.
 
@@ -45,7 +45,7 @@ The 2026-08-24 native matrix in [GitHub Actions run 32688251184](https://github.
 - Linux x64 gVisor `runsc` on Docker Engine 28.0.4: `runsc` registration, explicit runtime selection, executable readiness, and real-provider fixtures passed.
 - macOS 15 arm64: the blocked Docker Desktop boundary passed without making a runtime-execution claim.
 
-The same verifier passed locally on Windows 11 x64 with Docker Desktop 4.66.0, Docker Engine 29.3.0, and its WSL2 Linux engine. Real macOS Docker Desktop execution remains the only platform/backend gate in this matrix that has not run.
+The same verifier passed locally on Windows 11 x64 with Docker Desktop 4.66.0, Docker Engine 29.3.0, and its WSL2 Linux engine. Real macOS Docker Desktop execution remains unverified and explicitly deferred.
 
 ## Acceptance boundary
 

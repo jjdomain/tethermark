@@ -36,6 +36,8 @@ Completed:
 - Windows local static sandbox backend
 - Linux static sandbox backend
 - Linux container-backend scaffold
+- executable local runtime provider verified on Windows Docker Desktop and native Linux Docker, rootless Podman, and gVisor; real-Mac execution is explicitly deferred and not certified
+- hash-locked managed Python worker environment with setup/doctor commands and cross-platform CI coverage; adapter implementations remain scaffold-only
 - local static `scan path ... --mode static` verified on Windows with provider-backed agents and standards-based score artifacts
 - versioned deterministic regression suite for good, mixed, risky, ordinary, runnable, agentic, and MCP targets
 - four external-ground-truth vulnerable/fixed calibration pairs from reviewed `CVE-2025-53107`, `CVE-2026-27735`, `CVE-2024-51751`, and `CVE-2025-3248`, with strict known-finding FP/FN gates for command injection, MCP repository-boundary traversal, AI application file-payload path validation, and unauthenticated code validation
@@ -58,9 +60,7 @@ Completed:
 Not completed:
 - broader independently reviewed advisory coverage beyond the current four advisories and vulnerability classes, followed by multi-case/repeat model variance and weight/threshold calibration
 - cleanup or archival policy for old historical artifact directories already present under `.artifacts`
-- real Python worker execution on this machine
-- real Linux container or microVM execution for isolated build/runtime/validate flows
-- persistent queue/storage
+- real Garak, Inspect, and PyRIT adapter execution and normalized behavioral evidence
 - richer control coverage and framework depth beyond the first static control set
 
 ## Phase 1: Local Static Mode Hardening
@@ -230,18 +230,14 @@ Hosted rollout order:
 
 ## Recommended Next Order
 
-Community Edition Phase 6 is complete. The next product-plan milestone is Phase 7: Admin/System Policies and extensive-scan controls.
+Community Edition Phases 1–8 are complete within the documented platform scope. Phase 9 runtime eval operationalization is next.
 
-1. Implement the local versioned System Policy domain and resolution rules described in the production plan.
-2. Add simple cleanup/archive tooling for historical artifact directories.
-3. Implement executable Linux container backend for isolated runtime validation.
-4. Enable real Python workers on Linux.
-5. Deploy first isolated worker host for deeper AI-security audit modes.
-6. Add persistent queue and artifact storage.
+1. Replace the Inspect scaffold with one bounded, version-pinned executable adapter and normalized result contract.
+2. Add the first versioned runtime eval pack and failure/partial-result tests.
+3. Operationalize Garak and PyRIT behind the same resource, timeout, output, cancellation, and evidence boundaries.
+4. Continue Phase 10 recovery hardening and Phase 11 packaging after the first end-to-end runtime eval is retained.
 
-## Deferred Until Hetzner Is Ready
+## Deferred Hosted Worker Deployment
 
-- real container execution in `linux-container`
-- build/runtime/validate mode execution on Linux for isolated repo/local targets
-- real garak / Inspect / PyRIT worker integration
 - worker host deployment automation
+- hosted fleet scheduling and remote worker provisioning

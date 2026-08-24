@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import platform
 import sys
 
 from audit_workers.adapters.garak_adapter import run_garak
@@ -9,6 +10,17 @@ from audit_workers.adapters.pyrit_adapter import run_pyrit
 
 
 def main() -> None:
+    if len(sys.argv) == 2 and sys.argv[1] == "--self-check":
+        sys.stdout.write(json.dumps({
+            "schema_version": 1,
+            "worker_package_version": "0.2.0",
+            "python_version": platform.python_version(),
+            "adapter_implementation_status": "scaffold",
+            "adapters": ["inspect", "garak", "pyrit"],
+            "imports_ready": True,
+        }))
+        return
+
     if len(sys.argv) < 3:
         raise SystemExit("usage: python -m audit_workers.cli <worker> '<json-payload>'")
 

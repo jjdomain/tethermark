@@ -44,8 +44,11 @@ npm run scan -- setup-tools --dry-run
 npm run scan -- setup-tools --yes
 npm run scan -- setup-runtime --dry-run
 npm run scan -- setup-runtime --yes
+npm run scan -- setup-workers --dry-run
+npm run scan -- setup-workers --yes
 npm run scan -- doctor
 npm run scan -- runtime-doctor
+npm run scan -- worker-doctor
 npm run scan -- validate-runtime-fixtures
 npm run scan -- validate-fixtures --llm-provider mock
 npm run oss
@@ -120,6 +123,7 @@ For automation:
 ```bash
 npm run scan -- doctor --json
 npm run scan -- runtime-doctor --json
+npm run scan -- worker-doctor --json
 ```
 
 `doctor` reports required failures separately from optional runtime warnings. Missing Scorecard, Semgrep, or Trivy blocks production readiness for static audits. Development and diagnostic runs may still proceed in degraded mode, but release validation requires all three scanners to be available.
@@ -141,6 +145,25 @@ npm run production:harness-readiness
 ```
 
 `production:runtime-readiness` intentionally fails when no launchable local runtime backend is available or when isolated runtime fixtures do not execute successfully.
+
+## Python Worker Environment
+
+Python worker setup is separate from the container runtime. Tethermark supports Python `>=3.11 <3.14` for this environment and installs it into `.tethermark/python-worker` without modifying system packages.
+
+Preview the exact commands:
+
+```bash
+npm run scan -- setup-workers --dry-run
+```
+
+After review, create the environment and install the hash-locked packages:
+
+```bash
+npm run scan -- setup-workers --yes
+npm run scan -- worker-doctor
+```
+
+The setup consumes [`workers/python/requirements.lock`](../workers/python/requirements.lock) with pip hash enforcement, installs the local worker package without dependency resolution or build isolation, records the lock digest and installed package inventory, and runs an import-boundary self-check. The current Garak, Inspect, and PyRIT modules remain scaffolds; a passing worker doctor proves reproducible environment readiness, not production behavioral-eval coverage.
 
 ## External Tool Setup
 
