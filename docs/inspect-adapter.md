@@ -22,7 +22,7 @@ This pack produces observations, not automatic control passes. Missing endpoints
 - Only HTTP and HTTPS endpoints without embedded credentials or fragments are accepted.
 - Cloud metadata hostnames and link-local, multicast, or unspecified resolved addresses are blocked.
 - Redirects are not followed.
-- At most two serialized probes run, with a per-probe timeout capped at five seconds.
+- At most two serialized probes run, with network I/O capped at five seconds per probe and each full Inspect sample capped at fifteen seconds.
 - At most 64 KiB of a response is retained for hashing; body contents are discarded.
 - The adapter JSON result is capped at 256 KiB, while the TypeScript worker process has independent timeout and output limits.
 - Inspect logs are reduced to normalized sample evidence and a log SHA-256; temporary raw logs are removed after execution.

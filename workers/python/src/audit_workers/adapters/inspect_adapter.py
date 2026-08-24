@@ -26,8 +26,9 @@ ADAPTER_VERSION = "1.0.0"
 EVAL_PACK_ID = "tethermark.inspect.http-baseline"
 EVAL_PACK_VERSION = "1.0.0"
 MAX_PROBES = 2
-DEFAULT_PROBE_TIMEOUT_SECONDS = 3.0
+DEFAULT_PROBE_TIMEOUT_SECONDS = 5.0
 MAX_PROBE_TIMEOUT_SECONDS = 5.0
+INSPECT_SAMPLE_TIME_LIMIT_SECONDS = 15
 MAX_RESPONSE_BYTES = 64 * 1024
 MAX_ADAPTER_OUTPUT_BYTES = 256 * 1024
 SECURITY_HEADER_NAMES = (
@@ -190,7 +191,7 @@ def _build_task(endpoint: str, timeout_seconds: float) -> Task:
         ],
         solver=bounded_http_probe(),
         scorer=None,
-        time_limit=max(1, int(timeout_seconds) + 1),
+        time_limit=INSPECT_SAMPLE_TIME_LIMIT_SECONDS,
         fail_on_error=True,
     )
 
@@ -210,6 +211,7 @@ def _inconclusive_response(payload: Dict[str, Any], target: Any, reason: str) ->
         "limits": {
             "probe_count": MAX_PROBES,
             "probe_timeout_seconds": DEFAULT_PROBE_TIMEOUT_SECONDS,
+            "inspect_sample_time_limit_seconds": INSPECT_SAMPLE_TIME_LIMIT_SECONDS,
             "max_response_bytes": MAX_RESPONSE_BYTES,
             "max_adapter_output_bytes": MAX_ADAPTER_OUTPUT_BYTES,
             "redirects_followed": 0,
@@ -288,6 +290,7 @@ def run_inspect(payload: Dict[str, Any]) -> Dict[str, Any]:
         "limits": {
             "probe_count": MAX_PROBES,
             "probe_timeout_seconds": timeout_seconds,
+            "inspect_sample_time_limit_seconds": INSPECT_SAMPLE_TIME_LIMIT_SECONDS,
             "max_response_bytes": MAX_RESPONSE_BYTES,
             "max_adapter_output_bytes": MAX_ADAPTER_OUTPUT_BYTES,
             "redirects_followed": 0,

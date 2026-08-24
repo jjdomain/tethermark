@@ -57,6 +57,7 @@ class InspectAdapterTests(unittest.TestCase):
         self.assertEqual(result["schema_version"], ADAPTER_SCHEMA_VERSION)
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["execution"]["inspect_log_status"], "success")
+        self.assertEqual(result["limits"]["inspect_sample_time_limit_seconds"], 15)
         self.assertEqual(result["coverage"], {"status": "complete", "attempted": 2, "completed": 2, "inconclusive": 0, "errors": 0})
         self.assertEqual(len(result["observations"]), 2)
         get_observation = next(item for item in result["observations"] if item["probe_id"] == "inspect-http-get-baseline")
