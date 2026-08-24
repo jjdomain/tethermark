@@ -5,6 +5,16 @@ permissions:
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/native-runtime-verification.yml"
+      - "apps/cli/src/runtime-fixtures.ts"
+      - "apps/cli/src/setup-runtime.ts"
+      - "fixtures/runtime-targets/**"
+      - "packages/core-engine/src/sandbox/**"
+      - "packages/validation-runner/src/**"
+      - "scripts/check-native-runtime.mjs"
+      - "package.json"
 
 concurrency:
   group: native-runtime-${{ github.ref }}
