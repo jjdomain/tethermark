@@ -95,6 +95,7 @@ interface RuntimeFixturePaths {
 
 interface DockerInspectShape {
   ImageName?: string;
+  EffectiveCaps?: string[] | null;
   Config?: {
     Image?: string;
     User?: string;
@@ -262,7 +263,10 @@ export function validateDockerRuntimeFixtureInspect(inspection: DockerInspectSha
     non_root_user: inspection.Config?.User === "65532:65532",
     network_disabled: inspection.HostConfig?.NetworkMode === "none",
     root_filesystem_readonly: inspection.HostConfig?.ReadonlyRootfs === true,
-    capabilities_dropped: (inspection.HostConfig?.CapDrop ?? []).map((item) => item.toUpperCase()).includes("ALL"),
+    capabilities_dropped: (inspection.HostConfig?.CapDrop ?? []).map((item) => item.toUpperCase()).includes("ALL")
+      || (expected.backend === "podman" || expected.backend === "rootless_podman")
+        && Array.isArray(inspection.EffectiveCaps)
+        && inspection.EffectiveCaps.length === 0,
     no_new_privileges: (inspection.HostConfig?.SecurityOpt ?? []).some((item) => item === "no-new-privileges" || item === "no-new-privileges:true"),
     unprivileged_container: inspection.HostConfig?.Privileged === false,
     pids_limited: inspection.HostConfig?.PidsLimit === FIXTURE_PIDS_LIMIT,
@@ -289,6 +293,9 @@ async function createFixturePaths(): Promise<RuntimeFixturePaths> {
   const outputRoot = path.join(tempRoot, "output");
   await fs.mkdir(sourceRoot, { recursive: true });
   await fs.mkdir(outputRoot, { recursive: true });
+  // Native Linux bind mounts preserve host permissions. The fixture runs as
+  // 65532:65532, so grant write/execute without granting directory reads.
+  await fs.chmod(outputRoot, 0o733);
   await fs.writeFile(path.join(sourceRoot, "source-marker.txt"), SOURCE_MARKER, "utf8");
   return { tempRoot, sourceRoot, outputRoot };
 }

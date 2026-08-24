@@ -4792,6 +4792,12 @@ async function testRuntimeReadinessFixturePolicy(): Promise<void> {
     HostConfig: { ...inspection.HostConfig, Runtime: "runsc" }
   }, { sourceRoot, outputRoot, backend: "gvisor_container" });
   assert.equal(gvisorAssertions.selected_runtime_matches_backend, true);
+  const podmanAssertions = validateDockerRuntimeFixtureInspect({
+    ...inspection,
+    EffectiveCaps: [],
+    HostConfig: { ...inspection.HostConfig, CapDrop: null }
+  }, { sourceRoot, outputRoot, backend: "rootless_podman" });
+  assert.equal(podmanAssertions.capabilities_dropped, true);
   const secretAssertions = validateDockerRuntimeFixtureInspect({
     ...inspection,
     Config: { ...inspection.Config, Env: [...inspection.Config.Env, "OPENAI_API_KEY=must-not-pass"] }
