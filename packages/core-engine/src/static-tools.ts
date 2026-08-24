@@ -97,7 +97,7 @@ const TOOL_DEFS: Array<{
     default_enabled: true,
     mandatory: false,
     fallback: null,
-    fix: "Install and configure the Inspect adapter before runtime validation."
+    fix: "Run npm run scan -- setup-workers --yes, then verify Inspect with worker-doctor and worker-smoke."
   },
   {
     id: "garak",

@@ -37,7 +37,7 @@ Completed:
 - Linux static sandbox backend
 - Linux container-backend scaffold
 - executable local runtime provider verified on Windows Docker Desktop and native Linux Docker, rootless Podman, and gVisor; real-Mac execution is explicitly deferred and not certified
-- hash-locked managed Python worker environment with setup/doctor commands and cross-platform CI coverage; adapter implementations remain scaffold-only
+- hash-locked managed Python worker environment with setup/doctor commands and cross-platform CI coverage, plus executable Inspect AI `0.3.260` HTTP baseline evidence; Garak and PyRIT remain scaffold-only
 - local static `scan path ... --mode static` verified on Windows with provider-backed agents and standards-based score artifacts
 - versioned deterministic regression suite for good, mixed, risky, ordinary, runnable, agentic, and MCP targets
 - four external-ground-truth vulnerable/fixed calibration pairs from reviewed `CVE-2025-53107`, `CVE-2026-27735`, `CVE-2024-51751`, and `CVE-2025-3248`, with strict known-finding FP/FN gates for command injection, MCP repository-boundary traversal, AI application file-payload path validation, and unauthenticated code validation
@@ -60,7 +60,7 @@ Completed:
 Not completed:
 - broader independently reviewed advisory coverage beyond the current four advisories and vulnerability classes, followed by multi-case/repeat model variance and weight/threshold calibration
 - cleanup or archival policy for old historical artifact directories already present under `.artifacts`
-- real Garak, Inspect, and PyRIT adapter execution and normalized behavioral evidence
+- real Garak and PyRIT adapter execution plus AI-security-specific Inspect prompt/tool/data-boundary packs
 - richer control coverage and framework depth beyond the first static control set
 
 ## Phase 1: Local Static Mode Hardening
@@ -107,10 +107,10 @@ This work is implemented in the separate Tethermark Cloud repository; it is trac
 
 ## Phase 3: Python Worker Enablement
 
-1. Fix local Python environment assumptions and document supported installs.
-2. Add worker environment bootstrap commands for Linux hosts.
+1. Keep the completed cross-platform managed Python environment and worker doctor release-gated.
+2. Keep the completed TypeScript-to-Python worker smoke and Windows/Linux/macOS packaging matrix green.
 3. Replace garak adapter scaffold with real invocation and normalized output.
-4. Replace Inspect adapter scaffold with real multi-turn eval orchestration.
+4. Extend the executable Inspect HTTP baseline with real multi-turn AI-security eval orchestration.
 5. Replace PyRIT adapter scaffold with real adversarial evaluation flow.
 6. Add AI-security eval packs for prompt injection, tool misuse, MCP boundary failures, memory leakage, cross-session isolation, unsafe delegated actions, and retrieval/data exfiltration.
 7. Map runtime eval results to OWASP LLM, MITRE ATLAS, NIST AI RMF, and Tethermark executable control IDs.
@@ -232,9 +232,9 @@ Hosted rollout order:
 
 Community Edition Phases 1–8 are complete within the documented platform scope. Phase 9 runtime eval operationalization is next.
 
-1. Replace the Inspect scaffold with one bounded, version-pinned executable adapter and normalized result contract.
-2. Add the first versioned runtime eval pack and failure/partial-result tests.
-3. Operationalize Garak and PyRIT behind the same resource, timeout, output, cancellation, and evidence boundaries.
+1. Add the first AI-security-specific Inspect prompt/tool/data-boundary pack on top of the executable HTTP baseline contract.
+2. Operationalize Garak and PyRIT behind the same resource, timeout, output, cancellation, and evidence boundaries.
+3. Add deterministic fake-agent services and failure/partial-result fixtures for those security packs.
 4. Continue Phase 10 recovery hardening and Phase 11 packaging after the first end-to-end runtime eval is retained.
 
 ## Deferred Hosted Worker Deployment

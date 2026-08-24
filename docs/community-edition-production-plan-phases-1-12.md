@@ -99,7 +99,7 @@ Updated on 2026-08-20 during Phase 5 calibration work from merged Phase 4:
 | 6 | Complete review, remediation, exports, and operator workflows | **Complete** | Completed 2026-08-20; see `docs/phase6-operator-workflow-evidence.md` |
 | 7 | Implement Admin/System Policies and extensive-scan controls | **Complete for the policy plane** | Executable runtime enforcement is tracked in Phase 8 |
 | 8 | Execute local runtime scans in a real isolated sandbox | **Complete with accepted macOS runtime deferral** | Windows Docker Desktop and native Linux Docker/rootless-Podman/gVisor passed; macOS execution is not certified |
-| 9 | Operationalize runtime evals and Python workers | **In progress** | Managed worker environment implemented; Garak/Inspect/PyRIT adapters are not yet a verified production pipeline |
+| 9 | Operationalize runtime evals and Python workers | **In progress** | Managed environment and first bounded Inspect pack implemented; Garak/PyRIT and AI-security scenario packs remain |
 | 10 | Harden persistence, jobs, maintenance, and governed learning | **Mostly complete** | Stress/recovery tests, retention automation, learning consumption decision |
 | 11 | Package, secure, and verify cross-platform installation | **Partial** | Fresh-machine installers, SBOM/signing, hardened deployment profiles |
 | 12 | Run release candidate, beta, and production launch gates | **Not started** | Depends on Phases 1–11 and explicit release acceptance |
@@ -508,6 +508,8 @@ Tasks:
 - [x] Maintain bounded TypeScript-to-Python worker contracts and adapter scaffolding.
 - [x] Pin the Python `>=3.11 <3.14` worker environment with a hash-locked bootstrap, managed virtual environment, setup command, manifest/package verification, `doctor` integration, and Windows/Linux/macOS CI matrix.
 - [ ] Implement and verify Garak, Inspect, and PyRIT adapters behind explicit time/resource/output contracts.
+  - [x] Implement Inspect AI `0.3.260` with the versioned, model-free `tethermark.inspect.http-baseline@1.0.0` pack, bounded endpoint/response/time/output handling, normalized observations, and explicit inconclusive coverage.
+  - [ ] Replace the Garak and PyRIT scaffolds with executable adapters.
 - [ ] Build versioned eval packs for the runtime controls defined in Phase 7.
 - [ ] Add framework-aware target startup/health detection for common Node and Python applications and agents.
 - [ ] Add fake tools/services and deterministic attack fixtures for prompt/tool/MCP/memory/data-boundary scenarios.
@@ -609,8 +611,8 @@ A static-only beta may be cut before Phases 8–9 finish only if it is explicitl
 
 ## Recommended execution order from this snapshot
 
-1. Operationalize one bounded Phase 9 adapter end to end, beginning with Inspect, while retaining explicit scaffold status for Garak and PyRIT.
-2. Build the first versioned runtime eval pack against the Phase 7 executable controls and normalize its observations without turning failures or low sample counts into passes.
+1. Build the first AI-security-specific Inspect pack against the Phase 7 prompt/tool/data-boundary controls; the HTTP baseline pack now proves the worker, limits, Inspect log, and normalization path.
+2. Replace the Garak and PyRIT scaffolds behind the same fail-closed execution and evidence contracts.
 3. Complete Phase 10 stress/recovery hardening and Phase 11 packaging/cross-platform security.
 4. Execute Phase 12 release candidate and beta gates.
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from importlib.metadata import version
 import platform
 import sys
 
@@ -15,7 +16,13 @@ def main() -> None:
             "schema_version": 1,
             "worker_package_version": "0.2.0",
             "python_version": platform.python_version(),
-            "adapter_implementation_status": "scaffold",
+            "adapter_implementation_status": "partial",
+            "adapter_statuses": {
+                "inspect": "executable",
+                "garak": "scaffold",
+                "pyrit": "scaffold",
+            },
+            "inspect_ai_version": version("inspect-ai"),
             "adapters": ["inspect", "garak", "pyrit"],
             "imports_ready": True,
         }))

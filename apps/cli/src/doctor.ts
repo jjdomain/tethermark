@@ -339,7 +339,9 @@ export function buildDoctorReport(): DoctorReport {
       lock_sha256: pythonWorkers.lock_sha256,
       lock_current: pythonWorkers.lock_current,
       packages_current: pythonWorkers.packages_current,
-      adapter_implementation_status: pythonWorkers.self_check?.["adapter_implementation_status"] ?? null
+      adapter_implementation_status: pythonWorkers.self_check?.["adapter_implementation_status"] ?? null,
+      adapter_statuses: pythonWorkers.self_check?.["adapter_statuses"] ?? null,
+      inspect_ai_version: pythonWorkers.self_check?.["inspect_ai_version"] ?? null
     },
     fix: pythonWorkers.ready ? undefined : ["Run npm run scan -- setup-workers --dry-run, review the exact commands, then rerun with --yes."]
   });
@@ -565,7 +567,7 @@ export function runOnboarding(args: { dryRun?: boolean; skipDoctor?: boolean; sk
     console.log("Preview the hash-locked worker setup plan:");
     console.log("  npm run scan -- setup-workers --dry-run");
   } else {
-    console.log("Python worker imports are ready; individual eval adapters may still be scaffold-only.");
+    console.log("Inspect is executable; Garak and PyRIT remain scaffold-only.");
   }
 
   console.log("");

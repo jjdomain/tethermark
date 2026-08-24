@@ -5,12 +5,14 @@
 ### Added
 
 - Added a hash-locked Python `>=3.11 <3.14` worker bootstrap, managed virtual environment, environment manifest, setup/doctor CLI commands, and six-job Windows/Linux/macOS Python 3.11/3.13 verification matrix.
-- Added a machine-readable Python worker self-check that explicitly reports the current Inspect, Garak, and PyRIT implementation boundary as scaffold-only.
+- Added a machine-readable Python worker self-check that explicitly reports each Inspect, Garak, and PyRIT implementation boundary.
+- Added executable Inspect AI `0.3.260` integration through the model-free `tethermark.inspect.http-baseline@1.0.0` pack, including real Inspect task/log execution, bounded HTTP observations, normalized URI evidence, explicit incomplete coverage, and adapter tests.
 
 ### Changed
 
 - Closed Community Edition Phase 8 after native Windows Docker Desktop and Linux Docker/rootless-Podman/gVisor execution passed; executable real-Mac validation is project-owner deferred and excluded from certified runtime claims.
 - Python worker dispatch now requires the verified managed environment instead of treating an importable source tree as production worker readiness.
+- Python worker readiness and preflight now advertise only executable adapters; Garak and PyRIT are blocked as scaffolds instead of returning scenario-planning text as evidence.
 - Removed committed Python bytecode caches and added repository ignore rules for generated Python cache files.
 
 ### Verified

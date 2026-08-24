@@ -489,19 +489,34 @@ export function normalizeEvidenceSummaryForTests(args: {
   }
 }
 
-function normalizePythonWorker(output: any, status: string): NormalizedEvidenceSummary {
+export function normalizePythonWorkerForTests(output: any, status: string): NormalizedEvidenceSummary {
+  const observations = Array.isArray(output?.observations) ? output.observations : [];
   const scenarios = Array.isArray(output?.scenarios) ? output.scenarios : [];
+  const inconclusive = observations.filter((item: any) => item?.outcome === "inconclusive").length;
+  const errors = observations.filter((item: any) => item?.outcome === "error").length;
+  const explicitIssues = observations.filter((item: any) => ["finding", "failed_control"].includes(item?.outcome)).length;
+  const coverageWarning = output?.status === "inconclusive"
+    || (typeof output?.coverage?.status === "string" && output.coverage.status !== "complete")
+    ? 1
+    : 0;
   const summary = emptyNormalized("python_worker", {
-    signal_count: scenarios.length || (output && typeof output === "object" ? Object.keys(output).length : 0),
-    issue_count: scenarios.filter((item: any) => item?.status === "review").length,
-    warning_count: scenarios.filter((item: any) => item?.status && item.status !== "pass").length,
+    signal_count: observations.length || scenarios.length || (output && typeof output === "object" ? Object.keys(output).length : 0),
+    issue_count: explicitIssues || scenarios.filter((item: any) => item?.status === "review").length,
+    warning_count: Math.max(coverageWarning, inconclusive + errors)
+      + scenarios.filter((item: any) => item?.status && item.status !== "pass").length,
+    error_count: errors,
     notes: [
       ...(typeof output?.summary === "string" && output.summary ? [output.summary] : []),
       ...(typeof output?.scenario_family === "string" ? [`scenario_family:${output.scenario_family}`] : []),
+      ...(typeof output?.coverage?.status === "string" ? [`coverage_status:${output.coverage.status}`] : []),
+      ...(Array.isArray(output?.limitations) ? output.limitations.filter((item: unknown) => typeof item === "string").slice(0, 10) : []),
       ...(status === "completed" ? [] : ["Python worker returned non-completed status."])
-    ]
+    ],
+    locations: dedupeEvidenceLocations(observations.flatMap((item: any) =>
+      Array.isArray(item?.evidence_locations) ? item.evidence_locations : []
+    )).slice(0, 100)
   });
-  for (const item of scenarios) {
+  for (const item of [...observations, ...scenarios]) {
     pushSeverity(summary, item?.severity);
   }
   if (typeof output?.target === "string" && output.target) {
@@ -962,6 +977,19 @@ export async function executeEvidenceProvider(args: {
           normalized: emptyNormalized("python_worker", { notes: [capability.message ?? "Python workers are unavailable."] })
         });
       }
+      if (!capability.adapters.includes(worker)) {
+        const message = `Python worker adapter '${worker}' is installed as a scaffold and is not executable.`;
+        return skippedUnavailableRecord({
+          provider_id: args.providerId,
+          provider_kind: "internal_plugin",
+          tool: worker,
+          command: ["python-worker", worker],
+          artifact_type: "internal-python-worker-output",
+          failure: { category: "command_unavailable", capability: "unavailable", message },
+          fallback_from: args.fallbackFrom ?? null,
+          normalized: emptyNormalized("python_worker", { notes: [message] })
+        });
+      }
       const result = await invokePythonWorker(worker, args.request, args.rootPath);
       return completedRecord({
         provider_id: args.providerId,
@@ -976,7 +1004,7 @@ export async function executeEvidenceProvider(args: {
         failure_category: result.status === "completed" ? null : "runtime_error",
         capability_status: result.status === "completed" ? "available" : "unknown",
         fallback_from: args.fallbackFrom ?? null,
-        normalized: normalizePythonWorker(result.output, result.status)
+        normalized: normalizePythonWorkerForTests(result.output, result.status)
       });
     }
     default:

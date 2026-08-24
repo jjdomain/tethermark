@@ -76,6 +76,13 @@ function buildProviderReadiness(args: {
   const localBinarySummary = args.localBinaryCapability.message ?? "Local binary execution available.";
   const pythonWorkerStatus = args.pythonWorkerCapability.status;
   const pythonWorkerSummary = args.pythonWorkerCapability.message ?? "Python worker adapters are available.";
+  const pythonAdapterAvailable = (adapter: "inspect" | "garak" | "pyrit") => args.pythonWorkerCapability.adapters.includes(adapter);
+  const pythonAdapterStatus = (adapter: "inspect" | "garak" | "pyrit"): "available" | "blocked" =>
+    pythonWorkerStatus === "available" && pythonAdapterAvailable(adapter) ? "available" : "blocked";
+  const pythonAdapterSummary = (adapter: "inspect" | "garak" | "pyrit") =>
+    pythonWorkerStatus === "available" && !pythonAdapterAvailable(adapter)
+      ? `${adapter === "pyrit" ? "PyRIT" : adapter === "garak" ? "Garak" : "Inspect"} is installed as a non-executable scaffold.`
+      : pythonWorkerSummary;
   const scorecardTargetAvailable = Boolean(args.request.repo_url || args.inferredRepoUrl);
   const fileSystemAvailable = Boolean(args.request.local_path && args.analysisAvailable);
   const deferredFilesystem = Boolean(args.request.repo_url && !args.request.local_path);
@@ -147,30 +154,30 @@ function buildProviderReadiness(args: {
       provider_id: "inspect",
       provider_kind: "internal_plugin",
       status: runtimeCapable
-        ? (pythonWorkerStatus === "available" ? "available" : "blocked")
+        ? pythonAdapterStatus("inspect")
         : "conditional",
       summary: runtimeCapable
-        ? pythonWorkerSummary
+        ? pythonAdapterSummary("inspect")
         : "Inspect worker is used for build/runtime/validate flows."
     },
     {
       provider_id: "garak",
       provider_kind: "internal_plugin",
       status: runtimeCapable
-        ? (pythonWorkerStatus === "available" ? "available" : "blocked")
+        ? pythonAdapterStatus("garak")
         : "conditional",
       summary: runtimeCapable
-        ? pythonWorkerSummary
+        ? pythonAdapterSummary("garak")
         : "garak worker is used for runtime and validation probe planning."
     },
     {
       provider_id: "pyrit",
       provider_kind: "internal_plugin",
       status: runtimeCapable
-        ? (pythonWorkerStatus === "available" ? "available" : "blocked")
+        ? pythonAdapterStatus("pyrit")
         : "conditional",
       summary: runtimeCapable
-        ? pythonWorkerSummary
+        ? pythonAdapterSummary("pyrit")
         : "PyRIT worker is used for adversarial validation flows."
     }
   ];
@@ -282,6 +289,8 @@ export async function buildPreflightSummary(request: AuditRequest): Promise<Pref
   }
   if ((effectiveRunMode === "build" || effectiveRunMode === "runtime" || effectiveRunMode === "validate") && pythonWorkerCapability.status !== "available") {
     warnings.push("Python worker adapters are unavailable in this host environment; bounded runtime-worker evidence will be skipped.");
+  } else if ((effectiveRunMode === "build" || effectiveRunMode === "runtime" || effectiveRunMode === "validate") && pythonWorkerCapability.adapters.length < 3) {
+    warnings.push(`Executable Python worker adapters: ${pythonWorkerCapability.adapters.join(", ") || "none"}. Garak and PyRIT remain scaffold-only and cannot produce runtime evidence.`);
   }
   if (!inferredRepoUrl && request.local_path) {
     warnings.push("No git remote could be inferred from the local path, so Scorecard checks will be limited.");

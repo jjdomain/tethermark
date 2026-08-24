@@ -9,6 +9,7 @@ on:
     paths:
       - ".github/workflows/python-worker-environment.yml"
       - "apps/cli/src/doctor.ts"
+      - "apps/cli/src/index.ts"
       - "apps/cli/src/setup-workers.ts"
       - "packages/core-engine/src/python-worker.ts"
       - "packages/core-engine/src/python-worker-environment.ts"
@@ -37,10 +38,16 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
-          cache-dependency-path: workers/python/requirements.lock
+          cache-dependency-path: |
+            workers/python/requirements-bootstrap.lock
+            workers/python/requirements.lock
       - name: Install Node dependencies
         run: npm ci
       - name: Build managed Python worker environment
         run: npm run scan -- setup-workers --yes --python python
       - name: Verify worker doctor
         run: npm run scan -- worker-doctor --json
+      - name: Run executable Inspect adapter tests
+        run: npm run scan -- worker-tests
+      - name: Run TypeScript to Inspect worker smoke
+        run: npm run scan -- worker-smoke

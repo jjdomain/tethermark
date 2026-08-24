@@ -13,7 +13,7 @@ import { validateFixtures } from "../../../apps/cli/src/fixture-validation.js";
 import { buildDockerRuntimeFixtureCreateArgs, RUNTIME_FIXTURE_IMAGE, validateDockerRuntimeFixtureInspect } from "../../../apps/cli/src/runtime-fixtures.js";
 import { describeArtifactType } from "./artifact-policy.js";
 import { pruneArtifacts } from "./artifact-retention.js";
-import { executeEvidenceProvider, normalizeEvidenceSummaryForTests, normalizePublicScorecardProject, resetEvidenceProviderCapabilityCacheForTests } from "./evidence-providers.js";
+import { executeEvidenceProvider, normalizeEvidenceSummaryForTests, normalizePublicScorecardProject, normalizePythonWorkerForTests, resetEvidenceProviderCapabilityCacheForTests } from "./evidence-providers.js";
 import { buildFixedCalibrationEvidenceSelection, CALIBRATION_EVIDENCE_PLAN_POLICY_VERSION, CALIBRATION_STATIC_EVIDENCE_PROVIDER_IDS } from "./evidence-selection-policy.js";
 import { buildFindingEvaluationSummary } from "./finding-evaluation.js";
 import { buildFindingQualitySummary } from "./finding-quality.js";
@@ -22,7 +22,7 @@ import { buildHeuristicTargetProfile } from "./planner.js";
 import { assertAuditRequestProviderPolicy } from "./provider-policy.js";
 import { buildPreflightSummary } from "./preflight.js";
 import { analyzeTarget } from "./repo.js";
-import { resetPythonWorkerCapabilityCacheForTests } from "./python-worker.js";
+import { PYTHON_WORKER_DEFAULT_OUTPUT_BYTES, PYTHON_WORKER_DEFAULT_TIMEOUT_MS, PYTHON_WORKER_MAX_OUTPUT_BYTES, PYTHON_WORKER_MAX_TIMEOUT_MS, resetPythonWorkerCapabilityCacheForTests, resolvePythonWorkerInvocationLimits } from "./python-worker.js";
 import { inspectPythonWorkerEnvironment, isSupportedPythonWorkerVersion, parsePythonVersion, parsePythonWorkerLock, pythonWorkerVenvExecutable, resolvePythonWorkerExecutable } from "./python-worker-environment.js";
 import { resolveAssessmentEvidenceProviderIds } from "./stages/stage-assess-controls.js";
 import { applyControlDowngrades, applyUnsupportedFindingDrops, mergeSelectiveAssessmentCycle, retainFindingsSupportedByFinalControls } from "./stages/stage-corrections.js";
@@ -4940,6 +4940,52 @@ async function testPythonWorkerEnvironmentContract(): Promise<void> {
   });
 }
 
+async function testPythonWorkerExecutionLimitsAndInspectNormalization(): Promise<void> {
+  assert.deepEqual(resolvePythonWorkerInvocationLimits(), {
+    timeoutMs: PYTHON_WORKER_DEFAULT_TIMEOUT_MS,
+    maxBufferBytes: PYTHON_WORKER_DEFAULT_OUTPUT_BYTES
+  });
+  assert.deepEqual(resolvePythonWorkerInvocationLimits({ timeoutMs: Number.MAX_SAFE_INTEGER, maxBufferBytes: Number.MAX_SAFE_INTEGER }), {
+    timeoutMs: PYTHON_WORKER_MAX_TIMEOUT_MS,
+    maxBufferBytes: PYTHON_WORKER_MAX_OUTPUT_BYTES
+  });
+  const normalized = normalizePythonWorkerForTests({
+    status: "inconclusive",
+    summary: "One bounded probe completed and one timed out.",
+    target: "http://127.0.0.1:8788/agent",
+    coverage: { status: "partial", attempted: 2, completed: 1, inconclusive: 1, errors: 0 },
+    limitations: ["No runtime control may be marked passed from this result."],
+    observations: [
+      {
+        outcome: "observed",
+        severity: "info",
+        evidence_locations: [{ source_kind: "uri", uri: "http://127.0.0.1:8788/agent", label: "baseline" }]
+      },
+      {
+        outcome: "inconclusive",
+        severity: "info",
+        evidence_locations: [{ source_kind: "uri", uri: "http://127.0.0.1:8788/agent", label: "metadata" }]
+      }
+    ]
+  }, "completed");
+  assert.equal(normalized.signal_count, 2);
+  assert.equal(normalized.issue_count, 0);
+  assert.equal(normalized.warning_count, 1);
+  assert.equal(normalized.error_count, 0);
+  assert.equal(normalized.locations?.length, 2);
+  assert.ok(normalized.notes.includes("coverage_status:partial"));
+  assert.ok(normalized.notes.some((item) => /No runtime control may be marked passed/.test(item)));
+
+  const notRun = normalizePythonWorkerForTests({
+    status: "inconclusive",
+    coverage: { status: "not_run", attempted: 0, completed: 0, inconclusive: 0, errors: 0 },
+    observations: [],
+    limitations: ["No runtime control may be marked passed from this result."]
+  }, "completed");
+  assert.equal(notRun.issue_count, 0);
+  assert.equal(notRun.warning_count, 1);
+}
+
 async function testLinuxContainerSandboxBuildsPythonRuntimeProbePlan(): Promise<void> {
   await withTempDir("harness-container-python-plan-", async (rootDir) => {
     const sourceDir = path.join(rootDir, "source");
@@ -7140,6 +7186,7 @@ async function main(): Promise<void> {
       ["local binary providers short-circuit when spawn is blocked", testLocalBinaryProvidersShortCircuitWhenSpawnBlocked],
       ["python worker providers report blocked runtime capability when disabled", testPythonWorkerProvidersReportBlockedWhenDisabled],
       ["python worker environment contract", testPythonWorkerEnvironmentContract],
+      ["python worker limits and Inspect normalization", testPythonWorkerExecutionLimitsAndInspectNormalization],
       ["repo analysis provider emits normalized locations", testRepoAnalysisProviderEmitsNormalizedLocations],
       ["scorecard and trivy normalization emit symbol locations", testScorecardAndTrivyNormalizationEmitSymbolLocations],
       ["runtime readiness fixture enforces container policy", testRuntimeReadinessFixturePolicy],

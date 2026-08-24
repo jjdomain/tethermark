@@ -8,7 +8,7 @@ import { buildDoctorReport, buildStaticScannerDoctorReport, printDoctorReport, r
 import { validateFixtures } from "./fixture-validation.js";
 import { parseVerifiableRuntimeBackend, printRuntimeDoctor, runSetupRuntime, validateRuntimeFixtures } from "./setup-runtime.js";
 import { runSetupTools } from "./setup-tools.js";
-import { printWorkerDoctor, runSetupWorkers } from "./setup-workers.js";
+import { printWorkerDoctor, runSetupWorkers, runWorkerSmoke, runWorkerTests } from "./setup-workers.js";
 
 loadEnvironment();
 
@@ -26,6 +26,8 @@ npm run scan -- setup-tools [--dry-run] [--yes] [--tool scorecard,semgrep,trivy]
 npm run scan -- setup-runtime [--dry-run] [--yes]
 npm run scan -- setup-workers [--dry-run] [--yes] [--python <executable>]
 npm run scan -- worker-doctor [--json]
+npm run scan -- worker-tests
+npm run scan -- worker-smoke
 npm run scan -- runtime-doctor [--json] [--backend gvisor_container|rootless_podman|podman|docker|docker_desktop]
 npm run scan -- validate-runtime-fixtures [--backend gvisor_container|rootless_podman|podman|docker|docker_desktop]
 npm run scan -- benchmark list [--suite <id|file.json>] [--case <id>] [--include-extended] [--include-runtime-pending] [--json]
@@ -696,6 +698,16 @@ async function main(): Promise<void> {
   if (args[0] === "worker-doctor") {
     const inspection = printWorkerDoctor(args.includes("--json"));
     if (!inspection.ready) process.exitCode = 1;
+    return;
+  }
+
+  if (args[0] === "worker-tests") {
+    if (!runWorkerTests()) process.exitCode = 1;
+    return;
+  }
+
+  if (args[0] === "worker-smoke") {
+    if (!await runWorkerSmoke()) process.exitCode = 1;
     return;
   }
 

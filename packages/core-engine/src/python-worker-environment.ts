@@ -7,6 +7,7 @@ export const PYTHON_WORKER_ENVIRONMENT_SCHEMA_VERSION = 1;
 export const PYTHON_WORKER_MIN_VERSION = { major: 3, minor: 11 } as const;
 export const PYTHON_WORKER_MAX_VERSION_EXCLUSIVE = { major: 3, minor: 14 } as const;
 export const PYTHON_WORKER_PACKAGE_VERSION = "0.2.0";
+export const PYTHON_WORKER_INSPECT_VERSION = "0.3.260";
 
 export interface PythonVersion {
   major: number;
@@ -47,6 +48,10 @@ export function pythonWorkerRoot(workspaceRoot = process.cwd()): string {
 
 export function pythonWorkerLockPath(workspaceRoot = process.cwd()): string {
   return path.join(pythonWorkerRoot(workspaceRoot), "requirements.lock");
+}
+
+export function pythonWorkerBootstrapLockPath(workspaceRoot = process.cwd()): string {
+  return path.join(pythonWorkerRoot(workspaceRoot), "requirements-bootstrap.lock");
 }
 
 export function pythonWorkerVenvRoot(workspaceRoot = process.cwd()): string {
@@ -94,7 +99,7 @@ export function isSupportedPythonWorkerVersion(version: PythonVersion | null): b
 export function parsePythonWorkerLock(value: string): Record<string, string> {
   const packages: Record<string, string> = {};
   for (const line of value.split(/\r?\n/)) {
-    const match = line.trim().match(/^([A-Za-z0-9_.-]+)==([^\s\\]+)(?:\s*\\)?$/);
+    const match = line.trim().match(/^([A-Za-z0-9_.-]+)==([^\s;\\]+)(?:\s*;[^\\]+)?(?:\s*\\)?$/);
     if (match) packages[match[1].toLowerCase().replaceAll("_", "-")] = match[2];
   }
   return packages;
@@ -153,6 +158,7 @@ export function inspectPythonWorkerEnvironment(workspaceRoot = process.cwd(), op
   let pythonVersion: PythonVersion | null = null;
   let selfCheck: Record<string, unknown> | null = null;
   let installedPackages: Record<string, string> = {};
+  let dependencyCheckPassed = false;
   if (fs.existsSync(pythonExecutable)) {
     const versionProbe = runPython(pythonExecutable, ["--version"], workspaceRoot);
     pythonVersion = parsePythonVersion(`${versionProbe.stdout || ""}\n${versionProbe.stderr || ""}`.trim());
@@ -174,6 +180,12 @@ export function inspectPythonWorkerEnvironment(workspaceRoot = process.cwd(), op
       errors.push(`Managed Python package inventory failed (${packageProbe.error?.message ?? packageProbe.stderr ?? `exit ${packageProbe.status}`}).`);
     }
 
+    const dependencyProbe = runPython(pythonExecutable, ["-m", "pip", "check"], workspaceRoot);
+    dependencyCheckPassed = dependencyProbe.status === 0;
+    if (!dependencyCheckPassed) {
+      errors.push(`Managed Python dependency check failed (${dependencyProbe.error?.message ?? dependencyProbe.stdout ?? dependencyProbe.stderr ?? `exit ${dependencyProbe.status}`}).`);
+    }
+
     const selfCheckProbe = runPython(pythonExecutable, ["-m", "audit_workers.cli", "--self-check"], workspaceRoot);
     if (selfCheckProbe.status === 0) {
       try {
@@ -187,11 +199,23 @@ export function inspectPythonWorkerEnvironment(workspaceRoot = process.cwd(), op
   }
 
   const expectedPackages = fs.existsSync(lockPath) ? parsePythonWorkerLock(fs.readFileSync(lockPath, "utf8")) : {};
-  const expectedInventory = { ...expectedPackages, "audit-workers": PYTHON_WORKER_PACKAGE_VERSION };
+  const requiredVersions = {
+    "audit-workers": PYTHON_WORKER_PACKAGE_VERSION,
+    "inspect-ai": PYTHON_WORKER_INSPECT_VERSION,
+    pip: expectedPackages.pip,
+    setuptools: expectedPackages.setuptools,
+    virtualenv: expectedPackages.virtualenv,
+    wheel: expectedPackages.wheel
+  };
+  const requiredPackagesCurrent = Object.entries(requiredVersions)
+    .every(([name, version]) => Boolean(version) && installedPackages[name] === version);
+  const manifestInventoryCurrent = Boolean(manifest && packageInventoriesMatch(manifest.installed_packages ?? {}, installedPackages));
   const packagesCurrent = fs.existsSync(pythonExecutable)
     && Object.keys(expectedPackages).length > 0
-    && packageInventoriesMatch(installedPackages, expectedInventory);
-  if (fs.existsSync(pythonExecutable) && !packagesCurrent) errors.push("Managed Python package inventory does not exactly match requirements.lock plus the local worker package.");
+    && requiredPackagesCurrent
+    && manifestInventoryCurrent
+    && dependencyCheckPassed;
+  if (fs.existsSync(pythonExecutable) && !requiredPackagesCurrent) errors.push("Managed Python worker package versions do not match the pinned environment contract.");
   const lockCurrent = Boolean(lockSha256 && manifest?.lock_sha256 === lockSha256);
   if (manifest && !lockCurrent) errors.push("Managed Python environment was created from a different worker lockfile.");
   if (manifest && manifest.schema_version !== PYTHON_WORKER_ENVIRONMENT_SCHEMA_VERSION) {
@@ -203,21 +227,29 @@ export function inspectPythonWorkerEnvironment(workspaceRoot = process.cwd(), op
   if (manifest && pythonVersion && manifest.python_version !== pythonVersion.raw) {
     errors.push(`Managed worker manifest records Python ${manifest.python_version}; interpreter reports ${pythonVersion.raw}.`);
   }
-  if (manifest && !packageInventoriesMatch(manifest.installed_packages ?? {}, installedPackages)) {
+  if (manifest && !manifestInventoryCurrent) {
     errors.push("Managed Python package inventory has drifted from its environment manifest.");
   }
   if (fs.existsSync(pythonExecutable) && selfCheck?.["worker_package_version"] !== PYTHON_WORKER_PACKAGE_VERSION) {
     errors.push("Python worker self-check did not report the expected worker package version.");
   }
-  if (fs.existsSync(pythonExecutable) && selfCheck?.["adapter_implementation_status"] !== "scaffold") {
-    errors.push("Python worker self-check did not report the expected scaffold implementation boundary.");
+  const adapterStatuses = selfCheck?.["adapter_statuses"] as Record<string, unknown> | undefined;
+  if (fs.existsSync(pythonExecutable) && (
+    adapterStatuses?.inspect !== "executable"
+    || adapterStatuses?.garak !== "scaffold"
+    || adapterStatuses?.pyrit !== "scaffold"
+  )) {
+    errors.push("Python worker self-check did not report the expected executable/scaffold adapter boundary.");
+  }
+  if (fs.existsSync(pythonExecutable) && selfCheck?.["inspect_ai_version"] !== PYTHON_WORKER_INSPECT_VERSION) {
+    errors.push(`Inspect AI version does not match the pinned ${PYTHON_WORKER_INSPECT_VERSION} adapter contract.`);
   }
 
   return {
     ready: errors.length === 0,
     status: errors.length === 0 ? "available" : "unavailable",
     summary: errors.length === 0
-      ? `Managed Python worker environment is ready (${pythonVersion?.raw}; lock ${lockSha256?.slice(0, 12)}). Adapter modules are installed scaffolds, not production eval execution.`
+      ? `Managed Python worker environment is ready (${pythonVersion?.raw}; lock ${lockSha256?.slice(0, 12)}). Inspect ${PYTHON_WORKER_INSPECT_VERSION} is executable; Garak and PyRIT remain scaffolds.`
       : errors.join(" "),
     worker_root: workerRoot,
     lock_path: lockPath,

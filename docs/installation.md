@@ -49,6 +49,8 @@ npm run scan -- setup-workers --yes
 npm run scan -- doctor
 npm run scan -- runtime-doctor
 npm run scan -- worker-doctor
+npm run scan -- worker-tests
+npm run scan -- worker-smoke
 npm run scan -- validate-runtime-fixtures
 npm run scan -- validate-fixtures --llm-provider mock
 npm run oss
@@ -91,9 +93,9 @@ Required static scanners for production static audits:
 
 Advanced runtime validation tools:
 
-- Python 3.10+
+- Python `>=3.11 <3.14`
 - Local Runtime Sandbox backend: gVisor `runsc`, rootless Podman, Podman, Docker, or Docker Desktop
-- garak, Inspect, and PyRIT once their real adapters are enabled
+- executable Inspect HTTP baseline; Garak and PyRIT once their real adapters are enabled
 
 Runtime validation is a primary Community Edition feature, but it is launch-gated by Local Runtime Sandbox readiness. The launch UI shows one option, **Local Runtime Sandbox**. Admin -> Runtime Sandbox shows the resolved backend, candidate list, warnings, blockers, network policy, resource limits, and setup guidance.
 
@@ -163,7 +165,7 @@ npm run scan -- setup-workers --yes
 npm run scan -- worker-doctor
 ```
 
-The setup consumes [`workers/python/requirements.lock`](../workers/python/requirements.lock) with pip hash enforcement, installs the local worker package without dependency resolution or build isolation, records the lock digest and installed package inventory, and runs an import-boundary self-check. The current Garak, Inspect, and PyRIT modules remain scaffolds; a passing worker doctor proves reproducible environment readiness, not production behavioral-eval coverage.
+The setup consumes [`workers/python/requirements-bootstrap.lock`](../workers/python/requirements-bootstrap.lock) and [`workers/python/requirements.lock`](../workers/python/requirements.lock) with pip hash enforcement, installs the local worker package without dependency resolution or build isolation, records the runtime-lock digest and installed package inventory, and runs an import-boundary self-check. Inspect is executable through the bounded [`tethermark.inspect.http-baseline@1.0.0`](inspect-adapter.md) pack. Garak and PyRIT remain scaffolds and cannot produce runtime evidence.
 
 ## External Tool Setup
 
