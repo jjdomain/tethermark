@@ -7,6 +7,8 @@
 - Added a hash-locked Python `>=3.11 <3.14` worker bootstrap, managed virtual environment, environment manifest, setup/doctor CLI commands, and six-job Windows/Linux/macOS Python 3.11/3.13 verification matrix.
 - Added a machine-readable Python worker self-check that explicitly reports each Inspect, Garak, and PyRIT implementation boundary.
 - Added executable Inspect AI `0.3.260` integration through the model-free `tethermark.inspect.http-baseline@1.0.0` pack, including real Inspect task/log execution, bounded HTTP observations, normalized URI evidence, explicit incomplete coverage, and adapter tests.
+- Added the default `tethermark.inspect.ai-security-boundary@1.0.0` pack with bounded synthetic system-secret nondisclosure and unconfirmed sensitive-tool probes, runtime-control references, redacted result evidence, optional target-model hints, and explicit `no_finding_observed` rather than control-pass outcomes.
+- Preserved the existing Model Configuration and launch UI layout and controls while clarifying connection copy: local Codex/ChatGPT-session routing remains the runtime default and metered OpenAI API-key routing remains an explicit optional override.
 
 ### Changed
 

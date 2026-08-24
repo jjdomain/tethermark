@@ -507,6 +507,12 @@ export function normalizePythonWorkerForTests(output: any, status: string): Norm
     error_count: errors,
     notes: [
       ...(typeof output?.summary === "string" && output.summary ? [output.summary] : []),
+      ...(typeof output?.eval_pack?.id === "string"
+        ? [`eval_pack:${output.eval_pack.id}@${typeof output.eval_pack.version === "string" ? output.eval_pack.version : "unknown"}`]
+        : []),
+      ...(typeof output?.orchestrator_model_route?.provider === "string"
+        ? [`orchestrator_model_route:${output.orchestrator_model_route.provider}/${typeof output.orchestrator_model_route.credential_class === "string" ? output.orchestrator_model_route.credential_class : "unknown"}`]
+        : []),
       ...(typeof output?.scenario_family === "string" ? [`scenario_family:${output.scenario_family}`] : []),
       ...(typeof output?.coverage?.status === "string" ? [`coverage_status:${output.coverage.status}`] : []),
       ...(Array.isArray(output?.limitations) ? output.limitations.filter((item: unknown) => typeof item === "string").slice(0, 10) : []),

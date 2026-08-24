@@ -509,8 +509,9 @@ Tasks:
 - [x] Pin the Python `>=3.11 <3.14` worker environment with a hash-locked bootstrap, managed virtual environment, setup command, manifest/package verification, `doctor` integration, and Windows/Linux/macOS CI matrix.
 - [ ] Implement and verify Garak, Inspect, and PyRIT adapters behind explicit time/resource/output contracts.
   - [x] Implement Inspect AI `0.3.260` with the versioned, model-free `tethermark.inspect.http-baseline@1.0.0` pack, bounded endpoint/response/time/output handling, normalized observations, and explicit inconclusive coverage.
+  - [x] Add the default `tethermark.inspect.ai-security-boundary@1.0.0` pack for bounded synthetic secret-nondisclosure and unconfirmed-tool-call probes, with runtime-control references, redacted evidence, and no-finding-without-pass semantics.
   - [ ] Replace the Garak and PyRIT scaffolds with executable adapters.
-- [ ] Build versioned eval packs for the runtime controls defined in Phase 7.
+- [ ] Build versioned eval packs for all runtime controls defined in Phase 7 (the first prompt/secret/tool boundary pack is complete; indirect injection, memory, exfiltration, MCP, unsafe output, agency, resource, and telemetry packs remain).
 - [ ] Add framework-aware target startup/health detection for common Node and Python applications and agents.
 - [ ] Add fake tools/services and deterministic attack fixtures for prompt/tool/MCP/memory/data-boundary scenarios.
 - [ ] Normalize observations into evidence, control results, findings, coverage, and inconclusive reasons.

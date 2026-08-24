@@ -1471,7 +1471,9 @@ function deriveLaunchReadiness(form, preflightSummary, preflightAcceptedAt, pref
   if (usingMockProvider) {
     issues.push("Mock Agent Runtime is for dev/test only. Select a live default model in Model Configuration to enable real audits.");
   } else if (form.llm_provider && form.llm_model && !providerCredential.configured) {
-    issues.push("Configure the API key for the selected default model in Model Configuration before launching a real audit.");
+    issues.push(selectedProvider?.mode === "agent_oauth"
+      ? "Connect the ChatGPT account for the selected Codex model in Model Configuration before launching a real audit."
+      : "Configure the API key for the selected default model in Model Configuration before launching a real audit.");
   }
   const preflightStatus = preflightSummary?.readiness?.status || "not_run";
   const blockers = preflightSummary?.readiness?.blockers || [];
@@ -8417,7 +8419,7 @@ function triageDecisionFromReviewSummary(summary) {
         className: "mb-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 text-sm text-slate-700"
       }, [
         h("div", { key: "title", className: "font-medium text-slate-900" }, "Configure how models are chosen for audits"),
-        h("div", { key: "body", className: "mt-1" }, "Choose one default live model and API key for all agents. If a specific agent needs a different model, set it below in the agent-specific section. If a run sets its own agent model in the launch modal, that run-specific choice is used instead of the settings on this page.")
+        h("div", { key: "body", className: "mt-1" }, "Choose one default live model and connection for all agents. ChatGPT + Codex uses your local subscription sign-in by default; OpenAI API models remain available as an optional API-key route. If a specific agent needs a different model, set it below in the agent-specific section. If a run sets its own agent model in the launch modal, that run-specific choice is used instead of the settings on this page.")
       ]),
       h("div", { key: "global-model-header", className: "mb-3" }, [
         h("div", { key: "title", className: "font-medium text-slate-900" }, "Global Agent Default Model"),

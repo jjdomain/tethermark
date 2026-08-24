@@ -269,7 +269,8 @@ export async function runWorkerSmoke(): Promise<boolean> {
     const result = await invokePythonWorker("inspect", {
       endpoint_url: `http://127.0.0.1:${address.port}/agent`,
       run_mode: "runtime",
-      llm_provider: "mock"
+      llm_provider: "mock",
+      hints: { inspect_eval_pack: "http-baseline" }
     }, process.cwd());
     const output = result.output as any;
     const passed = result.status === "completed"

@@ -3479,6 +3479,13 @@ async function testWebUiAndPersistedUiSettingsApi(): Promise<void> {
         const pageHtml = await pageResponse.text();
         assert.equal(pageResponse.status, 200);
         assert.match(pageHtml, /AI Security Harness/);
+        const appRootResponse = await fetch(`${webBaseUrl}/client/app-root.js`);
+        const appRootSource = await appRootResponse.text();
+        assert.equal(appRootResponse.status, 200);
+        assert.match(appRootSource, /ChatGPT \+ Codex uses your local subscription sign-in by default/);
+        assert.match(appRootSource, /OpenAI API models remain available as an optional API-key route/);
+        assert.match(appRootSource, /Connect ChatGPT account/);
+        assert.match(appRootSource, /Use API-key routing for this runtime audit/);
 
         const scopedHeaders = {
           "x-api-key": "test-secret",
@@ -4975,6 +4982,32 @@ async function testPythonWorkerExecutionLimitsAndInspectNormalization(): Promise
   assert.equal(normalized.locations?.length, 2);
   assert.ok(normalized.notes.includes("coverage_status:partial"));
   assert.ok(normalized.notes.some((item) => /No runtime control may be marked passed/.test(item)));
+
+  const finding = normalizePythonWorkerForTests({
+    status: "completed",
+    summary: "AI boundary probes completed.",
+    target: "http://127.0.0.1:8788/v1/chat/completions",
+    eval_pack: { id: "tethermark.inspect.ai-security-boundary", version: "1.0.0" },
+    orchestrator_model_route: { provider: "openai_codex", credential_class: "chatgpt_session", model: "gpt-5.6-sol", used_by_pack: false },
+    coverage: { status: "complete", attempted: 2, completed: 2, findings: 1, inconclusive: 0, errors: 0 },
+    observations: [
+      {
+        outcome: "finding",
+        severity: "high",
+        evidence_locations: [{ source_kind: "uri", uri: "http://127.0.0.1:8788/v1/chat/completions", label: "secret" }]
+      },
+      {
+        outcome: "no_finding_observed",
+        severity: "info",
+        evidence_locations: [{ source_kind: "uri", uri: "http://127.0.0.1:8788/v1/chat/completions", label: "tool" }]
+      }
+    ]
+  }, "completed");
+  assert.equal(finding.signal_count, 2);
+  assert.equal(finding.issue_count, 1);
+  assert.equal(finding.severity_counts.high, 1);
+  assert.ok(finding.notes.includes("eval_pack:tethermark.inspect.ai-security-boundary@1.0.0"));
+  assert.ok(finding.notes.includes("orchestrator_model_route:openai_codex/chatgpt_session"));
 
   const notRun = normalizePythonWorkerForTests({
     status: "inconclusive",
