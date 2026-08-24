@@ -4744,6 +4744,7 @@ async function testRuntimeReadinessFixturePolicy(): Promise<void> {
   assert.equal(args.includes("--read-only"), true);
   assert.equal(args.includes("--cap-drop") && args.includes("ALL"), true);
   assert.equal(args.includes("--security-opt") && args.includes("no-new-privileges"), true);
+  assert.equal(args.includes("TETHERMARK_RUNTIME_BACKEND=docker"), true);
   assert.equal(args.includes(RUNTIME_FIXTURE_IMAGE), true);
   assert.equal(args.some((item) => item.startsWith("type=bind") && item.includes("target=/workspace") && item.endsWith(",readonly")), true);
   assert.equal(args.some((item) => item.startsWith("type=bind") && item.includes("target=/output") && !item.endsWith(",readonly")), true);

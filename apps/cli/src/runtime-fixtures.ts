@@ -24,7 +24,8 @@ const CONTAINER_SCRIPT = [
   "printf 'temporary-write-ok' > /tmp/runtime-fixture.tmp",
   "test \"$(cat /tmp/runtime-fixture.tmp)\" = 'temporary-write-ok'",
   "test \"$(awk '/^CapEff:/ { print $2 }' /proc/self/status)\" = '0000000000000000'",
-  "test \"$(awk '/^NoNewPrivs:/ { print $2 }' /proc/self/status)\" = '1'",
+  "no_new_privileges_observation=proc_status",
+  "if grep -q '^NoNewPrivs:' /proc/self/status; then test \"$(awk '/^NoNewPrivs:/ { print $2 }' /proc/self/status)\" = '1'; else test \"${TETHERMARK_RUNTIME_BACKEND-}\" = 'gvisor_container'; no_new_privileges_observation=gvisor_runtime; fi",
   "test -z \"${TETHERMARK_HOST_SECRET-}\"",
   "test \"${TETHERMARK_FAKE_SECRET-}\" = 'tm_fake_runtime_validation_only'",
   "if dd if=/dev/zero of=/tmp/oversized.bin bs=1048576 count=2 2>/dev/null; then echo 'file-size limit unexpectedly allowed oversized file' >&2; exit 34; fi",
@@ -33,7 +34,7 @@ const CONTAINER_SCRIPT = [
   "printf 'ready' > /output/ready",
   "attempt=0",
   "while [ ! -f /output/continue ]; do attempt=$((attempt + 1)); [ \"$attempt\" -lt 30 ] || exit 33; sleep 1; done",
-  "printf '%s' '{\"source_readonly\":true,\"writable_tmpfs\":true,\"network_blocked\":true,\"capabilities_dropped\":true,\"no_new_privileges\":true,\"host_secret_blocked\":true,\"synthetic_credential_only\":true,\"file_size_blocked\":true}' > /output/result.json",
+  "printf '%s' \"{\\\"source_readonly\\\":true,\\\"writable_tmpfs\\\":true,\\\"network_blocked\\\":true,\\\"capabilities_dropped\\\":true,\\\"no_new_privileges\\\":true,\\\"no_new_privileges_observation\\\":\\\"$no_new_privileges_observation\\\",\\\"host_secret_blocked\\\":true,\\\"synthetic_credential_only\\\":true,\\\"file_size_blocked\\\":true}\" > /output/result.json",
   "echo 'tethermark-runtime-fixture-complete'"
 ].join("\n");
 
@@ -73,6 +74,9 @@ export interface RuntimeFixtureExecutionResult {
   completed_at: string;
   duration_ms: number;
   assertions: Record<string, boolean>;
+  runtime_observations: {
+    no_new_privileges: "proc_status" | "gvisor_runtime" | null;
+  };
   command: {
     exit_code: number | null;
     stdout: string;
@@ -225,6 +229,7 @@ export function buildDockerRuntimeFixtureCreateArgs(input: {
     "--user", "65532:65532",
     "--workdir", "/workspace",
     "--env", "TETHERMARK_RUNTIME_FIXTURE=1",
+    "--env", `TETHERMARK_RUNTIME_BACKEND=${input.backend ?? "docker"}`,
     "--env", "TETHERMARK_RUNTIME_CREDENTIAL_MODE=synthetic",
     "--env", "TETHERMARK_FAKE_SECRET=tm_fake_runtime_validation_only",
     "--tmpfs", `/tmp:rw,noexec,nosuid,nodev,size=${FIXTURE_TMPFS_BYTES}`,
@@ -349,6 +354,7 @@ export async function executeRuntimeReadinessFixture(readiness: RuntimeSandboxRe
     completed_at: startedAt.toISOString(),
     duration_ms: 0,
     assertions: {},
+    runtime_observations: { no_new_privileges: null },
     command: null,
     cleanup: { container_removed: false, temp_root_removed: false },
     evidence_path: null,
@@ -377,6 +383,12 @@ export async function executeRuntimeReadinessFixture(readiness: RuntimeSandboxRe
     const inspectResult = await runCommand(runtimeCommand, ["inspect", containerName]);
     const inspection = (JSON.parse(inspectResult.stdout) as DockerInspectShape[])[0];
     if (!inspection) throw new Error(`${runtimeCommand} inspect returned no fixture container record.`);
+    if (runtimeCommand === "podman") {
+      // Podman's default JSON omits an empty EffectiveCaps slice. Its native
+      // template API can still prove that the interpreted set has length zero.
+      const effectiveCaps = await runCommand(runtimeCommand, ["inspect", "--format", "{{len .EffectiveCaps}}", containerName], { allowFailure: true });
+      if (effectiveCaps.exit_code === 0 && effectiveCaps.stdout.trim() === "0") inspection.EffectiveCaps = [];
+    }
     Object.assign(result.assertions, validateDockerRuntimeFixtureInspect(inspection, {
       sourceRoot: paths.sourceRoot,
       outputRoot: paths.outputRoot,
@@ -387,15 +399,28 @@ export async function executeRuntimeReadinessFixture(readiness: RuntimeSandboxRe
 
     const executionPromise = runCommand(runtimeCommand, ["start", "--attach", containerName], { timeoutMs: FIXTURE_TIMEOUT_MS });
     void executionPromise.catch(() => undefined);
-    await waitForFile(path.join(paths.outputRoot, "ready"), 20_000);
+    await Promise.race([
+      waitForFile(path.join(paths.outputRoot, "ready"), 20_000),
+      executionPromise.then((execution) => {
+        result.command = execution;
+        throw Object.assign(new Error("Runtime fixture exited before signaling readiness."), { command_result: execution });
+      })
+    ]);
     await fs.writeFile(path.join(paths.outputRoot, "continue"), "continue", "utf8");
     const execution = await executionPromise;
     result.command = execution;
     const containerResultPath = path.join(paths.outputRoot, "result.json");
     const containerResult = JSON.parse(await fs.readFile(containerResultPath, "utf8")) as Record<string, unknown>;
+    const noNewPrivilegesObservation = containerResult["no_new_privileges_observation"];
+    result.runtime_observations.no_new_privileges = noNewPrivilegesObservation === "proc_status" || noNewPrivilegesObservation === "gvisor_runtime"
+      ? noNewPrivilegesObservation
+      : null;
     for (const key of ["source_readonly", "writable_tmpfs", "network_blocked", "capabilities_dropped", "no_new_privileges", "host_secret_blocked", "synthetic_credential_only", "file_size_blocked"]) {
       result.assertions[`executed_${key}`] = containerResult[key] === true;
     }
+    result.assertions.no_new_privileges_observation_valid = backend === "gvisor_container"
+      ? noNewPrivilegesObservation === "proc_status" || noNewPrivilegesObservation === "gvisor_runtime"
+      : noNewPrivilegesObservation === "proc_status";
     result.assertions.container_exit_zero = execution.exit_code === 0 && !execution.timed_out;
     result.assertions.completion_marker = execution.stdout.includes("tethermark-runtime-fixture-complete");
     result.assertions.source_unchanged = await fs.readFile(path.join(paths.sourceRoot, "source-marker.txt"), "utf8") === SOURCE_MARKER
