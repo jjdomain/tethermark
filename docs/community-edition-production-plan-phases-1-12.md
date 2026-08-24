@@ -80,8 +80,9 @@ Updated on 2026-08-20 during Phase 5 calibration work from merged Phase 4:
 - The prior static-tool availability gap is resolved on Windows. Deterministic Pi E2E jobs intentionally disable local binaries and assert explicit skipped evidence, while the separate real-scanner gate requires executable pinned tools.
 - `npm run production:runtime-readiness`: **passed** on 2026-08-02 in 36.1 seconds with Docker Desktop `29.3.0` on the Linux engine. A digest-pinned Alpine fixture executed with no network, read-only source/root filesystems, bounded writable scratch, non-root execution, dropped capabilities, no-new-privileges, CPU/memory/PID/output limits, exact policy inspection, structured evidence, and verified container/temp cleanup. On 2026-08-21, `localRuntimeProvider.execute()` also completed real digest-pinned Node target tests and service startup through Docker Desktop with exact argv, non-root execution, default-deny network, source immutability, cancellation cleanup, and zero leftover containers/volumes.
 - `npm run production:runtime-native -- --backend docker_desktop`: **passed** on 2026-08-24 on Windows 11 x64 with Docker Desktop `4.66.0`, Docker engine `29.3.0`, and the WSL2 Linux engine. The pinned backend passed the malicious readiness fixture plus real Node test, artifact, and bounded-service execution; every step used exact argv and default-deny networking, quota accounting completed, artifact collection succeeded, and no Tethermark container, volume, or network remained.
+- Native Runtime Verification [GitHub Actions run `32688251184`](https://github.com/jjdomain/tethermark/actions/runs/32688251184): **passed** on 2026-08-24. Linux x64 executable gates passed for Docker Engine `28.0.4`, rootless Podman `5.8.4`, and gVisor `runsc`; each ran the malicious readiness fixture and the real Node provider fixture with zero Tethermark resources left behind. The macOS 15 arm64 job passed the truthful blocked boundary without claiming Docker Desktop execution.
 - The real Codex sign-in smoke and both bounded live inference gates now pass with a directly executable signed-in CLI.
-- The Local Runtime Sandbox resolver, policy contracts, and Docker-first execution provider are implemented. Docker now enforces per-file limits plus separate hard tmpfs workspace and artifact-scratch quotas, safely collects regular artifact files, persists resource summaries, injects synthetic-only fixture credentials/services, passes the malicious readiness fixture, and routes explicitly governed dependency-install or external runtime-probe egress through an internal-network allowlisting proxy. Remaining Phase 8 work is verified Podman/gVisor and macOS/Linux fixtures.
+- The Local Runtime Sandbox resolver, policy contracts, and Docker-first execution provider are implemented. Docker now enforces per-file limits plus separate hard tmpfs workspace and artifact-scratch quotas, safely collects regular artifact files, persists resource summaries, injects synthetic-only fixture credentials/services, passes the malicious readiness fixture, and routes explicitly governed dependency-install or external runtime-probe egress through an internal-network allowlisting proxy. Native Windows Docker Desktop and Linux Docker/rootless-Podman/gVisor executable fixtures pass; only real macOS Docker Desktop execution remains open.
 - The governed self-learning v1 path exists for CE and is off by default. Candidate generation/promotion is human governed. Hosted products may extend it, but it is not hosted-only.
 - Local ChatGPT-session credentials are blocked for unattended/background model synthesis. The approved matrix requires API-key or mock credentials for unattended and service work.
 
@@ -96,7 +97,7 @@ Updated on 2026-08-20 during Phase 5 calibration work from merged Phase 4:
 | 5 | Calibrate audit quality, evidence integrity, and scoring | **Complete** | Current four-advisory release set passes; future ground-truth expansion triggers recalibration |
 | 6 | Complete review, remediation, exports, and operator workflows | **Complete** | Completed 2026-08-20; see `docs/phase6-operator-workflow-evidence.md` |
 | 7 | Implement Admin/System Policies and extensive-scan controls | **Complete for the policy plane** | Executable runtime enforcement is tracked in Phase 8 |
-| 8 | Execute local runtime scans in a real isolated sandbox | **In progress** | Windows Docker Desktop passed; native Linux Docker/Podman/gVisor workflow evidence and a real-Mac Docker Desktop pass remain |
+| 8 | Execute local runtime scans in a real isolated sandbox | **In progress** | Windows Docker Desktop and native Linux Docker/rootless-Podman/gVisor passed; a real-Mac Docker Desktop pass remains |
 | 9 | Operationalize runtime evals and Python workers | **Partial** | Garak/Inspect/PyRIT adapters are not a verified production pipeline |
 | 10 | Harden persistence, jobs, maintenance, and governed learning | **Mostly complete** | Stress/recovery tests, retention automation, learning consumption decision |
 | 11 | Package, secure, and verify cross-platform installation | **Partial** | Fresh-machine installers, SBOM/signing, hardened deployment profiles |
@@ -115,7 +116,7 @@ Completed or evidenced:
 - Recovered branch is on GitHub and previously had green GitHub checks.
 - Provider/learning production-boundary hardening exists in commit `9a430b1`.
 - Deterministic release check passed on 2026-08-02.
-- Runtime readiness and real audit-target execution now run through Docker Desktop with persisted plan/result/cleanup evidence and no host fallback. Broader Phase 8 backend and egress hardening remains open.
+- Runtime readiness and real audit-target execution now pass on Windows Docker Desktop plus native Linux Docker, rootless Podman, and gVisor with persisted plan/result/cleanup evidence and no host fallback. Real macOS Docker Desktop execution remains the Phase 8 platform gate.
 
 Remaining tasks:
 
@@ -443,7 +444,7 @@ Exit criteria:
 
 ## Phase 8 — Execute local runtime scans in a real isolated sandbox
 
-Status: **In progress — Docker execution milestone complete**
+Status: **In progress — Windows/Linux native execution complete; real-Mac gate remains**
 
 Objective: turn the current readiness/policy scaffold into actual local isolated execution.
 
@@ -454,7 +455,7 @@ Tasks:
 - [x] Implement `localRuntimeProvider.execute()` against the selected backend instead of returning a blocked placeholder.
 - [x] Keep model-backed planning, supervision, and remediation for operator-started runtime validation on the `openai_codex`/`chatgpt_session` default; require an explicit operator override for API-key routing.
 - [x] Make the Codex model subprocess inference-only for runtime-validation runs and prove it cannot launch target or host commands; do not treat its `read-only` flag as runtime-isolation evidence.
-- [ ] Implement Docker first for broad CE usability, then rootless Podman and gVisor hardening on Linux.
+- [x] Implement Docker first for broad CE usability, then rootless Podman and gVisor hardening on Linux.
 - [x] Never execute untrusted build/runtime commands directly on the host as a fallback.
 - [x] Use exact argv with shell disabled; validate workdir and mounts against traversal/symlink escape.
 - [x] Mount the target read-only and a separate artifacts/scratch directory read-write.
@@ -465,7 +466,8 @@ Tasks:
 - [x] Add a deterministic fake service/tool backend on a separate internal-only network, inject only synthetic URLs/secrets, and preserve bounded request traces for the executable eval packs in Phase 9.
 - [x] Capture image/template digest, backend/version, exact command, policy, timestamps, exit status, resource summary, artifacts, and cleanup result.
 - [x] Prove cancellation kills descendants and cleanup removes containers, volumes, temp data, and credentials for the Docker execution path.
-- [ ] Add Windows Docker Desktop, macOS Docker Desktop, Linux Docker/Podman, and hardened Linux gVisor fixtures.
+- [x] Add executable Windows Docker Desktop and Linux Docker/rootless-Podman/gVisor fixtures, plus a native macOS fail-closed boundary fixture.
+- [ ] Run the executable `docker_desktop` fixture on a real Mac; do not treat the hosted macOS blocked-boundary job as runtime-execution evidence.
 
 Exit criteria:
 
@@ -487,6 +489,12 @@ Docker milestone evidence (2026-08-21):
 - The same live fixture filled a separate 1 MiB artifact-scratch tmpfs and received `ENOSPC`. A successful probe wrote an artifact inside that volume; a controlled collector copied only regular directories/files to the host run directory before both volumes were removed.
 - A live runtime-probe egress check reached allowlisted `registry.npmjs.org` only after both `runtime_probe_network` authorization and explicit `external_network` step metadata were present. It reused the internal proxy policy and cleaned up all resources.
 - A live synthetic-tool probe used an internal-only network with no egress proxy, retrieved the fixed fake secret, invoked the deterministic fake tool, and exported redacted method/path/body-hash traces plus the client result through the capped artifact collector.
+
+Native platform evidence (2026-08-24):
+
+- Windows 11 x64 with Docker Desktop `4.66.0` and Docker Engine `29.3.0` passed the executable `docker_desktop` gate locally.
+- [GitHub Actions run `32688251184`](https://github.com/jjdomain/tethermark/actions/runs/32688251184) passed executable Linux x64 gates for Docker Engine `28.0.4`, rootless Podman `5.8.4`, and Docker-registered gVisor `runsc` on Ubuntu 24.04.4.
+- The same run passed the macOS 15 arm64 blocked-boundary gate. It proves native build and fail-closed backend resolution, not Docker Desktop execution; a real-Mac pass remains required.
 
 ## Phase 9 — Operationalize runtime evals and Python workers
 

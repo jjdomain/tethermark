@@ -36,6 +36,17 @@ The macOS job intentionally expects the Docker Desktop backend to be blocked. Gi
 
 Windows GitHub-hosted runners have the same product-boundary role because they do not provide Docker Desktop. The executable Windows gate runs on a maintainer Windows machine with Docker Desktop's Linux engine.
 
+## Current verification evidence
+
+The 2026-08-24 native matrix in [GitHub Actions run 32688251184](https://github.com/jjdomain/tethermark/actions/runs/32688251184) passed all four jobs:
+
+- Linux x64 Docker Engine 28.0.4 on Ubuntu 24.04.4: executable readiness and real-provider fixtures passed.
+- Linux x64 rootless Podman 5.8.4: executable readiness and real-provider fixtures passed with rootless mode proven.
+- Linux x64 gVisor `runsc` on Docker Engine 28.0.4: `runsc` registration, explicit runtime selection, executable readiness, and real-provider fixtures passed.
+- macOS 15 arm64: the blocked Docker Desktop boundary passed without making a runtime-execution claim.
+
+The same verifier passed locally on Windows 11 x64 with Docker Desktop 4.66.0, Docker Engine 29.3.0, and its WSL2 Linux engine. Real macOS Docker Desktop execution remains the only platform/backend gate in this matrix that has not run.
+
 ## Acceptance boundary
 
 Passing Linux Docker, rootless Podman, or gVisor evidence applies only to the exact OS, architecture, engine, and runtime versions recorded in the evidence. A blocked-boundary job is successful evidence that Tethermark fails closed; it is not evidence that runtime execution passed on that platform.
