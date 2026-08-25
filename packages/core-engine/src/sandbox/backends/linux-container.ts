@@ -1190,6 +1190,7 @@ export class LinuxContainerSandboxBackend {
             container_name: null,
             image: providerPlan.image,
             command: step.command,
+            health_probe: null,
             network_mode: "none" as const,
             adapter: step.adapter,
             artifact_context: step.artifact_context
@@ -1215,7 +1216,18 @@ export class LinuxContainerSandboxBackend {
           summary: result.summary,
           exitCode: result.exit_code,
           stdout: result.stdout_excerpt,
-          stderr: result.stderr_excerpt
+          stderr: result.stderr_excerpt,
+          startupSignal: step.phase === "runtime_probe"
+            ? deriveStartupSignal(result.stdout_excerpt, result.stderr_excerpt)
+            : null,
+          runtimeProbe: result.health_probe ? {
+            ...result.health_probe,
+            response_excerpt: null,
+            attempts: result.health_probe.attempts.map((attempt) => ({
+              ...attempt,
+              response_excerpt: null
+            }))
+          } : null
         })
       };
     });

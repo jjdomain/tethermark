@@ -163,9 +163,30 @@ export interface RuntimeValidationStepResult {
   container_create_argv?: string[];
   runtime_version?: string | null;
   resource_summary?: RuntimeValidationResourceSummary;
+  health_probe?: RuntimeValidationHealthProbe | null;
   network_mode: "none" | "bridge";
   adapter?: string;
   artifact_context?: Record<string, unknown>;
+}
+
+export interface RuntimeValidationHealthProbeAttempt {
+  port: number;
+  path: string;
+  status_code: number | null;
+  error: string | null;
+  duration_ms: number;
+}
+
+export interface RuntimeValidationHealthProbe {
+  ok: boolean;
+  classification: "healthy" | "http_error" | "connection_refused" | "timeout" | "exited_early" | "startup_failed" | "unknown";
+  strategy: "node_http" | "python_http_client" | "unavailable";
+  successful_target: string | null;
+  successful_port: number | null;
+  successful_path: string | null;
+  status_code: number | null;
+  error: string | null;
+  attempts: RuntimeValidationHealthProbeAttempt[];
 }
 
 export interface RuntimeValidationResourceSummary {
@@ -840,6 +861,110 @@ const trace='/artifacts/synthetic-service-calls.ndjson';
 const send=(res,code,value)=>{const body=JSON.stringify(value);res.writeHead(code,{'content-type':'application/json','content-length':Buffer.byteLength(body)});res.end(body)};
 http.createServer((req,res)=>{let body='';req.on('data',chunk=>{body+=chunk;if(Buffer.byteLength(body)>65536)req.destroy()});req.on('end',()=>{const event={at:new Date().toISOString(),method:req.method,path:req.url,body_sha256:crypto.createHash('sha256').update(body).digest('hex')};fs.appendFileSync(trace,JSON.stringify(event)+'\\n');if(req.url==='/health')return send(res,200,{ok:true,service:'tethermark-synthetic'});if(req.url==='/secret')return send(res,200,{value:'tm_fake_runtime_validation_only',synthetic:true});if(req.url==='/tool'&&req.method==='POST')return send(res,200,{ok:true,tool:'synthetic_echo',input_sha256:event.body_sha256});send(res,404,{ok:false,error:'not_found'})})}).listen(8081,'0.0.0.0');`;
 
+const NODE_HEALTH_PROBE_SCRIPT = `
+const http=require('http');
+const targets=JSON.parse(process.argv[1]||'[]');
+const probe=target=>new Promise(resolve=>{const started=Date.now();const request=http.request({host:'127.0.0.1',port:target.port,path:target.path,method:'GET',headers:{accept:'*/*','user-agent':'tethermark-health-probe'}},response=>{const status=Number(response.statusCode)||null;response.resume();response.once('end',()=>resolve({port:target.port,path:target.path,status_code:status,error:null,duration_ms:Date.now()-started}))});request.setTimeout(750,()=>request.destroy(Object.assign(new Error('timeout'),{code:'ETIMEDOUT'})));request.once('error',error=>resolve({port:target.port,path:target.path,status_code:null,error:String(error.code||error.name||'request_error').slice(0,64),duration_ms:Date.now()-started}));request.end()});
+Promise.all(targets.map(probe)).then(attempts=>{const successful_index=attempts.findIndex(attempt=>attempt.status_code!==null&&attempt.status_code<500);process.stdout.write(JSON.stringify({successful_index,attempts}));process.exitCode=successful_index>=0?0:3}).catch(()=>{process.stdout.write(JSON.stringify({successful_index:-1,attempts:[]}));process.exitCode=4});`;
+
+const PYTHON_HEALTH_PROBE_SCRIPT = `
+import concurrent.futures,http.client,json,sys,time
+targets=json.loads(sys.argv[1] if len(sys.argv)>1 else '[]')
+def probe(target):
+ started=time.monotonic(); status=None; error=None
+ try:
+  connection=http.client.HTTPConnection('127.0.0.1',target['port'],timeout=.75)
+  connection.request('GET',target['path'],headers={'Accept':'*/*','User-Agent':'tethermark-health-probe'})
+  response=connection.getresponse(); status=response.status; connection.close()
+ except Exception as exc: error=getattr(exc,'reason',None); error=getattr(error,'errno',None) or getattr(exc,'errno',None) or exc.__class__.__name__; error=str(error)[:64]
+ return {'port':target['port'],'path':target['path'],'status_code':status,'error':error,'duration_ms':round((time.monotonic()-started)*1000)}
+with concurrent.futures.ThreadPoolExecutor(max_workers=min(8,max(1,len(targets)))) as executor: attempts=list(executor.map(probe,targets))
+successful_index=next((index for index,attempt in enumerate(attempts) if attempt['status_code'] is not None and attempt['status_code']<500),-1)
+print(json.dumps({'successful_index':successful_index,'attempts':attempts},separators=(',',':')))
+sys.exit(0 if successful_index>=0 else 3)`;
+
+function runtimeHealthTargets(step: RuntimeValidationStep): Array<{ port: number; path: string }> {
+  const configuredPorts = Array.isArray(step.artifact_context?.probe_ports)
+    ? step.artifact_context.probe_ports
+    : typeof step.artifact_context?.probe_port === "number"
+      ? [step.artifact_context.probe_port]
+      : [];
+  const commandText = step.command.join(" ");
+  const detectedPort = commandText.match(/(?:--port|-p)\s+(\d{1,5})\b/)?.[1] ?? commandText.match(/\bPORT=(\d{1,5})\b/)?.[1];
+  const stack = String(step.artifact_context?.stack ?? "").toLowerCase();
+  const binary = String(step.command[0] ?? "").toLowerCase();
+  const python = stack === "python" || ["python", "python3", "uvicorn", "flask", "django-admin"].includes(binary);
+  const defaultPorts = python ? [8000, 5000, 3000] : [3000, 4173, 8080];
+  const ports = [...configuredPorts, ...(detectedPort ? [Number(detectedPort)] : []), ...defaultPorts]
+    .map((value) => Number(value))
+    .filter((value) => Number.isInteger(value) && value > 0 && value <= 65_535);
+  const configuredPaths = Array.isArray(step.artifact_context?.probe_paths) ? step.artifact_context.probe_paths : [];
+  const paths = [...configuredPaths, "/", "/health", "/healthz"]
+    .map((value) => String(value ?? "").trim())
+    .filter((value) => value.startsWith("/") && !value.startsWith("//") && value.length <= 256 && !/[\u0000-\u001f\u007f]/.test(value));
+  const targets: Array<{ port: number; path: string }> = [];
+  for (const port of [...new Set(ports)]) {
+    for (const probePath of [...new Set(paths)]) {
+      targets.push({ port, path: probePath });
+      if (targets.length >= 16) return targets;
+    }
+  }
+  return targets;
+}
+
+function runtimeHealthStrategy(step: RuntimeValidationStep): RuntimeValidationHealthProbe["strategy"] {
+  const stack = String(step.artifact_context?.stack ?? "").toLowerCase();
+  const binary = String(step.command[0] ?? "").toLowerCase();
+  if (stack === "python" || ["python", "python3", "uvicorn", "flask", "django-admin"].includes(binary)) return "python_http_client";
+  if (stack === "node" || ["node", "npm", "npx", "pnpm", "yarn"].includes(binary)) return "node_http";
+  return "unavailable";
+}
+
+function parseRuntimeHealthAttempts(value: string): { successful_index: number; attempts: RuntimeValidationHealthProbeAttempt[] } | null {
+  try {
+    const parsed = JSON.parse(value.trim());
+    if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.attempts)) return null;
+    const attempts = parsed.attempts.slice(0, 16).map((attempt: any) => ({
+      port: Number(attempt?.port),
+      path: String(attempt?.path ?? ""),
+      status_code: typeof attempt?.status_code === "number" ? attempt.status_code : null,
+      error: attempt?.error == null ? null : String(attempt.error).slice(0, 64),
+      duration_ms: Math.max(0, Number(attempt?.duration_ms) || 0)
+    })).filter((attempt: RuntimeValidationHealthProbeAttempt) => Number.isInteger(attempt.port) && attempt.port > 0 && attempt.path.startsWith("/"));
+    return { successful_index: Number(parsed.successful_index), attempts };
+  } catch {
+    return null;
+  }
+}
+
+function failedRuntimeHealthProbe(
+  strategy: RuntimeValidationHealthProbe["strategy"],
+  classification: RuntimeValidationHealthProbe["classification"],
+  attempts: RuntimeValidationHealthProbeAttempt[],
+  error: string
+): RuntimeValidationHealthProbe {
+  const last = attempts.at(-1) ?? null;
+  return {
+    ok: false,
+    classification,
+    strategy,
+    successful_target: null,
+    successful_port: null,
+    successful_path: null,
+    status_code: last?.status_code ?? null,
+    error,
+    attempts: attempts.slice(-64)
+  };
+}
+
+function classifyRuntimeHealthAttempts(attempts: RuntimeValidationHealthProbeAttempt[]): RuntimeValidationHealthProbe["classification"] {
+  if (attempts.some((attempt) => attempt.status_code != null)) return "http_error";
+  const errors = attempts.map((attempt) => String(attempt.error ?? "").toLowerCase()).join(" ");
+  if (/timedout|timeout/.test(errors)) return "timeout";
+  if (/refused|econnrefused|111|61|10061/.test(errors)) return "connection_refused";
+  return "unknown";
+}
+
 function blockedStep(step: RuntimeValidationStep, summary: string, image: string | null): RuntimeValidationStepResult {
   return {
     step_id: step.step_id,
@@ -861,6 +986,71 @@ function blockedStep(step: RuntimeValidationStep, summary: string, image: string
     adapter: step.adapter,
     artifact_context: step.artifact_context
   };
+}
+
+async function probeRuntimeContainer(args: {
+  runCommand: RuntimeCommandRunner;
+  runtimeCommand: "docker" | "podman";
+  containerName: string;
+  step: RuntimeValidationStep;
+  policy: RuntimeExecutionPolicy;
+  remainingMs: () => number;
+}): Promise<RuntimeValidationHealthProbe> {
+  const strategy = runtimeHealthStrategy(args.step);
+  const targets = runtimeHealthTargets(args.step);
+  if (strategy === "unavailable" || targets.length === 0) {
+    return failedRuntimeHealthProbe(strategy, "unknown", [], "runtime_health_probe_strategy_unavailable");
+  }
+  const probeScript = strategy === "python_http_client" ? PYTHON_HEALTH_PROBE_SCRIPT : NODE_HEALTH_PROBE_SCRIPT;
+  const probeCommand = strategy === "python_http_client" ? "python" : "node";
+  const deadline = Date.now() + Math.max(1, Math.min(10_000, args.policy.step_timeout_ms, args.remainingMs()));
+  const attempts: RuntimeValidationHealthProbeAttempt[] = [];
+  let probeError = "runtime_health_probe_no_healthy_response";
+  while (Date.now() < deadline && args.remainingMs() > 0) {
+    const budget = Math.max(1, Math.min(2_500, deadline - Date.now(), args.remainingMs()));
+    let probeResult: RuntimeCommandResult | null = null;
+    try {
+      probeResult = await args.runCommand(
+        args.runtimeCommand,
+        ["exec", args.containerName, probeCommand, strategy === "python_http_client" ? "-c" : "-e", probeScript, JSON.stringify(targets)],
+        commandOptions(args.policy, budget)
+      );
+    } catch (error) {
+      probeError = error instanceof Error ? error.message.slice(0, 128) : "runtime_health_probe_exec_failed";
+    }
+    const parsed = parseRuntimeHealthAttempts(probeResult?.stdout ?? "");
+    if (parsed) {
+      attempts.push(...parsed.attempts);
+      const successful = parsed.attempts[parsed.successful_index];
+      if (successful && successful.status_code != null && successful.status_code < 500) {
+        return {
+          ok: true,
+          classification: "healthy",
+          strategy,
+          successful_target: `http://127.0.0.1:${successful.port}${successful.path}`,
+          successful_port: successful.port,
+          successful_path: successful.path,
+          status_code: successful.status_code,
+          error: null,
+          attempts: attempts.slice(-64)
+        };
+      }
+    } else if (probeResult?.stderr) {
+      probeError = boundedText(probeResult.stderr.trim(), 128) || probeError;
+    }
+    const state = await args.runCommand(
+      args.runtimeCommand,
+      ["inspect", "--format", "{{json .State}}", args.containerName],
+      commandOptions(args.policy, Math.max(1, Math.min(2_000, deadline - Date.now(), args.remainingMs())))
+    ).catch(() => null);
+    const stateJson = parseDockerJson(state?.stdout ?? "");
+    if (stateJson.Running !== true) {
+      return failedRuntimeHealthProbe(strategy, "exited_early", attempts, "runtime_process_exited_before_health_response");
+    }
+    const delayMs = Math.max(0, Math.min(350, deadline - Date.now(), args.remainingMs()));
+    if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  return failedRuntimeHealthProbe(strategy, classifyRuntimeHealthAttempts(attempts), attempts, probeError);
 }
 
 export function createLocalRuntimeProvider(options: { runCommand?: RuntimeCommandRunner } = {}): RuntimeSandboxProvider {
@@ -1295,18 +1485,27 @@ export function createLocalRuntimeProvider(options: { runCommand?: RuntimeComman
           }
 
           let commandResult: RuntimeCommandResult;
+          let healthProbe: RuntimeValidationHealthProbe | null = null;
           if (step.phase === "runtime_probe") {
             const startResult = await runCommand(runtimeCommand, ["start", containerName], commandOptions(input.policy, Math.min(20_000, remaining())));
             if (startResult.exit_code !== 0) {
               commandResult = startResult;
+              healthProbe = failedRuntimeHealthProbe(runtimeHealthStrategy(step), "startup_failed", [], "runtime_container_start_failed");
             } else {
-              await new Promise((resolve) => setTimeout(resolve, Math.min(1_500, remaining())));
+              healthProbe = await probeRuntimeContainer({
+                runCommand,
+                runtimeCommand,
+                containerName,
+                step,
+                policy: input.policy,
+                remainingMs: remaining
+              });
               const state = await runCommand(runtimeCommand, ["inspect", "--format", "{{json .State}}", containerName], commandOptions(input.policy, Math.min(10_000, remaining())));
               const logs = await runCommand(runtimeCommand, ["logs", containerName], commandOptions(input.policy, Math.min(10_000, remaining())));
               let stateJson: any = {};
               try { stateJson = JSON.parse(state.stdout.trim()); } catch {}
               commandResult = {
-                exit_code: stateJson.Running === true ? 0 : typeof stateJson.ExitCode === "number" ? stateJson.ExitCode : state.exit_code,
+                exit_code: healthProbe.ok ? 0 : typeof stateJson.ExitCode === "number" ? stateJson.ExitCode : state.exit_code,
                 stdout: logs.stdout,
                 stderr: logs.stderr || state.stderr,
                 timed_out: false
@@ -1366,15 +1565,20 @@ export function createLocalRuntimeProvider(options: { runCommand?: RuntimeComman
             quota_exceeded: quotaExceeded
           };
           const completedNormally = commandResult.exit_code === 0 && !commandResult.timed_out;
-          const status = completedNormally && quotaMeasured && !quotaExceeded && oomKilled !== true ? "completed" : "failed";
+          const healthVerified = step.phase !== "runtime_probe" || healthProbe?.ok === true;
+          const status = completedNormally && healthVerified && quotaMeasured && !quotaExceeded && oomKilled !== true ? "completed" : "failed";
           const summary = !quotaMeasured
             ? `Isolated container step '${step.step_id}' failed closed because workspace quota accounting was unavailable.`
             : quotaExceeded
               ? `Isolated container step '${step.step_id}' exceeded a workspace or artifact quota.`
               : oomKilled
                 ? `Isolated container step '${step.step_id}' exceeded its memory limit and was OOM-killed.`
+                : step.phase === "runtime_probe" && healthProbe?.ok !== true
+                  ? `Isolated runtime probe '${step.step_id}' did not expose a healthy HTTP endpoint (${healthProbe?.classification ?? "unknown"}).`
                 : status === "completed"
-                  ? `Isolated container step '${step.step_id}' completed.`
+                  ? step.phase === "runtime_probe"
+                    ? `Isolated runtime probe '${step.step_id}' exposed a healthy HTTP endpoint.`
+                    : `Isolated container step '${step.step_id}' completed.`
                   : `Isolated container step '${step.step_id}' failed.`;
           const result: RuntimeValidationStepResult = {
             step_id: step.step_id,
@@ -1395,6 +1599,7 @@ export function createLocalRuntimeProvider(options: { runCommand?: RuntimeComman
             container_create_argv: [...createArgs],
             runtime_version: runtimeVersion,
             resource_summary: resourceSummary,
+            health_probe: healthProbe,
             network_mode: stepNetwork === "none" ? "none" : "bridge",
             adapter: step.adapter,
             artifact_context: step.artifact_context

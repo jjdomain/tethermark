@@ -114,6 +114,8 @@ Defaults:
 - dependency-install network requires explicit configuration and a non-empty hostname allowlist
 - Docker dependency-install containers attach only to an internal network; a separate pinned proxy attached to that network and the Docker bridge validates exact/wildcard hostnames, permits only HTTP/HTTPS ports, and rejects private/local resolved addresses
 - runtime probes remain network-none unless the policy authorizes runtime-probe egress and the exact step carries `external_network: true`; authorized probes use the same proxy boundary
+- Node and Python runtime probes are verified from inside the target container against bounded loopback port/path candidates derived from the detected framework; a running process without an HTTP response below status 500 fails closed
+- health polling is capped by the step/overall budget and a 10-second readiness ceiling; attempt evidence retains only port, path, status/error class, and duration, never response bodies
 - steps requesting `fake_tool_api` receive a separate internal-only network, fixed synthetic service/tool URLs, a fixed fake secret, and bounded method/path/body-hash traces in artifact scratch; synthetic-service and external-egress phases cannot be combined in one step
 - target mounted read-only where supported
 - artifacts written only to the per-run artifact directory
@@ -159,6 +161,7 @@ Each runtime validation stores:
 - plan steps and command arrays
 - stdout/stderr excerpts
 - exit code, duration, and timeout state
+- bounded health-probe strategy, attempted loopback targets, status/error classification, and successful target when present
 - artifact paths
 - linked run and finding ids
 - generated evidence ids

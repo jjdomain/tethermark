@@ -18,6 +18,7 @@ The verifier fails closed unless all of the following hold:
 - the requested backend is pinned and launchable
 - the digest-pinned isolation fixture passes its runtime and inspected-policy assertions
 - a dependency-free Node target runs tests, writes a collected artifact, and starts a bounded service in containers
+- the bounded service returns a verified in-container loopback HTTP response; keeping the process alive without a responsive endpoint is insufficient
 - exact argv, non-root execution, default-deny network, filesystem policy, resource measurements, and backend identity are retained
 - no `tethermark-*` containers, volumes, or networks exist before or after the run
 
@@ -45,7 +46,7 @@ The 2026-08-24 native matrix in [GitHub Actions run 32688251184](https://github.
 - Linux x64 gVisor `runsc` on Docker Engine 28.0.4: `runsc` registration, explicit runtime selection, executable readiness, and real-provider fixtures passed.
 - macOS 15 arm64: the blocked Docker Desktop boundary passed without making a runtime-execution claim.
 
-The same verifier passed locally on Windows 11 x64 with Docker Desktop 4.66.0, Docker Engine 29.3.0, and its WSL2 Linux engine. Real macOS Docker Desktop execution remains unverified and explicitly deferred.
+The same verifier passed locally on Windows 11 x64 with Docker Desktop 4.66.0, Docker Engine 29.3.0, and its WSL2 Linux engine. On 2026-08-25 the updated verifier also passed the in-container Node HTTP health assertion and confirmed cleanup. Real macOS Docker Desktop execution remains unverified and explicitly deferred.
 
 ## Acceptance boundary
 

@@ -37,6 +37,7 @@ Completed:
 - Linux static sandbox backend
 - Linux container-backend scaffold
 - executable local runtime provider verified on Windows Docker Desktop and native Linux Docker, rootless Podman, and gVisor; real-Mac execution is explicitly deferred and not certified
+- framework-aware startup commands and port/path discovery for common Node/Python applications, with bounded in-container loopback health verification that rejects merely-running but unresponsive targets
 - hash-locked managed Python worker environment with setup/doctor commands and cross-platform CI coverage, executable Inspect AI `0.3.260` HTTP/prompt/tool/data/memory packs, bounded Garak `0.16.0` PromptInject, and bounded PyRIT `1.0.1` adversarial-text profiles
 - local static `scan path ... --mode static` verified on Windows with provider-backed agents and standards-based score artifacts
 - versioned deterministic regression suite for good, mixed, risky, ordinary, runnable, agentic, and MCP targets

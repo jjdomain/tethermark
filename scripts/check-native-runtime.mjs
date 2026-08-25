@@ -185,7 +185,7 @@ async function executeProviderVerification(backend, artifactRoot) {
         command: ["node", "server.js"],
         requires_network: false,
         enabled: true,
-        artifact_context: { stack: "node", native_verification: true }
+        artifact_context: { stack: "node", probe_ports: [3000], probe_paths: ["/health"], native_verification: true }
       }
     ]
   };
@@ -200,6 +200,7 @@ async function executeProviderVerification(backend, artifactRoot) {
     every_step_default_deny_network: result.steps.every((step) => step.network_mode === "none"),
     exact_commands_preserved: result.steps.every((step, index) => JSON.stringify(step.command) === JSON.stringify(request.steps[index].command)),
     quotas_measured: result.steps.every((step) => step.resource_summary?.workspace_bytes !== null && step.resource_summary?.artifact_bytes !== null),
+    runtime_health_verified: result.steps.find((step) => step.step_id === "bounded-service")?.health_probe?.ok === true,
     cleanup_confirmed: result.cleanup.containers_removed && result.cleanup.workspace_volume_removed && result.cleanup.errors.length === 0,
     artifact_collected: collectedArtifact?.collected === true,
     gvisor_runtime_explicit: backend !== "gvisor_container" || result.steps.every((step) => step.container_create_argv?.includes("runsc"))

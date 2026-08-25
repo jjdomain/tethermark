@@ -1,5 +1,16 @@
 ﻿# Changelog
 
+## 2026-08-25
+
+### Added
+
+- Added bounded in-container HTTP readiness verification for framework-aware Node and Python runtime probes. The provider polls only validated loopback port/path candidates, records body-free status/error evidence, and fails closed when a target process remains alive without a responsive endpoint.
+
+### Verified
+
+- Full TypeScript build and test suite passed with Node success and Python connection-refusal regressions.
+- Native Runtime Verification passed locally on Windows Docker Desktop with the real Node service health assertion and zero residual Tethermark container resources.
+
 ## 2026-08-24
 
 ### Added

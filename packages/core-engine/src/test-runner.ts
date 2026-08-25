@@ -3786,6 +3786,59 @@ async function testLocalRuntimeProviderExecutesExactArgvInContainer(): Promise<v
   });
 }
 
+async function testLocalRuntimeProviderRequiresHealthyFrameworkEndpoint(): Promise<void> {
+  await withTempDir("harness-local-runtime-health-", async (rootDir) => {
+    const targetDir = path.join(rootDir, "target");
+    const artifactDir = path.join(rootDir, "artifacts");
+    await fs.mkdir(targetDir);
+    await fs.mkdir(artifactDir);
+    await fs.writeFile(path.join(targetDir, "requirements.txt"), "fastapi\nuvicorn\n");
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const provider = createLocalRuntimeProvider({
+      runCommand: async (command, args) => {
+        calls.push({ command, args: [...args] });
+        const stdout = args[0] === "start" && args.some((item) => item.includes("-quota-"))
+          ? "1\t/workspace\n"
+          : args[0] === "exec"
+            ? '{"successful_index":-1,"attempts":[{"port":8000,"path":"/docs","status_code":null,"error":"ECONNREFUSED","duration_ms":1}]}\n'
+            : args[0] === "inspect" && args.includes("{{json .State}}")
+              ? '{"Running":true,"OOMKilled":false,"Pid":123,"ExitCode":0}\n'
+              : args[0] === "stats" ? "{}\n" : "";
+        return { exit_code: args[0] === "exec" ? 3 : 0, stdout, stderr: "", timed_out: false };
+      }
+    });
+    const policy = buildRuntimeExecutionPolicy({ selectedBackend: "docker", settings: { step_timeout_ms: 5 } });
+    const request = {
+      run_id: "run_provider_framework_health",
+      target_dir: targetDir,
+      artifact_dir: artifactDir,
+      policy,
+      detected_stack: ["python"],
+      steps: [{
+        step_id: "fastapi-runtime",
+        phase: "runtime_probe" as const,
+        adapter: "python_fastapi",
+        command: ["python", "-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", "8000"],
+        requires_network: false,
+        enabled: true,
+        artifact_context: { stack: "python", framework: "fastapi", probe_ports: [8000], probe_paths: ["/docs", "/openapi.json"] }
+      }]
+    };
+    const result = await provider.execute(request, await provider.plan(request));
+    assert.equal(result.status, "failed");
+    assert.equal(result.steps[0]?.status, "failed");
+    assert.equal(result.steps[0]?.health_probe?.ok, false);
+    assert.equal(result.steps[0]?.health_probe?.classification, "connection_refused");
+    assert.equal(result.steps[0]?.health_probe?.strategy, "python_http_client");
+    assert.match(result.steps[0]?.summary ?? "", /did not expose a healthy HTTP endpoint/i);
+    const healthExec = calls.find((item) => item.args[0] === "exec" && item.args.includes("python") && item.args.includes("-c"));
+    assert.ok(healthExec);
+    const targets = JSON.parse(healthExec.args.at(-1) ?? "[]") as Array<{ port: number; path: string }>;
+    assert.equal(targets.some((target) => target.port === 8000 && target.path === "/docs"), true);
+    assert.equal(calls.some((item) => item.args.includes("curl") || item.args.includes("wget")), false);
+  });
+}
+
 async function testLocalRuntimeProviderFailsClosedOnWorkspaceQuota(): Promise<void> {
   await withTempDir("harness-local-runtime-quota-", async (rootDir) => {
     const targetDir = path.join(rootDir, "target");
@@ -3852,8 +3905,10 @@ async function testLocalRuntimeProviderUsesInternalAllowlistedEgressProxy(): Pro
         calls.push({ command, args: [...args] });
         const stdout = args[0] === "start" && args.some((item) => item.includes("-quota-"))
           ? "1\t/workspace\n"
+          : args[0] === "exec"
+            ? '{"successful_index":0,"attempts":[{"port":3000,"path":"/health","status_code":200,"error":null,"duration_ms":2}]}\n'
           : args[0] === "inspect" && args.includes("{{json .State}}")
-            ? '{"OOMKilled":false,"Pid":0,"ExitCode":0}\n'
+            ? '{"Running":true,"OOMKilled":false,"Pid":123,"ExitCode":0}\n'
             : args[0] === "stats" ? "{}\n" : "";
         return { exit_code: 0, stdout, stderr: "", timed_out: false };
       }
@@ -3900,6 +3955,11 @@ async function testLocalRuntimeProviderUsesInternalAllowlistedEgressProxy(): Pro
     assert.equal(result.steps[0]?.network_mode, "bridge");
     assert.equal(result.steps[1]?.network_mode, "bridge");
     assert.equal(result.steps[2]?.network_mode, "bridge");
+    assert.equal(result.steps[1]?.health_probe?.ok, true);
+    assert.equal(result.steps[1]?.health_probe?.strategy, "node_http");
+    assert.equal(result.steps[1]?.health_probe?.successful_target, "http://127.0.0.1:3000/health");
+    const healthExec = calls.find((item) => item.args[0] === "exec" && item.args.includes("node") && item.args.includes("-e"));
+    assert.ok(healthExec);
     assert.equal(calls.some((item) => item.args[0] === "network" && item.args[1] === "create" && item.args.includes("--internal")), true);
     assert.equal(calls.some((item) => item.args[0] === "network" && item.args[1] === "connect" && item.args.includes("bridge")), true);
     const targetCreate = calls.find((item) => item.args[0] === "create" && item.args.includes("npm") && item.args.includes("view"));
@@ -7366,6 +7426,7 @@ async function main(): Promise<void> {
     ["preflight api summarizes readiness", testPreflightApiSummarizesReadiness],
     ["runtime sandbox backend resolution", testRuntimeSandboxBackendResolution],
     ["local runtime provider executes exact argv in container", testLocalRuntimeProviderExecutesExactArgvInContainer],
+    ["local runtime provider requires healthy framework endpoint", testLocalRuntimeProviderRequiresHealthyFrameworkEndpoint],
     ["local runtime provider fails closed on workspace quota", testLocalRuntimeProviderFailsClosedOnWorkspaceQuota],
     ["local runtime provider uses internal allowlisted egress proxy", testLocalRuntimeProviderUsesInternalAllowlistedEgressProxy],
     ["runtime sandbox api endpoints", testRuntimeSandboxApiEndpoints],
