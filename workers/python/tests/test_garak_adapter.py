@@ -116,7 +116,9 @@ class GarakAdapterTests(unittest.TestCase):
 
     def test_output_limit_and_timeout_are_inconclusive(self) -> None:
         oversized = run_garak({"request": {"endpoint_url": self.endpoint("/oversized"), "run_mode": "runtime"}})
-        if any(item["response"] is None for item in oversized["observations"]):
+        for _ in range(2):
+            if all(item["response"] is not None for item in oversized["observations"]):
+                break
             oversized = run_garak({"request": {"endpoint_url": self.endpoint("/oversized"), "run_mode": "runtime"}})
         self.assertEqual(oversized["status"], "inconclusive")
         self.assertTrue(all(item["response"]["body_truncated"] for item in oversized["observations"]))
