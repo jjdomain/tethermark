@@ -5009,6 +5009,30 @@ async function testPythonWorkerExecutionLimitsAndInspectNormalization(): Promise
   assert.ok(finding.notes.includes("eval_pack:tethermark.inspect.ai-security-boundary@1.0.0"));
   assert.ok(finding.notes.includes("orchestrator_model_route:openai_codex/chatgpt_session"));
 
+  const dataBoundary = normalizePythonWorkerForTests({
+    status: "inconclusive",
+    summary: "One AI data-boundary probe produced a finding and one was inconclusive.",
+    target: "http://127.0.0.1:8788/v1/chat/completions",
+    eval_pack: { id: "tethermark.inspect.ai-data-boundary", version: "1.0.0" },
+    coverage: { status: "partial", attempted: 2, completed: 1, findings: 1, inconclusive: 1, errors: 0 },
+    observations: [
+      {
+        outcome: "finding",
+        severity: "high",
+        evidence_locations: [{ source_kind: "uri", uri: "http://127.0.0.1:8788/v1/chat/completions", label: "indirect-exfiltration" }]
+      },
+      {
+        outcome: "inconclusive",
+        severity: "info",
+        evidence_locations: [{ source_kind: "uri", uri: "http://127.0.0.1:8788/v1/chat/completions", label: "cross-session-memory" }]
+      }
+    ]
+  }, "completed");
+  assert.equal(dataBoundary.issue_count, 1);
+  assert.equal(dataBoundary.warning_count, 1);
+  assert.ok(dataBoundary.notes.includes("eval_pack:tethermark.inspect.ai-data-boundary@1.0.0"));
+  assert.ok(dataBoundary.notes.includes("coverage_status:partial"));
+
   const notRun = normalizePythonWorkerForTests({
     status: "inconclusive",
     coverage: { status: "not_run", attempted: 0, completed: 0, inconclusive: 0, errors: 0 },

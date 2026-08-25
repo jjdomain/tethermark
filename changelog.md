@@ -8,11 +8,13 @@
 - Added a machine-readable Python worker self-check that explicitly reports each Inspect, Garak, and PyRIT implementation boundary.
 - Added executable Inspect AI `0.3.260` integration through the model-free `tethermark.inspect.http-baseline@1.0.0` pack, including real Inspect task/log execution, bounded HTTP observations, normalized URI evidence, explicit incomplete coverage, and adapter tests.
 - Added the default `tethermark.inspect.ai-security-boundary@1.0.0` pack with bounded synthetic system-secret nondisclosure and unconfirmed sensitive-tool probes, runtime-control references, redacted result evidence, optional target-model hints, and explicit `no_finding_observed` rather than control-pass outcomes.
+- Added `tethermark.inspect.ai-data-boundary@1.0.0` with bounded indirect prompt-injection/data-exfiltration and cross-session-memory isolation samples, three-request hard limits, partial-result handling, explicit session-contract limitations, and redacted synthetic records and tool arguments.
 - Preserved the existing Model Configuration and launch UI layout and controls while clarifying connection copy: local Codex/ChatGPT-session routing remains the runtime default and metered OpenAI API-key routing remains an explicit optional override.
 
 ### Changed
 
 - Closed Community Edition Phase 8 after native Windows Docker Desktop and Linux Docker/rootless-Podman/gVisor execution passed; executable real-Mac validation is project-owner deferred and excluded from certified runtime claims.
+- Increased the bounded managed-worker diagnostic subprocess timeout from 15 to 30 seconds so cold Inspect imports do not falsely block Windows worker doctor or test execution; runtime audit limits are unchanged.
 - Python worker dispatch now requires the verified managed environment instead of treating an importable source tree as production worker readiness.
 - Python worker readiness and preflight now advertise only executable adapters; Garak and PyRIT are blocked as scaffolds instead of returning scenario-planning text as evidence.
 - Removed committed Python bytecode caches and added repository ignore rules for generated Python cache files.

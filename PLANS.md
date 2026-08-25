@@ -37,7 +37,7 @@ Completed:
 - Linux static sandbox backend
 - Linux container-backend scaffold
 - executable local runtime provider verified on Windows Docker Desktop and native Linux Docker, rootless Podman, and gVisor; real-Mac execution is explicitly deferred and not certified
-- hash-locked managed Python worker environment with setup/doctor commands and cross-platform CI coverage, plus executable Inspect AI `0.3.260` HTTP baseline and first synthetic prompt/secret/tool boundary evidence; Garak and PyRIT remain scaffold-only
+- hash-locked managed Python worker environment with setup/doctor commands and cross-platform CI coverage, plus executable Inspect AI `0.3.260` HTTP baseline, prompt/secret/tool boundary, and indirect-injection/data-exfiltration/cross-session-memory evidence; Garak and PyRIT remain scaffold-only
 - local static `scan path ... --mode static` verified on Windows with provider-backed agents and standards-based score artifacts
 - versioned deterministic regression suite for good, mixed, risky, ordinary, runnable, agentic, and MCP targets
 - four external-ground-truth vulnerable/fixed calibration pairs from reviewed `CVE-2025-53107`, `CVE-2026-27735`, `CVE-2024-51751`, and `CVE-2025-3248`, with strict known-finding FP/FN gates for command injection, MCP repository-boundary traversal, AI application file-payload path validation, and unauthenticated code validation
@@ -60,7 +60,7 @@ Completed:
 Not completed:
 - broader independently reviewed advisory coverage beyond the current four advisories and vulnerability classes, followed by multi-case/repeat model variance and weight/threshold calibration
 - cleanup or archival policy for old historical artifact directories already present under `.artifacts`
-- real Garak and PyRIT adapter execution plus the remaining AI-security-specific Inspect indirect-injection, memory, exfiltration, MCP, unsafe-output, agency, resource, and telemetry packs
+- real Garak and PyRIT adapter execution plus the remaining AI-security-specific Inspect MCP, unsafe-output, agency, resource, and telemetry packs
 - richer control coverage and framework depth beyond the first static control set
 
 ## Phase 1: Local Static Mode Hardening

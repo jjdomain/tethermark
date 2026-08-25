@@ -122,7 +122,7 @@ function runPython(executable: string, args: string[], workspaceRoot: string) {
     encoding: "utf8",
     shell: false,
     windowsHide: true,
-    timeout: 15_000,
+    timeout: 30_000,
     maxBuffer: 1024 * 1024,
     env: {
       ...process.env,

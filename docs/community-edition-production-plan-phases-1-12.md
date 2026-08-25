@@ -99,7 +99,7 @@ Updated on 2026-08-20 during Phase 5 calibration work from merged Phase 4:
 | 6 | Complete review, remediation, exports, and operator workflows | **Complete** | Completed 2026-08-20; see `docs/phase6-operator-workflow-evidence.md` |
 | 7 | Implement Admin/System Policies and extensive-scan controls | **Complete for the policy plane** | Executable runtime enforcement is tracked in Phase 8 |
 | 8 | Execute local runtime scans in a real isolated sandbox | **Complete with accepted macOS runtime deferral** | Windows Docker Desktop and native Linux Docker/rootless-Podman/gVisor passed; macOS execution is not certified |
-| 9 | Operationalize runtime evals and Python workers | **In progress** | Managed environment and first bounded Inspect pack implemented; Garak/PyRIT and AI-security scenario packs remain |
+| 9 | Operationalize runtime evals and Python workers | **In progress** | Managed environment and two bounded AI-security Inspect packs implemented; Garak/PyRIT and remaining runtime scenarios remain |
 | 10 | Harden persistence, jobs, maintenance, and governed learning | **Mostly complete** | Stress/recovery tests, retention automation, learning consumption decision |
 | 11 | Package, secure, and verify cross-platform installation | **Partial** | Fresh-machine installers, SBOM/signing, hardened deployment profiles |
 | 12 | Run release candidate, beta, and production launch gates | **Not started** | Depends on Phases 1–11 and explicit release acceptance |
@@ -510,8 +510,9 @@ Tasks:
 - [ ] Implement and verify Garak, Inspect, and PyRIT adapters behind explicit time/resource/output contracts.
   - [x] Implement Inspect AI `0.3.260` with the versioned, model-free `tethermark.inspect.http-baseline@1.0.0` pack, bounded endpoint/response/time/output handling, normalized observations, and explicit inconclusive coverage.
   - [x] Add the default `tethermark.inspect.ai-security-boundary@1.0.0` pack for bounded synthetic secret-nondisclosure and unconfirmed-tool-call probes, with runtime-control references, redacted evidence, and no-finding-without-pass semantics.
+  - [x] Add `tethermark.inspect.ai-data-boundary@1.0.0` for bounded indirect-injection/exfiltration and cross-session-memory isolation probes, including partial-result handling, target session-contract limitations, and non-retained synthetic secrets and tool arguments.
   - [ ] Replace the Garak and PyRIT scaffolds with executable adapters.
-- [ ] Build versioned eval packs for all runtime controls defined in Phase 7 (the first prompt/secret/tool boundary pack is complete; indirect injection, memory, exfiltration, MCP, unsafe output, agency, resource, and telemetry packs remain).
+- [ ] Build versioned eval packs for all runtime controls defined in Phase 7 (prompt/secret/tool and indirect-injection/data-exfiltration/cross-session-memory packs are complete; MCP, unsafe output, agency, resource, and telemetry packs remain).
 - [ ] Add framework-aware target startup/health detection for common Node and Python applications and agents.
 - [ ] Add fake tools/services and deterministic attack fixtures for prompt/tool/MCP/memory/data-boundary scenarios.
 - [ ] Normalize observations into evidence, control results, findings, coverage, and inconclusive reasons.
@@ -612,8 +613,8 @@ A static-only beta may be cut before Phases 8–9 finish only if it is explicitl
 
 ## Recommended execution order from this snapshot
 
-1. Build the first AI-security-specific Inspect pack against the Phase 7 prompt/tool/data-boundary controls; the HTTP baseline pack now proves the worker, limits, Inspect log, and normalization path.
-2. Replace the Garak and PyRIT scaffolds behind the same fail-closed execution and evidence contracts.
+1. Replace the Garak and PyRIT scaffolds behind the same fail-closed execution and evidence contracts now used by the Inspect packs.
+2. Continue versioned Inspect coverage for MCP, unsafe-output, agency, resource, and telemetry controls.
 3. Complete Phase 10 stress/recovery hardening and Phase 11 packaging/cross-platform security.
 4. Execute Phase 12 release candidate and beta gates.
 
