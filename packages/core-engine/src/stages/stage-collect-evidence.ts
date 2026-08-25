@@ -1,5 +1,6 @@
 import type { AnalysisSummary, AuditLanePlan, AuditRequest, EvidenceExecutionRecord, EvidenceLocation, EvidenceRecord, RepoContextArtifact, TargetDescriptor } from "../contracts.js";
 import { runEvidenceProviders } from "../evidence-runner.js";
+import { buildRuntimeEvidenceRecords } from "../runtime-evidence.js";
 import { createId } from "../utils.js";
 
 function normalizeLocationPath(value: unknown): string | null {
@@ -174,13 +175,15 @@ export async function stageCollectEvidence(args: {
   });
 
   for (const execution of evidenceExecutions) {
+    const laneName = laneForExecution(args.lanePlans, execution);
+    const controlIds = controlsForExecution(args.lanePlans, execution);
     evidenceRecords.push({
       evidence_id: createId("evidence"),
       run_id: args.runId,
-      lane_name: laneForExecution(args.lanePlans, execution),
+      lane_name: laneName,
       source_type: "tool",
       source_id: execution.provider_id,
-      control_ids: controlsForExecution(args.lanePlans, execution),
+      control_ids: controlIds,
       summary: execution.summary,
       confidence: execution.status === "completed" ? 0.9 : execution.status === "skipped" ? 0.4 : 0.5,
       locations: deriveLocationsFromExecution(execution),
@@ -195,6 +198,12 @@ export async function stageCollectEvidence(args: {
         normalized: execution.normalized ?? null
       }
     });
+    evidenceRecords.push(...buildRuntimeEvidenceRecords({
+      execution,
+      runId: args.runId,
+      laneName,
+      allowedControlIds: controlIds
+    }));
   }
 
   return { evidenceExecutions, evidenceRecords };

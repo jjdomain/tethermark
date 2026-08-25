@@ -148,6 +148,24 @@ function runtimeEvidenceRecords(evidenceRecords: EvidenceRecord[]): EvidenceReco
   return evidenceRecords.filter((item) => item.metadata?.category === "sandbox_execution");
 }
 
+function runtimeEvaluationCoverageRecords(evidenceRecords: EvidenceRecord[]): EvidenceRecord[] {
+  return evidenceRecords.filter((item) => item.metadata?.category === "runtime_evaluation_coverage");
+}
+
+function runtimeEvaluationObservationRecords(evidenceRecords: EvidenceRecord[]): EvidenceRecord[] {
+  return evidenceRecords.filter((item) => item.metadata?.category === "runtime_evaluation_observation");
+}
+
+function runtimeEvidenceReference(record: EvidenceRecord): string[] {
+  const locations = (record.locations ?? []).map((location) => {
+    if (location.source_kind === "uri" && location.uri) return `${location.label ?? "runtime_endpoint"}: ${location.uri}`;
+    if (location.source_kind === "file" && location.path) return `${location.path}${location.line ? `:${location.line}` : ""}`;
+    if (location.source_kind === "symbol" && location.symbol) return `${location.label ?? "runtime_symbol"}: ${location.symbol}`;
+    return null;
+  }).filter((item): item is string => Boolean(item));
+  return [`evidence:${record.evidence_id}`, ...locations].slice(0, 8);
+}
+
 function runtimeEvidenceByPhase(evidenceRecords: EvidenceRecord[], phase: string): EvidenceRecord[] {
   return runtimeEvidenceRecords(evidenceRecords).filter((item) => String(item.metadata?.phase || "") === phase);
 }
@@ -292,6 +310,61 @@ export async function evaluateStandardsAudit(args: {
     const details = runtimeArtifactDetails(item);
     return Boolean(details.stdout_excerpt || details.stderr_excerpt);
   });
+  const runtimeEvaluationCoverage = runtimeEvaluationCoverageRecords(args.evidenceRecords);
+  const runtimeEvaluationObservations = runtimeEvaluationObservationRecords(args.evidenceRecords);
+  const runtimeFindingIdsByControl = new Map<string, string[]>();
+  for (const record of runtimeEvaluationObservations) {
+    if (record.metadata?.outcome !== "finding") continue;
+    const mappedControls = args.controlCatalog.filter((control) =>
+      record.control_ids.includes(control.control_id)
+      && args.applicableControlIds.includes(control.control_id)
+      && !args.deferredControlIds.includes(control.control_id)
+      && !args.nonApplicableControlIds.includes(control.control_id)
+    );
+    if (!mappedControls.length) continue;
+    const rawSeverity = String(record.metadata?.severity ?? "high");
+    const severity: Finding["severity"] = rawSeverity === "critical" || rawSeverity === "high" || rawSeverity === "medium" || rawSeverity === "low"
+      ? rawSeverity
+      : "high";
+    const probeId = String(record.metadata?.probe_id ?? "behavioral-boundary").replace(/[^a-z0-9_-]+/gi, "_").slice(0, 80);
+    const findingId = addFinding(findings, {
+      title: String(record.metadata?.title ?? "Runtime evaluation detected a security boundary failure"),
+      severity,
+      category: `runtime_${probeId}`,
+      description: record.summary,
+      evidence: runtimeEvidenceReference(record),
+      public_safe: true,
+      confidence: record.confidence,
+      score_impact: Math.max(...mappedControls.map((control) => control.weight)),
+      source: "tool",
+      control_ids: mappedControls.map((control) => control.control_id),
+      standards_refs: [...new Set(mappedControls.map((control) => control.standard_ref))]
+    });
+    for (const control of mappedControls) {
+      runtimeFindingIdsByControl.set(control.control_id, [...(runtimeFindingIdsByControl.get(control.control_id) ?? []), findingId]);
+    }
+  }
+  for (const record of runtimeEvaluationObservations) {
+    const outcome = String(record.metadata?.outcome ?? "error");
+    const reason = typeof record.metadata?.inconclusive_reason === "string" ? ` Reason: ${record.metadata.inconclusive_reason}.` : "";
+    observations.push({
+      observation_id: createId("obs_runtime"),
+      title: String(record.metadata?.title ?? "Runtime evaluation observation"),
+      summary: `${record.summary} Outcome: ${outcome}.${reason}`,
+      evidence: runtimeEvidenceReference(record)
+    });
+  }
+  for (const record of runtimeEvaluationCoverage.filter((item) => item.metadata?.adequate !== true)) {
+    const reasons = Array.isArray(record.metadata?.inconclusive_reasons)
+      ? record.metadata.inconclusive_reasons.filter((item): item is string => typeof item === "string")
+      : [];
+    observations.push({
+      observation_id: createId("obs_runtime_coverage"),
+      title: "Runtime evaluation coverage is inconclusive",
+      summary: `${record.summary}${reasons.length ? ` Inconclusive reasons: ${reasons.join(", ")}.` : ""}`,
+      evidence: [`evidence:${record.evidence_id}`]
+    });
+  }
   const secretCandidates = texts.flatMap((item) => {
     const matches = item.text.match(/(api[_-]?key|secret|token|password)\s*[:=]\s*["'][A-Za-z0-9_\-]{16,}["']/gi) ?? [];
     return matches.map((match) => `${item.relative}: ${match.slice(0, 120)}`);
@@ -448,6 +521,47 @@ export async function evaluateStandardsAudit(args: {
         score_awarded: 0,
         rationale: ["Control was not selected into the applicable audit scope."],
         sources: ["planner"]
+      }));
+      continue;
+    }
+
+    if (control.runtime_assessable && control.audit_lane === "runtime_validation") {
+      const coverageRecords = runtimeEvaluationCoverage.filter((record) => record.control_ids.includes(control.control_id));
+      const observationRecords = runtimeEvaluationObservations.filter((record) => record.control_ids.includes(control.control_id));
+      const findingIds = runtimeFindingIdsByControl.get(control.control_id) ?? [];
+      const assessableObservations = observationRecords.filter((record) => ["finding", "no_finding_observed", "observed"].includes(String(record.metadata?.outcome ?? "")));
+      const incompleteCoverage = coverageRecords.filter((record) => record.metadata?.adequate !== true);
+      const inconclusiveReasons = [...new Set([
+        ...incompleteCoverage.flatMap((record) => Array.isArray(record.metadata?.inconclusive_reasons) ? record.metadata.inconclusive_reasons : []),
+        ...observationRecords.map((record) => record.metadata?.inconclusive_reason).filter(Boolean)
+      ].filter((item): item is string => typeof item === "string"))];
+      const evidence = [
+        ...coverageRecords.map((record) => `evidence:${record.evidence_id} ${record.summary}`),
+        ...observationRecords.flatMap(runtimeEvidenceReference)
+      ].slice(0, 20);
+      const sources = [...new Set([...coverageRecords, ...observationRecords].map((record) => String(record.metadata?.provider_id ?? record.source_id)))];
+      const coverageAdequate = coverageRecords.length > 0 && incompleteCoverage.length === 0;
+      const hasFinding = findingIds.length > 0;
+      const hasAssessableObservation = assessableObservations.length > 0;
+      controlResults.push(makeControlResult(control, {
+        assessability: hasFinding
+          ? coverageAdequate ? "assessed" : "partially_assessed"
+          : hasAssessableObservation ? "partially_assessed" : "not_assessed",
+        status: hasFinding ? "fail" : hasAssessableObservation ? "partial" : "not_assessed",
+        score_awarded: 0,
+        rationale: [
+          hasFinding
+            ? `Bounded runtime evaluation produced ${findingIds.length} finding(s) mapped to this control${coverageAdequate ? "." : ", while coverage also remained incomplete."}`
+            : hasAssessableObservation && coverageAdequate
+              ? "The bounded runtime sample produced no finding, but a finite sample cannot establish a control pass."
+              : hasAssessableObservation
+                ? "Some bounded runtime samples were assessable, but incomplete coverage prevents a pass."
+                : "No assessable bounded runtime sample was available for this control.",
+          ...(inconclusiveReasons.length ? [`Inconclusive reasons: ${inconclusiveReasons.join(", ")}.`] : [])
+        ],
+        evidence,
+        finding_ids: findingIds,
+        sources: sources.length ? sources : ["runtime-evaluation"]
       }));
       continue;
     }
