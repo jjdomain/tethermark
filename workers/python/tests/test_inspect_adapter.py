@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+import shutil
+import socket
+import subprocess
 import threading
 import time
 import unittest
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from audit_workers.adapters.inspect_adapter import (
@@ -870,6 +876,139 @@ class InspectAdapterTests(unittest.TestCase):
         self.assertEqual(result["status"], "inconclusive")
         self.assertGreaterEqual(result["coverage"]["inconclusive"], 1)
         self.assertTrue(all(item["outcome"] != "pass" for item in result["observations"]))
+
+
+class RuntimeAttackFixtureIntegrationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        repo_root = Path(__file__).resolve().parents[3]
+        cls.fixture_root = repo_root / "fixtures" / "runtime-targets" / "ai-security-boundaries"
+        cls.catalog = json.loads((cls.fixture_root / "fixture-catalog.json").read_text(encoding="utf-8"))
+        cls.profiles = {item["profile_id"]: item for item in cls.catalog["profiles"]}
+        node = shutil.which("node")
+        if node is None:
+            raise RuntimeError("Node.js is required for the cross-platform runtime attack fixture.")
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            cls.port = int(reservation.getsockname()[1])
+        cls.process = subprocess.Popen(
+            [node, str(cls.fixture_root / "server.mjs"), "--port", str(cls.port)],
+            cwd=repo_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        health_url = f"http://127.0.0.1:{cls.port}/health"
+        deadline = time.monotonic() + 8
+        last_error: Exception | None = None
+        while time.monotonic() < deadline:
+            if cls.process.poll() is not None:
+                break
+            try:
+                with urllib.request.urlopen(health_url, timeout=0.5) as response:
+                    health = json.load(response)
+                if health.get("ok") is True:
+                    return
+            except Exception as error:  # pragma: no cover - startup polling is platform dependent
+                last_error = error
+                time.sleep(0.05)
+        stdout, stderr = cls.process.communicate(timeout=2)
+        raise RuntimeError(f"Runtime attack fixture failed to start: {last_error}; stdout={stdout!r}; stderr={stderr!r}")
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        if cls.process.poll() is None:
+            cls.process.terminate()
+            try:
+                cls.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                cls.process.kill()
+                cls.process.wait(timeout=2)
+        if cls.process.stdout is not None:
+            cls.process.stdout.close()
+        if cls.process.stderr is not None:
+            cls.process.stderr.close()
+
+    def run_profile(self, profile_id: str, pack: str) -> dict:
+        profile = self.profiles[profile_id]
+        return run_inspect({"request": {
+            "endpoint_url": f"http://127.0.0.1:{self.port}{profile['endpoint_path']}",
+            "run_mode": "runtime",
+            "hints": {"inspect_eval_pack": pack},
+        }})
+
+    def assert_catalog_expectation(self, profile_id: str, result: dict) -> None:
+        expected = self.profiles[profile_id]["expected"]
+        self.assertEqual(result["coverage"]["findings"], expected["findings"])
+        self.assertEqual(result["coverage"]["inconclusive"], expected["inconclusive"])
+        if "status" in expected:
+            self.assertEqual(result["status"], expected["status"])
+        if "allowed_outcome" in expected:
+            self.assertTrue(all(item["outcome"] == expected["allowed_outcome"] for item in result["observations"]))
+        self.assertTrue(all(item["outcome"] != "pass" for item in result["observations"]))
+
+    def test_versioned_prompt_and_tool_profiles_match_expectations(self) -> None:
+        self.assertEqual(self.catalog["fixture_id"], "tethermark.runtime.ai-security-boundaries")
+        self.assertEqual(self.catalog["fixture_version"], "1.0.0")
+        secure = self.run_profile("secure-agent", "ai-security-boundary")
+        vulnerable = self.run_profile("vulnerable-prompt-tool", "ai-security-boundary")
+        self.assert_catalog_expectation("secure-agent", secure)
+        self.assert_catalog_expectation("vulnerable-prompt-tool", vulnerable)
+        self.assertTrue(all(item["outcome"] == "finding" for item in vulnerable["observations"]))
+        self.assertNotIn("TM_SYNTHETIC_SECRET_", json.dumps(vulnerable))
+        self.assertNotIn('"arguments":', json.dumps(vulnerable))
+
+    def test_versioned_data_and_memory_profiles_match_expectations(self) -> None:
+        secure = self.run_profile("secure-agent", "ai-data-boundary")
+        vulnerable = self.run_profile("vulnerable-data-memory", "ai-data-boundary")
+        partial = self.run_profile("partial-data-memory", "ai-data-boundary")
+        self.assert_catalog_expectation("secure-agent", secure)
+        self.assert_catalog_expectation("vulnerable-data-memory", vulnerable)
+        self.assert_catalog_expectation("partial-data-memory", partial)
+        serialized = json.dumps(vulnerable)
+        self.assertNotIn("TM_SYNTHETIC_RECORD_", serialized)
+        self.assertNotIn("TM_SYNTHETIC_MEMORY_", serialized)
+        self.assertNotIn("synthetic-fixture", serialized)
+        memory = next(item for item in partial["observations"] if item["probe_id"] == "inspect-ai-cross-session-memory-isolation")
+        self.assertEqual(memory["inconclusive_reason"], "memory_retrieve_target_http_error")
+
+    def test_versioned_mcp_profiles_match_expectations(self) -> None:
+        secure = self.run_profile("secure-mcp", "mcp-boundary")
+        vulnerable = self.run_profile("vulnerable-mcp", "mcp-boundary")
+        partial = self.run_profile("partial-mcp-discovery", "mcp-boundary")
+        self.assert_catalog_expectation("secure-mcp", secure)
+        self.assert_catalog_expectation("vulnerable-mcp", vulnerable)
+        self.assert_catalog_expectation("partial-mcp-discovery", partial)
+        serialized = json.dumps(vulnerable)
+        self.assertNotIn("../tethermark-outside/synthetic-secret.txt", serialized)
+        self.assertNotIn("repository_read_file", serialized)
+        self.assertNotIn("tethermark_undeclared_admin_export", serialized)
+        self.assertNotIn('"arguments":', serialized)
+
+    def test_fixture_trace_is_bounded_and_body_free(self) -> None:
+        self.run_profile("vulnerable-prompt-tool", "ai-security-boundary")
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/__trace", timeout=1) as response:
+            trace_result = json.load(response)
+        self.assertFalse(trace_result["retained_request_bodies"])
+        self.assertLessEqual(len(trace_result["events"]), self.catalog["bounds"]["max_trace_events"])
+        self.assertTrue(all(set(event) == {"sequence", "path", "probe", "status_code", "request_bytes", "body_sha256"} for event in trace_result["events"]))
+        serialized = json.dumps(trace_result)
+        self.assertNotIn("TM_SYNTHETIC_SECRET_", serialized)
+        self.assertNotIn("TM_SYNTHETIC_MEMORY_", serialized)
+        self.assertNotIn("TM_SYNTHETIC_RECORD_", serialized)
+
+    def test_fixture_rejects_oversized_requests_and_remains_healthy(self) -> None:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/agent/secure",
+            data=b"x" * (self.catalog["bounds"]["max_request_bytes"] + 1),
+            headers={"content-type": "application/json"},
+            method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request, timeout=1)
+        self.assertEqual(raised.exception.code, 413)
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/health", timeout=1) as response:
+            self.assertTrue(json.load(response)["ok"])
 
 
 if __name__ == "__main__":

@@ -520,7 +520,7 @@ Tasks:
   - [x] Add `tethermark.inspect.security-telemetry-boundary@1.0.0` for correlated adversarial/authorization/denial-or-tool-call/completion/cleanup event verification through an explicit operator-supplied telemetry endpoint, with timestamp and redaction checks, four-request bounds, and fail-closed unavailable-evidence handling.
 - [x] Build versioned eval packs for all runtime controls defined in Phase 7 (prompt/secret/tool, indirect-injection/data-exfiltration/cross-session-memory, MCP, unsafe-output, excessive-agency, resource-limit, and security-telemetry packs are complete at their documented bounded integration profiles).
 - [x] Add framework-aware target startup/health detection for common Node and Python applications and agents. The resolver derives bounded commands and port/path candidates for Next.js, Vite, Express, NestJS, FastAPI, Flask, Django, and generic Node/Python entrypoints. The isolated provider now polls those candidates from inside the target container, fails closed when a process stays alive without a responsive endpoint, records body-free normalized health evidence, and passed the real Windows Docker Desktop Node fixture plus Node/Python orchestration regressions on 2026-08-25.
-- [ ] Add fake tools/services and deterministic attack fixtures for prompt/tool/MCP/memory/data-boundary scenarios.
+- [x] Add fake tools/services and deterministic attack fixtures for prompt/tool/MCP/memory/data-boundary scenarios. The versioned `tethermark.runtime.ai-security-boundaries@1.0.0` loopback service supplies secure, vulnerable, and partial prompt/secret, inert tool-call, indirect-exfiltration, cross-session-memory, and MCP profiles with a machine-readable expectation catalog and bounded body-free traces. The real Inspect packs assert every profile across the managed Windows/Linux/macOS Python matrix; repo-owned fixture outcomes remain engineering regression evidence rather than independent calibration ground truth.
 - [ ] Normalize observations into evidence, control results, findings, coverage, and inconclusive reasons.
 - [ ] Prevent eval failures or low sample counts from becoming passes.
 - [ ] Add cancellation, retry, timeout, output-flood, malformed-worker-output, and partial-result tests.
@@ -619,7 +619,7 @@ A static-only beta may be cut before Phases 8–9 finish only if it is explicitl
 
 ## Recommended execution order from this snapshot
 
-1. Expand deterministic fake services and failure/partial-result fixtures around the completed runtime-control packs.
+1. Normalize runtime observations into evidence, control results, findings, coverage, and explicit inconclusive reasons, preserving fail-closed low-sample and worker-failure behavior.
 2. Complete Phase 10 stress/recovery hardening and Phase 11 packaging/cross-platform security.
 3. Execute Phase 12 release candidate and beta gates.
 
