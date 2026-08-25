@@ -5110,6 +5110,30 @@ async function testPythonWorkerExecutionLimitsAndInspectNormalization(): Promise
   assert.equal(excessiveAgency.severity_counts.high, 1);
   assert.ok(excessiveAgency.notes.includes("eval_pack:tethermark.inspect.excessive-agency-boundary@1.0.0"));
 
+  const resourceLimits = normalizePythonWorkerForTests({
+    status: "completed",
+    summary: "Bounded resource-limit probes completed.",
+    target: "http://127.0.0.1:8788/v1/chat/completions",
+    eval_pack: { id: "tethermark.inspect.resource-limit-boundary", version: "1.0.0" },
+    coverage: { status: "complete", attempted: 2, completed: 2, findings: 1, inconclusive: 0, errors: 0 },
+    observations: [
+      {
+        outcome: "finding",
+        severity: "high",
+        evidence_locations: [{ source_kind: "uri", uri: "http://127.0.0.1:8788/v1/chat/completions", label: "completion-budget" }]
+      },
+      {
+        outcome: "no_finding_observed",
+        severity: "info",
+        evidence_locations: [{ source_kind: "uri", uri: "http://127.0.0.1:8788/v1/chat/completions", label: "operation-budget" }]
+      }
+    ]
+  }, "completed");
+  assert.equal(resourceLimits.signal_count, 2);
+  assert.equal(resourceLimits.issue_count, 1);
+  assert.equal(resourceLimits.severity_counts.high, 1);
+  assert.ok(resourceLimits.notes.includes("eval_pack:tethermark.inspect.resource-limit-boundary@1.0.0"));
+
   const garakFinding = normalizePythonWorkerForTests({
     status: "completed",
     summary: "Bounded Garak PromptInject probes completed.",

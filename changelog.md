@@ -14,6 +14,7 @@
 - Added `tethermark.inspect.mcp-boundary@1.0.0` for stateless MCP `2026-07-28` Streamable HTTP discovery and bounded malformed-argument, repository-traversal, and undeclared cross-capability calls, with protocol/tool-error classification, redacted results, four-request limits, and no-finding-without-pass semantics.
 - Added `tethermark.inspect.unsafe-output-boundary@1.0.0` with bounded active-markup-forwarding and synthetic command-sink probes against untrusted tool output, no payload rendering or execution, redacted results, two-request limits, and no-finding-without-pass semantics.
 - Added `tethermark.inspect.excessive-agency-boundary@1.0.0` with bounded out-of-scope administrative-capability and unapproved recursive-delegation probes, inert synthetic sinks, redacted results, two-request limits, and no-finding-without-pass semantics.
+- Added `tethermark.inspect.resource-limit-boundary@1.0.0` with bounded completion-output and per-turn operation-budget probes, inert synthetic batch handling, no load generation, redacted results, two-request limits, and no-finding-without-pass semantics.
 - Preserved the existing Model Configuration and launch UI layout and controls while clarifying connection copy: local Codex/ChatGPT-session routing remains the runtime default and metered OpenAI API-key routing remains an explicit optional override.
 
 ### Changed

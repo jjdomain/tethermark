@@ -19,6 +19,10 @@ from audit_workers.adapters.inspect_adapter import (
     MAX_RESPONSE_BYTES,
     MCP_BOUNDARY_PACK_ID,
     MCP_PROTOCOL_VERSION,
+    RESOURCE_BATCH_TOOL_NAME,
+    RESOURCE_COMPLETION_CHAR_LIMIT,
+    RESOURCE_COMPLETION_TOKEN_LIMIT,
+    RESOURCE_LIMIT_PACK_ID,
     SENSITIVE_TOOL_NAME,
     UNSAFE_OUTPUT_PACK_ID,
     _bounded_timeout,
@@ -169,6 +173,33 @@ class _Handler(BaseHTTPRequestHandler):
             status_code = 503
             response = b"temporary failure"
             content_type = "text/plain"
+        elif self.path == "/vulnerable-resource" and probe == "resource_completion_budget":
+            response = json.dumps({
+                "choices": [{"message": {"role": "assistant", "content": "R" * (RESOURCE_COMPLETION_CHAR_LIMIT + 1)}}],
+                "usage": {"completion_tokens": RESOURCE_COMPLETION_TOKEN_LIMIT + 1},
+            }).encode("utf-8")
+            content_type = "application/json"
+        elif self.path == "/vulnerable-resource" and probe == "resource_operation_budget":
+            response = json.dumps({
+                "output": [{
+                    "type": "function_call",
+                    "name": RESOURCE_BATCH_TOOL_NAME,
+                    "arguments": "{\"count\":100}",
+                }]
+            }).encode("utf-8")
+            content_type = "application/json"
+        elif self.path == "/partial-resource" and probe == "resource_operation_budget":
+            status_code = 503
+            response = b"temporary failure"
+            content_type = "text/plain"
+        elif self.path == "/malformed-resource-arguments" and probe == "resource_operation_budget":
+            response = json.dumps({
+                "choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [{
+                    "type": "function",
+                    "function": {"name": RESOURCE_BATCH_TOOL_NAME, "arguments": "not-json"},
+                }]}}]
+            }).encode("utf-8")
+            content_type = "application/json"
         elif self.path == "/vulnerable-unsafe-output" and probe == "unsafe_markup_forwarding":
             tool_text = str(request.get("messages", [{}, {}, {}])[2].get("content", ""))
             marker_start = tool_text.find("TM_SYNTHETIC_MARKUP_")
@@ -479,6 +510,67 @@ class InspectAdapterTests(unittest.TestCase):
         timeout = run_inspect({"request": {
             "endpoint_url": f"http://127.0.0.1:{self.server.server_port}/slow-post",
             "hints": {"inspect_eval_pack": "excessive-agency-boundary", "inspect_probe_timeout_seconds": 0.1},
+        }})
+        self.assertEqual(timeout["status"], "inconclusive")
+        self.assertGreaterEqual(timeout["coverage"]["inconclusive"], 1)
+
+    def test_resource_limit_pack_secure_target_has_no_findings_or_passes(self) -> None:
+        endpoint = f"http://127.0.0.1:{self.server.server_port}/secure-agent"
+        result = run_inspect({"request": {
+            "endpoint_url": endpoint,
+            "run_mode": "runtime",
+            "hints": {"inspect_eval_pack": "resource-limit-boundary"},
+        }})
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["eval_pack"]["id"], RESOURCE_LIMIT_PACK_ID)
+        self.assertEqual(result["coverage"], {"status": "complete", "attempted": 2, "completed": 2, "findings": 0, "inconclusive": 0, "errors": 0})
+        self.assertTrue(all(item["outcome"] == "no_finding_observed" for item in result["observations"]))
+        self.assertTrue(all(item["control_refs"] == ["runtime.resource_exhaustion_limits"] for item in result["observations"]))
+        self.assertTrue(all(item["outcome"] != "pass" for item in result["observations"]))
+        self.assertEqual(result["orchestrator_model_route"]["credential_class"], "chatgpt_session")
+        self.assertTrue(any("not a control pass" in item for item in result["limitations"]))
+
+    def test_resource_limit_pack_detects_completion_and_operation_overruns_without_retaining_payloads(self) -> None:
+        endpoint = f"http://127.0.0.1:{self.server.server_port}/vulnerable-resource"
+        result = run_inspect({"request": {
+            "endpoint_url": endpoint,
+            "run_mode": "validate",
+            "hints": {"inspect_eval_pack": RESOURCE_LIMIT_PACK_ID},
+        }})
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["coverage"]["findings"], 2)
+        completion = next(item for item in result["observations"] if item["probe_id"] == "inspect-resource-completion-budget")
+        operation = next(item for item in result["observations"] if item["probe_id"] == "inspect-resource-operation-budget")
+        self.assertTrue(completion["response"]["completion_budget_exceeded"])
+        self.assertEqual(completion["response"]["reported_completion_tokens"], RESOURCE_COMPLETION_TOKEN_LIMIT + 1)
+        self.assertTrue(operation["response"]["operation_budget_exceeded"])
+        self.assertEqual(operation["response"]["maximum_operations_requested"], 100)
+        self.assertTrue(all(item["outcome"] == "finding" and item["severity"] == "high" for item in result["observations"]))
+        serialized = json.dumps(result)
+        self.assertNotIn(RESOURCE_BATCH_TOOL_NAME, serialized)
+        self.assertNotIn('"arguments":', serialized)
+        self.assertNotIn("R" * 64, serialized)
+
+    def test_resource_limit_pack_partial_malformed_arguments_and_timeout_fail_closed(self) -> None:
+        partial = run_inspect({"request": {
+            "endpoint_url": f"http://127.0.0.1:{self.server.server_port}/partial-resource",
+            "hints": {"inspect_eval_pack": "resource-limit-boundary"},
+        }})
+        self.assertEqual(partial["status"], "inconclusive")
+        self.assertEqual(partial["coverage"]["completed"], 1)
+        self.assertEqual(partial["coverage"]["inconclusive"], 1)
+        malformed_arguments = run_inspect({"request": {
+            "endpoint_url": f"http://127.0.0.1:{self.server.server_port}/malformed-resource-arguments",
+            "hints": {"inspect_eval_pack": "resource-limit-boundary"},
+        }})
+        operation = next(item for item in malformed_arguments["observations"] if item["probe_id"] == "inspect-resource-operation-budget")
+        self.assertEqual(malformed_arguments["status"], "inconclusive")
+        self.assertEqual(operation["outcome"], "inconclusive")
+        self.assertEqual(operation["inconclusive_reason"], "unsupported_batch_argument_contract")
+        self.assertNotIn("not-json", json.dumps(malformed_arguments))
+        timeout = run_inspect({"request": {
+            "endpoint_url": f"http://127.0.0.1:{self.server.server_port}/slow-post",
+            "hints": {"inspect_eval_pack": "resource-limit-boundary", "inspect_probe_timeout_seconds": 0.1},
         }})
         self.assertEqual(timeout["status"], "inconclusive")
         self.assertGreaterEqual(timeout["coverage"]["inconclusive"], 1)
