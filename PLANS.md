@@ -60,7 +60,7 @@ Completed:
 Not completed:
 - broader independently reviewed advisory coverage beyond the current four advisories and vulnerability classes, followed by multi-case/repeat model variance and weight/threshold calibration
 - cleanup or archival policy for old historical artifact directories already present under `.artifacts`
-- broader reviewed Garak/PyRIT profiles beyond the bounded initial packs and the remaining AI-security-specific Inspect telemetry pack
+- broader reviewed Garak/PyRIT profiles and deeper scenario coverage beyond the completed bounded initial Inspect packs
 - richer control coverage and framework depth beyond the first static control set
 
 ## Phase 1: Local Static Mode Hardening
@@ -230,11 +230,11 @@ Hosted rollout order:
 
 ## Recommended Next Order
 
-Community Edition Phases 1–8 are complete within the documented platform scope. Phase 9 has executable Inspect, Garak, and PyRIT foundations and now continues with the remaining runtime-control scenarios.
+Community Edition Phases 1–8 are complete within the documented platform scope. Phase 9 now has executable Inspect coverage for every Phase 7 runtime control at its documented bounded profile, plus the initial Garak and PyRIT profiles; operational integration work remains.
 
-1. Add the versioned security-telemetry runtime pack behind the executable adapter boundary; the MCP, unsafe-output, excessive-agency, and resource-limit boundary packs are complete.
-2. Add framework-aware target startup/health detection for common Node and Python agents.
-3. Expand deterministic fake-agent services and failure/partial-result fixtures for the remaining security packs.
+1. Add framework-aware target startup/health detection for common Node and Python agents.
+2. Expand deterministic fake-agent and telemetry-verification services plus failure/partial-result fixtures around the completed security packs.
+3. Generalize normalized persistence/export coverage for runtime observations, findings, and inconclusive reasons.
 4. Continue Phase 10 recovery hardening and Phase 11 packaging alongside the remaining Phase 9 coverage.
 
 ## Deferred Hosted Worker Deployment

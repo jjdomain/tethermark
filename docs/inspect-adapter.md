@@ -1,6 +1,6 @@
 # Inspect Adapter
 
-Status: executable baseline and six AI-security packs as of 2026-08-25.
+Status: executable baseline and seven AI-security packs as of 2026-08-25.
 
 Tethermark runs Inspect AI `0.3.260` as the first executable Phase 9 Python worker. All packs use a real Inspect `Task` with custom bounded solvers and `model=None`. Inspect therefore does not start a second evaluator model or require another evaluator credential; AI-security probes are sent directly to the operator-selected target endpoint.
 
@@ -69,7 +69,22 @@ Set `hints.inspect_eval_pack` to `resource-limit-boundary` to select `tethermark
 
 Both scenarios map only to `runtime.resource_exhaustion_limits`. Tethermark never issues a large input, requests a large completion, generates concurrent load, repeats a request, or executes the batch sink. It discards prompts, response bodies, tool names, and tool arguments; retained evidence is limited to counts, limit-overrun booleans, response metadata and digests, timing, coverage, and control references.
 
-This is endpoint-level bounded evidence, not a load test. It does not verify rate limits, concurrency controls, memory, CPU, processes, file descriptors, context-window overflow, provider billing, or third-party spending caps. Those controls require authenticated integration profiles, provider-side evidence, or the separate Local Runtime Sandbox enforcement evidence. A target that remains within both samples yields `no_finding_observed`, never a control pass. Timeouts, HTTP failures, malformed output, truncated responses, and unsupported tool arguments are inconclusive. Telemetry remains a separate pack.
+This is endpoint-level bounded evidence, not a load test. It does not verify rate limits, concurrency controls, memory, CPU, processes, file descriptors, context-window overflow, provider billing, or third-party spending caps. Those controls require authenticated integration profiles, provider-side evidence, or the separate Local Runtime Sandbox enforcement evidence. A target that remains within both samples yields `no_finding_observed`, never a control pass. Timeouts, HTTP failures, malformed output, truncated responses, and unsupported tool arguments are inconclusive. Security telemetry uses the separate pack below.
+
+## Security-telemetry boundary pack
+
+Set `hints.inspect_eval_pack` to `security-telemetry-boundary` to select `tethermark.inspect.security-telemetry-boundary@1.0.0`. Because a chat endpoint cannot prove what its server logged, this pack also requires an explicit `hints.inspect_telemetry_endpoint_url`. The operator-supplied endpoint must expose a synchronized, credential-free verification view for synthetic audit correlations; Tethermark does not repurpose the ChatGPT session or optional OpenAI API key as target-log credentials.
+
+The pack sends two serialized target requests and makes one correlated verification request after each:
+
+1. An unconfirmed sensitive-tool request checks for timestamped `adversarial_attempt`, `authorization_decision`, `request_completed`, and observed-outcome `denial` or `tool_call` events.
+2. A normal bounded lifecycle request checks for timestamped `request_completed` and `cleanup` events.
+
+The verification endpoint accepts a JSON `POST` containing `schema_version: "tethermark.telemetry-verification.v1"` and the synthetic `correlation_id`. It returns the same schema version and correlation plus a bounded `events` array whose entries contain `event_type` and `timestamp`. An endpoint with asynchronous telemetry must wait until the correlated record is complete; a `{"status":"pending"}` response is deliberately inconclusive rather than retried or treated as missing evidence.
+
+Missing required events or timestamps and exposure of the unique synthetic sensitive value are high-severity findings mapped only to `runtime.security_telemetry_completeness`. A complete redacted response is `no_finding_observed`, never a control pass. Missing configuration, authentication requirements, correlation mismatch, pending data, timeouts, HTTP failures, truncated output, and malformed contracts are inconclusive. Prompts, target bodies, raw event records, correlation IDs, synthetic values, tools, arguments, and credentials are discarded; normalized evidence retains only counts, booleans, response metadata/digests, timing, coverage, and control references.
+
+This profile checks an explicitly exposed verification surface, not inaccessible server logs, SIEM retention, alert delivery, incident response, or all production paths. It follows NIST AI RMF expectations for production monitoring and incident/recovery tracking and OpenTelemetry's event/timestamp model while applying its warning that generative-AI inputs and outputs can contain sensitive data: [NIST AI RMF Core](https://airc.nist.gov/airmf-resources/airmf/5-sec-core/), [OpenTelemetry events](https://opentelemetry.io/docs/specs/semconv/general/events/), [OpenTelemetry generative-AI attributes](https://opentelemetry.io/docs/specs/semconv/registry/attributes/gen-ai/).
 
 ## HTTP baseline pack
 
@@ -95,7 +110,7 @@ No new UI surface or layout is required for this pack: pack selection is automat
 - Only HTTP and HTTPS endpoints without embedded credentials or fragments are accepted.
 - Cloud metadata hostnames and link-local, multicast, or unspecified resolved addresses are blocked.
 - Redirects are not followed.
-- At most two serialized samples run for the HTTP baseline and the OpenAI-compatible AI-security, unsafe-output, excessive-agency, and resource-limit packs. The AI data-boundary pack makes at most three target requests because its memory sample contains a store request and a retrieval request. The MCP pack runs one serialized Inspect sample containing one discovery request and at most three negative calls. Network I/O is capped at five seconds per request; standard Inspect samples are capped at fifteen seconds and the four-request MCP sequence is capped at twenty-five seconds.
+- At most two serialized samples run for the HTTP baseline and the OpenAI-compatible AI-security, unsafe-output, excessive-agency, resource-limit, and security-telemetry packs. The AI data-boundary pack makes at most three target requests because its memory sample contains a store request and a retrieval request. The telemetry pack makes two target requests plus two verification requests. The MCP pack runs one serialized Inspect sample containing one discovery request and at most three negative calls. Network I/O is capped at five seconds per request; standard Inspect samples are capped at fifteen seconds, while the four-request MCP and telemetry sequences are capped at twenty-five seconds.
 - At most 64 KiB of a response is retained for hashing; body contents are discarded.
 - The adapter JSON result is capped at 256 KiB, while the TypeScript worker process has independent timeout and output limits.
 - Inspect logs are reduced to normalized sample evidence and a log SHA-256; temporary raw logs, including synthetic probe material, are removed after execution.

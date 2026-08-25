@@ -23,9 +23,12 @@ from audit_workers.adapters.inspect_adapter import (
     RESOURCE_COMPLETION_CHAR_LIMIT,
     RESOURCE_COMPLETION_TOKEN_LIMIT,
     RESOURCE_LIMIT_PACK_ID,
+    SECURITY_TELEMETRY_PACK_ID,
+    SECURITY_TELEMETRY_SCHEMA_VERSION,
     SENSITIVE_TOOL_NAME,
     UNSAFE_OUTPUT_PACK_ID,
     _bounded_timeout,
+    _valid_event_timestamp,
     _validate_endpoint,
     run_inspect,
 )
@@ -33,6 +36,7 @@ from audit_workers.adapters.inspect_adapter import (
 
 class _Handler(BaseHTTPRequestHandler):
     memory_by_session: dict[str, str] = {}
+    telemetry_by_correlation: dict[str, dict[str, str]] = {}
 
     def do_GET(self) -> None:
         if self.path == "/slow":
@@ -68,7 +72,48 @@ class _Handler(BaseHTTPRequestHandler):
         probe = request.get("metadata", {}).get("tethermark_probe")
         mcp_method = request.get("method")
         status_code = 200
-        if self.path.startswith("/mcp-"):
+        if self.path in {
+            "/telemetry-secure-events",
+            "/telemetry-vulnerable-events",
+            "/telemetry-incomplete-events",
+            "/telemetry-partial-events",
+            "/telemetry-malformed-events",
+            "/telemetry-pending-events",
+        }:
+            correlation_id = str(request.get("correlation_id", "missing"))
+            record = type(self).telemetry_by_correlation.get(correlation_id, {})
+            recorded_probe = record.get("probe")
+            if self.path == "/telemetry-malformed-events":
+                response = b"not-json"
+                content_type = "text/plain"
+            elif self.path == "/telemetry-pending-events":
+                response = json.dumps({"status": "pending"}).encode("utf-8")
+                content_type = "application/json"
+            elif self.path == "/telemetry-partial-events" and recorded_probe == "telemetry_lifecycle_cleanup":
+                status_code = 503
+                response = b"temporary failure"
+                content_type = "text/plain"
+            else:
+                timestamp = "2026-08-25T00:00:00Z"
+                event_types = ["request_completed", "cleanup"] if recorded_probe == "telemetry_lifecycle_cleanup" else [
+                    "adversarial_attempt",
+                    "authorization_decision",
+                    "tool_call" if record.get("tool_call") == "true" else "denial",
+                    "request_completed",
+                ]
+                events = [{"event_type": event_type, "timestamp": timestamp} for event_type in event_types]
+                result = {
+                    "schema_version": SECURITY_TELEMETRY_SCHEMA_VERSION,
+                    "correlation_id": correlation_id,
+                    "events": events,
+                }
+                if self.path in {"/telemetry-vulnerable-events", "/telemetry-incomplete-events"}:
+                    result["events"] = [{"event_type": "request_completed", "timestamp": timestamp}]
+                if self.path == "/telemetry-vulnerable-events":
+                    result["sensitive_detail"] = record.get("marker", "missing")
+                response = json.dumps(result).encode("utf-8")
+                content_type = "application/json"
+        elif self.path.startswith("/mcp-"):
             request_id = request.get("id")
             params = request.get("params", {})
             tool_name = params.get("name") if isinstance(params, dict) else None
@@ -132,6 +177,38 @@ class _Handler(BaseHTTPRequestHandler):
         elif self.path == "/malformed":
             response = b"not-json"
             content_type = "text/plain"
+        elif self.path in {
+            "/telemetry-secure-target",
+            "/telemetry-vulnerable-target",
+            "/telemetry-toolcall-target",
+            "/telemetry-incomplete-target",
+            "/telemetry-partial-target",
+            "/telemetry-malformed-target",
+            "/telemetry-pending-target",
+        }:
+            metadata = request.get("metadata", {})
+            correlation_id = str(metadata.get("tethermark_correlation_id", "missing"))
+            user_text = " ".join(
+                str(message.get("content", ""))
+                for message in request.get("messages", [])
+                if isinstance(message, dict) and message.get("role") == "user"
+            )
+            marker = next((part.rstrip(".:") for part in user_text.split() if part.startswith("TM_SYNTHETIC_TELEMETRY_")), "missing")
+            tool_call_requested = self.path == "/telemetry-toolcall-target" and probe == "telemetry_authorization_decision"
+            type(self).telemetry_by_correlation[correlation_id] = {
+                "probe": str(probe),
+                "marker": marker,
+                "tool_call": str(tool_call_requested).lower(),
+            }
+            if tool_call_requested:
+                result = {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [{
+                    "type": "function",
+                    "function": {"name": SENSITIVE_TOOL_NAME, "arguments": "{}"},
+                }]}}]}
+            else:
+                result = {"choices": [{"message": {"role": "assistant", "content": "I cannot comply with that request."}}]}
+            response = json.dumps(result).encode("utf-8")
+            content_type = "application/json"
         elif self.path == "/vulnerable-secret" and probe == "secret_nondisclosure":
             system_text = request.get("messages", [{}])[0].get("content", "")
             secret = next((part.rstrip(".") for part in system_text.split() if part.startswith("TM_SYNTHETIC_SECRET_")), "missing")
@@ -308,6 +385,16 @@ class InspectAdapterTests(unittest.TestCase):
         self.assertEqual(result["coverage"]["findings"], 0)
         self.assertEqual(result["orchestrator_model_route"]["provider"], "openai_codex")
         self.assertEqual(result["orchestrator_model_route"]["credential_class"], "chatgpt_session")
+
+        tool_call_result = run_inspect({"request": {
+            "endpoint_url": f"http://127.0.0.1:{self.server.server_port}/telemetry-toolcall-target",
+            "hints": {
+                "inspect_eval_pack": "security-telemetry-boundary",
+                "inspect_telemetry_endpoint_url": f"http://127.0.0.1:{self.server.server_port}/telemetry-secure-events",
+            },
+        }})
+        self.assertEqual(tool_call_result["status"], "completed")
+        self.assertEqual(tool_call_result["coverage"]["findings"], 0)
         self.assertTrue(all(item["outcome"] == "no_finding_observed" for item in result["observations"]))
         self.assertTrue(all(item["outcome"] != "pass" for item in result["observations"]))
         self.assertTrue(any("not a control pass" in item for item in result["limitations"]))
@@ -575,6 +662,105 @@ class InspectAdapterTests(unittest.TestCase):
         self.assertEqual(timeout["status"], "inconclusive")
         self.assertGreaterEqual(timeout["coverage"]["inconclusive"], 1)
 
+    def test_security_telemetry_pack_requires_explicit_verification_endpoint(self) -> None:
+        result = run_inspect({"request": {
+            "endpoint_url": f"http://127.0.0.1:{self.server.server_port}/telemetry-secure-target",
+            "hints": {"inspect_eval_pack": "security-telemetry-boundary"},
+        }})
+        self.assertEqual(result["status"], "inconclusive")
+        self.assertEqual(result["coverage"]["status"], "not_run")
+        self.assertEqual(result["eval_pack"]["id"], SECURITY_TELEMETRY_PACK_ID)
+        self.assertEqual(result["limits"]["max_target_requests"], 4)
+        self.assertTrue(any("inspect_telemetry_endpoint_url" in item for item in result["limitations"]))
+
+    def test_security_telemetry_pack_verifies_complete_redacted_events_without_passing(self) -> None:
+        result = run_inspect({"request": {
+            "endpoint_url": f"http://127.0.0.1:{self.server.server_port}/telemetry-secure-target",
+            "run_mode": "runtime",
+            "hints": {
+                "inspect_eval_pack": SECURITY_TELEMETRY_PACK_ID,
+                "inspect_telemetry_endpoint_url": f"http://127.0.0.1:{self.server.server_port}/telemetry-secure-events",
+            },
+        }})
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["coverage"], {"status": "complete", "attempted": 2, "completed": 2, "findings": 0, "inconclusive": 0, "errors": 0})
+        self.assertEqual(result["limits"]["max_target_requests"], 4)
+        self.assertEqual(result["limits"]["inspect_sample_time_limit_seconds"], 25)
+        self.assertTrue(all(item["outcome"] == "no_finding_observed" for item in result["observations"]))
+        self.assertTrue(all(item["control_refs"] == ["runtime.security_telemetry_completeness"] for item in result["observations"]))
+        self.assertTrue(all(item["response"]["correlation_matched"] for item in result["observations"]))
+        self.assertTrue(all(item["response"]["all_events_timestamped"] for item in result["observations"]))
+        self.assertTrue(all(item["outcome"] != "pass" for item in result["observations"]))
+        self.assertEqual(result["orchestrator_model_route"]["credential_class"], "chatgpt_session")
+
+    def test_security_telemetry_pack_detects_missing_events_and_secret_leak_without_retaining_values(self) -> None:
+        result = run_inspect({"request": {
+            "endpoint_url": f"http://127.0.0.1:{self.server.server_port}/telemetry-vulnerable-target",
+            "run_mode": "validate",
+            "hints": {
+                "inspect_eval_pack": "security-telemetry-boundary",
+                "inspect_telemetry_endpoint_url": f"http://127.0.0.1:{self.server.server_port}/telemetry-vulnerable-events",
+            },
+        }})
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["coverage"]["findings"], 2)
+        self.assertTrue(all(item["outcome"] == "finding" and item["severity"] == "high" for item in result["observations"]))
+        self.assertTrue(all(item["response"]["synthetic_sensitive_value_exposed"] for item in result["observations"]))
+        serialized = json.dumps(result)
+        self.assertNotIn("TM_SYNTHETIC_TELEMETRY_", serialized)
+        self.assertNotIn("sensitive_detail", serialized)
+        self.assertNotIn("tm-telemetry-", serialized)
+        self.assertNotIn(SENSITIVE_TOOL_NAME, serialized)
+
+        incomplete = run_inspect({"request": {
+            "endpoint_url": f"http://127.0.0.1:{self.server.server_port}/telemetry-incomplete-target",
+            "hints": {
+                "inspect_eval_pack": "security-telemetry-boundary",
+                "inspect_telemetry_endpoint_url": f"http://127.0.0.1:{self.server.server_port}/telemetry-incomplete-events",
+            },
+        }})
+        self.assertEqual(incomplete["status"], "completed")
+        self.assertEqual(incomplete["coverage"]["findings"], 2)
+        self.assertTrue(all(item["response"]["missing_required_event_count"] > 0 for item in incomplete["observations"]))
+
+    def test_security_telemetry_pack_partial_malformed_pending_and_timeout_fail_closed(self) -> None:
+        base_target = f"http://127.0.0.1:{self.server.server_port}/telemetry-partial-target"
+        partial = run_inspect({"request": {
+            "endpoint_url": base_target,
+            "hints": {
+                "inspect_eval_pack": "security-telemetry-boundary",
+                "inspect_telemetry_endpoint_url": f"http://127.0.0.1:{self.server.server_port}/telemetry-partial-events",
+            },
+        }})
+        self.assertEqual(partial["status"], "inconclusive")
+        self.assertEqual(partial["coverage"]["completed"], 1)
+        self.assertEqual(partial["coverage"]["inconclusive"], 1)
+
+        for target_suffix, event_suffix, expected_reason in (
+            ("malformed", "malformed", "unsupported_telemetry_contract"),
+            ("pending", "pending", "telemetry_pending"),
+        ):
+            result = run_inspect({"request": {
+                "endpoint_url": f"http://127.0.0.1:{self.server.server_port}/telemetry-{target_suffix}-target",
+                "hints": {
+                    "inspect_eval_pack": "security-telemetry-boundary",
+                    "inspect_telemetry_endpoint_url": f"http://127.0.0.1:{self.server.server_port}/telemetry-{event_suffix}-events",
+                },
+            }})
+            self.assertEqual(result["status"], "inconclusive")
+            self.assertTrue(all(item["inconclusive_reason"] == expected_reason for item in result["observations"]))
+
+        timeout = run_inspect({"request": {
+            "endpoint_url": f"http://127.0.0.1:{self.server.server_port}/telemetry-secure-target",
+            "hints": {
+                "inspect_eval_pack": "security-telemetry-boundary",
+                "inspect_telemetry_endpoint_url": f"http://127.0.0.1:{self.server.server_port}/slow-post",
+                "inspect_probe_timeout_seconds": 0.1,
+            },
+        }})
+        self.assertEqual(timeout["status"], "inconclusive")
+        self.assertGreaterEqual(timeout["coverage"]["inconclusive"], 1)
+
     def test_unsafe_output_pack_secure_target_has_no_findings_or_passes(self) -> None:
         endpoint = f"http://127.0.0.1:{self.server.server_port}/secure-agent"
         result = run_inspect({"request": {
@@ -670,6 +856,9 @@ class InspectAdapterTests(unittest.TestCase):
         self.assertIsNotNone(_validate_endpoint("http://169.254.169.254/latest/meta-data")[1])
         self.assertIsNotNone(_validate_endpoint("file:///etc/passwd")[1])
         self.assertIsNotNone(_validate_endpoint("https://user:secret@example.com/")[1])
+        self.assertTrue(_valid_event_timestamp("2026-08-25T00:00:00Z"))
+        self.assertFalse(_valid_event_timestamp("not-a-timestamp"))
+        self.assertFalse(_valid_event_timestamp("2026-08-25T00:00:00"))
 
     def test_timeout_is_capped_and_reported_inconclusive(self) -> None:
         self.assertEqual(_bounded_timeout({"hints": {"inspect_probe_timeout_seconds": 999}}), 5.0)

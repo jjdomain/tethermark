@@ -517,7 +517,8 @@ Tasks:
   - [x] Add `tethermark.inspect.unsafe-output-boundary@1.0.0` for bounded active-markup forwarding and synthetic command-sink requests from untrusted tool output, with no rendering or execution, redacted evidence, and no-finding-without-pass semantics.
   - [x] Add `tethermark.inspect.excessive-agency-boundary@1.0.0` for bounded out-of-scope administrative-capability and unapproved recursive-delegation requests, with inert sinks, redacted evidence, and no-finding-without-pass semantics.
   - [x] Add `tethermark.inspect.resource-limit-boundary@1.0.0` for bounded completion-output and per-turn operation budgets, with no load generation or tool execution, redacted evidence, and explicit endpoint-only limitations.
-- [ ] Build versioned eval packs for all runtime controls defined in Phase 7 (prompt/secret/tool, indirect-injection/data-exfiltration/cross-session-memory, MCP, unsafe-output, excessive-agency, and resource-limit packs are complete; the telemetry pack remains).
+  - [x] Add `tethermark.inspect.security-telemetry-boundary@1.0.0` for correlated adversarial/authorization/denial-or-tool-call/completion/cleanup event verification through an explicit operator-supplied telemetry endpoint, with timestamp and redaction checks, four-request bounds, and fail-closed unavailable-evidence handling.
+- [x] Build versioned eval packs for all runtime controls defined in Phase 7 (prompt/secret/tool, indirect-injection/data-exfiltration/cross-session-memory, MCP, unsafe-output, excessive-agency, resource-limit, and security-telemetry packs are complete at their documented bounded integration profiles).
 - [ ] Add framework-aware target startup/health detection for common Node and Python applications and agents.
 - [ ] Add fake tools/services and deterministic attack fixtures for prompt/tool/MCP/memory/data-boundary scenarios.
 - [ ] Normalize observations into evidence, control results, findings, coverage, and inconclusive reasons.
@@ -618,8 +619,8 @@ A static-only beta may be cut before Phases 8–9 finish only if it is explicitl
 
 ## Recommended execution order from this snapshot
 
-1. Complete versioned runtime coverage for security telemetry using the now-executable adapter boundary.
-2. Add framework-aware target startup/health detection and deterministic fake services for the remaining runtime scenarios.
+1. Add framework-aware target startup/health detection for common Node and Python applications and agents.
+2. Expand deterministic fake services and failure/partial-result fixtures around the completed runtime-control packs.
 3. Complete Phase 10 stress/recovery hardening and Phase 11 packaging/cross-platform security.
 4. Execute Phase 12 release candidate and beta gates.
 
