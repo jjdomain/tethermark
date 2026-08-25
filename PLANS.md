@@ -37,7 +37,7 @@ Completed:
 - Linux static sandbox backend
 - Linux container-backend scaffold
 - executable local runtime provider verified on Windows Docker Desktop and native Linux Docker, rootless Podman, and gVisor; real-Mac execution is explicitly deferred and not certified
-- hash-locked managed Python worker environment with setup/doctor commands and cross-platform CI coverage, executable Inspect AI `0.3.260` HTTP/prompt/tool/data/memory packs, and an executable bounded Garak `0.16.0` PromptInject profile; PyRIT remains scaffold-only
+- hash-locked managed Python worker environment with setup/doctor commands and cross-platform CI coverage, executable Inspect AI `0.3.260` HTTP/prompt/tool/data/memory packs, bounded Garak `0.16.0` PromptInject, and bounded PyRIT `1.0.1` adversarial-text profiles
 - local static `scan path ... --mode static` verified on Windows with provider-backed agents and standards-based score artifacts
 - versioned deterministic regression suite for good, mixed, risky, ordinary, runnable, agentic, and MCP targets
 - four external-ground-truth vulnerable/fixed calibration pairs from reviewed `CVE-2025-53107`, `CVE-2026-27735`, `CVE-2024-51751`, and `CVE-2025-3248`, with strict known-finding FP/FN gates for command injection, MCP repository-boundary traversal, AI application file-payload path validation, and unauthenticated code validation
@@ -60,7 +60,7 @@ Completed:
 Not completed:
 - broader independently reviewed advisory coverage beyond the current four advisories and vulnerability classes, followed by multi-case/repeat model variance and weight/threshold calibration
 - cleanup or archival policy for old historical artifact directories already present under `.artifacts`
-- real PyRIT adapter execution, broader reviewed Garak profiles beyond the bounded PromptInject pack, and the remaining AI-security-specific Inspect MCP, unsafe-output, agency, resource, and telemetry packs
+- broader reviewed Garak/PyRIT profiles beyond the bounded initial packs and the remaining AI-security-specific Inspect MCP, unsafe-output, agency, resource, and telemetry packs
 - richer control coverage and framework depth beyond the first static control set
 
 ## Phase 1: Local Static Mode Hardening
@@ -111,7 +111,7 @@ This work is implemented in the separate Tethermark Cloud repository; it is trac
 2. Keep the completed TypeScript-to-Python worker smoke and Windows/Linux/macOS packaging matrix green.
 3. Replace garak adapter scaffold with real invocation and normalized output.
 4. Extend the executable Inspect HTTP baseline with real multi-turn AI-security eval orchestration.
-5. Replace PyRIT adapter scaffold with real adversarial evaluation flow.
+5. Expand the bounded PyRIT adversarial-text profile only through reviewed, versioned eval packs.
 6. Add AI-security eval packs for prompt injection, tool misuse, MCP boundary failures, memory leakage, cross-session isolation, unsafe delegated actions, and retrieval/data exfiltration.
 7. Map runtime eval results to OWASP LLM, MITRE ATLAS, NIST AI RMF, and Tethermark executable control IDs.
 8. Add worker result schema normalization into Node artifacts and findings.
@@ -230,12 +230,12 @@ Hosted rollout order:
 
 ## Recommended Next Order
 
-Community Edition Phases 1–8 are complete within the documented platform scope. Phase 9 runtime eval operationalization is next.
+Community Edition Phases 1–8 are complete within the documented platform scope. Phase 9 has executable Inspect, Garak, and PyRIT foundations and now continues with the remaining runtime-control scenarios.
 
-1. Add the first AI-security-specific Inspect prompt/tool/data-boundary pack on top of the executable HTTP baseline contract.
-2. Operationalize Garak and PyRIT behind the same resource, timeout, output, cancellation, and evidence boundaries.
-3. Add deterministic fake-agent services and failure/partial-result fixtures for those security packs.
-4. Continue Phase 10 recovery hardening and Phase 11 packaging after the first end-to-end runtime eval is retained.
+1. Add versioned MCP, unsafe-output, agency, resource, and telemetry runtime packs behind the executable adapter boundary.
+2. Add framework-aware target startup/health detection for common Node and Python agents.
+3. Expand deterministic fake-agent services and failure/partial-result fixtures for the remaining security packs.
+4. Continue Phase 10 recovery hardening and Phase 11 packaging alongside the remaining Phase 9 coverage.
 
 ## Deferred Hosted Worker Deployment
 

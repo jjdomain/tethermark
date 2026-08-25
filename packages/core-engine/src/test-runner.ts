@@ -5056,6 +5056,29 @@ async function testPythonWorkerExecutionLimitsAndInspectNormalization(): Promise
   assert.equal(garakFinding.severity_counts.high, 1);
   assert.ok(garakFinding.notes.includes("eval_pack:tethermark.garak.prompt-injection@1.0.0"));
 
+  const pyritFinding = normalizePythonWorkerForTests({
+    status: "completed",
+    summary: "Bounded PyRIT adversarial boundary probes completed.",
+    target: "http://127.0.0.1:8788/v1/chat/completions",
+    eval_pack: { id: "tethermark.pyrit.adversarial-boundary", version: "1.0.0" },
+    coverage: { status: "complete", attempted: 2, completed: 2, findings: 1, inconclusive: 0, errors: 0 },
+    observations: [
+      {
+        outcome: "finding",
+        severity: "high",
+        evidence_locations: [{ source_kind: "uri", uri: "http://127.0.0.1:8788/v1/chat/completions", label: "pyrit-authorization-escalation" }]
+      },
+      {
+        outcome: "no_finding_observed",
+        severity: "info",
+        evidence_locations: [{ source_kind: "uri", uri: "http://127.0.0.1:8788/v1/chat/completions", label: "pyrit-sensitive-data-handling" }]
+      }
+    ]
+  }, "completed");
+  assert.equal(pyritFinding.issue_count, 1);
+  assert.equal(pyritFinding.severity_counts.high, 1);
+  assert.ok(pyritFinding.notes.includes("eval_pack:tethermark.pyrit.adversarial-boundary@1.0.0"));
+
   const notRun = normalizePythonWorkerForTests({
     status: "inconclusive",
     coverage: { status: "not_run", attempted: 0, completed: 0, inconclusive: 0, errors: 0 },

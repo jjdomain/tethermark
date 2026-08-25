@@ -99,7 +99,7 @@ Updated on 2026-08-20 during Phase 5 calibration work from merged Phase 4:
 | 6 | Complete review, remediation, exports, and operator workflows | **Complete** | Completed 2026-08-20; see `docs/phase6-operator-workflow-evidence.md` |
 | 7 | Implement Admin/System Policies and extensive-scan controls | **Complete for the policy plane** | Executable runtime enforcement is tracked in Phase 8 |
 | 8 | Execute local runtime scans in a real isolated sandbox | **Complete with accepted macOS runtime deferral** | Windows Docker Desktop and native Linux Docker/rootless-Podman/gVisor passed; macOS execution is not certified |
-| 9 | Operationalize runtime evals and Python workers | **In progress** | Managed environment, bounded Inspect packs, and bounded Garak PromptInject profile implemented; PyRIT and remaining runtime scenarios remain |
+| 9 | Operationalize runtime evals and Python workers | **In progress** | Managed environment plus bounded Inspect, Garak, and PyRIT packs implemented; remaining runtime controls/scenarios remain |
 | 10 | Harden persistence, jobs, maintenance, and governed learning | **Mostly complete** | Stress/recovery tests, retention automation, learning consumption decision |
 | 11 | Package, secure, and verify cross-platform installation | **Partial** | Fresh-machine installers, SBOM/signing, hardened deployment profiles |
 | 12 | Run release candidate, beta, and production launch gates | **Not started** | Depends on Phases 1–11 and explicit release acceptance |
@@ -507,12 +507,12 @@ Tasks:
 
 - [x] Maintain bounded TypeScript-to-Python worker contracts and adapter scaffolding.
 - [x] Pin the Python `>=3.11 <3.14` worker environment with a hash-locked bootstrap, managed virtual environment, setup command, manifest/package verification, `doctor` integration, and Windows/Linux/macOS CI matrix.
-- [ ] Implement and verify Garak, Inspect, and PyRIT adapters behind explicit time/resource/output contracts.
+- [x] Implement and verify Garak, Inspect, and PyRIT adapters behind explicit time/resource/output contracts.
   - [x] Implement Inspect AI `0.3.260` with the versioned, model-free `tethermark.inspect.http-baseline@1.0.0` pack, bounded endpoint/response/time/output handling, normalized observations, and explicit inconclusive coverage.
   - [x] Add the default `tethermark.inspect.ai-security-boundary@1.0.0` pack for bounded synthetic secret-nondisclosure and unconfirmed-tool-call probes, with runtime-control references, redacted evidence, and no-finding-without-pass semantics.
   - [x] Add `tethermark.inspect.ai-data-boundary@1.0.0` for bounded indirect-injection/exfiltration and cross-session-memory isolation probes, including partial-result handling, target session-contract limitations, and non-retained synthetic secrets and tool arguments.
   - [x] Replace the Garak scaffold with the hash-locked `tethermark.garak.prompt-injection@1.0.0` profile using Garak `0.16.0`'s official PromptInject builder and detector, bounded target requests, normalized/redacted observations, and no-finding-without-pass semantics.
-  - [ ] Replace the PyRIT scaffold with an executable adapter.
+  - [x] Replace the PyRIT scaffold with the hash-locked `tethermark.pyrit.adversarial-boundary@1.0.0` profile using PyRIT `1.0.1`'s public safe-literal SeedPrompt and Score contracts plus official ExactTextMatching, bounded target requests, no PyRIT memory retention, normalized/redacted observations, and no-finding-without-pass semantics.
 - [ ] Build versioned eval packs for all runtime controls defined in Phase 7 (prompt/secret/tool and indirect-injection/data-exfiltration/cross-session-memory packs are complete; MCP, unsafe output, agency, resource, and telemetry packs remain).
 - [ ] Add framework-aware target startup/health detection for common Node and Python applications and agents.
 - [ ] Add fake tools/services and deterministic attack fixtures for prompt/tool/MCP/memory/data-boundary scenarios.
@@ -614,8 +614,8 @@ A static-only beta may be cut before Phases 8–9 finish only if it is explicitl
 
 ## Recommended execution order from this snapshot
 
-1. Replace the PyRIT scaffold behind the same fail-closed execution and evidence contracts now used by the Inspect and bounded Garak packs.
-2. Continue versioned Inspect coverage for MCP, unsafe-output, agency, resource, and telemetry controls.
+1. Continue versioned runtime coverage for MCP, unsafe-output, agency, resource, and telemetry controls using the now-executable adapter boundary.
+2. Add framework-aware target startup/health detection and deterministic fake services for the remaining runtime scenarios.
 3. Complete Phase 10 stress/recovery hardening and Phase 11 packaging/cross-platform security.
 4. Execute Phase 12 release candidate and beta gates.
 

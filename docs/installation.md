@@ -95,7 +95,7 @@ Advanced runtime validation tools:
 
 - Python `>=3.11 <3.14`
 - Local Runtime Sandbox backend: gVisor `runsc`, rootless Podman, Podman, Docker, or Docker Desktop
-- executable Inspect packs and bounded Garak PromptInject profile; PyRIT once its real adapter is enabled
+- executable Inspect packs, bounded Garak PromptInject, and bounded PyRIT adversarial-text profiles
 
 Runtime validation is a primary Community Edition feature, but it is launch-gated by Local Runtime Sandbox readiness. The launch UI shows one option, **Local Runtime Sandbox**. Admin -> Runtime Sandbox shows the resolved backend, candidate list, warnings, blockers, network policy, resource limits, and setup guidance.
 
@@ -165,7 +165,7 @@ npm run scan -- setup-workers --yes
 npm run scan -- worker-doctor
 ```
 
-The setup consumes [`workers/python/requirements-bootstrap.lock`](../workers/python/requirements-bootstrap.lock), [`workers/python/requirements.lock`](../workers/python/requirements.lock), and the isolated [`workers/python/requirements-garak-profile.lock`](../workers/python/requirements-garak-profile.lock) with pip hash enforcement. It installs the local worker package without dependency resolution or build isolation, records both runtime-lock digests and the base installed-package inventory, and runs an import-boundary self-check. Inspect is executable through the bounded packs in [`inspect-adapter.md`](inspect-adapter.md); Garak is executable through the bounded profile in [`garak-adapter.md`](garak-adapter.md). PyRIT remains a scaffold and cannot produce runtime evidence.
+The setup consumes [`workers/python/requirements-bootstrap.lock`](../workers/python/requirements-bootstrap.lock), [`workers/python/requirements.lock`](../workers/python/requirements.lock), and the isolated [`workers/python/requirements-garak-profile.lock`](../workers/python/requirements-garak-profile.lock) and [`workers/python/requirements-pyrit-profile.lock`](../workers/python/requirements-pyrit-profile.lock) with pip hash enforcement. It installs the local worker package without dependency resolution or build isolation, records all runtime-lock digests and the base installed-package inventory, and runs an import-boundary self-check. Inspect is executable through the bounded packs in [`inspect-adapter.md`](inspect-adapter.md), Garak through [`garak-adapter.md`](garak-adapter.md), and PyRIT through [`pyrit-adapter.md`](pyrit-adapter.md).
 
 ## External Tool Setup
 

@@ -41,6 +41,7 @@ jobs:
           cache-dependency-path: |
             workers/python/requirements-bootstrap.lock
             workers/python/requirements-garak-profile.lock
+            workers/python/requirements-pyrit-profile.lock
             workers/python/requirements.lock
       - name: Install Node dependencies
         run: npm ci
@@ -48,7 +49,7 @@ jobs:
         run: npm run scan -- setup-workers --yes --python python
       - name: Verify worker doctor
         run: npm run scan -- worker-doctor --json
-      - name: Run executable Inspect and Garak adapter tests
+      - name: Run executable Inspect, Garak, and PyRIT adapter tests
         run: npm run scan -- worker-tests
       - name: Run TypeScript to Python worker smoke
         run: npm run scan -- worker-smoke

@@ -3,13 +3,15 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
-export const PYTHON_WORKER_ENVIRONMENT_SCHEMA_VERSION = 2;
+export const PYTHON_WORKER_ENVIRONMENT_SCHEMA_VERSION = 3;
 export const PYTHON_WORKER_MIN_VERSION = { major: 3, minor: 11 } as const;
 export const PYTHON_WORKER_MAX_VERSION_EXCLUSIVE = { major: 3, minor: 14 } as const;
 export const PYTHON_WORKER_PACKAGE_VERSION = "0.2.0";
 export const PYTHON_WORKER_INSPECT_VERSION = "0.3.260";
 export const PYTHON_WORKER_GARAK_VERSION = "0.16.0";
 export const PYTHON_WORKER_GARAK_PROFILE_DIR = "tethermark-garak-profile";
+export const PYTHON_WORKER_PYRIT_VERSION = "1.0.1";
+export const PYTHON_WORKER_PYRIT_PROFILE_DIR = "tethermark-pyrit-profile";
 
 export interface PythonVersion {
   major: number;
@@ -19,12 +21,13 @@ export interface PythonVersion {
 }
 
 export interface PythonWorkerEnvironmentManifest {
-  schema_version: 2;
+  schema_version: 3;
   created_at: string;
   worker_package_version: string;
   python_version: string;
   lock_sha256: string;
   garak_profile_lock_sha256: string;
+  pyrit_profile_lock_sha256: string;
   installed_packages: Record<string, string>;
 }
 
@@ -39,6 +42,10 @@ export interface PythonWorkerEnvironmentInspection {
   garak_profile_lock_sha256: string | null;
   garak_profile_lock_current: boolean;
   garak_profile_root: string;
+  pyrit_profile_lock_path: string;
+  pyrit_profile_lock_sha256: string | null;
+  pyrit_profile_lock_current: boolean;
+  pyrit_profile_root: string;
   venv_root: string;
   python_executable: string;
   python_version: PythonVersion | null;
@@ -67,6 +74,14 @@ export function pythonWorkerGarakProfileLockPath(workspaceRoot = process.cwd()):
 
 export function pythonWorkerGarakProfileRoot(venvRoot: string): string {
   return path.join(venvRoot, PYTHON_WORKER_GARAK_PROFILE_DIR);
+}
+
+export function pythonWorkerPyritProfileLockPath(workspaceRoot = process.cwd()): string {
+  return path.join(pythonWorkerRoot(workspaceRoot), "requirements-pyrit-profile.lock");
+}
+
+export function pythonWorkerPyritProfileRoot(venvRoot: string): string {
+  return path.join(venvRoot, PYTHON_WORKER_PYRIT_PROFILE_DIR);
 }
 
 export function pythonWorkerVenvRoot(workspaceRoot = process.cwd()): string {
@@ -152,6 +167,7 @@ export function inspectPythonWorkerEnvironment(workspaceRoot = process.cwd(), op
   const workerRoot = pythonWorkerRoot(workspaceRoot);
   const lockPath = pythonWorkerLockPath(workspaceRoot);
   const garakProfileLockPath = pythonWorkerGarakProfileLockPath(workspaceRoot);
+  const pyritProfileLockPath = pythonWorkerPyritProfileLockPath(workspaceRoot);
   const venvRoot = path.resolve(options.venvRoot ?? pythonWorkerVenvRoot(workspaceRoot));
   const pythonExecutable = pythonWorkerVenvExecutable(venvRoot);
   const manifestPath = pythonWorkerManifestPath(venvRoot);
@@ -159,9 +175,13 @@ export function inspectPythonWorkerEnvironment(workspaceRoot = process.cwd(), op
   const lockSha256 = fs.existsSync(lockPath) ? sha256File(lockPath) : null;
   const garakProfileLockSha256 = fs.existsSync(garakProfileLockPath) ? sha256File(garakProfileLockPath) : null;
   const garakProfileRoot = pythonWorkerGarakProfileRoot(venvRoot);
+  const pyritProfileLockSha256 = fs.existsSync(pyritProfileLockPath) ? sha256File(pyritProfileLockPath) : null;
+  const pyritProfileRoot = pythonWorkerPyritProfileRoot(venvRoot);
   if (!lockSha256) errors.push("Python worker lockfile is missing.");
   if (!garakProfileLockSha256) errors.push("Garak profile lockfile is missing.");
   if (!fs.existsSync(garakProfileRoot)) errors.push("Managed Garak profile is not installed.");
+  if (!pyritProfileLockSha256) errors.push("PyRIT profile lockfile is missing.");
+  if (!fs.existsSync(pyritProfileRoot)) errors.push("Managed PyRIT profile is not installed.");
   if (!fs.existsSync(pythonExecutable)) errors.push("Managed Python worker virtual environment is not installed.");
 
   let manifest: PythonWorkerEnvironmentManifest | null = null;
@@ -244,6 +264,12 @@ export function inspectPythonWorkerEnvironment(workspaceRoot = process.cwd(), op
   if (manifest && !garakProfileLockCurrent) {
     errors.push("Managed Garak profile was created from a different profile lockfile.");
   }
+  const pyritProfileLockCurrent = Boolean(
+    pyritProfileLockSha256 && manifest?.pyrit_profile_lock_sha256 === pyritProfileLockSha256
+  );
+  if (manifest && !pyritProfileLockCurrent) {
+    errors.push("Managed PyRIT profile was created from a different profile lockfile.");
+  }
   if (manifest && manifest.schema_version !== PYTHON_WORKER_ENVIRONMENT_SCHEMA_VERSION) {
     errors.push(`Managed worker environment schema is ${manifest.schema_version}; expected ${PYTHON_WORKER_ENVIRONMENT_SCHEMA_VERSION}.`);
   }
@@ -263,9 +289,9 @@ export function inspectPythonWorkerEnvironment(workspaceRoot = process.cwd(), op
   if (fs.existsSync(pythonExecutable) && (
     adapterStatuses?.inspect !== "executable"
     || adapterStatuses?.garak !== "executable"
-    || adapterStatuses?.pyrit !== "scaffold"
+    || adapterStatuses?.pyrit !== "executable"
   )) {
-    errors.push("Python worker self-check did not report the expected executable/scaffold adapter boundary.");
+    errors.push("Python worker self-check did not report all three adapters as executable.");
   }
   if (fs.existsSync(pythonExecutable) && selfCheck?.["inspect_ai_version"] !== PYTHON_WORKER_INSPECT_VERSION) {
     errors.push(`Inspect AI version does not match the pinned ${PYTHON_WORKER_INSPECT_VERSION} adapter contract.`);
@@ -273,12 +299,15 @@ export function inspectPythonWorkerEnvironment(workspaceRoot = process.cwd(), op
   if (fs.existsSync(pythonExecutable) && selfCheck?.["garak_version"] !== PYTHON_WORKER_GARAK_VERSION) {
     errors.push(`Garak version does not match the pinned ${PYTHON_WORKER_GARAK_VERSION} adapter contract.`);
   }
+  if (fs.existsSync(pythonExecutable) && selfCheck?.["pyrit_version"] !== PYTHON_WORKER_PYRIT_VERSION) {
+    errors.push(`PyRIT version does not match the pinned ${PYTHON_WORKER_PYRIT_VERSION} adapter contract.`);
+  }
 
   return {
     ready: errors.length === 0,
     status: errors.length === 0 ? "available" : "unavailable",
     summary: errors.length === 0
-      ? `Managed Python worker environment is ready (${pythonVersion?.raw}; lock ${lockSha256?.slice(0, 12)}). Inspect ${PYTHON_WORKER_INSPECT_VERSION} and bounded Garak ${PYTHON_WORKER_GARAK_VERSION} are executable; PyRIT remains a scaffold.`
+      ? `Managed Python worker environment is ready (${pythonVersion?.raw}; lock ${lockSha256?.slice(0, 12)}). Inspect ${PYTHON_WORKER_INSPECT_VERSION}, bounded Garak ${PYTHON_WORKER_GARAK_VERSION}, and bounded PyRIT ${PYTHON_WORKER_PYRIT_VERSION} are executable.`
       : errors.join(" "),
     worker_root: workerRoot,
     lock_path: lockPath,
@@ -287,6 +316,10 @@ export function inspectPythonWorkerEnvironment(workspaceRoot = process.cwd(), op
     garak_profile_lock_sha256: garakProfileLockSha256,
     garak_profile_lock_current: garakProfileLockCurrent,
     garak_profile_root: garakProfileRoot,
+    pyrit_profile_lock_path: pyritProfileLockPath,
+    pyrit_profile_lock_sha256: pyritProfileLockSha256,
+    pyrit_profile_lock_current: pyritProfileLockCurrent,
+    pyrit_profile_root: pyritProfileRoot,
     venv_root: venvRoot,
     python_executable: pythonExecutable,
     python_version: pythonVersion,

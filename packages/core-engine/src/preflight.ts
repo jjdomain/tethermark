@@ -81,7 +81,7 @@ function buildProviderReadiness(args: {
     pythonWorkerStatus === "available" && pythonAdapterAvailable(adapter) ? "available" : "blocked";
   const pythonAdapterSummary = (adapter: "inspect" | "garak" | "pyrit") =>
     pythonWorkerStatus === "available" && !pythonAdapterAvailable(adapter)
-      ? `${adapter === "pyrit" ? "PyRIT" : adapter === "garak" ? "Garak" : "Inspect"} is installed as a non-executable scaffold.`
+      ? `${adapter === "pyrit" ? "PyRIT" : adapter === "garak" ? "Garak" : "Inspect"} did not pass its managed executable self-check.`
       : pythonWorkerSummary;
   const scorecardTargetAvailable = Boolean(args.request.repo_url || args.inferredRepoUrl);
   const fileSystemAvailable = Boolean(args.request.local_path && args.analysisAvailable);
@@ -168,7 +168,7 @@ function buildProviderReadiness(args: {
         : "conditional",
       summary: runtimeCapable
         ? pythonAdapterSummary("garak")
-        : "garak worker is used for runtime and validation probe planning."
+        : "Garak worker is used for bounded runtime and validation probes."
     },
     {
       provider_id: "pyrit",

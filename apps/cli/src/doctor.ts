@@ -567,7 +567,7 @@ export function runOnboarding(args: { dryRun?: boolean; skipDoctor?: boolean; sk
     console.log("Preview the hash-locked worker setup plan:");
     console.log("  npm run scan -- setup-workers --dry-run");
   } else {
-    console.log("Inspect and bounded Garak are executable; PyRIT remains scaffold-only.");
+    console.log("Inspect, bounded Garak, and bounded PyRIT are executable.");
   }
 
   console.log("");

@@ -984,7 +984,7 @@ export async function executeEvidenceProvider(args: {
         });
       }
       if (!capability.adapters.includes(worker)) {
-        const message = `Python worker adapter '${worker}' is installed as a scaffold and is not executable.`;
+        const message = `Python worker adapter '${worker}' did not pass its managed executable self-check.`;
         return skippedUnavailableRecord({
           provider_id: args.providerId,
           provider_kind: "internal_plugin",

@@ -14,6 +14,8 @@ import {
   pythonWorkerLockPath,
   pythonWorkerManifestPath,
   pythonWorkerRoot,
+  pythonWorkerPyritProfileLockPath,
+  pythonWorkerPyritProfileRoot,
   pythonWorkerVenvExecutable,
   pythonWorkerVenvRoot,
   PYTHON_WORKER_ENVIRONMENT_SCHEMA_VERSION,
@@ -45,6 +47,9 @@ export interface PythonWorkerSetupPlan {
   garak_profile_lock_path: string;
   garak_profile_lock_sha256: string | null;
   garak_profile_root: string;
+  pyrit_profile_lock_path: string;
+  pyrit_profile_lock_sha256: string | null;
+  pyrit_profile_root: string;
   lock_sha256: string | null;
   venv_root: string;
   managed_python: string;
@@ -83,13 +88,16 @@ export function buildPythonWorkerSetupPlan(options: { workspaceRoot?: string; py
   const lockPath = pythonWorkerLockPath(workspaceRoot);
   const bootstrapLockPath = pythonWorkerBootstrapLockPath(workspaceRoot);
   const garakProfileLockPath = pythonWorkerGarakProfileLockPath(workspaceRoot);
+  const pyritProfileLockPath = pythonWorkerPyritProfileLockPath(workspaceRoot);
   const venvRoot = path.resolve(options.venvRoot ?? pythonWorkerVenvRoot(workspaceRoot));
   const bootstrapRoot = `${venvRoot}-bootstrap`;
   const managedPython = pythonWorkerVenvExecutable(venvRoot);
   const garakProfileRoot = pythonWorkerGarakProfileRoot(venvRoot);
+  const pyritProfileRoot = pythonWorkerPyritProfileRoot(venvRoot);
   const basePython = resolveBasePython(options.python);
   const lockSha256 = fs.existsSync(lockPath) ? sha256File(lockPath) : null;
   const garakProfileLockSha256 = fs.existsSync(garakProfileLockPath) ? sha256File(garakProfileLockPath) : null;
+  const pyritProfileLockSha256 = fs.existsSync(pyritProfileLockPath) ? sha256File(pyritProfileLockPath) : null;
   const reason = !basePython
     ? "Python >=3.11 <3.14 was not found. Install a supported Python interpreter or pass --python <executable>."
     : !fs.existsSync(bootstrapLockPath)
@@ -98,8 +106,10 @@ export function buildPythonWorkerSetupPlan(options: { workspaceRoot?: string; py
       ? `Python worker lockfile is missing at ${lockPath}.`
       : !garakProfileLockSha256
         ? `Garak profile lockfile is missing at ${garakProfileLockPath}.`
+      : !pyritProfileLockSha256
+        ? `PyRIT profile lockfile is missing at ${pyritProfileLockPath}.`
       : null;
-  const steps: PythonWorkerSetupStep[] = reason === null && basePython && lockSha256 && garakProfileLockSha256 ? [
+  const steps: PythonWorkerSetupStep[] = reason === null && basePython && lockSha256 && garakProfileLockSha256 && pyritProfileLockSha256 ? [
     {
       label: "Stage the hash-locked environment bootstrap",
       command: basePython.command,
@@ -128,6 +138,11 @@ export function buildPythonWorkerSetupPlan(options: { workspaceRoot?: string; py
       args: ["-m", "pip", "install", "--require-hashes", "--only-binary=:all:", "--no-deps", "--upgrade", "--target", garakProfileRoot, "-r", garakProfileLockPath]
     },
     {
+      label: "Install the hash-locked minimal PyRIT profile",
+      command: managedPython,
+      args: ["-m", "pip", "install", "--require-hashes", "--only-binary=:all:", "--no-deps", "--upgrade", "--target", pyritProfileRoot, "-r", pyritProfileLockPath]
+    },
+    {
       label: "Install the local worker package without dependency resolution",
       command: managedPython,
       args: ["-m", "pip", "install", "--no-index", "--no-deps", "--no-build-isolation", "--editable", workerRoot]
@@ -148,6 +163,9 @@ export function buildPythonWorkerSetupPlan(options: { workspaceRoot?: string; py
     garak_profile_lock_path: garakProfileLockPath,
     garak_profile_lock_sha256: garakProfileLockSha256,
     garak_profile_root: garakProfileRoot,
+    pyrit_profile_lock_path: pyritProfileLockPath,
+    pyrit_profile_lock_sha256: pyritProfileLockSha256,
+    pyrit_profile_root: pyritProfileRoot,
     lock_sha256: lockSha256,
     venv_root: venvRoot,
     managed_python: managedPython,
@@ -163,6 +181,7 @@ function printPlan(plan: PythonWorkerSetupPlan): void {
   console.log(`Lockfile: ${plan.lock_path}${plan.lock_sha256 ? ` (${plan.lock_sha256})` : " (missing)"}`);
   console.log(`Bootstrap lockfile: ${plan.bootstrap_lock_path}`);
   console.log(`Garak profile: ${plan.garak_profile_root}${plan.garak_profile_lock_sha256 ? ` (${plan.garak_profile_lock_sha256})` : " (lock missing)"}`);
+  console.log(`PyRIT profile: ${plan.pyrit_profile_root}${plan.pyrit_profile_lock_sha256 ? ` (${plan.pyrit_profile_lock_sha256})` : " (lock missing)"}`);
   if (plan.reason) console.log(`blocker: ${plan.reason}`);
   for (const step of plan.steps) console.log(`- ${step.label}: ${[step.command, ...step.args].join(" ")}`);
 }
@@ -231,6 +250,7 @@ export function runSetupWorkers(options: { dryRun?: boolean; yes?: boolean; pyth
     python_version: version!.raw,
     lock_sha256: plan.lock_sha256,
     garak_profile_lock_sha256: plan.garak_profile_lock_sha256,
+    pyrit_profile_lock_sha256: plan.pyrit_profile_lock_sha256,
     installed_packages: installedPackages
   }, null, 2)}\n`, "utf8");
 
@@ -303,6 +323,12 @@ export async function runWorkerSmoke(): Promise<boolean> {
       llm_provider: "mock"
     }, process.cwd());
     const garakOutput = garakResult.output as any;
+    const pyritResult = await invokePythonWorker("pyrit", {
+      endpoint_url: `http://127.0.0.1:${address.port}/agent`,
+      run_mode: "validate",
+      llm_provider: "mock"
+    }, process.cwd());
+    const pyritOutput = pyritResult.output as any;
     const inspectPassed = inspectResult.status === "completed"
       && inspectOutput?.schema_version === "2026-08-24.inspect-worker.v1"
       && inspectOutput?.status === "completed"
@@ -317,7 +343,15 @@ export async function runWorkerSmoke(): Promise<boolean> {
       && garakOutput?.coverage?.status === "complete"
       && Array.isArray(garakOutput?.observations)
       && garakOutput.observations.length === 2;
-    const passed = inspectPassed && garakPassed;
+    const pyritPassed = pyritResult.status === "completed"
+      && pyritOutput?.schema_version === "2026-08-25.pyrit-worker.v1"
+      && pyritOutput?.pyrit_version === "1.0.1"
+      && pyritOutput?.status === "completed"
+      && pyritOutput?.coverage?.status === "complete"
+      && pyritOutput?.execution?.pyrit_memory_used === false
+      && Array.isArray(pyritOutput?.observations)
+      && pyritOutput.observations.length === 2;
+    const passed = inspectPassed && garakPassed && pyritPassed;
     console.log(JSON.stringify({
       inspect_worker_smoke: {
         passed: inspectPassed,
@@ -332,6 +366,14 @@ export async function runWorkerSmoke(): Promise<boolean> {
         adapter_status: garakOutput?.status ?? null,
         coverage: garakOutput?.coverage ?? null,
         garak_version: garakOutput?.garak_version ?? null
+      },
+      pyrit_worker_smoke: {
+        passed: pyritPassed,
+        worker_status: pyritResult.status,
+        adapter_status: pyritOutput?.status ?? null,
+        coverage: pyritOutput?.coverage ?? null,
+        pyrit_version: pyritOutput?.pyrit_version ?? null,
+        pyrit_memory_used: pyritOutput?.execution?.pyrit_memory_used ?? null
       }
     }, null, 2));
     return passed;

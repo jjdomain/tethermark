@@ -10,6 +10,7 @@
 - Added the default `tethermark.inspect.ai-security-boundary@1.0.0` pack with bounded synthetic system-secret nondisclosure and unconfirmed sensitive-tool probes, runtime-control references, redacted result evidence, optional target-model hints, and explicit `no_finding_observed` rather than control-pass outcomes.
 - Added `tethermark.inspect.ai-data-boundary@1.0.0` with bounded indirect prompt-injection/data-exfiltration and cross-session-memory isolation samples, three-request hard limits, partial-result handling, explicit session-contract limitations, and redacted synthetic records and tool arguments.
 - Added the hash-locked `tethermark.garak.prompt-injection@1.0.0` profile using Garak `0.16.0`'s official PromptInject builder, Attempt/Message contract, and AttackRogueString detector, with two-request limits, redacted evidence, fail-closed partial results, managed-worker capability reporting, and Windows/Linux/macOS tests.
+- Added the hash-locked `tethermark.pyrit.adversarial-boundary@1.0.0` profile using PyRIT `1.0.1`'s public safe-literal SeedPrompt and Score contracts and official ExactTextMatching implementation, with two synthetic authorization/data-boundary probes, no PyRIT memory retention, fail-closed results, and cross-platform tests.
 - Preserved the existing Model Configuration and launch UI layout and controls while clarifying connection copy: local Codex/ChatGPT-session routing remains the runtime default and metered OpenAI API-key routing remains an explicit optional override.
 
 ### Changed
@@ -17,7 +18,7 @@
 - Closed Community Edition Phase 8 after native Windows Docker Desktop and Linux Docker/rootless-Podman/gVisor execution passed; executable real-Mac validation is project-owner deferred and excluded from certified runtime claims.
 - Increased the bounded managed-worker diagnostic subprocess timeout from 15 to 30 seconds so cold Inspect imports do not falsely block Windows worker doctor or test execution; runtime audit limits are unchanged.
 - Python worker dispatch now requires the verified managed environment instead of treating an importable source tree as production worker readiness.
-- Python worker readiness and preflight now advertise only executable adapters; Garak and PyRIT are blocked as scaffolds instead of returning scenario-planning text as evidence.
+- Python worker readiness and preflight advertise only adapters that pass their managed executable self-check; Inspect, bounded Garak, and bounded PyRIT now satisfy that boundary.
 - Removed committed Python bytecode caches and added repository ignore rules for generated Python cache files.
 
 ### Verified

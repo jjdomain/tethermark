@@ -121,7 +121,7 @@ const TOOL_DEFS: Array<{
     default_enabled: true,
     mandatory: false,
     fallback: null,
-    fix: "Install and configure the PyRIT adapter before adversarial runtime validation."
+    fix: "Run setup-workers and configure an explicit runtime endpoint before bounded PyRIT adversarial validation."
   }
 ];
 
