@@ -290,7 +290,8 @@ export async function buildPreflightSummary(request: AuditRequest): Promise<Pref
   if ((effectiveRunMode === "build" || effectiveRunMode === "runtime" || effectiveRunMode === "validate") && pythonWorkerCapability.status !== "available") {
     warnings.push("Python worker adapters are unavailable in this host environment; bounded runtime-worker evidence will be skipped.");
   } else if ((effectiveRunMode === "build" || effectiveRunMode === "runtime" || effectiveRunMode === "validate") && pythonWorkerCapability.adapters.length < 3) {
-    warnings.push(`Executable Python worker adapters: ${pythonWorkerCapability.adapters.join(", ") || "none"}. Garak and PyRIT remain scaffold-only and cannot produce runtime evidence.`);
+    const unavailableAdapters = (["inspect", "garak", "pyrit"] as const).filter((adapter) => !pythonWorkerCapability.adapters.includes(adapter));
+    warnings.push(`Executable Python worker adapters: ${pythonWorkerCapability.adapters.join(", ") || "none"}. Non-executable adapters: ${unavailableAdapters.join(", ") || "none"}.`);
   }
   if (!inferredRepoUrl && request.local_path) {
     warnings.push("No git remote could be inferred from the local path, so Scorecard checks will be limited.");

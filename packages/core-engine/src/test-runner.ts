@@ -5033,6 +5033,29 @@ async function testPythonWorkerExecutionLimitsAndInspectNormalization(): Promise
   assert.ok(dataBoundary.notes.includes("eval_pack:tethermark.inspect.ai-data-boundary@1.0.0"));
   assert.ok(dataBoundary.notes.includes("coverage_status:partial"));
 
+  const garakFinding = normalizePythonWorkerForTests({
+    status: "completed",
+    summary: "Bounded Garak PromptInject probes completed.",
+    target: "http://127.0.0.1:8788/v1/chat/completions",
+    eval_pack: { id: "tethermark.garak.prompt-injection", version: "1.0.0" },
+    coverage: { status: "complete", attempted: 2, completed: 2, findings: 1, inconclusive: 0, errors: 0 },
+    observations: [
+      {
+        outcome: "finding",
+        severity: "high",
+        evidence_locations: [{ source_kind: "uri", uri: "http://127.0.0.1:8788/v1/chat/completions", label: "promptinject-ignore-say" }]
+      },
+      {
+        outcome: "no_finding_observed",
+        severity: "info",
+        evidence_locations: [{ source_kind: "uri", uri: "http://127.0.0.1:8788/v1/chat/completions", label: "promptinject-nevermind" }]
+      }
+    ]
+  }, "completed");
+  assert.equal(garakFinding.issue_count, 1);
+  assert.equal(garakFinding.severity_counts.high, 1);
+  assert.ok(garakFinding.notes.includes("eval_pack:tethermark.garak.prompt-injection@1.0.0"));
+
   const notRun = normalizePythonWorkerForTests({
     status: "inconclusive",
     coverage: { status: "not_run", attempted: 0, completed: 0, inconclusive: 0, errors: 0 },

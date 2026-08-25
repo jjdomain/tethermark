@@ -109,7 +109,7 @@ const TOOL_DEFS: Array<{
     default_enabled: true,
     mandatory: false,
     fallback: null,
-    fix: "Install and configure the garak adapter before prompt-stress runtime validation."
+    fix: "Run npm run scan -- setup-workers --yes, then verify bounded Garak with worker-doctor, worker-tests, and worker-smoke."
   },
   {
     id: "pyrit",

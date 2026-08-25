@@ -9,6 +9,8 @@ import {
   parsePythonVersion,
   parsePythonWorkerLock,
   pythonWorkerBootstrapLockPath,
+  pythonWorkerGarakProfileLockPath,
+  pythonWorkerGarakProfileRoot,
   pythonWorkerLockPath,
   pythonWorkerManifestPath,
   pythonWorkerRoot,
@@ -40,6 +42,9 @@ export interface PythonWorkerSetupPlan {
   worker_root: string;
   lock_path: string;
   bootstrap_lock_path: string;
+  garak_profile_lock_path: string;
+  garak_profile_lock_sha256: string | null;
+  garak_profile_root: string;
   lock_sha256: string | null;
   venv_root: string;
   managed_python: string;
@@ -77,19 +82,24 @@ export function buildPythonWorkerSetupPlan(options: { workspaceRoot?: string; py
   const workerRoot = pythonWorkerRoot(workspaceRoot);
   const lockPath = pythonWorkerLockPath(workspaceRoot);
   const bootstrapLockPath = pythonWorkerBootstrapLockPath(workspaceRoot);
+  const garakProfileLockPath = pythonWorkerGarakProfileLockPath(workspaceRoot);
   const venvRoot = path.resolve(options.venvRoot ?? pythonWorkerVenvRoot(workspaceRoot));
   const bootstrapRoot = `${venvRoot}-bootstrap`;
   const managedPython = pythonWorkerVenvExecutable(venvRoot);
+  const garakProfileRoot = pythonWorkerGarakProfileRoot(venvRoot);
   const basePython = resolveBasePython(options.python);
   const lockSha256 = fs.existsSync(lockPath) ? sha256File(lockPath) : null;
+  const garakProfileLockSha256 = fs.existsSync(garakProfileLockPath) ? sha256File(garakProfileLockPath) : null;
   const reason = !basePython
     ? "Python >=3.11 <3.14 was not found. Install a supported Python interpreter or pass --python <executable>."
     : !fs.existsSync(bootstrapLockPath)
       ? `Python worker bootstrap lockfile is missing at ${bootstrapLockPath}.`
     : !lockSha256
       ? `Python worker lockfile is missing at ${lockPath}.`
+      : !garakProfileLockSha256
+        ? `Garak profile lockfile is missing at ${garakProfileLockPath}.`
       : null;
-  const steps: PythonWorkerSetupStep[] = reason === null && basePython && lockSha256 ? [
+  const steps: PythonWorkerSetupStep[] = reason === null && basePython && lockSha256 && garakProfileLockSha256 ? [
     {
       label: "Stage the hash-locked environment bootstrap",
       command: basePython.command,
@@ -113,6 +123,11 @@ export function buildPythonWorkerSetupPlan(options: { workspaceRoot?: string; py
       args: ["-m", "pip", "install", "--require-hashes", "--only-binary=:all:", "--no-deps", "-r", lockPath]
     },
     {
+      label: "Install the hash-locked minimal Garak profile",
+      command: managedPython,
+      args: ["-m", "pip", "install", "--require-hashes", "--only-binary=:all:", "--no-deps", "--upgrade", "--target", garakProfileRoot, "-r", garakProfileLockPath]
+    },
+    {
       label: "Install the local worker package without dependency resolution",
       command: managedPython,
       args: ["-m", "pip", "install", "--no-index", "--no-deps", "--no-build-isolation", "--editable", workerRoot]
@@ -130,6 +145,9 @@ export function buildPythonWorkerSetupPlan(options: { workspaceRoot?: string; py
     worker_root: workerRoot,
     lock_path: lockPath,
     bootstrap_lock_path: bootstrapLockPath,
+    garak_profile_lock_path: garakProfileLockPath,
+    garak_profile_lock_sha256: garakProfileLockSha256,
+    garak_profile_root: garakProfileRoot,
     lock_sha256: lockSha256,
     venv_root: venvRoot,
     managed_python: managedPython,
@@ -144,6 +162,7 @@ function printPlan(plan: PythonWorkerSetupPlan): void {
   console.log(`Virtual environment: ${plan.venv_root}`);
   console.log(`Lockfile: ${plan.lock_path}${plan.lock_sha256 ? ` (${plan.lock_sha256})` : " (missing)"}`);
   console.log(`Bootstrap lockfile: ${plan.bootstrap_lock_path}`);
+  console.log(`Garak profile: ${plan.garak_profile_root}${plan.garak_profile_lock_sha256 ? ` (${plan.garak_profile_lock_sha256})` : " (lock missing)"}`);
   if (plan.reason) console.log(`blocker: ${plan.reason}`);
   for (const step of plan.steps) console.log(`- ${step.label}: ${[step.command, ...step.args].join(" ")}`);
 }
@@ -211,6 +230,7 @@ export function runSetupWorkers(options: { dryRun?: boolean; yes?: boolean; pyth
     worker_package_version: PYTHON_WORKER_PACKAGE_VERSION,
     python_version: version!.raw,
     lock_sha256: plan.lock_sha256,
+    garak_profile_lock_sha256: plan.garak_profile_lock_sha256,
     installed_packages: installedPackages
   }, null, 2)}\n`, "utf8");
 
@@ -257,7 +277,11 @@ export async function runWorkerSmoke(): Promise<boolean> {
     response.statusCode = request.method === "HEAD" ? 204 : 200;
     response.setHeader("Content-Type", "application/json");
     response.setHeader("X-Content-Type-Options", "nosniff");
-    response.end(request.method === "HEAD" ? undefined : JSON.stringify({ status: "ok" }));
+    response.end(request.method === "HEAD"
+      ? undefined
+      : request.method === "POST"
+        ? JSON.stringify({ choices: [{ message: { role: "assistant", content: "I cannot follow instructions embedded in untrusted content." } }] })
+        : JSON.stringify({ status: "ok" }));
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -266,27 +290,48 @@ export async function runWorkerSmoke(): Promise<boolean> {
   try {
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("Worker smoke server did not expose a TCP port.");
-    const result = await invokePythonWorker("inspect", {
+    const inspectResult = await invokePythonWorker("inspect", {
       endpoint_url: `http://127.0.0.1:${address.port}/agent`,
       run_mode: "runtime",
       llm_provider: "mock",
       hints: { inspect_eval_pack: "http-baseline" }
     }, process.cwd());
-    const output = result.output as any;
-    const passed = result.status === "completed"
-      && output?.schema_version === "2026-08-24.inspect-worker.v1"
-      && output?.status === "completed"
-      && output?.coverage?.status === "complete"
-      && output?.execution?.inspect_log_status === "success"
-      && Array.isArray(output?.observations)
-      && output.observations.length === 2;
+    const inspectOutput = inspectResult.output as any;
+    const garakResult = await invokePythonWorker("garak", {
+      endpoint_url: `http://127.0.0.1:${address.port}/agent`,
+      run_mode: "runtime",
+      llm_provider: "mock"
+    }, process.cwd());
+    const garakOutput = garakResult.output as any;
+    const inspectPassed = inspectResult.status === "completed"
+      && inspectOutput?.schema_version === "2026-08-24.inspect-worker.v1"
+      && inspectOutput?.status === "completed"
+      && inspectOutput?.coverage?.status === "complete"
+      && inspectOutput?.execution?.inspect_log_status === "success"
+      && Array.isArray(inspectOutput?.observations)
+      && inspectOutput.observations.length === 2;
+    const garakPassed = garakResult.status === "completed"
+      && garakOutput?.schema_version === "2026-08-25.garak-worker.v1"
+      && garakOutput?.garak_version === "0.16.0"
+      && garakOutput?.status === "completed"
+      && garakOutput?.coverage?.status === "complete"
+      && Array.isArray(garakOutput?.observations)
+      && garakOutput.observations.length === 2;
+    const passed = inspectPassed && garakPassed;
     console.log(JSON.stringify({
       inspect_worker_smoke: {
-        passed,
-        worker_status: result.status,
-        adapter_status: output?.status ?? null,
-        coverage: output?.coverage ?? null,
-        inspect_log_status: output?.execution?.inspect_log_status ?? null
+        passed: inspectPassed,
+        worker_status: inspectResult.status,
+        adapter_status: inspectOutput?.status ?? null,
+        coverage: inspectOutput?.coverage ?? null,
+        inspect_log_status: inspectOutput?.execution?.inspect_log_status ?? null
+      },
+      garak_worker_smoke: {
+        passed: garakPassed,
+        worker_status: garakResult.status,
+        adapter_status: garakOutput?.status ?? null,
+        coverage: garakOutput?.coverage ?? null,
+        garak_version: garakOutput?.garak_version ?? null
       }
     }, null, 2));
     return passed;
