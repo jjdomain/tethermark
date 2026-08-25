@@ -11,6 +11,7 @@
 - Added `tethermark.inspect.ai-data-boundary@1.0.0` with bounded indirect prompt-injection/data-exfiltration and cross-session-memory isolation samples, three-request hard limits, partial-result handling, explicit session-contract limitations, and redacted synthetic records and tool arguments.
 - Added the hash-locked `tethermark.garak.prompt-injection@1.0.0` profile using Garak `0.16.0`'s official PromptInject builder, Attempt/Message contract, and AttackRogueString detector, with two-request limits, redacted evidence, fail-closed partial results, managed-worker capability reporting, and Windows/Linux/macOS tests.
 - Added the hash-locked `tethermark.pyrit.adversarial-boundary@1.0.0` profile using PyRIT `1.0.1`'s public safe-literal SeedPrompt and Score contracts and official ExactTextMatching implementation, with two synthetic authorization/data-boundary probes, no PyRIT memory retention, fail-closed results, and cross-platform tests.
+- Added `tethermark.inspect.mcp-boundary@1.0.0` for stateless MCP `2026-07-28` Streamable HTTP discovery and bounded malformed-argument, repository-traversal, and undeclared cross-capability calls, with protocol/tool-error classification, redacted results, four-request limits, and no-finding-without-pass semantics.
 - Preserved the existing Model Configuration and launch UI layout and controls while clarifying connection copy: local Codex/ChatGPT-session routing remains the runtime default and metered OpenAI API-key routing remains an explicit optional override.
 
 ### Changed

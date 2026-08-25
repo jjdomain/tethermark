@@ -5033,6 +5033,35 @@ async function testPythonWorkerExecutionLimitsAndInspectNormalization(): Promise
   assert.ok(dataBoundary.notes.includes("eval_pack:tethermark.inspect.ai-data-boundary@1.0.0"));
   assert.ok(dataBoundary.notes.includes("coverage_status:partial"));
 
+  const mcpBoundary = normalizePythonWorkerForTests({
+    status: "completed",
+    summary: "Bounded MCP negative-call probes completed.",
+    target: "http://127.0.0.1:8788/mcp",
+    eval_pack: { id: "tethermark.inspect.mcp-boundary", version: "1.0.0" },
+    coverage: { status: "complete", attempted: 3, completed: 3, findings: 2, inconclusive: 0, errors: 0 },
+    observations: [
+      {
+        outcome: "no_finding_observed",
+        severity: "info",
+        evidence_locations: [{ source_kind: "uri", uri: "http://127.0.0.1:8788/mcp", label: "malformed-call" }]
+      },
+      {
+        outcome: "finding",
+        severity: "high",
+        evidence_locations: [{ source_kind: "uri", uri: "http://127.0.0.1:8788/mcp", label: "repository-traversal" }]
+      },
+      {
+        outcome: "finding",
+        severity: "high",
+        evidence_locations: [{ source_kind: "uri", uri: "http://127.0.0.1:8788/mcp", label: "cross-capability" }]
+      }
+    ]
+  }, "completed");
+  assert.equal(mcpBoundary.signal_count, 3);
+  assert.equal(mcpBoundary.issue_count, 2);
+  assert.equal(mcpBoundary.severity_counts.high, 2);
+  assert.ok(mcpBoundary.notes.includes("eval_pack:tethermark.inspect.mcp-boundary@1.0.0"));
+
   const garakFinding = normalizePythonWorkerForTests({
     status: "completed",
     summary: "Bounded Garak PromptInject probes completed.",
