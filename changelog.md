@@ -7,10 +7,12 @@
 - Added bounded in-container HTTP readiness verification for framework-aware Node and Python runtime probes. The provider polls only validated loopback port/path candidates, records body-free status/error evidence, and fails closed when a target process remains alive without a responsive endpoint.
 - Added `tethermark.runtime.ai-security-boundaries@1.0.0`, a standalone synthetic loopback service with versioned secure, vulnerable, and partial prompt/tool/MCP/memory/data-boundary profiles, inert tool calls, a machine-readable expectation catalog, and bounded body-free traces.
 - Added deterministic runtime worker normalization that emits pack-level coverage evidence, per-probe evidence, mapped runtime findings, audit observations, and fail-closed runtime control results without retaining request/response bodies or tool arguments.
+- Added deterministic runtime worker failure-path coverage for cancellation, bounded retry, timeout, output flooding, malformed output, retry exhaustion, and partial results.
 
 ### Changed
 
 - Runtime findings now fail their mapped controls, complete bounded no-finding samples remain zero-score `partial`, and worker failures, malformed coverage, unknown outcomes, and low sample counts remain `not_assessed` or `partial` with explicit inconclusive reasons; none can become a pass.
+- Python worker processes now receive audit cancellation signals, retry only transient execution failures under a two-attempt default and three-attempt ceiling, terminate non-retryable failures immediately, and retain attempt/terminal-reason metadata in normalized coverage evidence.
 
 ### Verified
 
@@ -18,6 +20,7 @@
 - Native Runtime Verification passed locally on Windows Docker Desktop with the real Node service health assertion and zero residual Tethermark container resources.
 - Managed worker tests passed with the real Inspect packs executing every runtime attack-fixture profile; the same integration is release-gated on Windows, Ubuntu, and macOS with Python 3.11 and 3.13.
 - Core-engine regression coverage verifies runtime finding propagation, redacted evidence, no-finding-without-pass semantics, low-sample rejection, and worker-failure containment.
+- Core-engine regression coverage verifies distinct canceled, timeout, output-limit, malformed-output, retry-exhausted, recovered-retry, and partial-result semantics.
 
 ## 2026-08-24
 

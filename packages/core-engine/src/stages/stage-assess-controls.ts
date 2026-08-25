@@ -122,6 +122,7 @@ export async function stageAssessControls(args: {
   analysisSummaryForEvidence?: unknown;
   evidenceOverrideIds?: string[];
   auditPackageId?: any;
+  signal?: AbortSignal;
 }): Promise<{ runPlan: any; evidenceExecutions: any[]; evidenceRecords: EvidenceRecord[]; laneResults: any[]; laneSpecialistOutputs: LaneSpecialistRunArtifact[]; findings: Finding[]; controlResults: ControlResult[]; observations: AuditObservation[]; scoreSummary: ScoreSummary; dimensionScores: any[]; staticScore: number; }> {
   const runPlan = assembleRunPlan({
     runId: args.runId,
@@ -155,7 +156,8 @@ export async function stageAssessControls(args: {
     lanePlans: lanePlans.map((plan) => ({
       ...plan,
       allowed_tools: getFixedCalibrationEvidenceProviderIds(args.request) ? assessmentProviderIds : args.evidenceOverrideIds?.length ? assessmentProviderIds : plan.allowed_tools
-    }))
+    })),
+    signal: args.signal
   });
   const sandboxEvidenceRecords = buildSandboxEvidenceRecords({
     runId: args.runId,

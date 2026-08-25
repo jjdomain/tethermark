@@ -109,6 +109,7 @@ export async function stageCollectEvidence(args: {
   analysis: AnalysisSummary;
   repoContext: RepoContextArtifact;
   lanePlans: AuditLanePlan[];
+  signal?: AbortSignal;
 }): Promise<{ evidenceExecutions: EvidenceExecutionRecord[]; evidenceRecords: EvidenceRecord[] }> {
   const providerIds = [...new Set(args.lanePlans.flatMap((plan) => plan.allowed_tools))];
   const evidenceExecutions = await runEvidenceProviders({
@@ -116,8 +117,10 @@ export async function stageCollectEvidence(args: {
     rootPath: args.target.local_path ?? args.target.snapshot.value,
     repoUrl: args.target.repo_url,
     request: args.request,
-    analysisSummary: { analysis: args.analysis, repoContext: args.repoContext }
+    analysisSummary: { analysis: args.analysis, repoContext: args.repoContext },
+    signal: args.signal
   });
+  args.signal?.throwIfAborted();
 
   const evidenceRecords: EvidenceRecord[] = [];
   evidenceRecords.push({

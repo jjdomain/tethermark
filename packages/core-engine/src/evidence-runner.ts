@@ -40,19 +40,23 @@ export async function runEvidenceProviders(args: {
   repoUrl: string | null;
   request: any;
   analysisSummary?: unknown;
+  signal?: AbortSignal;
 }): Promise<EvidenceExecutionRecord[]> {
   const uniqueProviders = [...new Set(args.providerIds)];
   const results: EvidenceExecutionRecord[] = [];
   let attemptOrder = 0;
 
   for (const providerId of uniqueProviders) {
+    args.signal?.throwIfAborted();
     const result = await executeEvidenceProvider({
       providerId,
       request: args.request,
       rootPath: args.rootPath,
       repoUrl: args.repoUrl,
-      analysisSummary: args.analysisSummary
+      analysisSummary: args.analysisSummary,
+      signal: args.signal
     });
+    args.signal?.throwIfAborted();
     const fallbackCandidates = shouldAutoFallback(providerId, result, uniqueProviders);
     results.push(withAdapterMetadata({
       record: result,
@@ -70,8 +74,10 @@ export async function runEvidenceProviders(args: {
         rootPath: args.rootPath,
         repoUrl: args.repoUrl,
         analysisSummary: args.analysisSummary,
-        fallbackFrom: providerId
+        fallbackFrom: providerId,
+        signal: args.signal
       });
+      args.signal?.throwIfAborted();
       results.push(withAdapterMetadata({
         record: fallbackResult,
         requestedProviderId: providerId,

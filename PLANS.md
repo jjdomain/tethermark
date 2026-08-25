@@ -233,12 +233,11 @@ Hosted rollout order:
 
 ## Recommended Next Order
 
-Community Edition Phases 1–8 are complete within the documented platform scope. Phase 9 now has executable Inspect coverage for every Phase 7 runtime control at its documented bounded profile, plus the initial Garak and PyRIT profiles; operational integration work remains.
+Community Edition Phases 1–8 are complete within the documented platform scope. Phase 9 now has executable Inspect coverage for every Phase 7 runtime control, initial Garak and PyRIT profiles, normalized audit artifacts, and bounded worker cancellation/retry/failure handling; repeatability calibration remains.
 
-1. Add framework-aware target startup/health detection for common Node and Python agents.
-2. Expand deterministic fake-agent and telemetry-verification services plus failure/partial-result fixtures around the completed security packs.
-3. Generalize normalized persistence/export coverage for runtime observations, findings, and inconclusive reasons.
-4. Continue Phase 10 recovery hardening and Phase 11 packaging alongside the remaining Phase 9 coverage.
+1. Calibrate behavior tests for repeatability and label nondeterministic confidence and sample limits.
+2. Complete Phase 10 recovery and stress hardening.
+3. Complete Phase 11 packaging and cross-platform security.
 
 ## Deferred Hosted Worker Deployment
 

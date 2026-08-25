@@ -22,7 +22,7 @@ import { buildHeuristicTargetProfile } from "./planner.js";
 import { assertAuditRequestProviderPolicy } from "./provider-policy.js";
 import { buildPreflightSummary } from "./preflight.js";
 import { analyzeTarget } from "./repo.js";
-import { PYTHON_WORKER_DEFAULT_OUTPUT_BYTES, PYTHON_WORKER_DEFAULT_TIMEOUT_MS, PYTHON_WORKER_MAX_OUTPUT_BYTES, PYTHON_WORKER_MAX_TIMEOUT_MS, resetPythonWorkerCapabilityCacheForTests, resolvePythonWorkerInvocationLimits } from "./python-worker.js";
+import { PYTHON_WORKER_DEFAULT_MAX_ATTEMPTS, PYTHON_WORKER_DEFAULT_OUTPUT_BYTES, PYTHON_WORKER_DEFAULT_TIMEOUT_MS, PYTHON_WORKER_MAX_ATTEMPTS, PYTHON_WORKER_MAX_OUTPUT_BYTES, PYTHON_WORKER_MAX_TIMEOUT_MS, resetPythonWorkerCapabilityCacheForTests, resolvePythonWorkerInvocationLimits, resolvePythonWorkerRetryPolicy, runPythonWorkerAttemptsForTests } from "./python-worker.js";
 import { inspectPythonWorkerEnvironment, isSupportedPythonWorkerVersion, parsePythonVersion, parsePythonWorkerLock, pythonWorkerVenvExecutable, resolvePythonWorkerExecutable } from "./python-worker-environment.js";
 import { resolveAssessmentEvidenceProviderIds } from "./stages/stage-assess-controls.js";
 import { buildRuntimeEvidenceRecords, normalizeRuntimeEvaluation } from "./runtime-evidence.js";
@@ -5251,6 +5251,149 @@ async function testPythonWorkerExecutionLimitsAndInspectNormalization(): Promise
   assert.equal(notRun.warning_count, 1);
 }
 
+async function testPythonWorkerFailurePathsNormalizeFailClosed(): Promise<void> {
+  assert.deepEqual(resolvePythonWorkerRetryPolicy(), {
+    maxAttempts: PYTHON_WORKER_DEFAULT_MAX_ATTEMPTS,
+    retryDelayMs: 100
+  });
+  assert.equal(resolvePythonWorkerRetryPolicy({ maxAttempts: Number.MAX_SAFE_INTEGER }).maxAttempts, PYTHON_WORKER_MAX_ATTEMPTS);
+
+  const controlIds = [
+    "runtime.prompt_injection_resistance",
+    "runtime.secret_retrieval_isolation",
+    "runtime.tool_authorization_boundary"
+  ];
+  const completedPayload = {
+    status: "completed",
+    summary: "Bounded runtime probes completed.",
+    eval_pack: { id: "tethermark.inspect.ai-security-boundary", version: "1.0.0" },
+    limits: { probe_count: 2 },
+    coverage: { status: "complete", attempted: 2, completed: 2, findings: 0, inconclusive: 0, errors: 0 },
+    observations: [
+      {
+        observation_id: "inspect:prompt",
+        probe_id: "prompt_injection",
+        title: "Prompt injection boundary",
+        outcome: "no_finding_observed",
+        severity: "low",
+        summary: "No finding was observed in the bounded prompt sample.",
+        control_refs: ["runtime.prompt_injection_resistance"]
+      },
+      {
+        observation_id: "inspect:tool",
+        probe_id: "tool_authorization",
+        title: "Tool authorization boundary",
+        outcome: "no_finding_observed",
+        severity: "low",
+        summary: "No finding was observed in the bounded tool sample.",
+        control_refs: ["runtime.tool_authorization_boundary"]
+      }
+    ],
+    limitations: ["Bounded samples do not establish a control pass."]
+  };
+  const executionForResult = (result: Awaited<ReturnType<typeof runPythonWorkerAttemptsForTests>>) => ({
+    tool: "inspect",
+    provider_id: "inspect",
+    provider_kind: "internal_plugin",
+    status: result.status === "completed" ? "completed" : "failed",
+    command: ["python-worker", "inspect"],
+    exit_code: null,
+    summary: `Worker result: ${result.status}`,
+    artifact_type: "internal-python-worker-output",
+    parsed: result.output,
+    normalized: null
+  } as any);
+  const normalizeResult = (result: Awaited<ReturnType<typeof runPythonWorkerAttemptsForTests>>) => normalizeRuntimeEvaluation(executionForResult(result), controlIds)!;
+
+  let retryCalls = 0;
+  const retrySuccess = await runPythonWorkerAttemptsForTests("inspect", { retryDelayMs: 0 }, async () => {
+    retryCalls += 1;
+    if (retryCalls === 1) throw new Error("transient worker launch failure");
+    return { stdout: JSON.stringify(completedPayload) };
+  });
+  assert.equal(retrySuccess.status, "completed");
+  assert.equal(retrySuccess.attempts, 2);
+  assert.equal((retrySuccess.output as any).worker_invocation.retry_count, 1);
+  assert.equal((retrySuccess.output as any).worker_invocation.terminal_reason, "completed_after_retry");
+  const retrySuccessEvaluation = normalizeResult(retrySuccess);
+  assert.equal(retrySuccessEvaluation.coverage.adequate, true);
+  assert.equal(retrySuccessEvaluation.invocation.retry_count, 1);
+  const retryEvidence = buildRuntimeEvidenceRecords({
+    execution: executionForResult(retrySuccess),
+    runId: "run_worker_retry",
+    laneName: "runtime_validation",
+    allowedControlIds: controlIds
+  });
+  assert.equal((retryEvidence[0]?.metadata?.invocation as any)?.retry_count, 1);
+
+  const retryExhausted = await runPythonWorkerAttemptsForTests("inspect", { maxAttempts: 2, retryDelayMs: 0 }, async () => {
+    throw new Error("worker process unavailable");
+  });
+  assert.equal(retryExhausted.status, "failed");
+  assert.equal(retryExhausted.attempts, 2);
+  assert.equal((retryExhausted.output as any).error_kind, "execution_error");
+  assert.equal((retryExhausted.output as any).worker_invocation.terminal_reason, "retry_exhausted");
+  assert.ok(normalizeResult(retryExhausted).coverage.inconclusive_reasons.includes("worker_retry_exhausted"));
+
+  const timeout = await runPythonWorkerAttemptsForTests("inspect", { retryDelayMs: 0 }, async () => {
+    throw Object.assign(new Error("worker timed out"), { killed: true });
+  });
+  assert.equal(timeout.status, "failed");
+  assert.equal(timeout.attempts, 1);
+  assert.equal((timeout.output as any).error_kind, "timeout");
+  assert.ok(normalizeResult(timeout).coverage.inconclusive_reasons.includes("worker_timeout"));
+
+  const outputFlood = await runPythonWorkerAttemptsForTests("inspect", { retryDelayMs: 0 }, async () => {
+    throw Object.assign(new Error("stdout maxBuffer length exceeded"), {
+      code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+      killed: true
+    });
+  });
+  assert.equal(outputFlood.status, "failed");
+  assert.equal(outputFlood.attempts, 1);
+  assert.equal((outputFlood.output as any).error_kind, "output_limit");
+  assert.ok(normalizeResult(outputFlood).coverage.inconclusive_reasons.includes("worker_output_limit"));
+
+  const malformed = await runPythonWorkerAttemptsForTests("inspect", { retryDelayMs: 0 }, async () => ({ stdout: "not-json" }));
+  assert.equal(malformed.status, "failed");
+  assert.equal(malformed.attempts, 1);
+  assert.equal((malformed.output as any).error_kind, "malformed_output");
+  assert.ok(normalizeResult(malformed).coverage.inconclusive_reasons.includes("worker_malformed_output"));
+
+  const partial = await runPythonWorkerAttemptsForTests("inspect", { retryDelayMs: 0 }, async () => ({
+    stdout: JSON.stringify({
+      ...completedPayload,
+      status: "partial",
+      coverage: { status: "partial", attempted: 1, completed: 1, findings: 0, inconclusive: 0, errors: 0 },
+      observations: [completedPayload.observations[0]]
+    })
+  }));
+  assert.equal(partial.status, "completed");
+  const partialEvaluation = normalizeResult(partial);
+  assert.equal(partialEvaluation.coverage.status, "partial");
+  assert.equal(partialEvaluation.observations.length, 1);
+  assert.ok(partialEvaluation.coverage.inconclusive_reasons.includes("worker_result_partial"));
+  assert.ok(partialEvaluation.coverage.inconclusive_reasons.includes("low_sample_count"));
+  assert.ok(partialEvaluation.coverage.inconclusive_reasons.includes("coverage_partial"));
+
+  const abortController = new AbortController();
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  const cancelPending = runPythonWorkerAttemptsForTests("inspect", { signal: abortController.signal, retryDelayMs: 0 }, async ({ signal }) => {
+    markStarted();
+    return new Promise<{ stdout: string }>((_resolve, reject) => {
+      signal?.addEventListener("abort", () => reject(signal.reason ?? new Error("worker canceled")), { once: true });
+    });
+  });
+  await started;
+  abortController.abort(new Error("operator canceled runtime audit"));
+  const canceled = await cancelPending;
+  assert.equal(canceled.status, "canceled");
+  assert.equal(canceled.attempts, 1);
+  assert.equal((canceled.output as any).error_kind, "canceled");
+  assert.ok(normalizeResult(canceled).coverage.inconclusive_reasons.includes("worker_canceled"));
+}
+
 async function testRuntimeObservationEvidenceAndControlNormalization(): Promise<void> {
   const controlIds = ["runtime.prompt_injection_resistance", "runtime.tool_authorization_boundary"];
   const vulnerableExecution = {
@@ -7649,6 +7792,7 @@ async function main(): Promise<void> {
       ["python worker providers report blocked runtime capability when disabled", testPythonWorkerProvidersReportBlockedWhenDisabled],
       ["python worker environment contract", testPythonWorkerEnvironmentContract],
       ["python worker limits and Inspect normalization", testPythonWorkerExecutionLimitsAndInspectNormalization],
+      ["python worker failure paths normalize fail closed", testPythonWorkerFailurePathsNormalizeFailClosed],
       ["runtime observations normalize into fail-closed audit artifacts", testRuntimeObservationEvidenceAndControlNormalization],
       ["repo analysis provider emits normalized locations", testRepoAnalysisProviderEmitsNormalizedLocations],
       ["scorecard and trivy normalization emit symbol locations", testScorecardAndTrivyNormalizationEmitSymbolLocations],

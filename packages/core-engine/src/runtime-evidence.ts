@@ -36,6 +36,12 @@ export interface NormalizedRuntimeEvaluation {
   coverage: NormalizedRuntimeCoverage;
   observations: NormalizedRuntimeObservation[];
   limitations: string[];
+  invocation: {
+    attempts: number;
+    max_attempts: number;
+    retry_count: number;
+    terminal_reason: string | null;
+  };
 }
 
 const RUNTIME_WORKERS = new Set(["inspect", "garak", "pyrit"]);
@@ -164,6 +170,15 @@ export function normalizeRuntimeEvaluation(
   const evalPackId = typeof output?.eval_pack?.id === "string" ? safeText(output.eval_pack.id, "", 160) || null : null;
   const evalPackVersion = typeof output?.eval_pack?.version === "string" ? safeText(output.eval_pack.version, "", 64) || null : null;
   const packControlIds = expectedControlIds(evalPackId, allowed);
+  const rawInvocation = output?.worker_invocation && typeof output.worker_invocation === "object" && !Array.isArray(output.worker_invocation)
+    ? output.worker_invocation as Record<string, unknown>
+    : {};
+  const invocationAttempts = nonNegativeInteger(rawInvocation.attempts) ?? (execution.status === "completed" ? 1 : 0);
+  const invocationMaxAttempts = nonNegativeInteger(rawInvocation.max_attempts) ?? Math.max(invocationAttempts, 1);
+  const invocationRetryCount = nonNegativeInteger(rawInvocation.retry_count) ?? Math.max(invocationAttempts - 1, 0);
+  const invocationTerminalReason = typeof rawInvocation.terminal_reason === "string"
+    ? safeText(rawInvocation.terminal_reason, "", 120) || null
+    : null;
   const rawObservations = Array.isArray(output?.observations) ? output.observations.slice(0, 256) : [];
   const observations: NormalizedRuntimeObservation[] = rawObservations.map((raw, index) => {
     const item = raw && typeof raw === "object" ? raw as Record<string, any> : {};
@@ -209,6 +224,9 @@ export function normalizeRuntimeEvaluation(
   if (execution.status !== "completed") reasons.push(`worker_execution_${execution.status}`);
   if (!output) reasons.push("worker_output_missing_or_malformed");
   if (output && output.status !== "completed") reasons.push(`worker_result_${safeText(output.status, "unknown", 80)}`);
+  const workerErrorKind = typeof output?.error_kind === "string" ? safeText(output.error_kind, "unknown", 80) : null;
+  if (workerErrorKind) reasons.push(`worker_${workerErrorKind}`);
+  if (invocationTerminalReason === "retry_exhausted") reasons.push("worker_retry_exhausted");
   if (!evalPackId || PACK_EXPECTED_SAMPLES[evalPackId] === undefined) reasons.push("unknown_or_missing_eval_pack");
   const reportedExpected = nonNegativeInteger(output?.limits?.probe_count);
   if (reportedExpected !== null && reportedExpected !== expected) reasons.push("expected_sample_contract_mismatch");
@@ -256,7 +274,13 @@ export function normalizeRuntimeEvaluation(
       inconclusive_reasons: inconclusiveReasons
     },
     observations,
-    limitations: uniqueStrings(Array.isArray(output?.limitations) ? output.limitations.map((item: unknown) => safeText(item, "", 500)) : [], 20)
+    limitations: uniqueStrings(Array.isArray(output?.limitations) ? output.limitations.map((item: unknown) => safeText(item, "", 500)) : [], 20),
+    invocation: {
+      attempts: invocationAttempts,
+      max_attempts: invocationMaxAttempts,
+      retry_count: invocationRetryCount,
+      terminal_reason: invocationTerminalReason
+    }
   };
 }
 
@@ -295,7 +319,8 @@ export function buildRuntimeEvidenceRecords(args: {
       inconclusive: evaluation.coverage.inconclusive,
       errors: evaluation.coverage.errors,
       inconclusive_reasons: evaluation.coverage.inconclusive_reasons,
-      limitations: evaluation.limitations
+      limitations: evaluation.limitations,
+      invocation: evaluation.invocation
     }
   };
   const observationRecords = evaluation.observations.map((observation) => ({

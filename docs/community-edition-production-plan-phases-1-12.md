@@ -523,7 +523,7 @@ Tasks:
 - [x] Add fake tools/services and deterministic attack fixtures for prompt/tool/MCP/memory/data-boundary scenarios. The versioned `tethermark.runtime.ai-security-boundaries@1.0.0` loopback service supplies secure, vulnerable, and partial prompt/secret, inert tool-call, indirect-exfiltration, cross-session-memory, and MCP profiles with a machine-readable expectation catalog and bounded body-free traces. The real Inspect packs assert every profile across the managed Windows/Linux/macOS Python matrix; repo-owned fixture outcomes remain engineering regression evidence rather than independent calibration ground truth.
 - [x] Normalize observations into evidence, control results, findings, coverage, and inconclusive reasons. The engine now converts each Inspect/Garak/PyRIT execution into a bounded pack-level coverage record and per-probe evidence records, carries mapped findings and audit observations into the standards path, and emits runtime control results with traceable evidence IDs and machine-readable inconclusive reasons.
 - [x] Prevent eval failures or low sample counts from becoming passes. Versioned expected-sample contracts, worker/result status checks, strict coverage-count reconciliation, unknown/malformed outcome handling, and explicit `low_sample_count`/worker-failure reasons fail closed. Findings fail mapped controls; complete no-finding samples remain zero-score `partial`, and unassessable results remain `not_assessed`.
-- [ ] Add cancellation, retry, timeout, output-flood, malformed-worker-output, and partial-result tests.
+- [x] Add cancellation, retry, timeout, output-flood, malformed-worker-output, and partial-result tests. Runtime worker child processes now accept audit cancellation signals, transient execution failures use a bounded two-attempt default/three-attempt hard ceiling, non-retryable failures terminate immediately, invocation metadata is retained in coverage evidence, and deterministic regressions verify all six paths remain partial/not-assessed rather than pass.
 - [ ] Calibrate behavior tests for repeatability and clearly label nondeterministic confidence/sample limits.
 
 Exit criteria:
@@ -619,7 +619,7 @@ A static-only beta may be cut before Phases 8–9 finish only if it is explicitl
 
 ## Recommended execution order from this snapshot
 
-1. Add cancellation, retry, timeout, output-flood, malformed-worker-output, and partial-result tests across the normalized runtime evidence path.
+1. Calibrate behavior tests for repeatability and clearly label nondeterministic confidence and sample limits.
 2. Complete Phase 10 stress/recovery hardening and Phase 11 packaging/cross-platform security.
 3. Execute Phase 12 release candidate and beta gates.
 
@@ -639,4 +639,4 @@ Phases 1 through 8 are complete within the documented platform scope. Before the
 npm run release:check
 ```
 
-Then follow the Phase 7 System Policy domain-model, persistence, resolver, API/UI, migration, and test tasks above. The live commands in `docs/live-model-validation.md` remain the Phase 3 release-candidate refresh procedure; they are not part of ordinary pull-request CI.
+Then complete the remaining Phase 9 repeatability/calibration task before proceeding to Phase 10 stress and recovery hardening. The live commands in `docs/live-model-validation.md` remain the Phase 3 release-candidate refresh procedure; they are not part of ordinary pull-request CI.

@@ -40,6 +40,16 @@ Coverage becomes partial or not-run when any of the following occurs:
 
 Reasons such as `low_sample_count`, `coverage_contract_mismatch`, `worker_execution_failed`, and adapter-provided transport or response reasons remain queryable in evidence metadata and visible in audit observations and control rationales.
 
+## Worker lifecycle policy
+
+- Running audit cancellation propagates an `AbortSignal` through control assessment, evidence collection, provider dispatch, and the Python child process. The worker is terminated immediately instead of waiting for its normal timeout; the audit still settles as canceled at the orchestrator boundary.
+- A worker gets two attempts by default, with a hard ceiling of three. Only transient process-launch or execution errors are retried, after a bounded abortable delay.
+- Timeouts, output-limit violations, malformed JSON, adapter-declared failures, partial results, and operator cancellation are terminal and are never retried.
+- Each result records attempts, maximum attempts, retry count, and terminal reason in `worker_invocation`. The normalized coverage evidence retains this metadata.
+- Failure kinds remain distinct as `worker_canceled`, `worker_timeout`, `worker_output_limit`, `worker_malformed_output`, `worker_execution_error`, and `worker_retry_exhausted`.
+
+The default per-attempt process timeout is 45 seconds and the child-process stdout/stderr buffer cap is 1 MiB. Callers may lower these values; hard ceilings remain 120 seconds and 4 MiB per attempt.
+
 ## Redaction and bounds
 
 - Only allowlisted observation fields are copied.

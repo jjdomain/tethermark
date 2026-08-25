@@ -575,6 +575,7 @@ function findIncompleteReusableStaticTools(selectedTools: string[], previousExec
 export class AuditEngine {
   private readonly queue = new InMemoryJobQueue();
   private readonly cancelRequested = new Set<string>();
+  private readonly runAbortControllers = new Map<string, AbortController>();
 
   private ensureRunNotCanceled(runId: string): void {
     if (this.cancelRequested.has(runId)) {
@@ -588,6 +589,7 @@ export class AuditEngine {
     request = assertAuditRequestProviderPolicy(initialSystemPolicy.request, "interactive_operator");
     let resolvedSystemPolicy: ResolvedSystemPolicySnapshot | null = initialSystemPolicy.snapshot;
     this.cancelRequested.delete(runId);
+    const runAbortController = new AbortController();
     const existing = this.queue.get(runId);
     if (existing) {
       this.queue.update(runId, { status: "running", error: undefined, result: undefined });
@@ -634,6 +636,7 @@ export class AuditEngine {
       }
     });
 
+    this.runAbortControllers.set(runId, runAbortController);
     try {
     const preflightSummary = await observer.observeStage({
       stage: "preflight",
@@ -931,7 +934,8 @@ export class AuditEngine {
           agentRuntime,
           lanePlans: rerunLanePlans.length ? rerunLanePlans : lanePlans,
           analysisSummaryForEvidence: { analysis: prepared.analysis, repoContext: prepared.repoContext },
-          auditPackageId: auditPackage.id
+          auditPackageId: auditPackage.id,
+          signal: runAbortController.signal
         })
       });
     }
@@ -1126,7 +1130,8 @@ export class AuditEngine {
           lanePlans: laneSubset.length ? lanePlans.filter((plan) => laneSubset.includes(plan.lane_name)) : lanePlans,
           analysisSummaryForEvidence: { analysis: prepared.analysis, repoContext: prepared.repoContext },
           evidenceOverrideIds: evidenceSubset.length ? evidenceSubset : undefined,
-          auditPackageId: auditPackage.id
+          auditPackageId: auditPackage.id,
+          signal: runAbortController.signal
         });
         if (correctionPlan.merge_strategy === "merge_selective") {
           const selectiveMerge = mergeSelectiveAssessmentCycle({
@@ -1500,10 +1505,12 @@ export class AuditEngine {
 
     this.queue.update(runId, { status: "succeeded", result });
     this.cancelRequested.delete(runId);
+    this.runAbortControllers.delete(runId);
     return result;
     } catch (error) {
       const canceled = error instanceof CanceledRunError || this.cancelRequested.has(runId);
       this.cancelRequested.delete(runId);
+      this.runAbortControllers.delete(runId);
       observer.emit({
         level: canceled ? "warn" : "error",
         stage: "run",
@@ -1566,6 +1573,7 @@ export class AuditEngine {
     }
     if (run.status === "running") {
       this.cancelRequested.add(runId);
+      this.runAbortControllers.get(runId)?.abort(new CanceledRunError(runId));
       return this.queue.update(runId, { error: "cancel_requested" });
     }
     return run;

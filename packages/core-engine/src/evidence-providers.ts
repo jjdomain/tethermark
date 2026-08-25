@@ -719,6 +719,7 @@ export async function executeEvidenceProvider(args: {
   repoUrl: string | null;
   analysisSummary?: unknown;
   fallbackFrom?: string | null;
+  signal?: AbortSignal;
 }): Promise<EvidenceExecutionRecord> {
   const effectiveRepoUrl = await inferRepoUrl(args.repoUrl, args.request.local_path ?? args.rootPath);
   const localBinaryBlocked = args.providerId === "scorecard" || args.providerId === "semgrep" || args.providerId === "trivy"
@@ -996,7 +997,7 @@ export async function executeEvidenceProvider(args: {
           normalized: emptyNormalized("python_worker", { notes: [message] })
         });
       }
-      const result = await invokePythonWorker(worker, args.request, args.rootPath);
+      const result = await invokePythonWorker(worker, args.request, args.rootPath, { signal: args.signal });
       return completedRecord({
         provider_id: args.providerId,
         provider_kind: "internal_plugin",
@@ -1004,6 +1005,8 @@ export async function executeEvidenceProvider(args: {
         status: result.status === "completed" ? "completed" : "failed",
         summary: result.status === "completed"
           ? (typeof (result.output as any)?.summary === "string" ? String((result.output as any).summary) : `Python worker '${worker}' returned adapter output.`)
+          : result.status === "canceled"
+            ? `Python worker '${worker}' execution was canceled.`
           : `Python worker '${worker}' execution failed.`,
         artifact_type: "internal-python-worker-output",
         parsed: result.output,
