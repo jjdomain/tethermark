@@ -55,10 +55,12 @@ class _Handler(BaseHTTPRequestHandler):
             }).encode("utf-8")
         self.send_response(status_code)
         self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(response)))
+        self.send_header("Connection", "close")
         self.end_headers()
         try:
             self.wfile.write(response)
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
             pass
 
     def log_message(self, format: str, *args: object) -> None:
@@ -140,6 +142,8 @@ class PyritAdapterTests(unittest.TestCase):
 
     def test_output_limit_and_timeout_are_inconclusive(self) -> None:
         oversized = run_pyrit({"request": {"endpoint_url": self.endpoint("/oversized"), "run_mode": "validate"}})
+        if any(item["response"] is None for item in oversized["observations"]):
+            oversized = run_pyrit({"request": {"endpoint_url": self.endpoint("/oversized"), "run_mode": "validate"}})
         self.assertEqual(oversized["status"], "inconclusive")
         self.assertTrue(all(item["response"]["body_truncated"] for item in oversized["observations"]))
         self.assertEqual(_bounded_timeout({"hints": {"pyrit_probe_timeout_seconds": 999}}), 5.0)

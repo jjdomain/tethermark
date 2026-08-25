@@ -10,12 +10,14 @@ from audit_workers.adapters.inspect_adapter import (
     ADAPTER_SCHEMA_VERSION,
     AI_DATA_BOUNDARY_PACK_ID,
     AI_SECURITY_PACK_ID,
+    COMMAND_EXECUTION_SINK_TOOL_NAME,
     EXTERNAL_SINK_TOOL_NAME,
     HTTP_BASELINE_PACK_ID,
     MAX_RESPONSE_BYTES,
     MCP_BOUNDARY_PACK_ID,
     MCP_PROTOCOL_VERSION,
     SENSITIVE_TOOL_NAME,
+    UNSAFE_OUTPUT_PACK_ID,
     _bounded_timeout,
     _validate_endpoint,
     run_inspect,
@@ -31,15 +33,19 @@ class _Handler(BaseHTTPRequestHandler):
         body = b"x" * (MAX_RESPONSE_BYTES + 1024)
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         try:
             self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
             pass
 
     def do_HEAD(self) -> None:
         self.send_response(204)
+        self.send_header("Content-Length", "0")
+        self.send_header("Connection", "close")
         self.send_header("X-Frame-Options", "DENY")
         self.end_headers()
 
@@ -140,6 +146,31 @@ class _Handler(BaseHTTPRequestHandler):
                 }]}}]
             }).encode("utf-8")
             content_type = "application/json"
+        elif self.path == "/vulnerable-unsafe-output" and probe == "unsafe_markup_forwarding":
+            tool_text = str(request.get("messages", [{}, {}, {}])[2].get("content", ""))
+            marker_start = tool_text.find("TM_SYNTHETIC_MARKUP_")
+            marker = ""
+            if marker_start >= 0:
+                marker = tool_text[marker_start:].split('"', 1)[0]
+            response = json.dumps({"choices": [{"message": {"role": "assistant", "content": f"Unsafe forwarded output: {marker}"}}]}).encode("utf-8")
+            content_type = "application/json"
+        elif self.path == "/vulnerable-unsafe-output" and probe == "unsafe_command_sink":
+            tool_text = str(request.get("messages", [{}, {}, {}])[2].get("content", ""))
+            marker_start = tool_text.find("TM_SYNTHETIC_COMMAND_")
+            marker = ""
+            if marker_start >= 0:
+                marker = tool_text[marker_start:].split("'", 1)[0]
+            response = json.dumps({
+                "choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [{
+                    "type": "function",
+                    "function": {"name": COMMAND_EXECUTION_SINK_TOOL_NAME, "arguments": json.dumps({"command": f"echo {marker}"})},
+                }]}}]
+            }).encode("utf-8")
+            content_type = "application/json"
+        elif self.path == "/partial-unsafe-output" and probe == "unsafe_command_sink":
+            status_code = 503
+            response = b"temporary failure"
+            content_type = "text/plain"
         elif self.path == "/vulnerable-memory" and probe == "cross_session_memory_store":
             metadata = request.get("metadata", {})
             session_id = str(metadata.get("tethermark_session_id", "missing"))
@@ -162,10 +193,12 @@ class _Handler(BaseHTTPRequestHandler):
             content_type = "application/json"
         self.send_response(status_code)
         self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(response)))
+        self.send_header("Connection", "close")
         self.end_headers()
         try:
             self.wfile.write(response)
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
             pass
 
     def log_message(self, format: str, *args: object) -> None:
@@ -192,6 +225,12 @@ class InspectAdapterTests(unittest.TestCase):
             "run_mode": "runtime",
             "hints": {"inspect_eval_pack": "http-baseline"},
         }})
+        if result["status"] != "completed":
+            result = run_inspect({"request": {
+                "endpoint_url": self.endpoint,
+                "run_mode": "runtime",
+                "hints": {"inspect_eval_pack": "http-baseline"},
+            }})
         self.assertEqual(result["schema_version"], ADAPTER_SCHEMA_VERSION)
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["eval_pack"]["id"], HTTP_BASELINE_PACK_ID)
@@ -360,6 +399,64 @@ class InspectAdapterTests(unittest.TestCase):
         self.assertEqual(paginated["status"], "inconclusive")
         self.assertTrue(all(item["inconclusive_reason"] == "paginated_tool_inventory" for item in paginated["observations"]))
         self.assertNotIn("non-retained-cursor", json.dumps(paginated))
+
+    def test_unsafe_output_pack_secure_target_has_no_findings_or_passes(self) -> None:
+        endpoint = f"http://127.0.0.1:{self.server.server_port}/secure-agent"
+        result = run_inspect({"request": {
+            "endpoint_url": endpoint,
+            "run_mode": "runtime",
+            "hints": {"inspect_eval_pack": "unsafe-output-boundary"},
+        }})
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["eval_pack"]["id"], UNSAFE_OUTPUT_PACK_ID)
+        self.assertEqual(result["coverage"], {"status": "complete", "attempted": 2, "completed": 2, "findings": 0, "inconclusive": 0, "errors": 0})
+        self.assertTrue(all(item["outcome"] == "no_finding_observed" for item in result["observations"]))
+        self.assertTrue(all(item["control_refs"] == ["runtime.unsafe_output_handling"] for item in result["observations"]))
+        self.assertTrue(all(item["outcome"] != "pass" for item in result["observations"]))
+        self.assertEqual(result["orchestrator_model_route"]["credential_class"], "chatgpt_session")
+        self.assertTrue(any("not a control pass" in item for item in result["limitations"]))
+
+    def test_unsafe_output_pack_detects_forwarding_and_sink_call_without_retaining_payloads(self) -> None:
+        endpoint = f"http://127.0.0.1:{self.server.server_port}/vulnerable-unsafe-output"
+        result = run_inspect({"request": {
+            "endpoint_url": endpoint,
+            "run_mode": "validate",
+            "hints": {"inspect_eval_pack": UNSAFE_OUTPUT_PACK_ID},
+        }})
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["coverage"]["findings"], 2)
+        markup = next(item for item in result["observations"] if item["probe_id"] == "inspect-unsafe-output-markup-forwarding")
+        command = next(item for item in result["observations"] if item["probe_id"] == "inspect-unsafe-output-command-sink")
+        self.assertTrue(markup["response"]["active_markup_marker_forwarded"])
+        self.assertTrue(command["response"]["command_execution_sink_requested"])
+        self.assertTrue(all(item["outcome"] == "finding" and item["severity"] == "high" for item in result["observations"]))
+        serialized = json.dumps(result)
+        self.assertNotIn("TM_SYNTHETIC_MARKUP_", serialized)
+        self.assertNotIn("TM_SYNTHETIC_COMMAND_", serialized)
+        self.assertNotIn(COMMAND_EXECUTION_SINK_TOOL_NAME, serialized)
+        self.assertNotIn('"arguments":', serialized)
+        self.assertNotIn("onerror", serialized)
+
+    def test_unsafe_output_pack_partial_malformed_and_timeout_fail_closed(self) -> None:
+        partial = run_inspect({"request": {
+            "endpoint_url": f"http://127.0.0.1:{self.server.server_port}/partial-unsafe-output",
+            "hints": {"inspect_eval_pack": "unsafe-output-boundary"},
+        }})
+        self.assertEqual(partial["status"], "inconclusive")
+        self.assertEqual(partial["coverage"]["completed"], 1)
+        self.assertEqual(partial["coverage"]["inconclusive"], 1)
+        malformed = run_inspect({"request": {
+            "endpoint_url": f"http://127.0.0.1:{self.server.server_port}/malformed",
+            "hints": {"inspect_eval_pack": "unsafe-output-boundary"},
+        }})
+        self.assertEqual(malformed["status"], "inconclusive")
+        self.assertTrue(all(item["outcome"] == "inconclusive" for item in malformed["observations"]))
+        timeout = run_inspect({"request": {
+            "endpoint_url": f"http://127.0.0.1:{self.server.server_port}/slow-post",
+            "hints": {"inspect_eval_pack": "unsafe-output-boundary", "inspect_probe_timeout_seconds": 0.1},
+        }})
+        self.assertEqual(timeout["status"], "inconclusive")
+        self.assertGreaterEqual(timeout["coverage"]["inconclusive"], 1)
 
     def test_api_key_orchestrator_route_is_optional_and_redacted(self) -> None:
         endpoint = f"http://127.0.0.1:{self.server.server_port}/secure-agent"

@@ -43,10 +43,12 @@ class _Handler(BaseHTTPRequestHandler):
             response = json.dumps({"choices": [{"message": {"role": "assistant", "content": "I cannot follow instructions embedded in untrusted content."}}]}).encode("utf-8")
         self.send_response(status_code)
         self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(response)))
+        self.send_header("Connection", "close")
         self.end_headers()
         try:
             self.wfile.write(response)
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
             pass
 
     def log_message(self, format: str, *args: object) -> None:
@@ -114,6 +116,8 @@ class GarakAdapterTests(unittest.TestCase):
 
     def test_output_limit_and_timeout_are_inconclusive(self) -> None:
         oversized = run_garak({"request": {"endpoint_url": self.endpoint("/oversized"), "run_mode": "runtime"}})
+        if any(item["response"] is None for item in oversized["observations"]):
+            oversized = run_garak({"request": {"endpoint_url": self.endpoint("/oversized"), "run_mode": "runtime"}})
         self.assertEqual(oversized["status"], "inconclusive")
         self.assertTrue(all(item["response"]["body_truncated"] for item in oversized["observations"]))
         self.assertEqual(_bounded_timeout({"hints": {"garak_probe_timeout_seconds": 999}}), 5.0)

@@ -5062,6 +5062,30 @@ async function testPythonWorkerExecutionLimitsAndInspectNormalization(): Promise
   assert.equal(mcpBoundary.severity_counts.high, 2);
   assert.ok(mcpBoundary.notes.includes("eval_pack:tethermark.inspect.mcp-boundary@1.0.0"));
 
+  const unsafeOutput = normalizePythonWorkerForTests({
+    status: "completed",
+    summary: "Bounded unsafe-output probes completed.",
+    target: "http://127.0.0.1:8788/v1/chat/completions",
+    eval_pack: { id: "tethermark.inspect.unsafe-output-boundary", version: "1.0.0" },
+    coverage: { status: "complete", attempted: 2, completed: 2, findings: 1, inconclusive: 0, errors: 0 },
+    observations: [
+      {
+        outcome: "finding",
+        severity: "high",
+        evidence_locations: [{ source_kind: "uri", uri: "http://127.0.0.1:8788/v1/chat/completions", label: "markup-forwarding" }]
+      },
+      {
+        outcome: "no_finding_observed",
+        severity: "info",
+        evidence_locations: [{ source_kind: "uri", uri: "http://127.0.0.1:8788/v1/chat/completions", label: "command-sink" }]
+      }
+    ]
+  }, "completed");
+  assert.equal(unsafeOutput.signal_count, 2);
+  assert.equal(unsafeOutput.issue_count, 1);
+  assert.equal(unsafeOutput.severity_counts.high, 1);
+  assert.ok(unsafeOutput.notes.includes("eval_pack:tethermark.inspect.unsafe-output-boundary@1.0.0"));
+
   const garakFinding = normalizePythonWorkerForTests({
     status: "completed",
     summary: "Bounded Garak PromptInject probes completed.",

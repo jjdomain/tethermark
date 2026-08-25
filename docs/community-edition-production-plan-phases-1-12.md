@@ -514,7 +514,8 @@ Tasks:
   - [x] Replace the Garak scaffold with the hash-locked `tethermark.garak.prompt-injection@1.0.0` profile using Garak `0.16.0`'s official PromptInject builder and detector, bounded target requests, normalized/redacted observations, and no-finding-without-pass semantics.
   - [x] Replace the PyRIT scaffold with the hash-locked `tethermark.pyrit.adversarial-boundary@1.0.0` profile using PyRIT `1.0.1`'s public safe-literal SeedPrompt and Score contracts plus official ExactTextMatching, bounded target requests, no PyRIT memory retention, normalized/redacted observations, and no-finding-without-pass semantics.
   - [x] Add `tethermark.inspect.mcp-boundary@1.0.0` for stateless MCP `2026-07-28` Streamable HTTP discovery plus bounded malformed-argument, repository-traversal, and undeclared cross-capability calls, with protocol/tool-error classification, redacted evidence, and no-finding-without-pass semantics.
-- [ ] Build versioned eval packs for all runtime controls defined in Phase 7 (prompt/secret/tool, indirect-injection/data-exfiltration/cross-session-memory, and MCP packs are complete; unsafe output, agency, resource, and telemetry packs remain).
+  - [x] Add `tethermark.inspect.unsafe-output-boundary@1.0.0` for bounded active-markup forwarding and synthetic command-sink requests from untrusted tool output, with no rendering or execution, redacted evidence, and no-finding-without-pass semantics.
+- [ ] Build versioned eval packs for all runtime controls defined in Phase 7 (prompt/secret/tool, indirect-injection/data-exfiltration/cross-session-memory, MCP, and unsafe-output packs are complete; agency, resource, and telemetry packs remain).
 - [ ] Add framework-aware target startup/health detection for common Node and Python applications and agents.
 - [ ] Add fake tools/services and deterministic attack fixtures for prompt/tool/MCP/memory/data-boundary scenarios.
 - [ ] Normalize observations into evidence, control results, findings, coverage, and inconclusive reasons.
@@ -615,7 +616,7 @@ A static-only beta may be cut before Phases 8–9 finish only if it is explicitl
 
 ## Recommended execution order from this snapshot
 
-1. Continue versioned runtime coverage for unsafe-output, agency, resource, and telemetry controls using the now-executable adapter boundary.
+1. Continue versioned runtime coverage for agency, resource, and telemetry controls using the now-executable adapter boundary.
 2. Add framework-aware target startup/health detection and deterministic fake services for the remaining runtime scenarios.
 3. Complete Phase 10 stress/recovery hardening and Phase 11 packaging/cross-platform security.
 4. Execute Phase 12 release candidate and beta gates.

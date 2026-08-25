@@ -60,7 +60,7 @@ Completed:
 Not completed:
 - broader independently reviewed advisory coverage beyond the current four advisories and vulnerability classes, followed by multi-case/repeat model variance and weight/threshold calibration
 - cleanup or archival policy for old historical artifact directories already present under `.artifacts`
-- broader reviewed Garak/PyRIT profiles beyond the bounded initial packs and the remaining AI-security-specific Inspect unsafe-output, agency, resource, and telemetry packs
+- broader reviewed Garak/PyRIT profiles beyond the bounded initial packs and the remaining AI-security-specific Inspect agency, resource, and telemetry packs
 - richer control coverage and framework depth beyond the first static control set
 
 ## Phase 1: Local Static Mode Hardening
@@ -232,7 +232,7 @@ Hosted rollout order:
 
 Community Edition Phases 1–8 are complete within the documented platform scope. Phase 9 has executable Inspect, Garak, and PyRIT foundations and now continues with the remaining runtime-control scenarios.
 
-1. Add versioned unsafe-output, agency, resource, and telemetry runtime packs behind the executable adapter boundary; the MCP boundary pack is complete.
+1. Add versioned agency, resource, and telemetry runtime packs behind the executable adapter boundary; the MCP and unsafe-output boundary packs are complete.
 2. Add framework-aware target startup/health detection for common Node and Python agents.
 3. Expand deterministic fake-agent services and failure/partial-result fixtures for the remaining security packs.
 4. Continue Phase 10 recovery hardening and Phase 11 packaging alongside the remaining Phase 9 coverage.
