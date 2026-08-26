@@ -184,10 +184,11 @@ export async function readGoldenExports(rootDir = process.cwd()): Promise<{
     fs.readFile(fixturePaths.executiveMarkdown, "utf8"),
     fs.readFile(fixturePaths.sarif, "utf8")
   ]);
+  const normalizeLineEndings = (value: string) => value.replace(/\r\n?/g, "\n").trim();
   return {
-    executiveJson: executiveJson.trim(),
-    executiveMarkdown: executiveMarkdown.trim(),
-    sarif: sarif.trim()
+    executiveJson: normalizeLineEndings(executiveJson),
+    executiveMarkdown: normalizeLineEndings(executiveMarkdown),
+    sarif: normalizeLineEndings(sarif)
   };
 }
 

@@ -546,6 +546,10 @@ Completed foundation:
 Remaining tasks:
 
 - [ ] Add crash-at-every-stage recovery tests, concurrent API/worker stress tests, database lock/backoff tests, and disk-full/corruption behavior.
+  - [x] Fail closed when the local SQLite file is unreadable, corrupt, or unsupported instead of silently opening an empty database; run `quick_check` on every existing database before use.
+  - [x] Preserve the last valid database and remove temporary output when a save fails before the temporary write or before replacement, with deterministic disk-full/replacement fault regressions.
+  - [x] Reconcile an already-persisted terminal run into its interrupted async job/attempt on restart without executing the run again or duplicating terminal hooks.
+  - [ ] Add per-stage crash injection, multi-request API/worker stress, and explicit filesystem lock/backoff coverage.
 - [ ] Add automatic backup, restore verification, migration rollback guidance, and release-to-release upgrade fixtures.
 - [ ] Finish retention scheduling and ensure database rows/artifacts remain consistent after pruning.
 - [ ] Decide how promoted learning overlays are consumed by planner/prompts/rules, with strict versioning and rollback.

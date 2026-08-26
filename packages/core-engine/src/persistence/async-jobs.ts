@@ -5,6 +5,7 @@ import { assertAuditRequestProviderPolicy } from "../provider-policy.js";
 import { createId, nowIso } from "../utils.js";
 import { resolvePersistenceLocation, type PersistenceReadOptions } from "./backend.js";
 import type { PersistedAsyncJobAttemptRecord, PersistedAsyncJobRecord } from "./contracts.js";
+import { getPersistedRun } from "./query.js";
 import { ensureSqliteSchema, hasSqliteDatabase, openSqliteDatabase, readSqliteTable, saveSqliteDatabase, upsertSqliteRecord } from "./sqlite.js";
 
 function resolveLocation(rootDirOrOptions?: string | PersistenceReadOptions) {
@@ -142,6 +143,8 @@ function asyncMonitorMaxPolls(): number {
 }
 
 export class PersistedAsyncJobManager {
+  private recoveryPromise: Promise<void> | null = null;
+
   constructor(
     private readonly engine: AuditEngine,
     private readonly hooks?: {
@@ -429,6 +432,13 @@ export class PersistedAsyncJobManager {
   }
 
   async recoverJobs(): Promise<void> {
+    this.recoveryPromise ??= this.recoverJobsOnce().finally(() => {
+      this.recoveryPromise = null;
+    });
+    return this.recoveryPromise;
+  }
+
+  private async recoverJobsOnce(): Promise<void> {
     for (const dbMode of ["local"] as const) {
       const location = resolveLocation({ dbMode });
       const jobs = await listPersistedAsyncJobs(location);
@@ -436,6 +446,44 @@ export class PersistedAsyncJobManager {
         const attempts = await readPersistedAsyncJobAttempts(job.job_id, location);
         const currentAttempt = attempts.find((item) => item.run_id === job.current_run_id) ?? attempts.at(-1) ?? null;
         if (!currentAttempt) continue;
+        const persistedRun = await getPersistedRun(currentAttempt.run_id, location);
+        const persistedTerminalStatus = persistedRun && ["succeeded", "failed", "canceled"].includes(persistedRun.status)
+          ? persistedRun.status as "succeeded" | "failed" | "canceled"
+          : null;
+        if (persistedTerminalStatus) {
+          const completedAt = persistedRun?.completed_at ?? nowIso();
+          const reconciledAttempt: PersistedAsyncJobAttemptRecord = {
+            ...currentAttempt,
+            status: persistedTerminalStatus,
+            completed_at: completedAt,
+            error: persistedTerminalStatus === "failed" ? currentAttempt.error ?? "recovered_terminal_run_failed" : null
+          };
+          const reconciledJob: PersistedAsyncJobRecord = {
+            ...job,
+            status: persistedTerminalStatus,
+            updated_at: completedAt,
+            completed_at: completedAt,
+            canceled_at: persistedTerminalStatus === "canceled" ? completedAt : null,
+            error: reconciledAttempt.error
+          };
+          await writeRecords({ rootDir: location.rootDir, dbMode: location.mode, job: reconciledJob, attempt: reconciledAttempt });
+          const deliveredJob = await this.deliverWebhook(location, reconciledJob, attempts.map((item) => item.id === reconciledAttempt.id ? reconciledAttempt : item));
+          await this.hooks?.onTerminalJob?.({
+            job: deliveredJob,
+            attempt: reconciledAttempt,
+            envelope: {
+              run_id: currentAttempt.run_id,
+              status: persistedTerminalStatus,
+              request: job.request_json,
+              created_at: currentAttempt.created_at,
+              updated_at: completedAt,
+              error: reconciledAttempt.error ?? undefined,
+              retry_of_run_id: currentAttempt.retry_of_run_id ?? undefined
+            },
+            rootDirOrOptions: location
+          });
+          continue;
+        }
         const resetJob: PersistedAsyncJobRecord = {
           ...job,
           status: "queued",

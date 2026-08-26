@@ -239,6 +239,8 @@ Community Edition Phases 1–9 are complete within the documented platform scope
 2. Complete Phase 11 packaging and cross-platform security.
 3. Execute the Phase 12 release-candidate and beta gates.
 
+Current Phase 10 recovery increment: local SQLite opens now reject corrupt/unreadable databases, failed pre-replacement saves preserve the prior valid file, and restart recovery reconciles already-durable terminal runs without rerunning them. Per-stage crash injection, API/worker stress, and lock/backoff coverage remain open.
+
 ## Deferred Hosted Worker Deployment
 
 - worker host deployment automation

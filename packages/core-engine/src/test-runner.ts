@@ -30,6 +30,7 @@ import { applyControlDowngrades, applyUnsupportedFindingDrops, mergeSelectiveAss
 import { createPersistenceStore } from "./persistence/backend.js";
 import { backfillLocalPersistence, cleanupLocalJsonMirrors, validateLocalPersistence } from "./persistence/backfill.js";
 import { compactBundleExports } from "./persistence/bundle-exports.js";
+import { PersistedAsyncJobManager, readPersistedAsyncJob, readPersistedAsyncJobAttempts } from "./persistence/async-jobs.js";
 import { LocalPersistenceStore } from "./persistence/local-store.js";
 import { getPersistedObservabilityHistory, readPersistedObservabilitySummary } from "./persistence/observability.js";
 import { getPersistedRun, listPersistedTargets, readPersistedDimensionScores, readPersistedPolicyApplication, readPersistedStageExecutions, readPersistedTargetSummary } from "./persistence/query.js";
@@ -37,7 +38,7 @@ import { deriveInitialReviewWorkflow, listPersistedReviewNotifications, listPers
 import { createPersistedReviewComment } from "./persistence/review-comments.js";
 import { buildFindingEvidenceFingerprint, createPersistedFindingDisposition } from "./persistence/finding-dispositions.js";
 import { readPersistedArtifactIndex, readPersistedCommitDiff, readPersistedControlResults, readPersistedEvents, readPersistedEvidenceRecords, readPersistedFindings, readPersistedLanePlans, readPersistedLaneResults, readPersistedLaneReuseDecisions, readPersistedLaneSpecialistOutputs, readPersistedMaintenanceHistory, readPersistedMetrics, readPersistedObservability, readPersistedResolvedConfiguration, readPersistedReviewActions, readPersistedReviewComments, readPersistedReviewDecision, readPersistedReviewWorkflow, readPersistedRunUsageSummary, readPersistedScoreSummary, readPersistedStageArtifact, readPersistedStageArtifacts, readPersistedToolAdapterSummary, readPersistedToolExecutions } from "./persistence/run-details.js";
-import { ensureSqliteSchema, openSqliteDatabase, PERSISTENCE_SCHEMA_VERSION, readPersistenceMetadata, readSqliteTable, saveSqliteDatabase, upsertSqliteRecord } from "./persistence/sqlite.js";
+import { ensureSqliteSchema, openSqliteDatabase, PERSISTENCE_SCHEMA_VERSION, readPersistenceMetadata, readSqliteTable, saveSqliteDatabase, setSqliteSaveFailureForTests, SqlitePersistenceError, upsertSqliteRecord } from "./persistence/sqlite.js";
 import { buildPsqlProcessEnv } from "./persistence/postgres.js";
 import { normalizeLearningSettings } from "./persistence/learning.js";
 import { listPersistedUiDocuments, readPersistedUiSettings, updatePersistedUiSettings } from "./persistence/ui-settings.js";
@@ -824,6 +825,176 @@ async function testConcurrentSqliteWritesAreMerged(): Promise<void> {
     } finally {
       verification.close();
     }
+  });
+}
+
+async function testSqliteCorruptionAndFailedSavesFailClosed(): Promise<void> {
+  await withTempDir("tethermark-sqlite-integrity-", async (rootDir) => {
+    const seed = await openSqliteDatabase(rootDir);
+    try {
+      ensureSqliteSchema(seed);
+      upsertSqliteRecord({ db: seed, tableName: "integrity_test", recordKey: "seed", payload: { id: "seed" } });
+      await saveSqliteDatabase(rootDir, seed);
+    } finally {
+      seed.close();
+    }
+    const databasePath = path.join(rootDir, "harness.sqlite");
+    const validBytes = await fs.readFile(databasePath);
+
+    for (const stage of ["before_temp_write", "before_replace"] as const) {
+      const pending = await openSqliteDatabase(rootDir);
+      try {
+        ensureSqliteSchema(pending);
+        upsertSqliteRecord({ db: pending, tableName: "integrity_test", recordKey: stage, payload: { id: stage } });
+        setSqliteSaveFailureForTests(stage);
+        await assert.rejects(
+          () => saveSqliteDatabase(rootDir, pending),
+          (error: unknown) => error instanceof SqlitePersistenceError && error.persistence_code === "sqlite_save_failed"
+        );
+      } finally {
+        setSqliteSaveFailureForTests(null);
+        pending.close();
+      }
+      assert.deepEqual(await fs.readFile(databasePath), validBytes);
+      assert.equal((await fs.readdir(rootDir)).some((item) => item.endsWith(".tmp")), false);
+      const verification = await openSqliteDatabase(rootDir);
+      try {
+        ensureSqliteSchema(verification);
+        assert.deepEqual(readSqliteTable<{ id: string }>(verification, "integrity_test"), [{ id: "seed" }]);
+      } finally {
+        verification.close();
+      }
+    }
+
+    const corruptBytes = Buffer.from("not-a-tethermark-sqlite-database", "utf8");
+    await fs.writeFile(databasePath, corruptBytes);
+    await assert.rejects(
+      () => openSqliteDatabase(rootDir),
+      (error: unknown) => error instanceof SqlitePersistenceError && error.persistence_code === "sqlite_database_corrupt_or_unsupported"
+    );
+    assert.deepEqual(await fs.readFile(databasePath), corruptBytes);
+  });
+}
+
+async function testAsyncRecoveryReconcilesDurableTerminalRun(): Promise<void> {
+  await withTempDir("tethermark-async-terminal-recovery-", async (rootDir) => {
+    const jobId = "job_terminal_recovery";
+    const runId = "run_terminal_recovery";
+    const timestamp = "2026-08-26T00:00:00.000Z";
+    const db = await openSqliteDatabase(rootDir);
+    try {
+      ensureSqliteSchema(db);
+      upsertSqliteRecord({
+        db,
+        tableName: "async_jobs",
+        recordKey: jobId,
+        runId,
+        createdAt: timestamp,
+        parentKey: jobId,
+        payload: {
+          job_id: jobId,
+          status: "running",
+          request_json: { local_path: rootDir, run_mode: "static", audit_package: "deep-static", llm_provider: "mock", llm_model: "mock-agent-runtime" },
+          db_mode: "local",
+          workspace_id: "default",
+          project_id: "default",
+          requested_by: null,
+          current_run_id: runId,
+          latest_attempt_number: 1,
+          completion_webhook_url: null,
+          completion_webhook_status: null,
+          completion_webhook_last_attempt_at: null,
+          completion_webhook_error: null,
+          error: null,
+          created_at: timestamp,
+          updated_at: timestamp,
+          started_at: timestamp,
+          completed_at: null,
+          canceled_at: null
+        }
+      });
+      upsertSqliteRecord({
+        db,
+        tableName: "async_job_attempts",
+        recordKey: `${jobId}:attempt:1`,
+        runId,
+        createdAt: timestamp,
+        parentKey: jobId,
+        payload: {
+          id: `${jobId}:attempt:1`,
+          job_id: jobId,
+          attempt_number: 1,
+          run_id: runId,
+          status: "running",
+          created_at: timestamp,
+          started_at: timestamp,
+          completed_at: null,
+          error: null,
+          retry_of_run_id: null
+        }
+      });
+      upsertSqliteRecord({
+        db,
+        tableName: "runs",
+        recordKey: runId,
+        runId,
+        createdAt: timestamp,
+        targetId: "target_terminal_recovery",
+        payload: {
+          id: runId,
+          target_id: "target_terminal_recovery",
+          target_snapshot_id: "snapshot_terminal_recovery",
+          workspace_id: "default",
+          project_id: "default",
+          requested_by: null,
+          policy_pack_id: null,
+          status: "succeeded",
+          run_mode: "static",
+          audit_package: "deep-static",
+          artifact_root: rootDir,
+          started_at: timestamp,
+          completed_at: "2026-08-26T00:01:00.000Z",
+          static_score: 80,
+          overall_score: 80,
+          rating: "good",
+          created_at: timestamp
+        }
+      });
+      await saveSqliteDatabase(rootDir, db);
+    } finally {
+      db.close();
+    }
+
+    let startCalls = 0;
+    let terminalHookCalls = 0;
+    const manager = new PersistedAsyncJobManager({
+      getRun: () => null,
+      hydrateRun: () => undefined,
+      startRun: async () => { startCalls += 1; },
+      cancelRun: () => false
+    } as any, {
+      onTerminalJob: ({ job, attempt, envelope }) => {
+        terminalHookCalls += 1;
+        assert.equal(job.status, "succeeded");
+        assert.equal(attempt.status, "succeeded");
+        assert.equal(envelope.status, "succeeded");
+      }
+    });
+
+    await withEnv({ HARNESS_LOCAL_DB_ROOT: rootDir }, async () => {
+      await Promise.all([manager.recoverJobs(), manager.recoverJobs()]);
+      await manager.recoverJobs();
+    });
+
+    const recoveredJob = await readPersistedAsyncJob(jobId, rootDir);
+    const recoveredAttempts = await readPersistedAsyncJobAttempts(jobId, rootDir);
+    assert.equal(startCalls, 0);
+    assert.equal(terminalHookCalls, 1);
+    assert.equal(recoveredJob?.status, "succeeded");
+    assert.equal(recoveredJob?.completed_at, "2026-08-26T00:01:00.000Z");
+    assert.equal(recoveredAttempts.length, 1);
+    assert.equal(recoveredAttempts[0]?.status, "succeeded");
+    assert.equal(recoveredAttempts[0]?.completed_at, "2026-08-26T00:01:00.000Z");
   });
 }
 
@@ -7845,6 +8016,8 @@ async function main(): Promise<void> {
     ["provider workload policy, budgets, and circuit breaker", testProviderWorkloadPolicyAndBudgets],
     ["local persistence uses configured root", testLocalPersistenceUsesConfiguredRoot],
     ["concurrent sqlite writes are merged", testConcurrentSqliteWritesAreMerged],
+    ["sqlite corruption and failed saves fail closed", testSqliteCorruptionAndFailedSavesFailClosed],
+    ["async recovery reconciles durable terminal run", testAsyncRecoveryReconcilesDurableTerminalRun],
     ["psql credentials use process environment", testPsqlCredentialsUseEnvironment],
     ["compactBundleExports prunes optional debug bundles", testCompactBundleExportsPrunesOptionalDebugBundles],
     ["pruneArtifacts removes old run bundles and updates index", testPruneArtifactsRemovesOldRunBundlesAndUpdatesIndex],

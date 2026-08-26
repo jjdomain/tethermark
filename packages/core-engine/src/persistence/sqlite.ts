@@ -14,6 +14,21 @@ const initSqlJs: any = require("sql.js/dist/sql-wasm.js");
 let sqlJsPromise: Promise<any> | null = null;
 const sqliteSaveQueues = new Map<string, Promise<void>>();
 const sqliteOpenSnapshots = new WeakMap<object, Map<string, SqliteRecordRow>>();
+let sqliteSaveFailureForTests: "before_temp_write" | "before_replace" | null = null;
+
+export class SqlitePersistenceError extends Error {
+  constructor(
+    public readonly persistence_code: "sqlite_database_unavailable" | "sqlite_database_corrupt_or_unsupported" | "sqlite_save_failed",
+    options?: { cause?: unknown }
+  ) {
+    super(persistence_code, options);
+    this.name = "SqlitePersistenceError";
+  }
+}
+
+export function setSqliteSaveFailureForTests(stage: "before_temp_write" | "before_replace" | null): void {
+  sqliteSaveFailureForTests = stage;
+}
 
 interface SqliteRecordRow {
   table_name: string;
@@ -194,6 +209,34 @@ export async function hasSqliteDatabase(rootDir: string): Promise<boolean> {
   }
 }
 
+function filesystemErrorCode(error: unknown): string {
+  return typeof error === "object" && error && "code" in error ? String((error as { code?: unknown }).code) : "";
+}
+
+async function readExistingSqliteBytes(rootDir: string): Promise<Uint8Array | null> {
+  try {
+    return await fs.readFile(sqliteDbPath(rootDir));
+  } catch (error) {
+    if (filesystemErrorCode(error) === "ENOENT") return null;
+    throw new SqlitePersistenceError("sqlite_database_unavailable", { cause: error });
+  }
+}
+
+function openSqliteBytes(SQL: any, bytes: Uint8Array | null): any {
+  if (!bytes) return new SQL.Database();
+  let db: any = null;
+  try {
+    db = new SQL.Database(bytes);
+    const check = db.exec("PRAGMA quick_check(1)");
+    const result = String(check?.[0]?.values?.[0]?.[0] ?? "");
+    if (result !== "ok") throw new Error("sqlite_quick_check_failed");
+    return db;
+  } catch (error) {
+    db?.close?.();
+    throw new SqlitePersistenceError("sqlite_database_corrupt_or_unsupported", { cause: error });
+  }
+}
+
 export async function openSqliteDatabase(rootDir: string): Promise<any> {
   if (isRemoteRoot(rootDir)) {
     return {
@@ -207,14 +250,7 @@ export async function openSqliteDatabase(rootDir: string): Promise<any> {
     } satisfies RemoteRecordDatabase;
   }
   const SQL = await getSqlJs();
-  const dbPath = sqliteDbPath(rootDir);
-  let db: any;
-  try {
-    const bytes = await fs.readFile(dbPath);
-    db = new SQL.Database(bytes);
-  } catch {
-    db = new SQL.Database();
-  }
+  const db = openSqliteBytes(SQL, await readExistingSqliteBytes(rootDir));
   sqliteOpenSnapshots.set(db, readSqliteRecordSnapshot(db));
   return db;
 }
@@ -405,11 +441,7 @@ function recordsEqual(left: SqliteRecordRow | undefined, right: SqliteRecordRow)
 
 async function openLatestSqliteDatabase(rootDir: string): Promise<any> {
   const SQL = await getSqlJs();
-  try {
-    return new SQL.Database(await fs.readFile(sqliteDbPath(rootDir)));
-  } catch {
-    return new SQL.Database();
-  }
+  return openSqliteBytes(SQL, await readExistingSqliteBytes(rootDir));
 }
 
 function mergeSqliteRecordChanges(args: {
@@ -475,11 +507,18 @@ export async function saveSqliteDatabase(rootDir: string, db: any, databaseMode:
     try {
       ensureSqliteSchema(latestDb);
       mergeSqliteRecordChanges({ latestDb, original, current });
+      if (sqliteSaveFailureForTests === "before_temp_write") {
+        throw Object.assign(new Error("simulated_sqlite_disk_full"), { code: "ENOSPC" });
+      }
       await fs.writeFile(tempPath, Buffer.from(latestDb.export()));
+      if (sqliteSaveFailureForTests === "before_replace") {
+        throw Object.assign(new Error("simulated_sqlite_replace_failure"), { code: "EIO" });
+      }
       await replaceSqliteFile(tempPath, dbPath);
     } catch (error) {
       await fs.rm(tempPath, { force: true }).catch(() => undefined);
-      throw error;
+      if (error instanceof SqlitePersistenceError) throw error;
+      throw new SqlitePersistenceError("sqlite_save_failed", { cause: error });
     } finally {
       latestDb.close();
     }
