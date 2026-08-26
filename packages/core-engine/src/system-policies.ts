@@ -11,6 +11,7 @@ import { ensureSqliteSchema, openSqliteDatabase, readSqliteTable, saveSqliteData
 
 export const SYSTEM_POLICY_SCHEMA_VERSION = "2026-08-21.system-policy.v1";
 export const SYSTEM_POLICY_RESOLUTION_SCHEMA_VERSION = "2026-08-21.resolved-system-policy.v1";
+const builtinPolicyEnsurePromises = new Map<string, Promise<PersistedSystemPolicyRecord[]>>();
 
 export type SystemPolicyStatus = "draft" | "active" | "archived";
 export type SystemPolicyTemplateId = "baseline-static-safe" | "agentic-static-safe" | "extensive-static-safe" | "extensive-runtime-local-safe";
@@ -476,13 +477,20 @@ export async function archivePersistedSystemPolicy(policyId: string, actorId?: s
   return (await getPersistedSystemPolicy(policyId, workspace, rootDirOrOptions))!;
 }
 
-export async function ensureBuiltinSystemPolicies(workspaceId?: string, rootDirOrOptions?: string | PersistenceReadOptions): Promise<PersistedSystemPolicyRecord[]> {
+async function ensureBuiltinSystemPoliciesOnce(workspaceId?: string, rootDirOrOptions?: string | PersistenceReadOptions): Promise<PersistedSystemPolicyRecord[]> {
   const workspace = normalizeWorkspaceId(workspaceId);
   let policies = await listPersistedSystemPolicies(workspace, rootDirOrOptions);
   for (const template of listBuiltinSystemPolicyTemplates()) {
     if (policies.some((item) => item.id === template.id)) continue;
-    await createPersistedSystemPolicy({ id: template.id, name: template.name, description: template.description, template_id: template.id, actor_id: "system", reason: "installed built-in safe policy", workspace_id: workspace }, rootDirOrOptions);
-    await publishPersistedSystemPolicy(template.id, "system", "published built-in safe policy", workspace, rootDirOrOptions);
+    try {
+      await createPersistedSystemPolicy({ id: template.id, name: template.name, description: template.description, template_id: template.id, actor_id: "system", reason: "installed built-in safe policy", workspace_id: workspace }, rootDirOrOptions);
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== "system_policy_exists") throw error;
+    }
+    const installed = await getPersistedSystemPolicy(template.id, workspace, rootDirOrOptions);
+    if (installed?.policy.status !== "active") {
+      await publishPersistedSystemPolicy(template.id, "system", "published built-in safe policy", workspace, rootDirOrOptions);
+    }
     policies = await listPersistedSystemPolicies(workspace, rootDirOrOptions);
   }
   if (!policies.some((item) => item.is_default && item.status === "active")) {
@@ -506,6 +514,21 @@ export async function ensureBuiltinSystemPolicies(workspaceId?: string, rootDirO
     }, rootDirOrOptions);
   }
   return listPersistedSystemPolicies(workspace, rootDirOrOptions);
+}
+
+export async function ensureBuiltinSystemPolicies(workspaceId?: string, rootDirOrOptions?: string | PersistenceReadOptions): Promise<PersistedSystemPolicyRecord[]> {
+  const workspace = normalizeWorkspaceId(workspaceId);
+  const location = resolvePersistenceLocation(typeof rootDirOrOptions === "string" ? { rootDir: rootDirOrOptions } : rootDirOrOptions);
+  const key = `${location.mode}:${location.rootDir}:${workspace}`;
+  const existing = builtinPolicyEnsurePromises.get(key);
+  if (existing) return existing;
+  const pending = ensureBuiltinSystemPoliciesOnce(workspace, rootDirOrOptions);
+  builtinPolicyEnsurePromises.set(key, pending);
+  try {
+    return await pending;
+  } finally {
+    if (builtinPolicyEnsurePromises.get(key) === pending) builtinPolicyEnsurePromises.delete(key);
+  }
 }
 
 export async function upsertPersistedSystemPolicyBinding(input: {

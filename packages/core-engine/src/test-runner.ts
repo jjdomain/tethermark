@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { buildRunComparisonReport, createApiServer } from "../../../apps/api-server/src/index.js";
@@ -876,6 +877,137 @@ async function testSqliteCorruptionAndFailedSavesFailClosed(): Promise<void> {
   });
 }
 
+async function testConcurrentSqliteProcessWritesAreMerged(): Promise<void> {
+  await withTempDir("tethermark-sqlite-process-concurrency-", async (rootDir) => {
+    const workerPath = path.resolve(process.cwd(), "scripts", "sqlite-stress-worker.mjs");
+    const workerCount = 4;
+    const writesPerWorker = 5;
+    const runWorker = (workerIndex: number) => new Promise<void>((resolve, reject) => {
+      const child = spawn(process.execPath, [workerPath, rootDir, `worker-${workerIndex}`, String(writesPerWorker)], {
+        cwd: process.cwd(),
+        env: { ...process.env, HARNESS_SQLITE_LOCK_TIMEOUT_MS: "15000" },
+        shell: false,
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+      const stdout: Buffer[] = [];
+      const stderr: Buffer[] = [];
+      child.stdout.on("data", (chunk) => stdout.push(Buffer.from(chunk)));
+      child.stderr.on("data", (chunk) => stderr.push(Buffer.from(chunk)));
+      child.once("error", reject);
+      child.once("close", (code) => {
+        if (code === 0) {
+          resolve();
+          return;
+        }
+        reject(new Error(`sqlite stress worker ${workerIndex} exited ${code}: ${Buffer.concat(stderr).toString("utf8") || Buffer.concat(stdout).toString("utf8")}`));
+      });
+    });
+
+    await Promise.all(Array.from({ length: workerCount }, (_, index) => runWorker(index)));
+    const verification = await openSqliteDatabase(rootDir);
+    try {
+      ensureSqliteSchema(verification);
+      const records = readSqliteTable<{ id: string }>(verification, "process_concurrency_test");
+      assert.equal(records.length, workerCount * writesPerWorker);
+      assert.equal(new Set(records.map((item) => item.id)).size, workerCount * writesPerWorker);
+    } finally {
+      verification.close();
+    }
+    assert.equal((await fs.readdir(rootDir)).some((item) => item.includes("harness.sqlite.lock")), false);
+    assert.ok(await readPersistenceMetadata(rootDir));
+  });
+}
+
+async function testSqliteFileLockBackoffAndRecovery(): Promise<void> {
+  await withTempDir("tethermark-sqlite-lock-", async (rootDir) => {
+    const databasePath = path.join(rootDir, "harness.sqlite");
+    const lockPath = `${databasePath}.lock`;
+    const seed = await openSqliteDatabase(rootDir);
+    try {
+      ensureSqliteSchema(seed);
+      upsertSqliteRecord({ db: seed, tableName: "lock_test", recordKey: "seed", payload: { id: "seed" } });
+      await saveSqliteDatabase(rootDir, seed);
+    } finally {
+      seed.close();
+    }
+
+    const waitingWriter = await openSqliteDatabase(rootDir);
+    try {
+      ensureSqliteSchema(waitingWriter);
+      upsertSqliteRecord({ db: waitingWriter, tableName: "lock_test", recordKey: "backoff", payload: { id: "backoff" } });
+      await fs.writeFile(lockPath, JSON.stringify({ token: "held-by-test" }), { encoding: "utf8", flag: "wx" });
+      const delayedRelease = new Promise<void>((resolve, reject) => {
+        setTimeout(() => {
+          void fs.rm(lockPath, { force: true }).then(() => resolve(), reject);
+        }, 60);
+      });
+      await withEnv({
+        HARNESS_SQLITE_LOCK_TIMEOUT_MS: "1000",
+        HARNESS_SQLITE_LOCK_STALE_MS: "60000",
+        HARNESS_SQLITE_LOCK_BACKOFF_BASE_MS: "10",
+        HARNESS_SQLITE_LOCK_BACKOFF_MAX_MS: "25"
+      }, async () => {
+        await Promise.all([saveSqliteDatabase(rootDir, waitingWriter), delayedRelease]);
+      });
+    } finally {
+      waitingWriter.close();
+      await fs.rm(lockPath, { force: true });
+    }
+
+    const timedOutWriter = await openSqliteDatabase(rootDir);
+    try {
+      ensureSqliteSchema(timedOutWriter);
+      upsertSqliteRecord({ db: timedOutWriter, tableName: "lock_test", recordKey: "timeout", payload: { id: "timeout" } });
+      await fs.writeFile(lockPath, JSON.stringify({ token: "still-held-by-test" }), { encoding: "utf8", flag: "wx" });
+      await withEnv({
+        HARNESS_SQLITE_LOCK_TIMEOUT_MS: "40",
+        HARNESS_SQLITE_LOCK_STALE_MS: "60000",
+        HARNESS_SQLITE_LOCK_BACKOFF_BASE_MS: "10",
+        HARNESS_SQLITE_LOCK_BACKOFF_MAX_MS: "20"
+      }, async () => {
+        await assert.rejects(
+          () => saveSqliteDatabase(rootDir, timedOutWriter),
+          (error: unknown) => error instanceof SqlitePersistenceError && error.persistence_code === "sqlite_database_locked"
+        );
+      });
+    } finally {
+      timedOutWriter.close();
+      await fs.rm(lockPath, { force: true });
+    }
+
+    const staleLockWriter = await openSqliteDatabase(rootDir);
+    try {
+      ensureSqliteSchema(staleLockWriter);
+      upsertSqliteRecord({ db: staleLockWriter, tableName: "lock_test", recordKey: "stale", payload: { id: "stale" } });
+      await fs.writeFile(lockPath, JSON.stringify({ token: "crashed-owner" }), { encoding: "utf8", flag: "wx" });
+      const oldLockTime = new Date(Date.now() - 60_000);
+      await fs.utimes(lockPath, oldLockTime, oldLockTime);
+      await withEnv({
+        HARNESS_SQLITE_LOCK_TIMEOUT_MS: "500",
+        HARNESS_SQLITE_LOCK_STALE_MS: "20",
+        HARNESS_SQLITE_LOCK_BACKOFF_BASE_MS: "5",
+        HARNESS_SQLITE_LOCK_BACKOFF_MAX_MS: "10"
+      }, async () => saveSqliteDatabase(rootDir, staleLockWriter));
+    } finally {
+      staleLockWriter.close();
+      await fs.rm(lockPath, { force: true });
+    }
+
+    const verification = await openSqliteDatabase(rootDir);
+    try {
+      ensureSqliteSchema(verification);
+      assert.deepEqual(
+        readSqliteTable<{ id: string }>(verification, "lock_test").map((item) => item.id).sort(),
+        ["backoff", "seed", "stale"]
+      );
+    } finally {
+      verification.close();
+    }
+    assert.equal((await fs.readdir(rootDir)).some((item) => item.includes("harness.sqlite.lock")), false);
+  });
+}
+
 async function testAsyncRecoveryReconcilesDurableTerminalRun(): Promise<void> {
   await withTempDir("tethermark-async-terminal-recovery-", async (rootDir) => {
     const jobId = "job_terminal_recovery";
@@ -995,6 +1127,113 @@ async function testAsyncRecoveryReconcilesDurableTerminalRun(): Promise<void> {
     assert.equal(recoveredAttempts.length, 1);
     assert.equal(recoveredAttempts[0]?.status, "succeeded");
     assert.equal(recoveredAttempts[0]?.completed_at, "2026-08-26T00:01:00.000Z");
+  });
+}
+
+async function testConcurrentAsyncWorkerPersistenceStress(): Promise<void> {
+  await withTempDir("tethermark-async-worker-stress-", async (rootDir) => {
+    const runs = new Map<string, any>();
+    let startCalls = 0;
+    const manager = new PersistedAsyncJobManager({
+      hydrateRun: (envelope: any) => runs.set(envelope.run_id, envelope),
+      startRun: async (runId: string) => {
+        startCalls += 1;
+        const envelope = runs.get(runId);
+        runs.set(runId, {
+          ...envelope,
+          status: "succeeded",
+          updated_at: new Date().toISOString(),
+          result: { run_id: runId, findings: [] }
+        });
+      },
+      getRun: (runId: string) => runs.get(runId) ?? null,
+      cancelRun: () => false
+    } as any);
+    const jobCount = 16;
+
+    await withEnv({ HARNESS_LOCAL_DB_ROOT: rootDir }, async () => {
+      const created = await Promise.all(Array.from({ length: jobCount }, (_, index) => manager.createJob({
+        request: {
+          local_path: rootDir,
+          run_mode: "static",
+          audit_package: "deep-static",
+          llm_provider: "mock",
+          llm_model: "mock-agent-runtime",
+          workspace_id: "stress-workspace",
+          project_id: `worker-project-${index}`
+        }
+      })));
+      assert.equal(new Set(created.map((item) => item.job.job_id)).size, jobCount);
+
+      let persistedJobs = await manager.listJobs(rootDir);
+      for (let attempt = 0; attempt < 100 && persistedJobs.some((item) => item.status !== "succeeded"); attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        persistedJobs = await manager.listJobs(rootDir);
+      }
+      assert.equal(persistedJobs.length, jobCount);
+      assert.equal(persistedJobs.every((item) => item.status === "succeeded"), true);
+      assert.equal(startCalls, jobCount);
+      const attempts = await Promise.all(persistedJobs.map((job) => readPersistedAsyncJobAttempts(job.job_id, rootDir)));
+      assert.equal(attempts.every((items) => items.length === 1 && items[0]?.status === "succeeded"), true);
+    });
+  });
+}
+
+async function testConcurrentAsyncApiPersistenceStress(): Promise<void> {
+  await withWorkspaceTempDir("tethermark-async-api-stress-", async (rootDir) => {
+    await stageBuiltinCoreEngineData(rootDir);
+    const stateRoot = path.join(rootDir, "state");
+    const projectDir = path.join(rootDir, "project");
+    await fs.mkdir(projectDir, { recursive: true });
+    await fs.writeFile(path.join(projectDir, "package.json"), JSON.stringify({ name: "api-stress-target", version: "1.0.0" }), "utf8");
+
+    await withEnv({
+      HARNESS_API_AUTH_MODE: "none",
+      HARNESS_LOCAL_DB_ROOT: stateRoot,
+      HARNESS_DISABLE_LOCAL_BINARIES: "1",
+      HARNESS_DISABLE_PYTHON_WORKERS: "1"
+    }, async () => withWorkingDir(rootDir, async () => {
+      const server = createApiServer();
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", () => resolve());
+      });
+      const baseUrl = `http://127.0.0.1:${getListeningPort(server)}`;
+      const requestCount = 16;
+      try {
+        await waitForServer(`${baseUrl}/health`);
+        const responses = await Promise.all(Array.from({ length: requestCount }, () => fetch(`${baseUrl}/runs/async`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-harness-workspace": "stress-workspace", "x-harness-project": "stress-project" },
+          body: JSON.stringify({
+            request: {
+              local_path: projectDir,
+              run_mode: "static",
+              audit_package: "deep-static",
+              llm_provider: "mock",
+              llm_model: "mock-agent-runtime"
+            },
+            start_immediately: false
+          })
+        })));
+        const payloads = await Promise.all(responses.map((response) => response.json() as Promise<any>));
+        assert.equal(responses.every((response) => response.status === 202), true, JSON.stringify(payloads));
+        assert.equal(new Set(payloads.map((payload) => payload.job.job_id)).size, requestCount);
+        assert.equal(payloads.every((payload) => payload.job.status === "queued" && payload.attempts.length === 1), true);
+
+        const listResponse = await fetch(`${baseUrl}/runs/async`, {
+          headers: { "x-harness-workspace": "stress-workspace", "x-harness-project": "stress-project" }
+        });
+        const listPayload = await listResponse.json() as any;
+        assert.equal(listResponse.status, 200);
+        assert.equal(listPayload.jobs.length, requestCount);
+        assert.equal(listPayload.jobs.every((job: any) => job.status === "queued"), true);
+        const attempts = await Promise.all(listPayload.jobs.map((job: any) => readPersistedAsyncJobAttempts(job.job_id, stateRoot)));
+        assert.equal(attempts.every((items) => items.length === 1 && items[0]?.status === "queued"), true);
+      } finally {
+        await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      }
+    }));
   });
 }
 
@@ -8016,8 +8255,12 @@ async function main(): Promise<void> {
     ["provider workload policy, budgets, and circuit breaker", testProviderWorkloadPolicyAndBudgets],
     ["local persistence uses configured root", testLocalPersistenceUsesConfiguredRoot],
     ["concurrent sqlite writes are merged", testConcurrentSqliteWritesAreMerged],
+    ["concurrent sqlite process writes are merged", testConcurrentSqliteProcessWritesAreMerged],
     ["sqlite corruption and failed saves fail closed", testSqliteCorruptionAndFailedSavesFailClosed],
+    ["sqlite file lock backoff and recovery", testSqliteFileLockBackoffAndRecovery],
     ["async recovery reconciles durable terminal run", testAsyncRecoveryReconcilesDurableTerminalRun],
+    ["concurrent async worker persistence stress", testConcurrentAsyncWorkerPersistenceStress],
+    ["concurrent async api persistence stress", testConcurrentAsyncApiPersistenceStress],
     ["psql credentials use process environment", testPsqlCredentialsUseEnvironment],
     ["compactBundleExports prunes optional debug bundles", testCompactBundleExportsPrunesOptionalDebugBundles],
     ["pruneArtifacts removes old run bundles and updates index", testPruneArtifactsRemovesOldRunBundlesAndUpdatesIndex],

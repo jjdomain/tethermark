@@ -18,7 +18,7 @@ let sqliteSaveFailureForTests: "before_temp_write" | "before_replace" | null = n
 
 export class SqlitePersistenceError extends Error {
   constructor(
-    public readonly persistence_code: "sqlite_database_unavailable" | "sqlite_database_corrupt_or_unsupported" | "sqlite_save_failed",
+    public readonly persistence_code: "sqlite_database_unavailable" | "sqlite_database_corrupt_or_unsupported" | "sqlite_database_locked" | "sqlite_save_failed",
     options?: { cause?: unknown }
   ) {
     super(persistence_code, options);
@@ -331,6 +331,86 @@ async function waitForWritablePathError(error: unknown, attempt: number): Promis
   return true;
 }
 
+function positiveIntegerEnv(name: string, fallback: number): number {
+  const configured = Number(process.env[name]);
+  return Number.isFinite(configured) && configured > 0 ? Math.floor(configured) : fallback;
+}
+
+function sqliteLockPath(dbPath: string): string {
+  return `${dbPath}.lock`;
+}
+
+async function clearStaleSqliteLock(lockPath: string, staleAfterMs: number): Promise<boolean> {
+  try {
+    const lockStat = await fs.stat(lockPath);
+    if (Date.now() - lockStat.mtimeMs < staleAfterMs) return false;
+  } catch (error) {
+    if (filesystemErrorCode(error) === "ENOENT") return true;
+    return false;
+  }
+
+  const quarantinePath = `${lockPath}.stale.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}`;
+  try {
+    await fs.rename(lockPath, quarantinePath);
+    await fs.rm(quarantinePath, { force: true });
+    return true;
+  } catch (error) {
+    if (filesystemErrorCode(error) === "ENOENT") return true;
+    return false;
+  }
+}
+
+async function acquireSqliteFileLock(dbPath: string): Promise<{
+  handle: Awaited<ReturnType<typeof fs.open>>;
+  lockPath: string;
+  token: string;
+}> {
+  const lockPath = sqliteLockPath(dbPath);
+  const timeoutMs = positiveIntegerEnv("HARNESS_SQLITE_LOCK_TIMEOUT_MS", 10_000);
+  const staleAfterMs = positiveIntegerEnv("HARNESS_SQLITE_LOCK_STALE_MS", 120_000);
+  const backoffBaseMs = positiveIntegerEnv("HARNESS_SQLITE_LOCK_BACKOFF_BASE_MS", 20);
+  const backoffMaxMs = positiveIntegerEnv("HARNESS_SQLITE_LOCK_BACKOFF_MAX_MS", 500);
+  const startedAt = Date.now();
+  let attempt = 0;
+
+  while (true) {
+    const token = `${process.pid}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
+    let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
+    try {
+      handle = await fs.open(lockPath, "wx", 0o600);
+      await handle.writeFile(JSON.stringify({ token, pid: process.pid, acquired_at: new Date().toISOString() }), "utf8");
+      return { handle, lockPath, token };
+    } catch (error) {
+      if (handle) {
+        await handle.close().catch(() => undefined);
+        await fs.rm(lockPath, { force: true }).catch(() => undefined);
+      }
+      if (filesystemErrorCode(error) !== "EEXIST") {
+        throw new SqlitePersistenceError("sqlite_database_unavailable", { cause: error });
+      }
+      if (await clearStaleSqliteLock(lockPath, staleAfterMs)) continue;
+      const elapsedMs = Date.now() - startedAt;
+      if (elapsedMs >= timeoutMs) {
+        throw new SqlitePersistenceError("sqlite_database_locked", { cause: error });
+      }
+      const delayMs = Math.min(backoffMaxMs, backoffBaseMs * (2 ** Math.min(attempt, 8)), timeoutMs - elapsedMs);
+      attempt += 1;
+      await new Promise((resolve) => setTimeout(resolve, Math.max(1, delayMs)));
+    }
+  }
+}
+
+async function releaseSqliteFileLock(lock: Awaited<ReturnType<typeof acquireSqliteFileLock>>): Promise<void> {
+  await lock.handle.close().catch(() => undefined);
+  try {
+    const owner = JSON.parse(await fs.readFile(lock.lockPath, "utf8")) as { token?: unknown };
+    if (owner.token === lock.token) await fs.rm(lock.lockPath, { force: true });
+  } catch {
+    // A crashed/stale owner may already have been quarantined. Never remove a
+    // replacement lock unless this process can prove ownership by token.
+  }
+}
+
 async function pathExists(filePath: string): Promise<boolean> {
   try {
     await fs.access(filePath);
@@ -502,25 +582,30 @@ export async function saveSqliteDatabase(rootDir: string, db: any, databaseMode:
   const current = readSqliteRecordSnapshot(db);
   const dbPath = sqliteDbPath(rootDir);
   await enqueueSqliteSave(dbPath, async () => {
-    const latestDb = await openLatestSqliteDatabase(rootDir);
-    const tempPath = `${dbPath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+    const fileLock = await acquireSqliteFileLock(dbPath);
     try {
-      ensureSqliteSchema(latestDb);
-      mergeSqliteRecordChanges({ latestDb, original, current });
-      if (sqliteSaveFailureForTests === "before_temp_write") {
-        throw Object.assign(new Error("simulated_sqlite_disk_full"), { code: "ENOSPC" });
+      const latestDb = await openLatestSqliteDatabase(rootDir);
+      const tempPath = `${dbPath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+      try {
+        ensureSqliteSchema(latestDb);
+        mergeSqliteRecordChanges({ latestDb, original, current });
+        if (sqliteSaveFailureForTests === "before_temp_write") {
+          throw Object.assign(new Error("simulated_sqlite_disk_full"), { code: "ENOSPC" });
+        }
+        await fs.writeFile(tempPath, Buffer.from(latestDb.export()));
+        if (sqliteSaveFailureForTests === "before_replace") {
+          throw Object.assign(new Error("simulated_sqlite_replace_failure"), { code: "EIO" });
+        }
+        await replaceSqliteFile(tempPath, dbPath);
+      } catch (error) {
+        await fs.rm(tempPath, { force: true }).catch(() => undefined);
+        if (error instanceof SqlitePersistenceError) throw error;
+        throw new SqlitePersistenceError("sqlite_save_failed", { cause: error });
+      } finally {
+        latestDb.close();
       }
-      await fs.writeFile(tempPath, Buffer.from(latestDb.export()));
-      if (sqliteSaveFailureForTests === "before_replace") {
-        throw Object.assign(new Error("simulated_sqlite_replace_failure"), { code: "EIO" });
-      }
-      await replaceSqliteFile(tempPath, dbPath);
-    } catch (error) {
-      await fs.rm(tempPath, { force: true }).catch(() => undefined);
-      if (error instanceof SqlitePersistenceError) throw error;
-      throw new SqlitePersistenceError("sqlite_save_failed", { cause: error });
     } finally {
-      latestDb.close();
+      await releaseSqliteFileLock(fileLock);
     }
   });
   sqliteOpenSnapshots.set(db, current);

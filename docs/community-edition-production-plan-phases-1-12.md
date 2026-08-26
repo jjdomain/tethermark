@@ -549,7 +549,9 @@ Remaining tasks:
   - [x] Fail closed when the local SQLite file is unreadable, corrupt, or unsupported instead of silently opening an empty database; run `quick_check` on every existing database before use.
   - [x] Preserve the last valid database and remove temporary output when a save fails before the temporary write or before replacement, with deterministic disk-full/replacement fault regressions.
   - [x] Reconcile an already-persisted terminal run into its interrupted async job/attempt on restart without executing the run again or duplicating terminal hooks.
-  - [ ] Add per-stage crash injection, multi-request API/worker stress, and explicit filesystem lock/backoff coverage.
+  - [x] Add bounded filesystem lock acquisition with exponential backoff, stale-owner quarantine, ownership-safe release, and a distinct lock-timeout failure.
+  - [x] Stress simultaneous API queue requests, concurrent worker lifecycle transitions, and independent Node processes writing the same database without lost records.
+  - [ ] Add per-stage crash injection across the remaining async lifecycle and persistence boundaries.
 - [ ] Add automatic backup, restore verification, migration rollback guidance, and release-to-release upgrade fixtures.
 - [ ] Finish retention scheduling and ensure database rows/artifacts remain consistent after pruning.
 - [ ] Decide how promoted learning overlays are consumed by planner/prompts/rules, with strict versioning and rollback.
