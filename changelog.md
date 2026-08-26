@@ -4,6 +4,10 @@
 
 ### Changed
 
+- Learning model synthesis now requires a checksum-verified, exact-scope operator launch by default. Scheduled and event-driven synthesis can proceed only through the Phase 2 `unattended_local` API-key/mock policy, while Codex/ChatGPT-session background use fails closed; learning records retain the non-secret authorization decision.
+- Permissive governance actions now require content-hashed human approval records. Policy/control changes, severity downgrades, suppressions, waivers, package/evidence/lane reduction, and runtime-probe removal are tied to authenticated API or local interactive CLI launches and append-only reviewer/policy events; unattended and model-driven weakening fails closed.
+- Approved learning promotions now resolve into immutable per-run overlay snapshots. Additive evidence/validation and bounded advisory effects reach planner/model contexts and deterministic selection rules; permissive suppression/severity promotions remain non-executable without governed policy/disposition records, and rollback changes the resolution version for future runs.
+- The API now schedules artifact retention with 30-day run and 7-day sandbox defaults, protects active durable jobs, preserves normalized SQLite history, reconciles stale raw-artifact index rows, and records bounded maintenance history with retryable failure state.
 - Local SQLite persistence now validates existing databases before use, fails closed on corrupt or unreadable files, and preserves the last valid database when a temporary write or replacement fails.
 - Local SQLite writers in separate processes now coordinate through a bounded sidecar lock with exponential backoff, stale-lock recovery, ownership-safe release, and an explicit `sqlite_database_locked` timeout.
 - Async restart recovery now reconciles already-persisted terminal runs into their job and attempt records instead of executing those runs again.
@@ -15,6 +19,10 @@
 
 ### Verified
 
+- Learning-synthesis regressions cover exact-scope operator approvals, approval reuse rejection, Codex/ChatGPT-session background denial, Phase 2 API-key background authorization, API lifecycle evidence, and atomic synthesis-attempt budgets.
+- Human-approval regressions cover checksum tampering, unapproved policy-pack exceptions, protected review actions, policy activation evidence, authenticated interactive reduction requests, and unattended-request rejection.
+- Learning overlay regressions cover content-derived artifact versions, scope/approval resolution, additive planner and evidence effects, prompt trust boundaries, non-executable permissive overlays, and rollback removal on subsequent resolutions.
+- Retention regressions prove completed raw artifacts prune, active run directories survive, normalized run rows remain queryable, stale artifact pointers are removed, and a successful schedule does not rerun before its interval.
 - Deterministic persistence regressions cover corrupt-database rejection, disk-full/pre-replacement failure preservation, temporary-file cleanup, concurrent-write compatibility, and idempotent terminal-run recovery.
 - Persistence stress regressions cover simultaneous API queue requests, concurrent worker terminal transitions, lock contention/timeout/stale-owner recovery, and independent Node processes writing one database without record loss.
 - Crash-stage regressions use real child-process exits after SQLite lock/temp/replace boundaries and deterministic interruptions after every durable async lifecycle transition.

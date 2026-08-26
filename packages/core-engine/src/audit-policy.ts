@@ -8,6 +8,7 @@ import type {
   ControlWaiverRule,
   FindingSuppressionRule
 } from "./contracts.js";
+import { requireHumanApproval } from "./human-approval.js";
 
 export interface AuditPolicyPackDefinition {
   id: string;
@@ -49,6 +50,11 @@ function validateSuppressionRule(rule: FindingSuppressionRule, context: string, 
   if (selectorCount === 0) {
     throw new Error(`${context}: finding_suppressions[${index}] must define at least one selector.`);
   }
+  try {
+    requireHumanApproval(rule.human_approval, { action: "finding_suppression", subject: rule.rule_id });
+  } catch {
+    throw new Error(`${context}: finding_suppressions[${index}] requires a valid immutable human approval for rule '${rule.rule_id}'.`);
+  }
 }
 
 function validateWaiverRule(rule: ControlWaiverRule, context: string, index: number): void {
@@ -60,6 +66,11 @@ function validateWaiverRule(rule: ControlWaiverRule, context: string, index: num
   }
   if (!Array.isArray(rule.control_ids) || rule.control_ids.length === 0 || !rule.control_ids.every(isNonEmptyString)) {
     throw new Error(`${context}: control_waivers[${index}] must include one or more non-empty control_ids.`);
+  }
+  try {
+    requireHumanApproval(rule.human_approval, { action: "control_waiver", subject: rule.rule_id });
+  } catch {
+    throw new Error(`${context}: control_waivers[${index}] requires a valid immutable human approval for rule '${rule.rule_id}'.`);
   }
 }
 

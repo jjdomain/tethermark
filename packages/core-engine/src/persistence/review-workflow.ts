@@ -9,6 +9,7 @@ import type {
   PersistedReviewWorkflowRecord,
   PersistedRunRecord
 } from "./contracts.js";
+import { createHumanApprovalRecord, type HumanApprovalAction } from "../human-approval.js";
 import { getPersistedRun, listPersistedRuns, type PersistedRunQuery } from "./query.js";
 import { ensureSqliteSchema, hasSqliteDatabase, openSqliteDatabase, readSqliteTable, saveSqliteDatabase, upsertSqliteRecord } from "./sqlite.js";
 
@@ -236,6 +237,34 @@ export async function submitPersistedReviewAction(args: {
   const projectId = normalizeProjectId(run.project_id);
   const createdAt = args.input.created_at ?? new Date().toISOString();
   const actionId = `${args.runId}:review-action:${createdAt}:${args.input.reviewer_id}:${args.input.action_type}:${Math.random().toString(36).slice(2, 10)}`;
+  const severityRank: Record<string, number> = { low: 0, medium: 1, high: 2, critical: 3 };
+  if (args.input.action_type === "downgrade_severity" && !(
+    String(args.input.previous_severity) in severityRank
+    && String(args.input.updated_severity) in severityRank
+    && severityRank[String(args.input.updated_severity)] < severityRank[String(args.input.previous_severity)]
+  )) throw new Error("invalid_severity_downgrade");
+  const protectedApprovalAction: HumanApprovalAction | null = args.input.action_type === "suppress_finding"
+    ? "finding_suppression"
+    : args.input.action_type === "waive_control"
+      ? "control_waiver"
+    : args.input.action_type === "accept_without_runtime_validation"
+      ? "runtime_probe_removal"
+      : args.input.action_type === "downgrade_severity"
+        ? "severity_downgrade"
+        : null;
+  if (protectedApprovalAction && !args.input.notes?.trim()) throw new Error("human_approval_reason_required");
+  const metadata = args.input.metadata && typeof args.input.metadata === "object" ? { ...args.input.metadata } : {};
+  if (protectedApprovalAction) {
+    metadata.human_approval = createHumanApprovalRecord({
+      approvalId: actionId,
+      action: protectedApprovalAction,
+      subject: args.input.finding_id?.trim() || args.runId,
+      approvedBy: args.input.reviewer_id,
+      approvedAt: createdAt,
+      reason: args.input.notes ?? `${args.input.action_type} approved by reviewer`,
+      source: "review_action"
+    });
+  }
   const action: PersistedReviewActionRecord = {
     id: actionId,
     run_id: args.runId,
@@ -253,7 +282,7 @@ export async function submitPersistedReviewAction(args: {
     review_priority: args.input.review_priority ?? null,
     validation_intent: args.input.validation_intent ?? null,
     notes: args.input.notes ?? null,
-    metadata_json: args.input.metadata ?? null
+    metadata_json: Object.keys(metadata).length ? metadata : null
   };
   const nextWorkflow = applyReviewAction(workflow, action);
   const notification = (() => {

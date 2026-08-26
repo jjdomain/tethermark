@@ -60,7 +60,7 @@ AUDIT_LLM_CIRCUIT_COOLDOWN_MS=120000
 
 ## Audit record
 
-Every agent invocation records the provider, model, credential class, workload class, initiation mode, per-run request index, attempts, start/completion timestamps, token usage, estimated cost when configured, status, and terminal reason. The OpenAI API path records response usage; the Codex path runs `codex exec --json` and records its `turn.completed` usage. A non-mock provider response without auditable usage stops the run before another request. The `provider-policy.json` run artifact records the resolved non-secret policy decisions.
+Every agent invocation records the provider, model, credential class, workload class, initiation mode, per-run request index, attempts, start/completion timestamps, token usage, estimated cost when configured, status, and terminal reason. Learning synthesis additionally records whether exact-scope operator initiation was verified or whether the Phase 2 `unattended_local` API-key/mock exception authorized background work. The OpenAI API path records response usage; the Codex path runs `codex exec --json` and records its `turn.completed` usage. A non-mock provider response without auditable usage stops the run before another request. The `provider-policy.json` run artifact records the resolved non-secret policy decisions.
 
 Authentication tokens, API keys, authorization headers, and local authentication-cache contents are never included in these records.
 

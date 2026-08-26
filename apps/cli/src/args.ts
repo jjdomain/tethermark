@@ -36,6 +36,7 @@ export function buildScanRequest(args: string[]): { request: AuditRequest; targe
   const targetValue = args[2];
   const runMode = (readFlag(args, "--mode") as AuditRequest["run_mode"]) ?? "static";
   const policyPath = readFlag(args, "--policy");
+  const workloadClass = (readFlag(args, "--llm-workload") as AuditRequest["llm_workload_class"]) ?? "interactive_operator";
 
   const request: AuditRequest = {
     run_mode: runMode,
@@ -43,14 +44,15 @@ export function buildScanRequest(args: string[]): { request: AuditRequest; targe
     llm_provider: (readFlag(args, "--llm-provider") as AuditRequest["llm_provider"]) ?? undefined,
     llm_model: readFlag(args, "--llm-model") ?? undefined,
     llm_api_key: readFlag(args, "--llm-api-key") ?? undefined,
-    llm_workload_class: (readFlag(args, "--llm-workload") as AuditRequest["llm_workload_class"]) ?? "interactive_operator",
+    llm_workload_class: workloadClass,
     llm_credential_class: readFlag(args, "--llm-credential-class") as AuditRequest["llm_credential_class"] | undefined,
     llm_max_requests: readNumberFlag(args, "--llm-max-requests"),
     llm_max_tokens: readNumberFlag(args, "--llm-max-tokens"),
     audit_policy_pack: readFlag(args, "--policy-pack") ?? undefined,
     audit_policy: policyPath ? JSON.parse(fs.readFileSync(path.resolve(policyPath), "utf8")) : undefined,
     audit_package: readFlag(args, "--package") as AuditRequest["audit_package"] | undefined,
-    db_mode: readFlag(args, "--db-mode") as AuditRequest["db_mode"] | undefined
+    db_mode: readFlag(args, "--db-mode") as AuditRequest["db_mode"] | undefined,
+    requested_by: workloadClass === "interactive_operator" ? (process.env.USERNAME ?? process.env.USER ?? "local-cli-operator") : undefined
   };
 
   if (readBooleanFlag(args, "--accept-runtime-warning") === true) {

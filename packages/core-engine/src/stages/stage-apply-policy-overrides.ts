@@ -4,6 +4,7 @@ import type {
   Finding,
   PolicyApplicationArtifact
 } from "../contracts.js";
+import { isValidHumanApprovalRecord } from "../human-approval.js";
 
 function isRuleActive(expiresAt?: string | null): boolean {
   return !expiresAt || expiresAt >= new Date().toISOString();
@@ -42,8 +43,14 @@ export function stageApplyPolicyOverrides(args: {
   controlResults: ControlResult[];
   policyApplication: PolicyApplicationArtifact;
 } {
-  const activeSuppressions = (args.auditPolicy.finding_suppressions ?? []).filter((rule) => isRuleActive(rule.expires_at));
-  const activeWaivers = (args.auditPolicy.control_waivers ?? []).filter((rule) => isRuleActive(rule.expires_at));
+  const activeSuppressions = (args.auditPolicy.finding_suppressions ?? []).filter((rule) => (
+    isRuleActive(rule.expires_at)
+    && isValidHumanApprovalRecord(rule.human_approval, { action: "finding_suppression", subject: rule.rule_id })
+  ));
+  const activeWaivers = (args.auditPolicy.control_waivers ?? []).filter((rule) => (
+    isRuleActive(rule.expires_at)
+    && isValidHumanApprovalRecord(rule.human_approval, { action: "control_waiver", subject: rule.rule_id })
+  ));
 
   const suppressedFindingIds = new Set<string>();
   const appliedSuppressions: PolicyApplicationArtifact["applied_suppressions"] = [];
@@ -77,8 +84,12 @@ export function stageApplyPolicyOverrides(args: {
   });
 
   const notes: string[] = [];
+  const rejectedSuppressions = (args.auditPolicy.finding_suppressions ?? []).length - activeSuppressions.length;
+  const rejectedWaivers = (args.auditPolicy.control_waivers ?? []).length - activeWaivers.length;
   if (appliedSuppressions.length) notes.push(`Applied ${appliedSuppressions.length} finding suppression rule(s).`);
   if (appliedWaivers.length) notes.push(`Applied ${appliedWaivers.length} control waiver record(s).`);
+  if (rejectedSuppressions) notes.push(`Ignored ${rejectedSuppressions} expired or unapproved finding suppression rule(s).`);
+  if (rejectedWaivers) notes.push(`Ignored ${rejectedWaivers} expired or unapproved control waiver rule(s).`);
   if (!notes.length) notes.push("No active suppression or waiver rules matched this run.");
 
   return {

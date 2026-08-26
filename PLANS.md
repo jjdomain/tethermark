@@ -33,6 +33,7 @@ Completed:
 - static clone provenance capture with commit SHA recording for repo targets
 - static sandbox storage reporting for per-run target size and file count
 - cleaner active artifact layout using `.artifacts/runs` for run artifacts and `.artifacts/sandboxes` for cloned or mirrored targets
+- scheduled local artifact retention with active-run protection, normalized SQLite history preservation, stale artifact-index reconciliation, and bounded maintenance history
 - Windows local static sandbox backend
 - Linux static sandbox backend
 - Linux container-backend scaffold
@@ -62,7 +63,6 @@ Completed:
 
 Not completed:
 - broader independently reviewed advisory coverage beyond the current four advisories and vulnerability classes, followed by multi-case/repeat model variance and weight/threshold calibration
-- cleanup or archival policy for old historical artifact directories already present under `.artifacts`
 - broader reviewed Garak/PyRIT profiles and deeper scenario coverage beyond the completed bounded initial Inspect packs
 - richer control coverage and framework depth beyond the first static control set
 
@@ -239,7 +239,7 @@ Community Edition Phases 1–9 are complete within the documented platform scope
 2. Complete Phase 11 packaging and cross-platform security.
 3. Execute the Phase 12 release-candidate and beta gates.
 
-Current Phase 10 recovery progress: local SQLite opens reject corrupt/unreadable databases, failed pre-replacement saves preserve the prior valid file, and restart recovery reconciles already-durable terminal runs without adding attempts or duplicate terminal state. Cross-process writers use a bounded sidecar lock with backoff and stale-owner recovery; simultaneous API requests, worker transitions, and independent process writes retain every record. True-process-exit SQLite tests and deterministic async interruption cover each durable lifecycle boundary, including resumable terminal follow-up. Verified scheduled snapshots, fail-closed restore, migration rollback guidance, and an immutable 1.2.0-to-1.3.0 upgrade fixture are complete. Retention scheduling with database-row/artifact consistency is next.
+Current Phase 10 recovery progress: local SQLite opens reject corrupt/unreadable databases, failed pre-replacement saves preserve the prior valid file, and restart recovery reconciles already-durable terminal runs without adding attempts or duplicate terminal state. Cross-process writers use a bounded sidecar lock with backoff and stale-owner recovery; simultaneous API requests, worker transitions, and independent process writes retain every record. True-process-exit SQLite tests and deterministic async interruption cover each durable lifecycle boundary, including resumable terminal follow-up. Verified scheduled snapshots, fail-closed restore, migration rollback guidance, immutable upgrade fixtures, scheduled retention consistency, and content-versioned additive-only learning overlay consumption are complete.
 
 ## Deferred Hosted Worker Deployment
 

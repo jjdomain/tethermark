@@ -12,7 +12,7 @@ V1 implements self-learning as a governed improvement loop:
 - require explicit reviewer promotion before any candidate is treated as approved configuration
 - keep every event, candidate, experiment, promotion, rejection, and rollback queryable and exportable
 
-V1 is intentionally advisory. It helps reviewers notice recurring patterns and approve improvements, but it does not silently change audit execution.
+Candidate generation and dry-run experiments are advisory. A promoted overlay can affect future audits only through the bounded consumption contract below; it never mutates the audit that produced its source signals.
 
 The module is disabled by default. Enabling it records an explicit, versioned operator consent. Candidate generation and LLM synthesis are separate controls; synthesis and source excerpts are both off by default.
 
@@ -20,7 +20,7 @@ The module is disabled by default. Enabling it records an explicit, versioned op
 
 V1 must not:
 
-- change prompt-registry prompts automatically
+- mutate prompt-registry prompt definitions automatically
 - inject hidden assistant memory into future audit prompts
 - add suppressions or waivers without approval
 - downgrade severity, confidence, or visibility automatically
@@ -29,7 +29,22 @@ V1 must not:
 - mutate policy packs, control mappings, or evidence thresholds during a live run
 - run scheduled background tuning jobs that deploy changes without review
 
-The implementation stores promoted candidates as auditable learning overlays. Core audit execution does not consume those overlays until a later, explicit implementation chooses to do so.
+## Approved Overlay Consumption
+
+Each future run resolves active promotions for its workspace, project, target, and run scope. The resolver accepts only unexpired promotions with an explicit human approval record and a corresponding reviewed candidate. It writes the exact `learning-overlay-resolution.v1` content version into the run-version manifest and persists the full resolution as a normalized stage artifact. A resolution-version change invalidates planner, threat-model, and evidence-selection reuse.
+
+Consumption is additive-only:
+
+- evidence-requirement adjustments add validation requirements
+- eval-fixture and runtime-follow-up candidates add validation candidates
+- prompt-improvement and duplicate-grouping candidates are bounded advisory context
+- suppression and severity-calibration promotions remain recorded but have no direct runtime effect; an executable permissive change must use the existing governed system-policy or finding-disposition records
+
+Overlay titles, summaries, and signatures are passed to model contexts as untrusted reviewed data with an explicit instruction boundary. They cannot remove controls or evidence, suppress findings, lower severity, remove runtime probes, or weaken publication/review gates.
+
+The overlay-aware prompt/context contract is versioned as `2026-08-26.agent-context.v3`; the run manifest records that version alongside the resolved overlay version.
+
+Promotion artifacts use a content-derived `learning-overlay.v1.<hash>` version and retain an explicit rollback pointer. Rollback deactivates the promotion; the next run resolves a different version and no longer applies its additive effect. Completed runs retain their immutable resolution snapshot for replay and audit.
 
 ## V2 Boundary
 
@@ -58,6 +73,8 @@ These categories should always require explicit approval:
 - prompt changes that reduce scrutiny
 - anything that can reduce evidence collection, hide findings, or weaken reviewer gates
 
+This boundary is executable, not advisory. Approval records use the versioned `2026-08-26.human-approval.v1` contract and a content checksum. Policy-pack suppression and waiver rules are rejected without a matching approval; persisted dispositions retain the current approval plus prior approval history; severity downgrades and runtime-validation acceptance are written to the append-only review-action log; and policy publish, rollback, default, and binding events retain their approval evidence. Interactive UI/API launches record the authenticated operator, and interactive local CLI launches record the local operator identity, when they request control, package, evidence-lane, or runtime-probe reduction. Unattended, learning, model, automation, anonymous, and arbitrary `system` actors cannot create those approvals. The only system exception is bootstrap of an exact built-in safe policy.
+
 ## V1 Data Model
 
 V1 persists six record families/settings surfaces:
@@ -65,7 +82,7 @@ V1 persists six record families/settings surfaces:
 - `learning_events`: immutable signals from existing persisted workflow records
 - `learning_candidates`: proposed improvements with scope, rationale, source events, expected effect, risk, and approval requirement
 - `learning_experiments`: dry-run replay records with baseline/candidate metrics and regression notes
-- `learning_promotions`: approved overlays with reviewer, scope, version, expiry, rollback pointer, and status
+- `learning_promotions`: approved overlays with reviewer, scope, content-derived version, expiry, rollback pointer, effect mode, and status
 - `learning_jobs`: self-learning pipeline runs, including trigger, status, synced event count, generated candidate count, synthesis count, skipped synthesis count, settings snapshot, metadata, and error state
 - `ui_settings.learning_json`: self-learning trigger, frequency, threshold, LLM synthesis, budget, and promotion guardrail configuration
 
@@ -89,7 +106,7 @@ V1 exposes:
 
 Promotion, rejection, and rollback require reviewer-level governance permission. Experiments are dry-run records and do not mutate audit behavior.
 
-All `GET` routes are read-only. UI load, refresh, and run-detail navigation never sync events, generate candidates, or call a model. Scheduled and event-driven execution must be explicitly enabled and cannot use the local OAuth provider; background deployments use API-key providers with service-side quotas. The daily synthesis budget reserves attempts before provider execution and serializes same-scope work in the Community Edition process.
+All `GET` routes are read-only. UI load, refresh, and run-detail navigation never sync events, generate candidates, or call a model. `POST /learning/run` creates a checksum-verified `learning_model_synthesis` operator record bound to the exact workspace, project, and optional run; merely passing the internal `api` trigger is not proof of operator intent. Scheduled and event-driven execution must be explicitly enabled and is classified as `unattended_local`: it cannot use the local Codex/ChatGPT-session credential, and can synthesize only when `provider-policy.v1` approves an actually configured API-key provider (or deterministic mock). The non-secret authorization and provider-policy decision is retained in learning-job and synthesis metadata. The daily synthesis budget reserves attempts before provider execution and serializes same-scope work in the Community Edition process.
 
 ## Historical Implementation Plan
 

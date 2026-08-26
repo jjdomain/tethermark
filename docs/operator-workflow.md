@@ -129,6 +129,21 @@ npm run scan -- doctor
 
 Restore accepts only a verified, compatible backup and replaces the database atomically. A valid current database is first captured as a `pre-restore` safety backup. An invalid current database is retained as `harness.sqlite.rejected.<timestamp>` for diagnosis. Do not merge SQLite files by hand. Run validation and open several historical runs before resuming audits. Back up retained run artifacts under `.artifacts` separately; the SQLite snapshot does not copy those artifact directories.
 
+## Artifact Retention
+
+While the API is running, Tethermark checks retention on startup and then on a bounded schedule. The default cycle retains run artifacts for 30 days and sandbox/source copies for 7 days. It never prunes a run ID referenced by a queued, starting, or running durable job. Pruning removes raw local directories and their `run-index.json` entries, reconciles SQLite `artifact_index` rows that point to deleted managed files, and preserves normalized audit, finding, evidence, review, remediation, and learning records.
+
+Use **System -> Data -> Artifact Retention** or the CLI for an operator-controlled preview:
+
+```powershell
+npm run scan -- artifacts prune --kind all --older-than 30d --dry-run
+npm run scan -- artifacts prune --kind all --older-than 30d
+```
+
+The scheduled defaults can be changed with `HARNESS_ARTIFACT_RETENTION_DAYS`, `HARNESS_SANDBOX_RETENTION_DAYS`, `HARNESS_ARTIFACT_RETENTION_MAX_GB`, and `HARNESS_ARTIFACT_RETENTION_INTERVAL_MS`. `HARNESS_ARTIFACT_RETENTION_SCHEDULER_POLL_MS` changes how often the API checks whether a cycle is due. Set `HARNESS_DISABLE_ARTIFACT_RETENTION_SCHEDULER=1` only when another trusted maintenance process owns cleanup.
+
+The latest state is recorded in `.artifacts/maintenance/artifact-retention-state.json`; the newest 100 success/failure records are retained in `artifact-retention-history.json`. A failed cycle is retried on the next scheduler poll. Raw artifact routes may become unavailable after retention, but normalized query APIs continue to serve the retained audit record.
+
 ## Upgrade
 
 Before upgrading:

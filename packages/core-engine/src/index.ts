@@ -7,6 +7,7 @@ export * from "./repo-context.js";
 export * from "./planner.js";
 export * from "./artifact-store.js";
 export * from "./artifact-retention.js";
+export * from "./learning-overlays.js";
 export * from "./python-worker.js";
 export * from "./sandbox/manager.js";
 export * from "./standards.js";
@@ -35,6 +36,7 @@ export * from "./report-exports.js";
 export * from "./export-contract.js";
 export * from "./webhook-events.js";
 export * from "./review-governance.js";
+export * from "./human-approval.js";
 export * from "./outbound-integrations.js";
 export * from "./assistant.js";
 export * from "./persistence/finding-dispositions.js";
@@ -75,10 +77,12 @@ export {
   listPersistedLearningEvents,
   listPersistedLearningExperiments,
   listPersistedLearningPromotions,
+  learningSynthesisApprovalSubject,
   normalizeLearningSettings,
   promoteLearningCandidate,
   readPersistedLearningCandidate,
   rejectLearningCandidate,
+  resolveLearningSynthesisAuthorization,
   runLearningPipeline,
   rollbackLearningPromotion,
   syncLearningEventsForScope,

@@ -4,6 +4,7 @@ import { resolvePersistenceLocation } from "./backend.js";
 import type { PersistedFindingDispositionRecord } from "./contracts.js";
 import { getPersistedRun } from "./query.js";
 import { ensureSqliteSchema, hasSqliteDatabase, openSqliteDatabase, readSqliteTable, saveSqliteDatabase, upsertSqliteRecord } from "./sqlite.js";
+import { createHumanApprovalRecord, isValidHumanApprovalRecord } from "../human-approval.js";
 
 function resolveLocation(rootDirOrOptions?: string | PersistenceReadOptions) {
   return typeof rootDirOrOptions === "string" || !rootDirOrOptions
@@ -60,6 +61,14 @@ function matchesFinding(record: PersistedFindingDispositionRecord, finding: { id
   return Boolean(record.finding_signature && record.finding_signature === findingDispositionSignature(finding));
 }
 
+function hasValidDispositionApproval(record: PersistedFindingDispositionRecord): boolean {
+  const metadata = record.metadata_json && typeof record.metadata_json === "object" ? record.metadata_json as Record<string, unknown> : {};
+  return isValidHumanApprovalRecord(metadata.human_approval, {
+    action: record.disposition_type === "waiver" ? "control_waiver" : "finding_suppression",
+    subject: record.id
+  });
+}
+
 function compareDispositionPrecedence(left: PersistedFindingDispositionRecord, right: PersistedFindingDispositionRecord): number {
   const scopeRank = (value: PersistedFindingDispositionRecord["scope_level"]): number => value === "run" ? 2 : 1;
   if (scopeRank(right.scope_level) !== scopeRank(left.scope_level)) return scopeRank(right.scope_level) - scopeRank(left.scope_level);
@@ -85,6 +94,8 @@ export interface FindingDispositionUpdateInput {
   notes?: string | null;
   expires_at?: string | null;
   metadata?: Record<string, unknown> | null;
+  approved_by: string;
+  approved_at?: string;
 }
 
 export interface ResolvedFindingDisposition {
@@ -121,7 +132,8 @@ export function resolveFindingDispositions(args: {
   const nowIso = args.nowIso ?? new Date().toISOString();
   return args.findings.map((finding) => {
     const related = args.dispositions.filter((item) => matchesFinding(item, finding));
-    const activeDispositions = related.filter((item) => item.status === "active" && !isDispositionExpired(item, nowIso));
+    const unapprovedActiveDisposition = related.find((item) => item.status === "active" && !isDispositionExpired(item, nowIso) && !hasValidDispositionApproval(item));
+    const activeDispositions = related.filter((item) => item.status === "active" && !isDispositionExpired(item, nowIso) && hasValidDispositionApproval(item));
     const effectiveDisposition = [...activeDispositions].sort(compareDispositionPrecedence)[0] ?? null;
     const latest = [...related].sort(compareDispositionPrecedence)[0] ?? null;
     const effectiveStatus: ResolvedFindingDisposition["effective_status"] = effectiveDisposition
@@ -140,7 +152,9 @@ export function resolveFindingDispositions(args: {
     const storedEvidenceFingerprint = typeof metadata.evidence_fingerprint === "string" ? metadata.evidence_fingerprint : null;
     const currentEvidenceFingerprint = buildFindingEvidenceFingerprint(finding);
     let reviewReason: string | null = null;
-    if (effectiveStatus === "expired") {
+    if (!effectiveDisposition && unapprovedActiveDisposition) {
+      reviewReason = "active suppression or waiver is missing a valid immutable human approval";
+    } else if (effectiveStatus === "expired") {
       reviewReason = "an earlier suppression or waiver expired and needs explicit re-review";
     } else if (effectiveDisposition?.disposition_type === "waiver" && (!governanceOwnerId || !governanceReviewedAt)) {
       reviewReason = "waiver is missing explicit owner or review timestamp governance metadata";
@@ -194,7 +208,20 @@ export async function createPersistedFindingDisposition(args: {
     created_at: createdAt,
     expires_at: args.input.expires_at ?? null,
     revoked_at: null,
-    metadata_json: args.input.metadata ?? null
+    metadata_json: null
+  };
+  const suppliedMetadata = args.input.metadata && typeof args.input.metadata === "object" ? { ...args.input.metadata } : {};
+  record.metadata_json = {
+    ...suppliedMetadata,
+    human_approval: createHumanApprovalRecord({
+      approvalId: record.id,
+      action: record.disposition_type === "waiver" ? "control_waiver" : "finding_suppression",
+      subject: record.id,
+      approvedBy: record.created_by,
+      approvedAt: record.created_at,
+      reason: record.reason,
+      source: "review_action"
+    })
   };
   const db = await openSqliteDatabase(location.rootDir);
   try {
@@ -231,12 +258,29 @@ export async function updatePersistedFindingDisposition(args: {
   if (existing.status !== "active") throw new Error("finding_disposition_not_editable");
   const reason = args.input.reason === undefined ? existing.reason : String(args.input.reason ?? "").trim();
   if (!reason) throw new Error("disposition_reason_required");
+  const metadata = args.input.metadata === undefined
+    ? existing.metadata_json && typeof existing.metadata_json === "object" ? { ...existing.metadata_json as Record<string, unknown> } : {}
+    : args.input.metadata ?? {};
+  const previousApproval = metadata.human_approval;
+  const approvalHistory = Array.isArray(metadata.human_approval_history) ? [...metadata.human_approval_history] : [];
+  if (previousApproval) approvalHistory.push(previousApproval);
+  const approvedAt = args.input.approved_at ?? new Date().toISOString();
+  metadata.human_approval = createHumanApprovalRecord({
+    approvalId: `${existing.id}:update:${approvedAt}`,
+    action: existing.disposition_type === "waiver" ? "control_waiver" : "finding_suppression",
+    subject: existing.id,
+    approvedBy: args.input.approved_by,
+    approvedAt,
+    reason,
+    source: "review_action"
+  });
+  metadata.human_approval_history = approvalHistory;
   const record: PersistedFindingDispositionRecord = {
     ...existing,
     reason,
     notes: args.input.notes === undefined ? existing.notes : args.input.notes ?? null,
     expires_at: args.input.expires_at === undefined ? existing.expires_at : args.input.expires_at ?? null,
-    metadata_json: args.input.metadata === undefined ? existing.metadata_json : args.input.metadata ?? null
+    metadata_json: metadata
   };
   const db = await openSqliteDatabase(location.rootDir);
   try {

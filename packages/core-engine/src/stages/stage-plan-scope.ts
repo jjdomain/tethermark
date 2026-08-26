@@ -2,6 +2,7 @@ import type { AgentRuntime } from "../../../agent-runtime/src/index.js";
 import { buildPlannerContext } from "../agent-context-builders.js";
 import type { AuditPolicyArtifact, AuditRequest, HeuristicTargetProfile, MethodologyArtifact, PlannerArtifact, RepoContextArtifact, SandboxSession, StandardControlDefinition, TargetClass, TargetDescriptor, TargetProfileArtifact } from "../contracts.js";
 import { buildHeuristicTargetProfile } from "../planner.js";
+import { requireRequestHumanApproval } from "../human-approval.js";
 
 function getPlannerControlConstraints(request: AuditRequest): {
   selection_mode: "automatic" | "constrained";
@@ -25,6 +26,9 @@ function getPlannerControlConstraints(request: AuditRequest): {
 function applyPlannerControlConstraints(artifact: PlannerArtifact, controlCatalog: StandardControlDefinition[], request: AuditRequest): PlannerArtifact {
   const operatorConstraints = getPlannerControlConstraints(request);
   if (!operatorConstraints || operatorConstraints.selection_mode !== "constrained") return artifact;
+  if (operatorConstraints.excluded_control_ids.length || operatorConstraints.excluded_frameworks.length) {
+    requireRequestHumanApproval(request, "control_change");
+  }
 
   const controlById = new Map(controlCatalog.map((control) => [control.control_id, control]));
   const knownFrameworks = new Set(controlCatalog.map((control) => control.framework));

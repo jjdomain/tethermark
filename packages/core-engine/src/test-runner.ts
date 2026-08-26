@@ -13,11 +13,15 @@ import { buildScanRequest } from "../../../apps/cli/src/args.js";
 import { validateFixtures } from "../../../apps/cli/src/fixture-validation.js";
 import { buildDockerRuntimeFixtureCreateArgs, RUNTIME_FIXTURE_IMAGE, validateDockerRuntimeFixtureInspect } from "../../../apps/cli/src/runtime-fixtures.js";
 import { describeArtifactType } from "./artifact-policy.js";
-import { pruneArtifacts } from "./artifact-retention.js";
+import { pruneArtifacts, runScheduledArtifactRetention } from "./artifact-retention.js";
+import { buildPlannerContext } from "./agent-context-builders.js";
 import { executeEvidenceProvider, normalizeEvidenceSummaryForTests, normalizePublicScorecardProject, normalizePythonWorkerForTests, resetEvidenceProviderCapabilityCacheForTests } from "./evidence-providers.js";
 import { buildFixedCalibrationEvidenceSelection, CALIBRATION_EVIDENCE_PLAN_POLICY_VERSION, CALIBRATION_STATIC_EVIDENCE_PROVIDER_IDS } from "./evidence-selection-policy.js";
 import { buildFindingEvaluationSummary } from "./finding-evaluation.js";
 import { buildFindingQualitySummary } from "./finding-quality.js";
+import { attachOperatorLaunchApprovals, createHumanApprovalRecord, isValidHumanApprovalRecord, requireRequestHumanApproval } from "./human-approval.js";
+import { validateAuditPolicyPackDefinition } from "./audit-policy.js";
+import { applyLearningOverlayEvidenceRules, applyLearningOverlayPlannerRules, resolveLearningOverlays } from "./learning-overlays.js";
 import { createEngine, updateControlResultsWithFindings } from "./orchestrator.js";
 import { buildHeuristicTargetProfile } from "./planner.js";
 import { assertAuditRequestProviderPolicy } from "./provider-policy.js";
@@ -41,7 +45,7 @@ import { buildFindingEvidenceFingerprint, createPersistedFindingDisposition } fr
 import { readPersistedArtifactIndex, readPersistedCommitDiff, readPersistedControlResults, readPersistedEvents, readPersistedEvidenceRecords, readPersistedFindings, readPersistedLanePlans, readPersistedLaneResults, readPersistedLaneReuseDecisions, readPersistedLaneSpecialistOutputs, readPersistedMaintenanceHistory, readPersistedMetrics, readPersistedObservability, readPersistedResolvedConfiguration, readPersistedReviewActions, readPersistedReviewComments, readPersistedReviewDecision, readPersistedReviewWorkflow, readPersistedRunUsageSummary, readPersistedScoreSummary, readPersistedStageArtifact, readPersistedStageArtifacts, readPersistedToolAdapterSummary, readPersistedToolExecutions } from "./persistence/run-details.js";
 import { createLocalPersistenceBackup, ensureSqliteSchema, listLocalPersistenceBackups, openSqliteDatabase, PERSISTENCE_SCHEMA_VERSION, readPersistenceMetadata, readSqliteTable, restoreLocalPersistenceBackup, saveSqliteDatabase, setSqliteSaveFailureForTests, SqlitePersistenceError, upsertSqliteRecord, verifyLocalPersistenceBackup } from "./persistence/sqlite.js";
 import { buildPsqlProcessEnv } from "./persistence/postgres.js";
-import { normalizeLearningSettings } from "./persistence/learning.js";
+import { learningSynthesisApprovalSubject, normalizeLearningSettings, promoteLearningCandidate, resolveLearningSynthesisAuthorization, rollbackLearningPromotion } from "./persistence/learning.js";
 import { listPersistedUiDocuments, readPersistedUiSettings, updatePersistedUiSettings } from "./persistence/ui-settings.js";
 import { markRuntimeFollowupJobTerminal, markRuntimeFollowupLaunched, readPersistedRuntimeFollowup, upsertRuntimeFollowupFromReviewAction } from "./persistence/runtime-followups.js";
 import { LinuxContainerSandboxBackend } from "./sandbox/backends/linux-container.js";
@@ -391,6 +395,19 @@ async function waitForCondition(label: string, predicate: () => boolean, timeout
   throw new Error(`Timed out waiting for ${label}`);
 }
 
+async function waitForPersistedWebhookDeliveries(baseUrl: string, runId: string, expectedCount: number, timeoutMs = 45000): Promise<any> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const response = await fetch(`${baseUrl}/runs/${runId}/webhook-deliveries`);
+    const payload = await response.json() as any;
+    if (response.ok && Array.isArray(payload.webhook_deliveries) && payload.webhook_deliveries.length >= expectedCount) {
+      return payload;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`Timed out waiting for ${expectedCount} persisted webhook deliveries for ${runId}`);
+}
+
 async function waitForRunSummary(baseUrl: string, runId: string, timeoutMs = 180000): Promise<any> {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
@@ -466,6 +483,7 @@ async function testBuildScanRequestParsesLlmFlags(): Promise<void> {
   assert.equal(parsed.request.llm_model, "mock-lane-specialist");
   assert.equal(parsed.request.llm_api_key, "test-key");
   assert.equal(parsed.request.llm_workload_class, "interactive_operator");
+  assert.equal(typeof parsed.request.requested_by, "string");
   assert.ok(parsed.request.local_path);
   const runtimeParsed = buildScanRequest(["scan", "path", ".", "--mode", "runtime", "--accept-runtime-warning", "true"]);
   assert.equal(typeof (runtimeParsed.request.hints as any)?.runtime_sandbox_accepted_at, "string");
@@ -1774,6 +1792,144 @@ async function testPruneArtifactsRemovesOldRunBundlesAndUpdatesIndex(): Promise<
   });
 }
 
+async function testArtifactRetentionPreservesRunsAndReconcilesArtifactIndex(): Promise<void> {
+  await withTempDir("harness-artifact-retention-consistency-", async (rootDir) => {
+    const artifactRoot = path.join(rootDir, ".artifacts");
+    const persistenceRoot = path.join(artifactRoot, "state", "local-db");
+    const oldRunDir = path.join(artifactRoot, "runs", "run_old");
+    const activeRunDir = path.join(artifactRoot, "runs", "run_active");
+    const oldArtifactPath = path.join(oldRunDir, "planner-artifact.json");
+    const activeArtifactPath = path.join(activeRunDir, "planner-artifact.json");
+    await fs.mkdir(oldRunDir, { recursive: true });
+    await fs.mkdir(activeRunDir, { recursive: true });
+    await fs.writeFile(oldArtifactPath, "{}\n", "utf8");
+    await fs.writeFile(activeArtifactPath, "{}\n", "utf8");
+    const oldDate = new Date("2026-01-01T00:00:00.000Z");
+    await fs.utimes(oldRunDir, oldDate, oldDate);
+    await fs.utimes(activeRunDir, oldDate, oldDate);
+
+    const db = await openSqliteDatabase(persistenceRoot);
+    try {
+      ensureSqliteSchema(db);
+      for (const run of [
+        { id: "run_old", status: "succeeded", artifact_root: oldRunDir },
+        { id: "run_active", status: "running", artifact_root: activeRunDir }
+      ]) {
+        upsertSqliteRecord({
+          db,
+          tableName: "runs",
+          recordKey: run.id,
+          runId: run.id,
+          payload: {
+            ...run,
+            target_id: "target_retention",
+            target_snapshot_id: "snapshot_retention",
+            workspace_id: "default",
+            project_id: "default",
+            requested_by: null,
+            policy_pack_id: null,
+            run_mode: "static",
+            audit_package: "agentic-static",
+            started_at: "2026-01-01T00:00:00.000Z",
+            completed_at: run.status === "running" ? null : "2026-01-01T00:01:00.000Z",
+            static_score: 0,
+            overall_score: 0,
+            rating: "N/A",
+            created_at: "2026-01-01T00:00:00.000Z"
+          }
+        });
+      }
+      for (const artifact of [
+        { artifact_id: "artifact_old", run_id: "run_old", path: oldArtifactPath },
+        { artifact_id: "artifact_active", run_id: "run_active", path: activeArtifactPath },
+        { artifact_id: "artifact_missing", run_id: "run_missing", path: path.join(artifactRoot, "runs", "run_missing", "missing.json") }
+      ]) {
+        upsertSqliteRecord({
+          db,
+          tableName: "artifact_index",
+          recordKey: artifact.artifact_id,
+          runId: artifact.run_id,
+          payload: { ...artifact, type: "planner-artifact", created_at: "2026-01-01T00:00:00.000Z", sha256: null, size_bytes: null }
+        });
+      }
+      await withEnv({ HARNESS_SQLITE_AUTO_BACKUP_INTERVAL_MS: "0" }, async () => saveSqliteDatabase(persistenceRoot, db));
+    } finally {
+      db.close();
+    }
+
+    const dryRun = await pruneArtifacts({
+      rootDir: artifactRoot,
+      persistenceRoot,
+      kind: "runs",
+      olderThanDays: 30,
+      dryRun: true,
+      now: new Date("2026-05-05T00:00:00.000Z")
+    });
+    assert.deepEqual(dryRun.protected_run_ids, ["run_active"]);
+    assert.deepEqual(dryRun.artifact_index_reconciled_ids, ["artifact_missing", "artifact_old"]);
+    assert.equal(await pathExists(oldRunDir), true);
+
+    const live = await withEnv({ HARNESS_SQLITE_AUTO_BACKUP_INTERVAL_MS: "0" }, async () => pruneArtifacts({
+      rootDir: artifactRoot,
+      persistenceRoot,
+      kind: "runs",
+      olderThanDays: 30,
+      now: new Date("2026-05-05T00:00:00.000Z")
+    }));
+    assert.deepEqual(live.artifact_index_reconciled_ids, ["artifact_missing", "artifact_old"]);
+    assert.equal(await pathExists(oldRunDir), false);
+    assert.equal(await pathExists(activeRunDir), true);
+
+    const verification = await openSqliteDatabase(persistenceRoot);
+    try {
+      assert.deepEqual(readSqliteTable<any>(verification, "runs").map((item) => item.id).sort(), ["run_active", "run_old"]);
+      assert.deepEqual(readSqliteTable<any>(verification, "artifact_index").map((item) => item.artifact_id), ["artifact_active"]);
+    } finally {
+      verification.close();
+    }
+  });
+}
+
+async function testScheduledArtifactRetentionRunsOncePerIntervalAndRecordsHistory(): Promise<void> {
+  await withTempDir("harness-artifact-retention-schedule-", async (rootDir) => {
+    const artifactRoot = path.join(rootDir, ".artifacts");
+    const runDir = path.join(artifactRoot, "runs", "run_old");
+    const sandboxDir = path.join(artifactRoot, "sandboxes", "sandbox_old");
+    await fs.mkdir(runDir, { recursive: true });
+    await fs.mkdir(sandboxDir, { recursive: true });
+    await fs.writeFile(path.join(runDir, "report.json"), "{}\n", "utf8");
+    await fs.writeFile(path.join(sandboxDir, "target.txt"), "fixture\n", "utf8");
+    const oldDate = new Date("2026-01-01T00:00:00.000Z");
+    await fs.utimes(runDir, oldDate, oldDate);
+    await fs.utimes(sandboxDir, oldDate, oldDate);
+
+    const first = await runScheduledArtifactRetention({
+      rootDir: artifactRoot,
+      runRetentionDays: 30,
+      sandboxRetentionDays: 7,
+      intervalMs: 24 * 60 * 60 * 1000,
+      now: new Date("2026-05-05T00:00:00.000Z")
+    });
+    assert.equal(first.due, true);
+    assert.equal(first.state?.status, "succeeded");
+    assert.deepEqual(first.state?.summaries.map((item) => item.removed_count), [1, 1]);
+    assert.equal(await pathExists(runDir), false);
+    assert.equal(await pathExists(sandboxDir), false);
+
+    const second = await runScheduledArtifactRetention({
+      rootDir: artifactRoot,
+      runRetentionDays: 30,
+      sandboxRetentionDays: 7,
+      intervalMs: 24 * 60 * 60 * 1000,
+      now: new Date("2026-05-05T12:00:00.000Z")
+    });
+    assert.equal(second.due, false);
+    const history = JSON.parse(await fs.readFile(path.join(artifactRoot, "maintenance", "artifact-retention-history.json"), "utf8"));
+    assert.equal(history.length, 1);
+    assert.equal(history[0].schema_version, "2026-08-26.artifact-retention-schedule.v1");
+  });
+}
+
 async function testReadPersistedLaneSpecialistOutputsFromSqlite(): Promise<void> {
   await withTempDir("harness-lane-specialists-sqlite-", async (rootDir) => {
     const store = new LocalPersistenceStore(rootDir);
@@ -2510,6 +2666,7 @@ async function testPersistedReviewWorkflowAndActions(): Promise<void> {
     assert.equal(actions[7]?.action_type, "mark_manual_runtime_review_complete");
     assert.equal(actions[8]?.action_type, "downgrade_severity");
     assert.equal(actions[8]?.updated_severity, "medium");
+    assert.equal(isValidHumanApprovalRecord((actions[8]?.metadata_json as any)?.human_approval, { action: "severity_downgrade", subject: "finding_review" }), true);
     assert.equal(actions[8]?.triage_decision, "confirmed");
     assert.equal(actions[8]?.review_priority, "p1");
     assert.equal(actions[8]?.validation_intent, "manual_review");
@@ -3271,6 +3428,11 @@ async function testApiResponsesUsePersistedState(): Promise<void> {
         assert.equal(updateDispositionPayload.finding_disposition.metadata_json.owner_id, "lead-reviewer");
         assert.equal(updateDispositionPayload.finding_disposition.metadata_json.reviewed_at, "2026-04-15T08:00:00.000Z");
         assert.equal(updateDispositionPayload.finding_disposition.metadata_json.review_due_by, reopenedReviewDue);
+        assert.equal(isValidHumanApprovalRecord(updateDispositionPayload.finding_disposition.metadata_json.human_approval, {
+          action: "control_waiver",
+          subject: seededReopenedWaiver.id
+        }), true);
+        assert.equal(updateDispositionPayload.finding_disposition.metadata_json.approval_review_action_id.includes(":review-action:"), true);
         assert.equal(revokeDispositionPayload.finding_disposition.status, "revoked");
         assert.equal(revokeDispositionPayload.finding_disposition.metadata_json.revoked_by, "qa_api");
         assert.equal(findingDispositionsAfterMutationPayload.resolved_finding_dispositions.find((item: any) => item.finding_id === "finding_api_dup")?.effective_status, "revoked");
@@ -4038,9 +4200,7 @@ async function testAsyncRunLifecycleApi(): Promise<void> {
         assert.equal(genericWebhookPayload.run_id, finalPayload.attempts[0].run_id);
         await waitForCondition("review_required generic webhook", () => genericWebhookEvents.some((item: any) => item.payload?.event_type === "review_required"));
 
-        const webhookDeliveriesResponse = await fetch(`${baseUrl}/runs/${finalPayload.attempts[0].run_id}/webhook-deliveries`);
-        const webhookDeliveriesPayload = await webhookDeliveriesResponse.json() as any;
-        assert.equal(webhookDeliveriesResponse.status, 200);
+        const webhookDeliveriesPayload = await waitForPersistedWebhookDeliveries(baseUrl, finalPayload.attempts[0].run_id, 2);
         assert.equal(webhookDeliveriesPayload.webhook_deliveries.length, 2);
         assert.equal(webhookDeliveriesPayload.webhook_deliveries.some((item: any) => item.event_type === "run_completed"), true);
         assert.equal(webhookDeliveriesPayload.webhook_deliveries.some((item: any) => item.event_type === "review_required"), true);
@@ -5261,7 +5421,7 @@ async function testCalibrationBenchmarkMetricsAndComparisonGuards(): Promise<voi
     assert.equal(result.control_traceability, 1);
     assert.equal(result.duplicate_group_count, 0);
     assert.equal(result.conflict_pair_count, 0);
-    assert.equal(result.version_manifest?.prompt_set_version, "2026-08-18.agent-context.v2");
+    assert.equal(result.version_manifest?.prompt_set_version, "2026-08-26.agent-context.v3");
     assert.equal(result.version_manifest?.model_identities[0]?.model, "mock-agent-runtime");
     assert.equal(result.evidence_plan?.policy_version, CALIBRATION_EVIDENCE_PLAN_POLICY_VERSION);
     assert.deepEqual(result.evidence_plan?.baseline_provider_ids, [...CALIBRATION_STATIC_EVIDENCE_PROVIDER_IDS].sort((left, right) => left.localeCompare(right)));
@@ -8178,6 +8338,142 @@ async function testAssistantApiScopesActionsAndTargetHistory(): Promise<void> {
   });
 }
 
+async function testApprovedLearningOverlayConsumptionAndRollback(): Promise<void> {
+  await withTempDir("tethermark-learning-overlay-", async (rootDir) => {
+    const dbRoot = path.join(rootDir, "local-db");
+    const createdAt = "2026-08-01T00:00:00.000Z";
+    const candidate = (id: string, candidateType: string, signature: string, riskLevel: "medium" | "high") => ({
+      id,
+      workspace_id: "default",
+      project_id: "default",
+      scope_type: "target",
+      scope_id: "target_overlay",
+      target_id: "target_overlay",
+      candidate_type: candidateType,
+      status: "experimented",
+      title: `${candidateType} title`,
+      summary: `${candidateType} reviewed summary`,
+      rationale: "Repeated reviewed signal.",
+      proposed_change_json: { finding_signature: signature },
+      source_event_ids_json: [`event_${id}_1`, `event_${id}_2`],
+      affected_finding_signatures_json: [signature],
+      expected_effect_json: { source_event_count: 2, source_run_ids: ["run_1", "run_2"] },
+      risk_level: riskLevel,
+      requires_human_approval: true,
+      created_at: createdAt,
+      updated_at: createdAt,
+      created_by: "system_learning",
+      reviewed_by: null,
+      reviewed_at: null,
+      rejection_reason: null,
+      expires_at: null,
+      metadata_json: {}
+    });
+    const db = await openSqliteDatabase(dbRoot);
+    try {
+      ensureSqliteSchema(db);
+      for (const item of [
+        candidate("candidate_evidence", "evidence_requirement_adjustment", "auth::missing-evidence", "medium"),
+        candidate("candidate_severity", "severity_calibration_suggestion", "auth::accepted-risk", "high")
+      ]) {
+        upsertSqliteRecord({
+          db,
+          tableName: "learning_candidates",
+          recordKey: item.id,
+          targetId: item.target_id,
+          parentKey: item.scope_id,
+          createdAt: item.created_at,
+          payload: item
+        });
+      }
+      await saveSqliteDatabase(dbRoot, db, "local");
+    } finally {
+      db.close();
+    }
+
+    const evidencePromotion = await promoteLearningCandidate({
+      candidateId: "candidate_evidence",
+      actorId: "human_reviewer",
+      expiresAt: "2027-01-01T00:00:00.000Z",
+      rootDirOrOptions: { rootDir: dbRoot, dbMode: "local" }
+    });
+    await promoteLearningCandidate({
+      candidateId: "candidate_severity",
+      actorId: "human_reviewer",
+      expiresAt: "2027-01-01T00:00:00.000Z",
+      rootDirOrOptions: { rootDir: dbRoot, dbMode: "local" }
+    });
+    assert.match(evidencePromotion.promotion.promoted_artifact_version, /^learning-overlay\.v1\.[a-f0-9]{24}$/);
+    assert.equal((evidencePromotion.promotion.rollback_pointer_json as any).deactivates_artifact_version, evidencePromotion.promotion.promoted_artifact_version);
+
+    const resolution = await resolveLearningOverlays({
+      runId: "run_overlay",
+      targetId: "target_overlay",
+      workspaceId: "default",
+      projectId: "default",
+      now: new Date("2026-09-01T00:00:00.000Z"),
+      rootDirOrOptions: { rootDir: dbRoot, dbMode: "local" }
+    });
+    assert.equal(resolution.active_overlays.length, 2);
+    assert.deepEqual(resolution.additive_rules.evidence_requirement_signatures, ["auth::missing-evidence"]);
+    assert.equal(resolution.active_overlays.find((item) => item.candidate_id === "candidate_severity")?.effect_mode, "governed_no_runtime_effect");
+    assert.deepEqual(resolution.prompt_guidance.map((item) => item.promotion_id), [evidencePromotion.promotion.id]);
+
+    const plannerArtifact = applyLearningOverlayPlannerRules({
+      selected_profile: "deep-static",
+      classification_review: { semantic_class: "repo_posture_only", final_class: "repo_posture_only", secondary_traits: [], confidence: 1, evidence: [] },
+      frameworks_in_scope: [],
+      applicable_control_ids: [],
+      deferred_control_ids: [],
+      non_applicable_control_ids: [],
+      rationale: [],
+      constraints: { max_runtime_minutes: 0, network_mode: "none", sandbox_required: false, install_allowed: false, read_only_analysis_only: true, target_execution_allowed: false }
+    }, resolution);
+    assert.equal(plannerArtifact.rationale.some((item) => item.includes(resolution.resolution_version)), true);
+    assert.equal(plannerArtifact.rationale.some((item) => item.includes("not executed")), true);
+
+    const evalSelection = applyLearningOverlayEvidenceRules({
+      baseline_tools: [],
+      runtime_tools: [],
+      custom_eval_packs: [],
+      validation_candidates: [],
+      control_tool_map: [],
+      rationale: []
+    }, resolution);
+    assert.deepEqual(evalSelection.validation_candidates, ["approved-learning-overlay:auth::missing-evidence"]);
+
+    const plannerContext = buildPlannerContext({
+      request: { run_mode: "static", hints: { approved_learning_overlay_resolution: resolution } },
+      sandbox: { run_mode: "static", backend: "windows_local", target_dir: rootDir },
+      target: { target_id: "target_overlay", target_type: "path", repo_url: null, local_path: rootDir, endpoint_url: null, snapshot: { type: "filesystem", value: rootDir, captured_at: createdAt, commit_sha: null }, hints: {} },
+      analysis: { project_name: "overlay", file_count: 1, frameworks: [], languages: [], entry_points: [], ci_workflows: [], security_docs: [], dependency_manifests: [], mcp_indicators: [], agent_indicators: [], tool_execution_indicators: [] },
+      repoContext: { summary: [], capability_signals: [], documents: [] },
+      targetProfile: { heuristic: { primary_class: "repo_posture_only", secondary_traits: [], confidence: 1, evidence: [] }, semantic_review: { semantic_class: "repo_posture_only", final_class: "repo_posture_only", secondary_traits: [], confidence: 1, evidence: [] } },
+      controlCatalog: [],
+      methodology: { version: "test", summary: "test" },
+      auditPolicy: {}
+    });
+    assert.equal((plannerContext.approvedLearningOverlays as any).resolution_version, resolution.resolution_version);
+    assert.match(String((plannerContext.approvedLearningOverlays as any).trust_boundary), /untrusted reviewed data/);
+
+    await rollbackLearningPromotion({
+      promotionId: evidencePromotion.promotion.id,
+      actorId: "human_reviewer",
+      reason: "Rollback regression",
+      rootDirOrOptions: { rootDir: dbRoot, dbMode: "local" }
+    });
+    const afterRollback = await resolveLearningOverlays({
+      runId: "run_overlay_next",
+      targetId: "target_overlay",
+      now: new Date("2026-09-01T00:00:00.000Z"),
+      rootDirOrOptions: { rootDir: dbRoot, dbMode: "local" }
+    });
+    assert.notEqual(afterRollback.resolution_version, resolution.resolution_version);
+    assert.deepEqual(afterRollback.additive_rules.evidence_requirement_signatures, []);
+    assert.equal(afterRollback.ignored_promotions.some((item) => item.promotion_id === evidencePromotion.promotion.id && item.reason === "status_rolled_back"), true);
+  });
+}
+
 async function testLearningApiLifecycle(): Promise<void> {
   await withTempDir("tethermark-learning-api-", async (rootDir) => {
     await fs.mkdir(path.join(rootDir, "target"), { recursive: true });
@@ -8243,6 +8539,9 @@ async function testLearningApiLifecycle(): Promise<void> {
         assert.equal(manualRunResponse.status, 200, JSON.stringify(manualRunPayload));
         assert.equal(manualRunPayload.learning_job.trigger, "api");
         assert.equal(manualRunPayload.learning_job.status, "completed");
+        assert.equal(manualRunPayload.learning_job.metadata_json.synthesis_authorization.mode, "operator_initiated");
+        assert.equal(manualRunPayload.learning_job.metadata_json.synthesis_authorization.operator_initiation_verified, true);
+        assert.equal(manualRunPayload.learning_job.metadata_json.synthesis_authorization.operator_approval.approved_by, "local-operator");
         const jobsAfterRunPayload = await (await fetch(`${baseUrl}/learning/jobs`)).json() as any;
         assert.equal(jobsAfterRunPayload.learning_jobs.length, 1);
 
@@ -8301,7 +8600,9 @@ async function testLearningApiLifecycle(): Promise<void> {
         assert.equal(promotePayload.export_schema.schema_name, "learning_promotions.v1");
         await assertExportSchemaMatches("learning_promotions.v1.json", promotePayload.export_schema);
         assert.equal(promotePayload.learning_candidate.status, "promoted");
-        assert.equal(promotePayload.learning_promotion.metadata_json.v1_no_automatic_live_behavior_change, true);
+        assert.equal(promotePayload.learning_promotion.metadata_json.human_approved, true);
+        assert.equal(promotePayload.learning_promotion.metadata_json.effect_mode, "governed_no_runtime_effect");
+        assert.equal(promotePayload.learning_promotion.metadata_json.future_run_consumption_eligible, false);
 
         const promotionsResponse = await fetch(`${baseUrl}/learning/promotions`);
         const promotionsPayload = await promotionsResponse.json() as any;
@@ -8483,6 +8784,9 @@ async function testSystemPolicyLifecycleAndResolution(): Promise<void> {
     const firstVersion = created.versions[0];
     assert.equal(validateSystemPolicyDefinition(firstVersion.definition_json).valid, true);
     await publishPersistedSystemPolicy("custom-baseline", "test-admin", "publish v1", "default", rootDir);
+    const publishedV1 = await getPersistedSystemPolicy("custom-baseline", "default", rootDir);
+    const publishEvent = publishedV1?.events.find((item) => item.event_type === "publish");
+    assert.equal(isValidHumanApprovalRecord(publishEvent?.details_json.human_approval, { action: "policy_change", subject: firstVersion.id }), true);
 
     const secondDefinition = structuredClone(firstVersion.definition_json);
     secondDefinition.providers.maximum_agent_calls = 6;
@@ -8585,6 +8889,152 @@ async function testSystemPolicyLifecycleAndResolution(): Promise<void> {
       assert.ok(readSqliteTable<any>(db, "policy_change_events").length >= 10);
     } finally { db.close(); }
   });
+}
+
+async function testImmutableHumanApprovalBoundaries(): Promise<void> {
+  const approval = createHumanApprovalRecord({
+    approvalId: "approval:test-suppression",
+    action: "finding_suppression",
+    subject: "suppress-test",
+    approvedBy: "security-reviewer",
+    approvedAt: "2026-08-26T08:00:00.000Z",
+    reason: "Reviewed the exact scoped false-positive signature.",
+    source: "review_action"
+  });
+  assert.equal(isValidHumanApprovalRecord(approval, { action: "finding_suppression", subject: "suppress-test" }), true);
+  assert.equal(isValidHumanApprovalRecord({ ...approval, reason: "tampered" }, { action: "finding_suppression" }), false);
+  assert.throws(() => validateAuditPolicyPackDefinition({
+    id: "unapproved-pack",
+    name: "Unapproved",
+    version: "1",
+    source: "file",
+    policy: {
+      profile: "test",
+      finding_suppressions: [{ rule_id: "suppress-test", reason: "missing approval", finding_ids: ["finding-1"] } as any]
+    }
+  }), /requires a valid immutable human approval/);
+  assert.doesNotThrow(() => validateAuditPolicyPackDefinition({
+    id: "approved-pack",
+    name: "Approved",
+    version: "1",
+    source: "file",
+    policy: {
+      profile: "test",
+      finding_suppressions: [{ rule_id: "suppress-test", reason: "reviewed exception", finding_ids: ["finding-1"], human_approval: approval }]
+    }
+  }));
+  assert.throws(() => createHumanApprovalRecord({
+    approvalId: "approval:automation",
+    action: "evidence_reduction",
+    subject: "audit-request",
+    approvedBy: "automation",
+    reason: "automated request",
+    source: "operator_launch"
+  }), /human_approval_actor_required/);
+  const approvedRequest = attachOperatorLaunchApprovals({
+    local_path: ".",
+    requested_by: "security-reviewer",
+    llm_workload_class: "interactive_operator",
+    hints: {
+      planner_control_constraints: { excluded_control_ids: ["control-a"] },
+      audit_package_overrides: { enabled_lanes: ["repo_posture"] }
+    }
+  });
+  assert.equal(requireRequestHumanApproval(approvedRequest, "control_change").approved_by, "security-reviewer");
+  assert.equal(requireRequestHumanApproval(approvedRequest, "evidence_reduction").approved_by, "security-reviewer");
+  assert.equal(requireRequestHumanApproval(approvedRequest, "runtime_probe_removal").approved_by, "security-reviewer");
+  const reusedForDifferentControls = {
+    ...approvedRequest,
+    hints: {
+      ...approvedRequest.hints,
+      planner_control_constraints: { excluded_control_ids: ["control-b"] }
+    }
+  };
+  assert.throws(() => requireRequestHumanApproval(reusedForDifferentControls, "control_change"), /human_approval_required:control_change/);
+  const unattendedRequest = attachOperatorLaunchApprovals({
+    local_path: ".",
+    requested_by: "batch-runner",
+    llm_workload_class: "unattended_local",
+    hints: {
+      planner_control_constraints: { excluded_control_ids: ["control-a"] },
+      human_approvals: [createHumanApprovalRecord({
+        approvalId: "approval:precomputed-unattended",
+        action: "control_change",
+        subject: "audit-request",
+        approvedBy: "batch-runner",
+        reason: "precomputed approval must not authorize unattended weakening",
+        source: "operator_launch"
+      })]
+    }
+  });
+  assert.throws(() => requireRequestHumanApproval(unattendedRequest, "control_change"), /human_approval_required:control_change/);
+}
+
+async function testLearningSynthesisInitiationBoundaries(): Promise<void> {
+  const scope = { workspaceId: "security", projectId: "agent-a", runId: "run-1" };
+  const approval = createHumanApprovalRecord({
+    approvalId: "approval:learning-synthesis",
+    action: "learning_model_synthesis",
+    subject: learningSynthesisApprovalSubject(scope),
+    approvedBy: "security-reviewer",
+    approvedAt: "2026-08-26T09:00:00.000Z",
+    reason: "Operator requested synthesis for this exact learning scope.",
+    source: "operator_launch"
+  });
+  const operatorDecision = resolveLearningSynthesisAuthorization({
+    ...scope,
+    trigger: "api",
+    actorId: "security-reviewer",
+    operatorApproval: approval,
+    providers: { default_provider: "openai_codex", default_model: "gpt-5.6-sol" },
+    maxRequests: 3
+  });
+  assert.equal(operatorDecision.allowed, true);
+  assert.equal(operatorDecision.mode, "operator_initiated");
+  assert.equal(operatorDecision.operator_initiation_verified, true);
+  assert.equal(operatorDecision.provider_policy?.initiation_mode, "operator");
+  assert.equal(operatorDecision.provider_policy?.credential_class, "chatgpt_session");
+
+  const wrongScopeDecision = resolveLearningSynthesisAuthorization({
+    ...scope,
+    runId: "run-2",
+    trigger: "api",
+    actorId: "security-reviewer",
+    operatorApproval: approval,
+    providers: { default_provider: "openai_codex", default_model: "gpt-5.6-sol" },
+    maxRequests: 3
+  });
+  assert.equal(wrongScopeDecision.allowed, false);
+  assert.equal(wrongScopeDecision.mode, "denied");
+  assert.equal(wrongScopeDecision.operator_initiation_verified, false);
+
+  const scheduledCodexDecision = resolveLearningSynthesisAuthorization({
+    ...scope,
+    trigger: "scheduled",
+    actorId: "system_learning_scheduler",
+    providers: { default_provider: "openai_codex", default_model: "gpt-5.6-sol" },
+    maxRequests: 3
+  });
+  assert.equal(scheduledCodexDecision.allowed, false);
+  assert.equal(scheduledCodexDecision.provider_policy, null);
+
+  const scheduledApiKeyDecision = resolveLearningSynthesisAuthorization({
+    ...scope,
+    trigger: "scheduled",
+    actorId: "system_learning_scheduler",
+    providers: {
+      default_provider: "openai",
+      default_model: "gpt-4.1",
+      agent_overrides: { learning_synthesizer_agent: { api_key: "test-only-key" } }
+    },
+    maxRequests: 3
+  });
+  assert.equal(scheduledApiKeyDecision.allowed, true);
+  assert.equal(scheduledApiKeyDecision.mode, "phase2_background_policy");
+  assert.equal(scheduledApiKeyDecision.provider_policy?.policy_version, "provider-policy.v1");
+  assert.equal(scheduledApiKeyDecision.provider_policy?.workload_class, "unattended_local");
+  assert.equal(scheduledApiKeyDecision.provider_policy?.credential_class, "api_key");
+  assert.equal(scheduledApiKeyDecision.provider_policy?.initiation_mode, "background");
 }
 
 async function testSystemPolicyAdminApi(): Promise<void> {
@@ -8716,6 +9166,8 @@ async function main(): Promise<void> {
     ["psql credentials use process environment", testPsqlCredentialsUseEnvironment],
     ["compactBundleExports prunes optional debug bundles", testCompactBundleExportsPrunesOptionalDebugBundles],
     ["pruneArtifacts removes old run bundles and updates index", testPruneArtifactsRemovesOldRunBundlesAndUpdatesIndex],
+    ["artifact retention preserves runs and reconciles artifact index", testArtifactRetentionPreservesRunsAndReconcilesArtifactIndex],
+    ["scheduled artifact retention runs once per interval and records history", testScheduledArtifactRetentionRunsOncePerIntervalAndRecordsHistory],
     ["readPersistedLaneSpecialistOutputs from sqlite", testReadPersistedLaneSpecialistOutputsFromSqlite],
     ["backfillLocalPersistence migrates lane specialists", testBackfillLocalPersistenceMigratesLaneSpecialists],
     ["readPersistedToolAdapterSummary", testReadPersistedToolAdapterSummary],
@@ -8748,9 +9200,12 @@ async function main(): Promise<void> {
     ["assistant storage and capability gating", testAssistantStorageAndCapabilities],
     ["assistant provider cites findings", testAssistantProviderCitesFindings],
     ["assistant api scopes actions and target history", testAssistantApiScopesActionsAndTargetHistory],
+    ["approved learning overlay consumption and rollback", testApprovedLearningOverlayConsumptionAndRollback],
     ["learning api lifecycle", testLearningApiLifecycle],
     ["concurrent learning runs respect attempt budget", testConcurrentLearningRunsRespectAttemptBudget],
     ["system policy lifecycle and deterministic resolution", testSystemPolicyLifecycleAndResolution],
+    ["immutable human approval boundaries", testImmutableHumanApprovalBoundaries],
+    ["learning synthesis initiation boundaries", testLearningSynthesisInitiationBoundaries],
     ["system policy administration api", testSystemPolicyAdminApi],
     ["extensive static policy coverage is explicit", testExtensiveStaticPolicyCoverage],
       ["validateFixtures passes for bundled targets", testValidateFixturesPassesForBundledTargets],

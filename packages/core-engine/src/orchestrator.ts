@@ -27,6 +27,7 @@ import { AUDIT_PACKAGE_CATALOG_VERSION, getBuiltinAuditPackage, resolveAuditPack
 import { AUDIT_PROMPT_SET_VERSION } from "./agent-context-builders.js";
 import { ArtifactStore } from "./artifact-store.js";
 import { computeCommitDiffGate } from "./commit-diff.js";
+import { applyLearningOverlayEvidenceRules, applyLearningOverlayPlannerRules, resolveLearningOverlays, type LearningOverlayResolution } from "./learning-overlays.js";
 import { refreshLaneArtifacts } from "./lane-analyzers.js";
 import { formatEventJsonl } from "./observability/events.js";
 import { buildPostSupervisorIntegritySummary, buildPreSupervisorEvidencePacket } from "./finding-quality.js";
@@ -64,6 +65,7 @@ import { isAutoRunModeRequest, resolveRequestedOrAutoRunMode } from "./planner.j
 import { AUDIT_LANES, type AuditLaneName } from "./audit-lanes.js";
 import { assertAuditRequestProviderPolicy } from "./provider-policy.js";
 import { persistPolicyResolutionSnapshot, resolveAndApplySystemPolicy, type ResolvedSystemPolicySnapshot } from "./system-policies.js";
+import { attachOperatorLaunchApprovals, isValidHumanApprovalRecord, requireRequestHumanApproval } from "./human-approval.js";
 
 type AssessmentCycle = Awaited<ReturnType<typeof stageAssessControls>>;
 
@@ -115,6 +117,11 @@ function applyAuditPackageOverrides(request: AuditRequest, auditPackage: AuditPa
   const enabledLanes = Array.isArray(requested.enabled_lanes)
     ? requested.enabled_lanes.filter((item: unknown): item is AuditLaneName => typeof item === "string" && allowed.has(item as AuditLaneName))
     : auditPackage.enabled_lanes;
+  const removedLanes = auditPackage.enabled_lanes.filter((lane) => !enabledLanes.includes(lane));
+  if (removedLanes.length) {
+    requireRequestHumanApproval(request, "evidence_reduction");
+    if (removedLanes.includes("runtime_validation")) requireRequestHumanApproval(request, "runtime_probe_removal");
+  }
   const maxAgentCalls = Number(requested.max_agent_calls);
   const maxTotalTokens = Number(requested.max_total_tokens);
   const maxRerunRounds = Number(requested.max_rerun_rounds);
@@ -279,6 +286,9 @@ function buildLaunchIntentArtifact(args: {
       stale,
       accepted: Boolean(acceptedAt) && !stale
     },
+    governance_approvals: Array.isArray((args.request.hints as any)?.human_approvals)
+      ? (args.request.hints as any).human_approvals.filter((item: unknown) => isValidHumanApprovalRecord(item))
+      : [],
     notes
   };
 }
@@ -584,6 +594,7 @@ export class AuditEngine {
   }
 
   async run(request: AuditRequest, options?: { runId?: string; retryOfRunId?: string }): Promise<AuditResult> {
+    request = attachOperatorLaunchApprovals(request);
     const runId = options?.runId ?? createId("run", deriveRunLabel(request));
     const initialSystemPolicy = await resolveAndApplySystemPolicy(request, { run_id: runId, rootDirOrOptions: { dbMode: request.db_mode } });
     request = assertAuditRequestProviderPolicy(initialSystemPolicy.request, "interactive_operator");
@@ -715,12 +726,43 @@ export class AuditEngine {
     await artifactStore.writeJson(runId, "audit-policy", auditPolicy);
     this.ensureRunNotCanceled(runId);
 
-    const commitDiff = await computeCommitDiffGate({
+    const learningOverlayResolution = await resolveLearningOverlays({
+      runId,
+      targetId: prepared.target.target_id,
+      workspaceId: effectiveRequest.workspace_id,
+      projectId: effectiveRequest.project_id,
+      rootDirOrOptions: { dbMode: effectiveRequest.db_mode }
+    });
+    effectiveRequest = {
+      ...effectiveRequest,
+      hints: {
+        ...(effectiveRequest.hints ?? {}),
+        approved_learning_overlay_resolution: learningOverlayResolution
+      }
+    };
+    await artifactStore.writeJson(runId, "learning-overlay-resolution", learningOverlayResolution);
+
+    let commitDiff = await computeCommitDiffGate({
       currentRunId: runId,
       request: effectiveRequest,
       target: prepared.target,
       auditPolicy
     });
+    if (commitDiff.previous_run_id) {
+      const previousResolution = await readPersistedStageArtifact<LearningOverlayResolution>(commitDiff.previous_run_id, "learning-overlay-resolution").catch(() => null);
+      const currentHasOverlays = learningOverlayResolution.active_overlays.length > 0;
+      const previousHadOverlays = (previousResolution?.active_overlays.length ?? 0) > 0;
+      const overlayResolutionChanged = previousResolution
+        ? previousResolution.resolution_version !== learningOverlayResolution.resolution_version
+        : currentHasOverlays;
+      if (overlayResolutionChanged || (!currentHasOverlays && previousHadOverlays)) {
+        commitDiff = {
+          ...commitDiff,
+          stage_decisions: { planner: "rerun", threat_model: "rerun", eval_selection: "rerun" },
+          rationale: [...commitDiff.rationale, `Approved learning overlay resolution changed to ${learningOverlayResolution.resolution_version}; planner, threat-model, and evidence-selection reuse was invalidated.`]
+        };
+      }
+    }
     await artifactStore.writeJson(runId, "commit-diff", commitDiff);
     this.ensureRunNotCanceled(runId);
 
@@ -776,6 +818,7 @@ export class AuditEngine {
       targetProfile = planStage.targetProfile;
     }
     if (!plannerArtifact || !targetProfile) { throw new Error("Planner stage did not produce reusable artifacts."); }
+    plannerArtifact = applyLearningOverlayPlannerRules(plannerArtifact, learningOverlayResolution);
     trace.steps.push({ step: 2, actor: "stage_plan_scope", action: "plan_scope", summary: `Planner selected ${plannerArtifact.selected_profile} and final class ${targetProfile.semantic_review.final_class}.`, artifacts: ["planner-artifact.json", "target-profile.json"], timestamp: nowIso() });
     await artifactStore.writeJson(runId, "planner-artifact", plannerArtifact);
     await artifactStore.writeJson(runId, "target-profile", targetProfile);
@@ -855,6 +898,7 @@ export class AuditEngine {
       });
     }
     if (!evalSelection) { throw new Error("Eval selection stage did not produce a reusable artifact."); }
+    evalSelection = applyLearningOverlayEvidenceRules(evalSelection, learningOverlayResolution);
     trace.steps.push({ step: 4, actor: "stage_select_evidence", action: "select_evidence", summary: `Selected ${evalSelection.baseline_tools.length + evalSelection.runtime_tools.length} evidence providers.`, artifacts: ["eval-selection.json"], timestamp: nowIso() });
     await artifactStore.writeJson(runId, "eval-selection", evalSelection);
     this.ensureRunNotCanceled(runId);
@@ -1066,9 +1110,9 @@ export class AuditEngine {
           priorPlannerArtifact: plannerArtifact,
           priorRunPlan: cycle.runPlan
         });
-        plannerArtifact = replanned.plannerArtifact;
+        plannerArtifact = applyLearningOverlayPlannerRules(replanned.plannerArtifact, learningOverlayResolution);
         targetProfile = replanned.targetProfile;
-        await artifactStore.writeJson(runId, "planner-artifact-corrected", replanned.plannerArtifact);
+        await artifactStore.writeJson(runId, "planner-artifact-corrected", plannerArtifact);
         await artifactStore.writeJson(runId, "target-profile", replanned.targetProfile);
       }
 
@@ -1107,6 +1151,7 @@ export class AuditEngine {
           agentRuntime,
           skepticFeedback: skepticReview
         });
+        evalSelection = applyLearningOverlayEvidenceRules(evalSelection, learningOverlayResolution);
         await artifactStore.writeJson(runId, "eval-selection-corrected", evalSelection);
       }
 
@@ -1353,7 +1398,7 @@ export class AuditEngine {
       modelIdentities.push({ provider: config.provider, model: config.model, credential_class: config.credential_class });
     }
     const versionManifest: RunVersionManifest = {
-      schema_version: "2026-08-18.run-versions.v1",
+      schema_version: "2026-08-26.run-versions.v2",
       methodology_version: methodology.version,
       static_baseline_version: staticBaseline.version,
       control_catalog_version: CONTROL_CATALOG_VERSION,
@@ -1361,6 +1406,7 @@ export class AuditEngine {
       audit_package_catalog_version: AUDIT_PACKAGE_CATALOG_VERSION,
       audit_package_id: auditPackage.id,
       prompt_set_version: AUDIT_PROMPT_SET_VERSION,
+      learning_overlay_resolution_version: learningOverlayResolution.resolution_version,
       tool_versions: (preflightSummary.static_tools?.tools ?? []).map((tool) => ({
         tool_id: tool.id,
         version: tool.version,
@@ -1381,6 +1427,7 @@ export class AuditEngine {
       await artifactStore.writeJson(runId, "static-baseline", staticBaseline),
       await artifactStore.writeJson(runId, "audit-policy", auditPolicy),
       ...(resolvedSystemPolicy ? [await artifactStore.writeJson(runId, "resolved-system-policy", resolvedSystemPolicy)] : []),
+      await artifactStore.writeJson(runId, "learning-overlay-resolution", learningOverlayResolution),
       await artifactStore.writeJson(runId, "run-versions", versionManifest),
       await artifactStore.writeJson(runId, "resolved-config", resolvedConfiguration),
       await artifactStore.writeJson(runId, "commit-diff", commitDiff),

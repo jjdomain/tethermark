@@ -127,6 +127,7 @@ async function deriveStageArtifacts(result: AuditResult): Promise<PersistedStage
     "preflight-summary",
     "launch-intent",
     "sandbox-execution",
+    "learning-overlay-resolution",
     "planner-artifact",
     "target-profile",
     "threat-model",

@@ -8,6 +8,7 @@ import { hashObject } from "./utils.js";
 import type { PersistenceReadOptions } from "./persistence/backend.js";
 import { resolvePersistenceLocation } from "./persistence/backend.js";
 import { ensureSqliteSchema, openSqliteDatabase, readSqliteTable, saveSqliteDatabase, upsertSqliteRecord } from "./persistence/sqlite.js";
+import { attachOperatorLaunchApprovals, createHumanApprovalRecord, requireRequestHumanApproval } from "./human-approval.js";
 
 export const SYSTEM_POLICY_SCHEMA_VERSION = "2026-08-21.system-policy.v1";
 export const SYSTEM_POLICY_RESOLUTION_SCHEMA_VERSION = "2026-08-21.resolved-system-policy.v1";
@@ -304,6 +305,20 @@ function policyKey(workspaceId: string, policyId: string): string { return `${wo
 function versionKey(workspaceId: string, versionId: string): string { return `${workspaceId}:${versionId}`; }
 function eventId(policyId: string, eventType: string): string { return `${policyId}:event:${Date.now()}:${eventType}:${randomUUID()}`; }
 
+function policyChangeApproval(args: { policyId: string; subject: string; actorId?: string; reason: string; approvedAt: string; allowSystemSafeBootstrap?: boolean }) {
+  const actor = args.actorId?.trim() || "anonymous";
+  if (actor === "system" && args.allowSystemSafeBootstrap && getBuiltinSystemPolicyTemplate(args.policyId)) return null;
+  return createHumanApprovalRecord({
+    approvalId: eventId(args.policyId, "policy-approval"),
+    action: "policy_change",
+    subject: args.subject,
+    approvedBy: actor,
+    approvedAt: args.approvedAt,
+    reason: args.reason,
+    source: "policy_administration"
+  });
+}
+
 async function openPolicyDb(rootDirOrOptions?: string | PersistenceReadOptions) {
   const options = typeof rootDirOrOptions === "string" ? { rootDir: rootDirOrOptions } : rootDirOrOptions;
   const location = resolvePersistenceLocation(options);
@@ -417,13 +432,14 @@ async function activateVersion(args: { policyId: string; versionId: string; even
     if (!validation.valid || validation.checksum !== selected.checksum) throw new Error(`invalid_system_policy:${validation.errors.join(" ") || "checksum mismatch"}`);
     const timestamp = nowIso();
     const actor = args.actorId || "anonymous";
+    const approval = policyChangeApproval({ policyId: args.policyId, subject: selected.id, actorId: actor, approvedAt: timestamp, reason: args.reason?.trim() || args.eventType, allowSystemSafeBootstrap: true });
     for (const version of versions) {
       const next = version.id === selected.id ? { ...version, state: "published" as const, published_at: version.published_at ?? timestamp } : version.state === "published" ? { ...version, state: "superseded" as const } : version;
       if (next !== version) upsertSqliteRecord({ db, tableName: "system_policy_versions", recordKey: versionKey(workspace, version.id), payload: next, createdAt: version.created_at, parentKey: policyKey(workspace, args.policyId) });
     }
     const updated: PersistedSystemPolicyRecord = { ...policy, status: "active", active_version_id: selected.id, current_version_id: selected.id, updated_by: actor, updated_at: timestamp };
     upsertSqliteRecord({ db, tableName: "system_policies", recordKey: policyKey(workspace, args.policyId), payload: updated, createdAt: policy.created_at, parentKey: workspace });
-    writeEvent(db, { id: eventId(args.policyId, args.eventType), workspace_id: workspace, policy_id: args.policyId, policy_version_id: selected.id, event_type: args.eventType, actor_id: actor, reason: args.reason?.trim() || args.eventType, details_json: { checksum: selected.checksum }, created_at: timestamp });
+    writeEvent(db, { id: eventId(args.policyId, args.eventType), workspace_id: workspace, policy_id: args.policyId, policy_version_id: selected.id, event_type: args.eventType, actor_id: actor, reason: args.reason?.trim() || args.eventType, details_json: { checksum: selected.checksum, human_approval: approval, system_safe_bootstrap: approval === null }, created_at: timestamp });
     await saveSqliteDatabase(location.rootDir, db, location.mode);
   } finally { db.close(); }
   return (await getPersistedSystemPolicy(args.policyId, workspace, args.rootDirOrOptions))!;
@@ -447,6 +463,7 @@ export async function setDefaultPersistedSystemPolicy(policyId: string, actorId?
     const selected = policies.find((item) => item.id === policyId);
     if (!selected || selected.status !== "active" || !selected.active_version_id) throw new Error(!selected ? "system_policy_not_found" : "system_policy_not_active");
     const timestamp = nowIso();
+    const approval = policyChangeApproval({ policyId, subject: `${workspace}:default`, actorId, approvedAt: timestamp, reason: "set as workspace default", allowSystemSafeBootstrap: policyId === "agentic-static-safe" });
     for (const policy of policies) {
       const next = { ...policy, is_default: policy.id === policyId, updated_by: actorId || "anonymous", updated_at: timestamp };
       upsertSqliteRecord({ db, tableName: "system_policies", recordKey: policyKey(workspace, policy.id), payload: next, createdAt: policy.created_at, parentKey: workspace });
@@ -455,7 +472,7 @@ export async function setDefaultPersistedSystemPolicy(policyId: string, actorId?
     for (const binding of bindings) upsertSqliteRecord({ db, tableName: "system_policy_bindings", recordKey: binding.id, payload: { ...binding, active: false, updated_at: timestamp }, createdAt: binding.created_at, parentKey: workspace });
     const binding: PersistedSystemPolicyBindingRecord = { id: `${workspace}:default`, workspace_id: workspace, project_id: null, target_ref: null, audit_package: null, binding_type: "default", policy_id: policyId, policy_version_id: selected.active_version_id, priority: 0, active: true, created_by: actorId || "anonymous", created_at: timestamp, updated_at: timestamp };
     upsertSqliteRecord({ db, tableName: "system_policy_bindings", recordKey: binding.id, payload: binding, createdAt: timestamp, parentKey: workspace });
-    writeEvent(db, { id: eventId(policyId, "set_default"), workspace_id: workspace, policy_id: policyId, policy_version_id: selected.active_version_id, event_type: "set_default", actor_id: actorId || "anonymous", reason: "set as workspace default", details_json: {}, created_at: timestamp });
+    writeEvent(db, { id: eventId(policyId, "set_default"), workspace_id: workspace, policy_id: policyId, policy_version_id: selected.active_version_id, event_type: "set_default", actor_id: actorId || "anonymous", reason: "set as workspace default", details_json: { human_approval: approval, system_safe_bootstrap: approval === null }, created_at: timestamp });
     await saveSqliteDatabase(location.rootDir, db, location.mode);
   } finally { db.close(); }
   return (await getPersistedSystemPolicy(policyId, workspace, rootDirOrOptions))!;
@@ -552,6 +569,10 @@ export async function upsertPersistedSystemPolicyBinding(input: {
     if (input.binding_type === "package" && !input.audit_package) throw new Error("system_policy_package_binding_requires_audit_package");
     const timestamp = nowIso();
     const id = input.id?.trim() || `${workspace}:${input.binding_type}:${input.project_id ?? input.target_ref ?? input.audit_package}`;
+    const automaticRuntimeBinding = input.binding_type === "package"
+      && policy.id === "extensive-runtime-local-safe"
+      && (input.audit_package === "runtime-validated" || input.audit_package === "comprehensive-local");
+    const approval = policyChangeApproval({ policyId: policy.id, subject: id, actorId: input.actor_id, approvedAt: timestamp, reason: `set ${input.binding_type} binding`, allowSystemSafeBootstrap: automaticRuntimeBinding });
     const existing = readSqliteTable<PersistedSystemPolicyBindingRecord>(db, "system_policy_bindings").find((item) => item.id === id);
     const binding: PersistedSystemPolicyBindingRecord = {
       id,
@@ -569,7 +590,7 @@ export async function upsertPersistedSystemPolicyBinding(input: {
       updated_at: timestamp
     };
     upsertSqliteRecord({ db, tableName: "system_policy_bindings", recordKey: id, payload: binding, createdAt: binding.created_at, parentKey: workspace });
-    writeEvent(db, { id: eventId(policy.id, "bind"), workspace_id: workspace, policy_id: policy.id, policy_version_id: policy.active_version_id, event_type: "bind", actor_id: input.actor_id || "anonymous", reason: `set ${input.binding_type} binding`, details_json: { binding_id: id }, created_at: timestamp });
+    writeEvent(db, { id: eventId(policy.id, "bind"), workspace_id: workspace, policy_id: policy.id, policy_version_id: policy.active_version_id, event_type: "bind", actor_id: input.actor_id || "anonymous", reason: `set ${input.binding_type} binding`, details_json: { binding_id: id, human_approval: approval, system_safe_bootstrap: approval === null }, created_at: timestamp });
     await saveSqliteDatabase(location.rootDir, db, location.mode);
     return binding;
   } finally { db.close(); }
@@ -649,6 +670,16 @@ export function applyResolvedSystemPolicyToRequest(request: AuditRequest, snapsh
   const previouslyApplied = new Set(uniqueStrings((hints as any).system_policy?.applied_required_control_ids));
   const requestedRequired = uniqueStrings(constraints.required_control_ids).filter((id) => !previouslyApplied.has(id));
   const requestedExcluded = new Set(uniqueStrings(constraints.excluded_control_ids));
+  const packageCatalog = listBuiltinAuditPackages();
+  const defaultPackage = packageCatalog.find((item) => item.id === snapshot.definition_json.default_audit_package);
+  const selectedPackage = packageCatalog.find((item) => item.id === snapshot.audit_package);
+  const removedPackageLanes = defaultPackage && selectedPackage
+    ? defaultPackage.enabled_lanes.filter((lane) => !selectedPackage.enabled_lanes.includes(lane))
+    : [];
+  if (removedPackageLanes.length) {
+    requireRequestHumanApproval(request, "evidence_reduction");
+    if (removedPackageLanes.includes("runtime_validation")) requireRequestHumanApproval(request, "runtime_probe_removal");
+  }
   const required = [...new Set([...snapshot.applicable_required_control_ids, ...requestedRequired])];
   const externalTools = (hints as any).external_audit_tools && typeof (hints as any).external_audit_tools === "object" ? (hints as any).external_audit_tools : {};
   const requiredStaticTools = snapshot.required_evidence_provider_ids.filter((id) => id !== "local_runtime" && id !== "repo_analysis");
@@ -671,7 +702,9 @@ export function applyResolvedSystemPolicyToRequest(request: AuditRequest, snapsh
     publishability_threshold: effectiveThreshold
   };
   for (const id of snapshot.applicable_required_control_ids) {
-    if (requestedExcluded.has(id) && !snapshot.definition_json.exceptions.allow_approved_weakening) throw new Error(`system_policy_required_control_cannot_be_excluded:${id}`);
+    if (!requestedExcluded.has(id)) continue;
+    if (!snapshot.definition_json.exceptions.allow_approved_weakening) throw new Error(`system_policy_required_control_cannot_be_excluded:${id}`);
+    requireRequestHumanApproval(request, "control_change");
   }
   return {
     ...request,
@@ -680,7 +713,14 @@ export function applyResolvedSystemPolicyToRequest(request: AuditRequest, snapsh
     llm_max_tokens: Math.min(request.llm_max_tokens ?? snapshot.definition_json.providers.maximum_total_tokens, snapshot.definition_json.providers.maximum_total_tokens),
     hints: {
       ...hints,
-      planner_control_constraints: { ...constraints, selection_mode: "constrained", required_control_ids: required, excluded_control_ids: uniqueStrings(constraints.excluded_control_ids).filter((id) => !snapshot.applicable_required_control_ids.includes(id)) },
+      planner_control_constraints: {
+        ...constraints,
+        selection_mode: "constrained",
+        required_control_ids: required.filter((id) => !requestedExcluded.has(id) || !snapshot.definition_json.exceptions.allow_approved_weakening),
+        excluded_control_ids: uniqueStrings(constraints.excluded_control_ids).filter((id) => (
+          !snapshot.applicable_required_control_ids.includes(id) || snapshot.definition_json.exceptions.allow_approved_weakening
+        ))
+      },
       ...(effectiveExternalTools ? { external_audit_tools: effectiveExternalTools } : {}),
       audit_package_overrides: effectivePackageOverrides,
       evidence_failure_policy: snapshot.definition_json.evidence_failure_policy,
@@ -691,6 +731,7 @@ export function applyResolvedSystemPolicyToRequest(request: AuditRequest, snapsh
 }
 
 export async function resolveAndApplySystemPolicy(request: AuditRequest, args?: { target_class?: TargetClass | null; analysis?: AnalysisSummary | null; run_id?: string | null; rootDirOrOptions?: string | PersistenceReadOptions }): Promise<{ request: AuditRequest; snapshot: ResolvedSystemPolicySnapshot | null }> {
+  request = attachOperatorLaunchApprovals(request);
   const snapshot = await resolvePersistedSystemPolicy({ request, target_class: args?.target_class, analysis: args?.analysis, run_id: args?.run_id, rootDirOrOptions: args?.rootDirOrOptions });
   return { request: snapshot ? applyResolvedSystemPolicyToRequest(request, snapshot) : request, snapshot };
 }

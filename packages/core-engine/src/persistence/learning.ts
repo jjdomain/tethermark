@@ -1,8 +1,11 @@
 import crypto from "node:crypto";
 
-import { createModelProvider, resolveAgentProviderConfig, type ProviderConfig } from "../../../llm-provider/src/index.js";
+import { createModelProvider, resolveAgentProviderConfig, type ProviderConfig, type ProviderPolicyDecision } from "../../../llm-provider/src/index.js";
 import type { DatabaseMode } from "../contracts.js";
+import { isValidHumanApprovalRecord, type HumanApprovalRecord } from "../human-approval.js";
+import { learningOverlayEffectMode } from "../learning-overlays.js";
 import { normalizeProjectId, normalizeWorkspaceId } from "../request-scope.js";
+import { hashObject } from "../utils.js";
 import { findingDispositionSignature } from "./finding-dispositions.js";
 import { resolvePersistenceLocation, type PersistenceReadOptions } from "./backend.js";
 import type {
@@ -941,11 +944,112 @@ function providerConfigFromSettings(providers: unknown): ProviderConfig {
   };
 }
 
+export type LearningSynthesisAuthorizationMode = "operator_initiated" | "phase2_background_policy" | "denied";
+
+export interface LearningSynthesisAuthorizationDecision {
+  allowed: boolean;
+  mode: LearningSynthesisAuthorizationMode;
+  reason: string;
+  operator_initiation_verified: boolean;
+  operator_approval: HumanApprovalRecord | null;
+  provider_policy: ProviderPolicyDecision | null;
+  provider: string | null;
+  model: string | null;
+}
+
+export function learningSynthesisApprovalSubject(args: {
+  workspaceId?: string;
+  projectId?: string;
+  runId?: string | null;
+}): string {
+  return `learning-synthesis:${hashObject({
+    workspace_id: normalizeWorkspaceId(args.workspaceId),
+    project_id: normalizeProjectId(args.projectId),
+    run_id: args.runId ?? null
+  })}`;
+}
+
+export function resolveLearningSynthesisAuthorization(args: {
+  workspaceId?: string;
+  projectId?: string;
+  runId?: string | null;
+  trigger: LearningTrigger;
+  actorId?: string | null;
+  operatorApproval?: HumanApprovalRecord | null;
+  providers?: unknown;
+  maxRequests: number;
+}): LearningSynthesisAuthorizationDecision {
+  const subject = learningSynthesisApprovalSubject(args);
+  const actorId = args.actorId?.trim() ?? "";
+  const operatorInitiationVerified = args.trigger === "api"
+    && Boolean(actorId)
+    && isValidHumanApprovalRecord(args.operatorApproval, { action: "learning_model_synthesis", subject })
+    && args.operatorApproval.source === "operator_launch"
+    && args.operatorApproval.approved_by === actorId;
+  const workloadClass = operatorInitiationVerified ? "interactive_operator" : "unattended_local";
+  try {
+    const resolved = resolveAgentProviderConfig("learning_synthesizer_agent", {
+      ...providerConfigFromSettings(args.providers),
+      workloadClass,
+      maxRequests: Math.max(1, Math.min(args.maxRequests, 20)),
+      maxTokens: 80_000
+    });
+    if (operatorInitiationVerified && resolved.policyDecision.initiation_mode === "operator") {
+      return {
+        allowed: true,
+        mode: "operator_initiated",
+        reason: "operator_initiation_verified",
+        operator_initiation_verified: true,
+        operator_approval: args.operatorApproval ?? null,
+        provider_policy: resolved.policyDecision,
+        provider: resolved.provider,
+        model: resolved.model ?? null
+      };
+    }
+    const backgroundCredentialConfigured = resolved.provider === "mock"
+      || (resolved.policyDecision.credential_class === "api_key" && Boolean(resolved.apiKey));
+    if (resolved.policyDecision.initiation_mode === "background" && backgroundCredentialConfigured) {
+      return {
+        allowed: true,
+        mode: "phase2_background_policy",
+        reason: "phase2_background_credential_workload_approved",
+        operator_initiation_verified: false,
+        operator_approval: null,
+        provider_policy: resolved.policyDecision,
+        provider: resolved.provider,
+        model: resolved.model ?? null
+      };
+    }
+    return {
+      allowed: false,
+      mode: "denied",
+      reason: "operator_initiation_required",
+      operator_initiation_verified: false,
+      operator_approval: null,
+      provider_policy: resolved.policyDecision,
+      provider: resolved.provider,
+      model: resolved.model ?? null
+    };
+  } catch (error) {
+    return {
+      allowed: false,
+      mode: "denied",
+      reason: "operator_initiation_required_or_phase2_policy_denied",
+      operator_initiation_verified: false,
+      operator_approval: null,
+      provider_policy: null,
+      provider: null,
+      model: null
+    };
+  }
+}
+
 async function synthesizeCandidateWithLlm(args: {
   candidate: PersistedLearningCandidateRecord;
   sourceEvents: PersistedLearningEventRecord[];
   settings: LearningSettings;
   providerConfig?: ProviderConfig;
+  synthesisAuthorization?: LearningSynthesisAuthorizationDecision;
   rootDirOrOptions?: string | PersistenceReadOptions;
 }): Promise<{ candidate: PersistedLearningCandidateRecord; synthesized: boolean; reason: string }> {
   const eligibility = shouldRunLlmSynthesis({ candidate: args.candidate, sourceEvents: args.sourceEvents, settings: args.settings });
@@ -967,6 +1071,7 @@ async function synthesizeCandidateWithLlm(args: {
           agent_name: "learning_synthesizer_agent",
           provider: resolved.provider,
           model: resolved.model ?? null,
+          authorization: args.synthesisAuthorization ?? null,
           updated_at: now
         }
       }
@@ -1021,6 +1126,7 @@ async function synthesizeCandidateWithLlm(args: {
           agent_name: "learning_synthesizer_agent",
           provider: modelProvider?.providerName ?? resolved.provider,
           model: modelProvider?.modelName ?? resolved.model ?? null,
+          authorization: args.synthesisAuthorization ?? null,
           error: error instanceof Error ? error.message : String(error),
           updated_at: now
         }
@@ -1043,6 +1149,7 @@ async function synthesizeCandidateWithLlm(args: {
         agent_name: "learning_synthesizer_agent",
         provider: result.provider,
         model: result.model,
+        authorization: args.synthesisAuthorization ?? null,
         usage: result.usage ?? null,
         recommended_review: result.parsed.recommended_review ?? null,
         risk_notes: Array.isArray(result.parsed.risk_notes) ? result.parsed.risk_notes : [],
@@ -1081,6 +1188,7 @@ async function runLearningPipelineUnlocked(args: {
   runId?: string | null;
   trigger?: LearningTrigger;
   actorId?: string | null;
+  synthesisOperatorApproval?: HumanApprovalRecord | null;
   settings?: unknown;
   providers?: unknown;
 }): Promise<{ job: PersistedLearningJobRecord; candidates: PersistedLearningCandidateRecord[] }> {
@@ -1161,14 +1269,19 @@ async function runLearningPipelineUnlocked(args: {
     });
     const manualTrigger = baseJob.trigger === "api";
     const configuredProvider = providerConfigFromSettings(args.providers);
-    const resolvedSynthesisProvider = resolveAgentProviderConfig("learning_synthesizer_agent", {
-      ...configuredProvider,
-      workloadClass: "interactive_operator"
+    const synthesisAuthorization = resolveLearningSynthesisAuthorization({
+      workspaceId,
+      projectId,
+      runId: args.runId,
+      trigger: baseJob.trigger,
+      actorId: args.actorId,
+      operatorApproval: args.synthesisOperatorApproval,
+      providers: args.providers,
+      maxRequests: settings.llm_max_calls_per_day
     });
-    const oauthBackgroundBlocked = !manualTrigger && resolvedSynthesisProvider.provider === "openai_codex";
     const providerConfig: ProviderConfig = {
       ...configuredProvider,
-      workloadClass: manualTrigger ? "interactive_operator" : "unattended_local",
+      workloadClass: synthesisAuthorization.operator_initiation_verified ? "interactive_operator" : "unattended_local",
       maxRequests: Math.max(1, Math.min(settings.llm_max_calls_per_day, 20)),
       maxTokens: 80_000
     };
@@ -1176,7 +1289,7 @@ async function runLearningPipelineUnlocked(args: {
       ...settings,
       llm_synthesis_enabled: settings.llm_synthesis_enabled
         && (manualTrigger ? settings.llm_manual_synthesis_enabled : true)
-        && !oauthBackgroundBlocked
+        && synthesisAuthorization.allowed
     };
     const today = new Date().toISOString().slice(0, 10);
     const existingJobs = await listPersistedLearningJobs({
@@ -1203,7 +1316,7 @@ async function runLearningPipelineUnlocked(args: {
         skipped += 1;
         continue;
       }
-      if (eligibility.eligible && resolvedSynthesisProvider.provider !== "mock") {
+      if (eligibility.eligible && synthesisAuthorization.provider !== "mock") {
         synthesisCallsReserved += 1;
         remainingSynthesisCalls -= 1;
         await writeRunningJob({
@@ -1216,6 +1329,7 @@ async function runLearningPipelineUnlocked(args: {
         sourceEvents,
         settings: synthesisSettings,
         providerConfig,
+        synthesisAuthorization,
         rootDirOrOptions: { rootDir: location.rootDir, dbMode: location.mode }
       });
       if (result.synthesized) {
@@ -1237,7 +1351,7 @@ async function runLearningPipelineUnlocked(args: {
         synthesis_calls_reserved: synthesisCallsReserved,
         synthesis_budget_used_today: usedSynthesisCallsToday,
         synthesis_budget_remaining_after_job: remainingSynthesisCalls,
-        oauth_background_blocked: oauthBackgroundBlocked
+        synthesis_authorization: synthesisAuthorization
       }
     };
     await writeLearningJob(job, { rootDir: location.rootDir, dbMode: location.mode });
@@ -1274,6 +1388,7 @@ export async function runLearningPipeline(args: {
   runId?: string | null;
   trigger?: LearningTrigger;
   actorId?: string | null;
+  synthesisOperatorApproval?: HumanApprovalRecord | null;
   settings?: unknown;
   providers?: unknown;
 }): Promise<{ job: PersistedLearningJobRecord; candidates: PersistedLearningCandidateRecord[] }> {
@@ -1437,7 +1552,30 @@ export async function promoteLearningCandidate(args: {
   if (candidate.status === "rejected") throw new Error("learning_candidate_rejected");
   const experiments = await listPersistedLearningExperiments({ rootDir: location.rootDir, dbMode: location.mode, candidateId: candidate.id });
   const latestExperiment = experiments[0] ?? null;
+  const priorPromotions = (await listPersistedLearningPromotions({ rootDir: location.rootDir, dbMode: location.mode, limit: Number.MAX_SAFE_INTEGER }))
+    .filter((item) => item.candidate_id === candidate.id);
+  const previousPromotion = priorPromotions[0] ?? null;
   const now = new Date().toISOString();
+  const effectMode = learningOverlayEffectMode(candidate.candidate_type);
+  const appliedChange = {
+    schema_version: "2026-08-26.learning-overlay.v1",
+    effect_mode: effectMode,
+    candidate_type: candidate.candidate_type,
+    title: candidate.title,
+    summary: candidate.summary,
+    proposed_change: asObject(candidate.proposed_change_json),
+    affected_finding_signatures: asStringArray(candidate.affected_finding_signatures_json),
+    safety_boundary: effectMode === "governed_no_runtime_effect"
+      ? "Promotion is recorded and queryable, but suppression and severity changes require an explicit governed policy or finding-disposition record."
+      : "Only additive validation, evidence, or advisory behavior is eligible for future-run consumption."
+  };
+  const artifactVersion = `learning-overlay.v1.${hashObject({
+    candidate_id: candidate.id,
+    scope_type: candidate.scope_type,
+    scope_id: candidate.scope_id,
+    target_id: candidate.target_id,
+    applied_change: appliedChange
+  }).slice(0, 24)}`;
   const promotion: PersistedLearningPromotionRecord = {
     id: newId("learn_promo"),
     candidate_id: candidate.id,
@@ -1448,14 +1586,15 @@ export async function promoteLearningCandidate(args: {
     scope_id: candidate.scope_id,
     target_id: candidate.target_id,
     promoted_artifact_type: candidate.candidate_type,
-    promoted_artifact_version: `learning-overlay-${now}`,
-    applied_change_json: {
-      ...asObject(candidate.proposed_change_json),
-      v1_application: "Recorded as approved learning overlay. Core audit execution is unchanged unless future code explicitly consumes this overlay."
-    },
+    promoted_artifact_version: artifactVersion,
+    applied_change_json: appliedChange,
     rollback_pointer_json: {
+      schema_version: "2026-08-26.learning-overlay-rollback.v1",
       candidate_status_before_promotion: candidate.status,
-      promotion_can_be_rolled_back: true
+      promotion_can_be_rolled_back: true,
+      deactivates_artifact_version: artifactVersion,
+      previous_promotion_id: previousPromotion?.id ?? null,
+      previous_artifact_version: previousPromotion?.promoted_artifact_version ?? null
     },
     status: "active",
     promoted_by: args.actorId,
@@ -1466,7 +1605,11 @@ export async function promoteLearningCandidate(args: {
     expires_at: args.expiresAt ?? candidate.expires_at,
     metadata_json: {
       human_approved: true,
-      v1_no_automatic_live_behavior_change: true
+      approval_actor: args.actorId,
+      approval_recorded_at: now,
+      effect_mode: effectMode,
+      future_run_consumption_eligible: effectMode !== "governed_no_runtime_effect",
+      live_run_mutation: false
     }
   };
   const nextCandidate: PersistedLearningCandidateRecord = {

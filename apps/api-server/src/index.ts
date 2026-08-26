@@ -30,6 +30,7 @@ import {
   attachLlmProviderCredentialStatus,
   listBuiltinIntegrations,
   attachIntegrationCredentialStatus,
+  createArtifactRetentionScheduler,
   pruneArtifacts,
   summarizeArtifacts,
   listPersistedRuns,
@@ -119,11 +120,13 @@ import {
   markRuntimeFollowupLaunched,
   markRuntimeFollowupJobTerminal,
   createLearningExperiment,
+  createHumanApprovalRecord,
   listPersistedLearningCandidates,
   listPersistedLearningEvents,
   listPersistedLearningExperiments,
   listPersistedLearningJobs,
   listPersistedLearningPromotions,
+  learningSynthesisApprovalSubject,
   normalizeLearningSettings,
   promoteLearningCandidate,
   readPersistedLearningCandidate,
@@ -2503,9 +2506,14 @@ function createSelfLearningScheduler(): { start(): void; stop(): void } {
   };
 }
 
-export function createApiServer(): http.Server {
+export function createApiServer(options: { enableArtifactRetentionScheduler?: boolean } = {}): http.Server {
   void asyncJobs.recoverJobs();
   const scheduler = createSelfLearningScheduler();
+  const artifactRetentionScheduler = options.enableArtifactRetentionScheduler
+    ? createArtifactRetentionScheduler({
+      onError: (error) => console.warn("Artifact retention scheduler tick failed:", error)
+    })
+    : null;
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", `http://${host}:${port}`);
 
@@ -3434,12 +3442,30 @@ export function createApiServer(): http.Server {
         ...((settingsResolution.effective.learning_json && typeof settingsResolution.effective.learning_json === "object") ? settingsResolution.effective.learning_json as Record<string, unknown> : {}),
         ...(syncLimit ? { sync_limit: syncLimit } : {})
       };
+      const synthesisActorId = getAuthMode() === "none" && context.actorId === "anonymous"
+        ? "local-operator"
+        : context.actorId;
+      const approvedAt = new Date().toISOString();
+      const synthesisOperatorApproval = createHumanApprovalRecord({
+        approvalId: `operator-learning:${approvedAt}:${synthesisActorId}`,
+        action: "learning_model_synthesis",
+        subject: learningSynthesisApprovalSubject({
+          workspaceId: context.workspaceId,
+          projectId: context.projectId,
+          runId
+        }),
+        approvedBy: synthesisActorId,
+        approvedAt,
+        reason: "Operator submitted an explicit learning synthesis request.",
+        source: "operator_launch"
+      });
       const result = await runLearningPipeline({
         workspaceId: context.workspaceId,
         projectId: context.projectId,
         runId,
         trigger: "api",
-        actorId: context.actorId,
+        actorId: synthesisActorId,
+        synthesisOperatorApproval,
         settings: learningSettings,
         providers: settingsResolution.effective.providers_json
       });
@@ -4172,6 +4198,19 @@ export function createApiServer(): http.Server {
           return;
         }
       }
+      const dispositionReview = await submitPersistedReviewAction({
+        runId: runFindingDispositions.runId,
+        input: {
+          reviewer_id: context.actorId,
+          action_type: body.disposition_type === "waiver" ? "waive_control" : "suppress_finding",
+          finding_id: finding.id,
+          triage_decision: (body.triage_decision ?? (body.disposition_type === "waiver" ? "accepted_risk" : "out_of_scope")) as any,
+          review_priority: body.review_priority as any,
+          validation_intent: body.validation_intent as any,
+          notes: body.reason,
+          metadata: { governance_operation: "create", disposition_type: body.disposition_type, scope_level: scopeLevel }
+        }
+      });
       const disposition = await createPersistedFindingDisposition({
         runId: runFindingDispositions.runId,
         input: {
@@ -4185,6 +4224,7 @@ export function createApiServer(): http.Server {
           created_by: context.actorId,
           metadata: {
             created_via: "api",
+            approval_review_action_id: dispositionReview.action.id,
             workspace_id: context.workspaceId,
             project_id: context.projectId,
             owner_id: body.disposition_type === "waiver" ? String(body.owner_id ?? "").trim() || null : null,
@@ -4273,8 +4313,19 @@ export function createApiServer(): http.Server {
       if (finding) {
         metadata.evidence_fingerprint = buildFindingEvidenceFingerprint(finding);
       }
+      const dispositionReview = await submitPersistedReviewAction({
+        runId: runFindingDispositionItem.runId,
+        input: {
+          reviewer_id: context.actorId,
+          action_type: existing.disposition_type === "waiver" ? "waive_control" : "suppress_finding",
+          finding_id: existing.finding_id,
+          notes: body.reason ?? existing.reason,
+          metadata: { governance_operation: "update", disposition_id: existing.id, disposition_type: existing.disposition_type }
+        }
+      });
       metadata.updated_by = context.actorId;
       metadata.updated_at = new Date().toISOString();
+      metadata.approval_review_action_id = dispositionReview.action.id;
       const updated = await updatePersistedFindingDisposition({
         runId: runFindingDispositionItem.runId,
         dispositionId: runFindingDispositionItem.dispositionId,
@@ -4282,7 +4333,8 @@ export function createApiServer(): http.Server {
           reason: body.reason,
           notes: body.notes,
           expires_at: body.expires_at,
-          metadata
+          metadata,
+          approved_by: context.actorId
         }
       });
       await triggerLearningForReviewMutation({ runId: runFindingDispositionItem.runId, context, source: "finding_disposition_update" });
@@ -5686,14 +5738,20 @@ export function createApiServer(): http.Server {
 
     sendJson(res, 404, { error: "not_found" });
   });
-  server.on("listening", () => scheduler.start());
-  server.on("close", () => scheduler.stop());
+  server.on("listening", () => {
+    scheduler.start();
+    artifactRetentionScheduler?.start();
+  });
+  server.on("close", () => {
+    scheduler.stop();
+    artifactRetentionScheduler?.stop();
+  });
   return server;
 }
 
 const entryHref = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : null;
 if (entryHref && import.meta.url === entryHref) {
-  const server = createApiServer();
+  const server = createApiServer({ enableArtifactRetentionScheduler: true });
   listenWithFriendlyErrors({ server, host, port, serviceName: "API", portEnvVar: "PORT", onListening: () => {
     console.log(`API listening on http://${host}:${port}`);
   } });

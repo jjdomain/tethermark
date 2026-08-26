@@ -59,6 +59,7 @@ export type HumanReviewActionType =
     | "adopt_rerun_outcome"
     | "confirm_finding"
     | "suppress_finding"
+    | "waive_control"
     | "downgrade_severity"
     | "request_validation"
     | "open_remediation"
@@ -369,6 +370,7 @@ export interface LaunchIntentArtifact {
     stale: boolean;
     accepted: boolean;
   };
+  governance_approvals: import("./human-approval.js").HumanApprovalRecord[];
   notes: string[];
 }
 
@@ -703,6 +705,7 @@ export interface FindingSuppressionRule {
   control_ids?: string[];
   title_contains?: string[];
   expires_at?: string | null;
+  human_approval: import("./human-approval.js").HumanApprovalRecord;
 }
 
 export interface ControlWaiverRule {
@@ -711,6 +714,7 @@ export interface ControlWaiverRule {
   control_ids: string[];
   finding_ids?: string[];
   expires_at?: string | null;
+  human_approval: import("./human-approval.js").HumanApprovalRecord;
 }
 
 export interface PolicyApplicationArtifact {
@@ -836,7 +840,7 @@ export interface ScoreSummary {
 }
 
 export interface RunVersionManifest {
-  schema_version: "2026-08-18.run-versions.v1";
+  schema_version: "2026-08-26.run-versions.v2";
   methodology_version: string;
   static_baseline_version: string;
   control_catalog_version: string;
@@ -844,6 +848,7 @@ export interface RunVersionManifest {
   audit_package_catalog_version: string;
   audit_package_id: AuditPackageId;
   prompt_set_version: string;
+  learning_overlay_resolution_version: string;
   tool_versions: Array<{
     tool_id: string;
     version: string | null;

@@ -14,7 +14,7 @@ The harness combines deterministic evidence collection, LLM-guided planning and 
 - Supports Community Edition `local` persistence with SQLite-backed roots and metadata.
 - Exposes stable query APIs and separate best-effort artifact/debug APIs.
 - Includes a self-hostable Community Edition web UI for audits, findings, remediation, jobs, artifacts, and persisted settings.
-- Adds a governed self-learning loop for review-derived improvement candidates, dry-run experiments, explicit promotion, and rollback history. See [`docs/self-learning-governed-improvement-loop.md`](docs/self-learning-governed-improvement-loop.md).
+- Adds a governed self-learning loop for review-derived improvement candidates, dry-run experiments, explicit promotion, versioned additive-only future-run consumption, and rollback history. Suppression/severity promotions remain non-executable without governed policy or disposition records. See [`docs/self-learning-governed-improvement-loop.md`](docs/self-learning-governed-improvement-loop.md).
 - Includes a product benchmark suite for Tethermark release validation against pinned public AI-agent and LLM-app repositories. See [`docs/product-benchmark-suite.md`](docs/product-benchmark-suite.md).
 
 ## Current Status
@@ -464,7 +464,9 @@ The harness now has an explicit boundary between queryable state and archival de
 - Artifact APIs under `/artifacts/runs/...` are best-effort archival/debug access.
 - Reusable orchestration inputs such as planner output, threat model, eval selection, run plan, findings-pre-skeptic, score summary, and observations are persisted as normalized stage artifacts.
 - Per-run bundle exports are optional debug exports rather than canonical persistence.
-- Local artifact and sandbox directories can be pruned explicitly with `npm run scan -- artifacts prune`. The command defaults to run artifact bundles and supports `--kind runs|sandboxes|all`, `--older-than <days|30d>`, `--max-gb <n>`, and `--dry-run`; it can read defaults from `HARNESS_ARTIFACT_RETENTION_DAYS`, `HARNESS_ARTIFACT_RETENTION_MAX_GB`, and `HARNESS_ARTIFACT_RETENTION_KIND`.
+- The API process schedules local retention maintenance every 24 hours: run artifacts older than 30 days and sandbox/source copies older than 7 days are removed by default. Queued, starting, and running audit IDs are protected. Normalized audit history remains in SQLite, while stale raw-artifact index rows are reconciled so artifact APIs do not advertise deleted files.
+- Manual preview/pruning remains available through the existing UI and `npm run scan -- artifacts prune`. The CLI supports `--kind runs|sandboxes|all`, `--older-than <days|30d>`, `--max-gb <n>`, and `--dry-run`. Configure scheduling with `HARNESS_ARTIFACT_RETENTION_DAYS`, `HARNESS_SANDBOX_RETENTION_DAYS`, `HARNESS_ARTIFACT_RETENTION_MAX_GB`, and `HARNESS_ARTIFACT_RETENTION_INTERVAL_MS`; set `HARNESS_DISABLE_ARTIFACT_RETENTION_SCHEDULER=1` only when external maintenance owns retention.
+- The latest maintenance state and the newest 100 success/failure records are stored under `.artifacts/maintenance`. Retention never deletes normalized run, finding, evidence, review, or learning rows.
 
 ## Runtime Limitations
 
