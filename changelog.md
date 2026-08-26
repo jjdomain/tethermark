@@ -1,5 +1,16 @@
 ﻿# Changelog
 
+## 2026-08-26
+
+### Changed
+
+- Local SQLite persistence now validates existing databases before use, fails closed on corrupt or unreadable files, and preserves the last valid database when a temporary write or replacement fails.
+- Async restart recovery now reconciles already-persisted terminal runs into their job and attempt records instead of executing those runs again.
+
+### Verified
+
+- Deterministic persistence regressions cover corrupt-database rejection, disk-full/pre-replacement failure preservation, temporary-file cleanup, concurrent-write compatibility, and idempotent terminal-run recovery.
+
 ## 2026-08-25
 
 ### Added
