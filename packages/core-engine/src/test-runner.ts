@@ -39,7 +39,7 @@ import { deriveInitialReviewWorkflow, listPersistedReviewNotifications, listPers
 import { createPersistedReviewComment } from "./persistence/review-comments.js";
 import { buildFindingEvidenceFingerprint, createPersistedFindingDisposition } from "./persistence/finding-dispositions.js";
 import { readPersistedArtifactIndex, readPersistedCommitDiff, readPersistedControlResults, readPersistedEvents, readPersistedEvidenceRecords, readPersistedFindings, readPersistedLanePlans, readPersistedLaneResults, readPersistedLaneReuseDecisions, readPersistedLaneSpecialistOutputs, readPersistedMaintenanceHistory, readPersistedMetrics, readPersistedObservability, readPersistedResolvedConfiguration, readPersistedReviewActions, readPersistedReviewComments, readPersistedReviewDecision, readPersistedReviewWorkflow, readPersistedRunUsageSummary, readPersistedScoreSummary, readPersistedStageArtifact, readPersistedStageArtifacts, readPersistedToolAdapterSummary, readPersistedToolExecutions } from "./persistence/run-details.js";
-import { ensureSqliteSchema, openSqliteDatabase, PERSISTENCE_SCHEMA_VERSION, readPersistenceMetadata, readSqliteTable, saveSqliteDatabase, setSqliteSaveFailureForTests, SqlitePersistenceError, upsertSqliteRecord } from "./persistence/sqlite.js";
+import { createLocalPersistenceBackup, ensureSqliteSchema, listLocalPersistenceBackups, openSqliteDatabase, PERSISTENCE_SCHEMA_VERSION, readPersistenceMetadata, readSqliteTable, restoreLocalPersistenceBackup, saveSqliteDatabase, setSqliteSaveFailureForTests, SqlitePersistenceError, upsertSqliteRecord, verifyLocalPersistenceBackup } from "./persistence/sqlite.js";
 import { buildPsqlProcessEnv } from "./persistence/postgres.js";
 import { normalizeLearningSettings } from "./persistence/learning.js";
 import { listPersistedUiDocuments, readPersistedUiSettings, updatePersistedUiSettings } from "./persistence/ui-settings.js";
@@ -874,6 +874,179 @@ async function testSqliteCorruptionAndFailedSavesFailClosed(): Promise<void> {
       (error: unknown) => error instanceof SqlitePersistenceError && error.persistence_code === "sqlite_database_corrupt_or_unsupported"
     );
     assert.deepEqual(await fs.readFile(databasePath), corruptBytes);
+  });
+}
+
+async function testSqliteAutomaticBackupVerificationAndRestore(): Promise<void> {
+  await withTempDir("tethermark-sqlite-backup-restore-", async (rootDir) => {
+    const writeValue = async (value: string): Promise<void> => {
+      const db = await openSqliteDatabase(rootDir);
+      try {
+        ensureSqliteSchema(db);
+        upsertSqliteRecord({ db, tableName: "backup_test", recordKey: "state", payload: { value } });
+        await saveSqliteDatabase(rootDir, db);
+      } finally {
+        db.close();
+      }
+    };
+
+    await withEnv({ HARNESS_SQLITE_AUTO_BACKUP_INTERVAL_MS: "1", HARNESS_SQLITE_BACKUP_RETENTION: "2" }, async () => {
+      await writeValue("v1");
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await writeValue("v2");
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await writeValue("v3");
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await writeValue("v4");
+    });
+
+    const automatic = (await listLocalPersistenceBackups(rootDir)).filter((item) => item.manifest.reason === "automatic");
+    assert.equal(automatic.length, 2);
+    assert.ok(automatic.every((item) => item.verification.valid));
+
+    const manual = await createLocalPersistenceBackup({ rootDir, reason: "operator-test" });
+    assert.equal(manual.verification.valid, true);
+    assert.equal(manual.manifest.reason, "operator-test");
+    assert.equal((await verifyLocalPersistenceBackup(manual.backup_dir)).valid, true);
+
+    await withEnv({ HARNESS_SQLITE_AUTO_BACKUP_INTERVAL_MS: "0" }, async () => writeValue("v5"));
+    const restored = await restoreLocalPersistenceBackup({ rootDir, backupDir: manual.backup_dir });
+    assert.ok(restored.safety_backup_dir);
+    assert.equal(restored.rejected_database_path, null);
+    assert.equal(restored.verification.valid, true);
+
+    const restoredDb = await openSqliteDatabase(rootDir);
+    try {
+      assert.deepEqual(readSqliteTable<{ value: string }>(restoredDb, "backup_test"), [{ value: "v4" }]);
+    } finally {
+      restoredDb.close();
+    }
+
+    const tamperedDir = path.join(rootDir, "tampered-backup");
+    await fs.cp(manual.backup_dir, tamperedDir, { recursive: true });
+    await fs.appendFile(path.join(tamperedDir, "harness.sqlite"), Buffer.from("tamper", "utf8"));
+    const tampered = await verifyLocalPersistenceBackup(tamperedDir);
+    assert.equal(tampered.valid, false);
+    assert.ok(tampered.issues.includes("backup_database_size_mismatch"));
+    assert.ok(tampered.issues.includes("backup_database_checksum_mismatch"));
+    await assert.rejects(
+      () => restoreLocalPersistenceBackup({ rootDir, backupDir: tamperedDir }),
+      (error: unknown) => error instanceof SqlitePersistenceError && error.persistence_code === "sqlite_backup_invalid"
+    );
+    const afterRejectedRestore = await openSqliteDatabase(rootDir);
+    try {
+      assert.deepEqual(readSqliteTable<{ value: string }>(afterRejectedRestore, "backup_test"), [{ value: "v4" }]);
+    } finally {
+      afterRejectedRestore.close();
+    }
+
+    await fs.writeFile(path.join(rootDir, "harness.sqlite"), Buffer.from("corrupt-current-database", "utf8"));
+    const recovered = await restoreLocalPersistenceBackup({ rootDir, backupDir: manual.backup_dir });
+    assert.equal(recovered.safety_backup_dir, null);
+    assert.ok(recovered.rejected_database_path);
+    assert.deepEqual(await fs.readFile(recovered.rejected_database_path!), Buffer.from("corrupt-current-database", "utf8"));
+    const recoveredDb = await openSqliteDatabase(rootDir);
+    try {
+      assert.deepEqual(readSqliteTable<{ value: string }>(recoveredDb, "backup_test"), [{ value: "v4" }]);
+    } finally {
+      recoveredDb.close();
+    }
+  });
+}
+
+async function testSqliteReleaseUpgradeFixtureAndRollback(): Promise<void> {
+  await withTempDir("tethermark-sqlite-upgrade-", async (rootDir) => {
+    const fixturePath = path.resolve(process.cwd(), "fixtures", "persistence-upgrades", "sqlite-1.2.0.json");
+    const fixture = JSON.parse(await fs.readFile(fixturePath, "utf8")) as {
+      source_schema_version: string;
+      records: Array<{
+        table_name: string;
+        record_key: string;
+        run_id: string | null;
+        created_at: string | null;
+        target_id: string | null;
+        target_snapshot_id: string | null;
+        parent_key: string | null;
+        payload: unknown;
+      }>;
+      expected: { run_ids: string[]; review_comment_ids: string[] };
+    };
+    assert.equal(fixture.source_schema_version, "1.2.0");
+
+    const seed = await openSqliteDatabase(rootDir);
+    try {
+      ensureSqliteSchema(seed);
+      for (const record of fixture.records) {
+        upsertSqliteRecord({
+          db: seed,
+          tableName: record.table_name,
+          recordKey: record.record_key,
+          runId: record.run_id,
+          createdAt: record.created_at,
+          targetId: record.target_id,
+          targetSnapshotId: record.target_snapshot_id,
+          parentKey: record.parent_key,
+          payload: record.payload
+        });
+      }
+      await withEnv({ HARNESS_SQLITE_AUTO_BACKUP_INTERVAL_MS: "0" }, async () => saveSqliteDatabase(rootDir, seed));
+    } finally {
+      seed.close();
+    }
+    const legacyMetadataPath = path.join(rootDir, "persistence-meta.json");
+    const legacyMetadata = JSON.parse(await fs.readFile(legacyMetadataPath, "utf8"));
+    legacyMetadata.persistence_schema_version = fixture.source_schema_version;
+    legacyMetadata.compatibility_status = "current";
+    await fs.writeFile(legacyMetadataPath, `${JSON.stringify(legacyMetadata, null, 2)}\n`, "utf8");
+    assert.equal((await readPersistenceMetadata(rootDir))?.compatibility_status, "legacy");
+
+    const migration = await openSqliteDatabase(rootDir);
+    try {
+      ensureSqliteSchema(migration);
+      upsertSqliteRecord({ db: migration, tableName: "upgrade_markers", recordKey: "current", payload: { schema: PERSISTENCE_SCHEMA_VERSION } });
+      setSqliteSaveFailureForTests("before_replace");
+      await withEnv({ HARNESS_SQLITE_AUTO_BACKUP_INTERVAL_MS: "1" }, async () => {
+        await assert.rejects(
+          () => saveSqliteDatabase(rootDir, migration),
+          (error: unknown) => error instanceof SqlitePersistenceError && error.persistence_code === "sqlite_save_failed"
+        );
+      });
+      assert.equal((await readPersistenceMetadata(rootDir))?.persistence_schema_version, fixture.source_schema_version);
+      setSqliteSaveFailureForTests(null);
+      await withEnv({ HARNESS_SQLITE_AUTO_BACKUP_INTERVAL_MS: "86400000" }, async () => saveSqliteDatabase(rootDir, migration));
+    } finally {
+      setSqliteSaveFailureForTests(null);
+      migration.close();
+    }
+
+    const backups = await listLocalPersistenceBackups(rootDir);
+    assert.equal(backups.length, 1);
+    assert.equal(backups[0]?.manifest.source_schema_version, fixture.source_schema_version);
+    assert.equal(backups[0]?.verification.valid, true);
+    assert.equal((await readPersistenceMetadata(rootDir))?.persistence_schema_version, PERSISTENCE_SCHEMA_VERSION);
+
+    const verification = await openSqliteDatabase(rootDir);
+    try {
+      assert.deepEqual(readSqliteTable<{ id: string }>(verification, "runs").map((item) => item.id), fixture.expected.run_ids);
+      assert.deepEqual(readSqliteTable<{ id: string }>(verification, "review_comments").map((item) => item.id), fixture.expected.review_comment_ids);
+      assert.deepEqual(readSqliteTable<{ schema: string }>(verification, "upgrade_markers"), [{ schema: PERSISTENCE_SCHEMA_VERSION }]);
+    } finally {
+      verification.close();
+    }
+
+    const futureBackupDir = path.join(rootDir, "future-backup");
+    await fs.cp(backups[0]!.backup_dir, futureBackupDir, { recursive: true });
+    const futureManifestPath = path.join(futureBackupDir, "backup-manifest.json");
+    const futureManifest = JSON.parse(await fs.readFile(futureManifestPath, "utf8"));
+    futureManifest.source_schema_version = "2.0.0";
+    await fs.writeFile(futureManifestPath, `${JSON.stringify(futureManifest, null, 2)}\n`, "utf8");
+    const futureVerification = await verifyLocalPersistenceBackup(futureBackupDir);
+    assert.equal(futureVerification.valid, false);
+    assert.equal(futureVerification.compatible, false);
+    await assert.rejects(
+      () => restoreLocalPersistenceBackup({ rootDir, backupDir: futureBackupDir }),
+      (error: unknown) => error instanceof SqlitePersistenceError && error.persistence_code === "sqlite_backup_incompatible"
+    );
   });
 }
 
@@ -8532,6 +8705,8 @@ async function main(): Promise<void> {
     ["concurrent sqlite process writes are merged", testConcurrentSqliteProcessWritesAreMerged],
     ["sqlite crash stage recovery", testSqliteCrashStageRecovery],
     ["sqlite corruption and failed saves fail closed", testSqliteCorruptionAndFailedSavesFailClosed],
+    ["sqlite automatic backup verification and restore", testSqliteAutomaticBackupVerificationAndRestore],
+    ["sqlite release upgrade fixture and rollback", testSqliteReleaseUpgradeFixtureAndRollback],
     ["sqlite file lock backoff and recovery", testSqliteFileLockBackoffAndRecovery],
     ["async recovery reconciles durable terminal run", testAsyncRecoveryReconcilesDurableTerminalRun],
     ["async lifecycle crash stage recovery", testAsyncLifecycleCrashStageRecovery],

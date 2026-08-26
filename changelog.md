@@ -10,12 +10,15 @@
 - Built-in system-policy initialization now coalesces concurrent in-process requests and treats an independently created built-in as an idempotent success.
 - Async terminal follow-up is now durably marked pending/completed/failed, resumes after restart, and does not resend a completion webhook already recorded as delivered.
 - SQLite recovery now removes orphaned database temporary files while holding the recovered writer lock.
+- SQLite now creates verified automatic pre-replacement snapshots with bounded retention and exposes create/list/verify/restore CLI workflows with checksum, integrity, and schema-compatibility enforcement.
+- Restore now creates a safety snapshot of valid current state, retains a corrupt current database for diagnosis, and refuses tampered or future-schema backups before changing live data.
 
 ### Verified
 
 - Deterministic persistence regressions cover corrupt-database rejection, disk-full/pre-replacement failure preservation, temporary-file cleanup, concurrent-write compatibility, and idempotent terminal-run recovery.
 - Persistence stress regressions cover simultaneous API queue requests, concurrent worker terminal transitions, lock contention/timeout/stale-owner recovery, and independent Node processes writing one database without record loss.
 - Crash-stage regressions use real child-process exits after SQLite lock/temp/replace boundaries and deterministic interruptions after every durable async lifecycle transition.
+- The immutable SQLite 1.2.0 upgrade fixture proves a failed migration preserves legacy data and metadata, while a successful 1.3.0 upgrade retains run and review history.
 
 ## 2026-08-25
 

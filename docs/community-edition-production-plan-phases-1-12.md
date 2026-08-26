@@ -552,7 +552,7 @@ Remaining tasks:
   - [x] Add bounded filesystem lock acquisition with exponential backoff, stale-owner quarantine, ownership-safe release, and a distinct lock-timeout failure.
   - [x] Stress simultaneous API queue requests, concurrent worker lifecycle transitions, and independent Node processes writing the same database without lost records.
   - [x] Add true-process-exit SQLite crash injection and deterministic async lifecycle interruption across queued, starting, engine-started, running, terminal, webhook, hook, and follow-up-marker boundaries.
-- [ ] Add automatic backup, restore verification, migration rollback guidance, and release-to-release upgrade fixtures.
+- [x] Add automatic backup, restore verification, migration rollback guidance, and release-to-release upgrade fixtures. SQLite now takes verified pre-replacement snapshots on a bounded schedule, exposes create/list/verify/restore CLI operations, rejects tampered/corrupt/future-schema backups, preserves invalid current databases during recovery, and exercises an immutable 1.2.0-to-1.3.0 fixture through failed and successful upgrades.
 - [ ] Finish retention scheduling and ensure database rows/artifacts remain consistent after pruning.
 - [ ] Decide how promoted learning overlays are consumed by planner/prompts/rules, with strict versioning and rollback.
 - [ ] Keep policy/control changes, severity downgrades, suppressions, waivers, evidence reduction, and runtime-probe removal human approved.

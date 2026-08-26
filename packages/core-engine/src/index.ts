@@ -85,6 +85,14 @@ export {
   syncLearningEventsForRun
 } from "./persistence/learning.js";
 export { PersistedAsyncJobManager, listPersistedAsyncJobs, readPersistedAsyncJob, readPersistedAsyncJobAttempts } from "./persistence/async-jobs.js";
-export { readLocalPersistenceMetadata, readPersistenceMetadata } from "./persistence/sqlite.js";
+export {
+  createLocalPersistenceBackup,
+  listLocalPersistenceBackups,
+  pruneLocalPersistenceBackups,
+  readLocalPersistenceMetadata,
+  readPersistenceMetadata,
+  restoreLocalPersistenceBackup,
+  verifyLocalPersistenceBackup
+} from "./persistence/sqlite.js";
 export { computeCommitDiffGate } from "./commit-diff.js";
 

@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 
 import type { DatabaseMode } from "../contracts.js";
 import type { BundleExportPolicy } from "./bundle-exports.js";
@@ -19,7 +20,7 @@ let sqliteSaveStageObserverForTests: ((stage: "after_lock_acquired" | "after_tem
 
 export class SqlitePersistenceError extends Error {
   constructor(
-    public readonly persistence_code: "sqlite_database_unavailable" | "sqlite_database_corrupt_or_unsupported" | "sqlite_database_locked" | "sqlite_save_failed",
+    public readonly persistence_code: "sqlite_database_unavailable" | "sqlite_database_corrupt_or_unsupported" | "sqlite_database_locked" | "sqlite_save_failed" | "sqlite_backup_failed" | "sqlite_backup_invalid" | "sqlite_backup_incompatible" | "sqlite_restore_failed",
     options?: { cause?: unknown }
   ) {
     super(persistence_code, options);
@@ -81,6 +82,43 @@ export interface PersistenceMetadata {
 export type LocalPersistenceMetadata = PersistenceMetadata;
 
 export const PERSISTENCE_SCHEMA_VERSION = "1.3.0";
+export const SQLITE_BACKUP_MANIFEST_VERSION = "1.0.0";
+export const SQLITE_BACKUP_MANIFEST_FILE = "backup-manifest.json";
+
+export interface LocalPersistenceBackupManifest {
+  manifest_version: typeof SQLITE_BACKUP_MANIFEST_VERSION;
+  created_at: string;
+  reason: string;
+  source_schema_version: string;
+  database_file: "harness.sqlite";
+  database_sha256: string;
+  database_bytes: number;
+  metadata_file: "persistence-meta.json" | null;
+  metadata_sha256: string | null;
+}
+
+export interface LocalPersistenceBackupVerification {
+  backup_dir: string;
+  valid: boolean;
+  compatible: boolean;
+  manifest: LocalPersistenceBackupManifest | null;
+  issues: string[];
+}
+
+export interface LocalPersistenceBackupResult {
+  backup_dir: string;
+  manifest: LocalPersistenceBackupManifest;
+  verification: LocalPersistenceBackupVerification;
+}
+
+export interface LocalPersistenceRestoreResult {
+  root: string;
+  backup_dir: string;
+  restored_schema_version: string;
+  safety_backup_dir: string | null;
+  rejected_database_path: string | null;
+  verification: LocalPersistenceBackupVerification;
+}
 
 function wasmPath(): string {
   return require.resolve("sql.js/dist/sql-wasm.wasm");
@@ -274,7 +312,15 @@ export async function writePersistenceMetadata(rootDir: string, databaseMode: Da
     updated_at: new Date().toISOString()
   };
   await fs.mkdir(rootDir, { recursive: true });
-  await fs.writeFile(localPersistenceMetadataPath(rootDir), `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
+  const metadataPath = localPersistenceMetadataPath(rootDir);
+  const tempPath = `${metadataPath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+  try {
+    await fs.writeFile(tempPath, `${JSON.stringify(metadata, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    await replaceSqliteFile(tempPath, metadataPath);
+  } catch (error) {
+    await fs.rm(tempPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
   return metadata;
 }
 
@@ -339,6 +385,11 @@ async function waitForWritablePathError(error: unknown, attempt: number): Promis
 function positiveIntegerEnv(name: string, fallback: number): number {
   const configured = Number(process.env[name]);
   return Number.isFinite(configured) && configured > 0 ? Math.floor(configured) : fallback;
+}
+
+function nonNegativeIntegerEnv(name: string, fallback: number): number {
+  const configured = Number(process.env[name]);
+  return Number.isFinite(configured) && configured >= 0 ? Math.floor(configured) : fallback;
 }
 
 function sqliteLockPath(dbPath: string): string {
@@ -482,6 +533,283 @@ async function replaceSqliteFile(tempPath: string, dbPath: string): Promise<void
   throw lastError;
 }
 
+function sha256(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function safeBackupReason(value: string): string {
+  return value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48) || "manual";
+}
+
+function persistenceVersionParts(value: string): [number, number, number] | null {
+  const match = value.match(/^(\d+)\.(\d+)\.(\d+)$/);
+  return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
+}
+
+function isCompatiblePersistenceVersion(value: string): boolean {
+  const candidate = persistenceVersionParts(value);
+  const current = persistenceVersionParts(PERSISTENCE_SCHEMA_VERSION);
+  if (!candidate || !current || candidate[0] !== current[0]) return false;
+  for (let index = 0; index < current.length; index += 1) {
+    if (candidate[index] < current[index]) return true;
+    if (candidate[index] > current[index]) return false;
+  }
+  return true;
+}
+
+async function readOptionalFile(filePath: string): Promise<Buffer | null> {
+  try {
+    return await fs.readFile(filePath);
+  } catch (error) {
+    if (filesystemErrorCode(error) === "ENOENT") return null;
+    throw error;
+  }
+}
+
+async function validateSqliteBackupBytes(bytes: Uint8Array): Promise<void> {
+  const SQL = await getSqlJs();
+  const db = openSqliteBytes(SQL, bytes);
+  db.close();
+}
+
+async function readBackupManifest(backupDir: string): Promise<LocalPersistenceBackupManifest | null> {
+  try {
+    const parsed = JSON.parse(await fs.readFile(path.join(backupDir, SQLITE_BACKUP_MANIFEST_FILE), "utf8")) as Partial<LocalPersistenceBackupManifest>;
+    if (!parsed || typeof parsed !== "object") return null;
+    return parsed as LocalPersistenceBackupManifest;
+  } catch {
+    return null;
+  }
+}
+
+export async function verifyLocalPersistenceBackup(backupDir: string): Promise<LocalPersistenceBackupVerification> {
+  const resolvedBackupDir = path.resolve(backupDir);
+  const issues: string[] = [];
+  const manifest = await readBackupManifest(resolvedBackupDir);
+  if (!manifest) {
+    return { backup_dir: resolvedBackupDir, valid: false, compatible: false, manifest: null, issues: ["backup_manifest_missing_or_invalid"] };
+  }
+  if (manifest.manifest_version !== SQLITE_BACKUP_MANIFEST_VERSION) issues.push("backup_manifest_version_unsupported");
+  if (manifest.database_file !== "harness.sqlite") issues.push("backup_database_file_invalid");
+  if (manifest.metadata_file !== null && manifest.metadata_file !== "persistence-meta.json") issues.push("backup_metadata_file_invalid");
+  if (!Number.isSafeInteger(manifest.database_bytes) || manifest.database_bytes <= 0) issues.push("backup_database_size_invalid");
+  if (!/^[a-f0-9]{64}$/.test(String(manifest.database_sha256 ?? ""))) issues.push("backup_database_checksum_invalid");
+  if (manifest.metadata_file && !/^[a-f0-9]{64}$/.test(String(manifest.metadata_sha256 ?? ""))) issues.push("backup_metadata_checksum_invalid");
+  if (!Number.isFinite(Date.parse(String(manifest.created_at ?? "")))) issues.push("backup_created_at_invalid");
+  if (!isCompatiblePersistenceVersion(String(manifest.source_schema_version ?? ""))) issues.push("backup_schema_version_incompatible");
+
+  const databasePath = path.join(resolvedBackupDir, "harness.sqlite");
+  const databaseBytes = await readOptionalFile(databasePath).catch(() => null);
+  if (!databaseBytes) {
+    issues.push("backup_database_missing_or_unreadable");
+  } else {
+    if (databaseBytes.byteLength !== manifest.database_bytes) issues.push("backup_database_size_mismatch");
+    if (sha256(databaseBytes) !== manifest.database_sha256) issues.push("backup_database_checksum_mismatch");
+    try {
+      await validateSqliteBackupBytes(databaseBytes);
+    } catch {
+      issues.push("backup_database_integrity_check_failed");
+    }
+  }
+
+  if (manifest.metadata_file === "persistence-meta.json") {
+    const metadataBytes = await readOptionalFile(path.join(resolvedBackupDir, manifest.metadata_file)).catch(() => null);
+    if (!metadataBytes) issues.push("backup_metadata_missing_or_unreadable");
+    else if (sha256(metadataBytes) !== manifest.metadata_sha256) issues.push("backup_metadata_checksum_mismatch");
+  } else if (manifest.metadata_sha256 !== null) {
+    issues.push("backup_metadata_manifest_invalid");
+  }
+
+  const compatible = !issues.includes("backup_schema_version_incompatible") && !issues.includes("backup_manifest_version_unsupported");
+  return { backup_dir: resolvedBackupDir, valid: issues.length === 0, compatible, manifest, issues };
+}
+
+async function sourceSchemaVersion(metadataBytes: Buffer | null): Promise<string> {
+  if (!metadataBytes) return "1.0.0";
+  try {
+    const parsed = JSON.parse(metadataBytes.toString("utf8")) as { persistence_schema_version?: unknown };
+    return typeof parsed.persistence_schema_version === "string" && parsed.persistence_schema_version
+      ? parsed.persistence_schema_version
+      : "1.0.0";
+  } catch (error) {
+    throw new SqlitePersistenceError("sqlite_backup_failed", { cause: error });
+  }
+}
+
+async function createLocalPersistenceBackupUnlocked(args: {
+  rootDir: string;
+  outputDir?: string;
+  reason: string;
+  pruneAutomatic?: boolean;
+}): Promise<LocalPersistenceBackupResult> {
+  const rootDir = path.resolve(args.rootDir);
+  const databaseBytes = await readExistingSqliteBytes(rootDir);
+  if (!databaseBytes) throw new SqlitePersistenceError("sqlite_backup_failed", { cause: new Error("sqlite_database_missing") });
+  try {
+    await validateSqliteBackupBytes(databaseBytes);
+  } catch (error) {
+    if (error instanceof SqlitePersistenceError) throw error;
+    throw new SqlitePersistenceError("sqlite_backup_failed", { cause: error });
+  }
+  const metadataBytes = await readOptionalFile(localPersistenceMetadataPath(rootDir));
+  const createdAt = new Date().toISOString();
+  const reason = safeBackupReason(args.reason);
+  const defaultBackupRoot = path.join(rootDir, "backups");
+  const backupDir = path.resolve(args.outputDir ?? path.join(
+    defaultBackupRoot,
+    `${createdAt.replace(/[-:.]/g, "")}-${reason}-${process.pid}-${Math.random().toString(16).slice(2, 10)}`
+  ));
+  if (await pathExists(backupDir)) throw new SqlitePersistenceError("sqlite_backup_failed", { cause: new Error("backup_destination_exists") });
+  const tempDir = `${backupDir}.tmp.${process.pid}.${Math.random().toString(16).slice(2)}`;
+  const manifest: LocalPersistenceBackupManifest = {
+    manifest_version: SQLITE_BACKUP_MANIFEST_VERSION,
+    created_at: createdAt,
+    reason,
+    source_schema_version: await sourceSchemaVersion(metadataBytes),
+    database_file: "harness.sqlite",
+    database_sha256: sha256(databaseBytes),
+    database_bytes: databaseBytes.byteLength,
+    metadata_file: metadataBytes ? "persistence-meta.json" : null,
+    metadata_sha256: metadataBytes ? sha256(metadataBytes) : null
+  };
+
+  try {
+    await fs.mkdir(path.dirname(backupDir), { recursive: true });
+    await fs.mkdir(tempDir, { recursive: false, mode: 0o700 });
+    await fs.writeFile(path.join(tempDir, "harness.sqlite"), databaseBytes, { mode: 0o600 });
+    if (metadataBytes) await fs.writeFile(path.join(tempDir, "persistence-meta.json"), metadataBytes, { mode: 0o600 });
+    await fs.writeFile(path.join(tempDir, SQLITE_BACKUP_MANIFEST_FILE), `${JSON.stringify(manifest, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    const verification = await verifyLocalPersistenceBackup(tempDir);
+    if (!verification.valid) throw new Error(`backup_verification_failed:${verification.issues.join(",")}`);
+    await fs.rename(tempDir, backupDir);
+    const finalVerification = { ...verification, backup_dir: backupDir };
+    if (args.pruneAutomatic && path.dirname(backupDir) === defaultBackupRoot) {
+      await pruneLocalPersistenceBackups(rootDir, nonNegativeIntegerEnv("HARNESS_SQLITE_BACKUP_RETENTION", 7));
+    }
+    return { backup_dir: backupDir, manifest, verification: finalVerification };
+  } catch (error) {
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+    if (error instanceof SqlitePersistenceError) throw error;
+    throw new SqlitePersistenceError("sqlite_backup_failed", { cause: error });
+  }
+}
+
+export async function listLocalPersistenceBackups(rootDir: string): Promise<LocalPersistenceBackupResult[]> {
+  const backupRoot = path.join(path.resolve(rootDir), "backups");
+  let entries: Array<{ name: string; isDirectory(): boolean }> = [];
+  try {
+    entries = await fs.readdir(backupRoot, { withFileTypes: true });
+  } catch (error) {
+    if (filesystemErrorCode(error) === "ENOENT") return [];
+    throw error;
+  }
+  const results: LocalPersistenceBackupResult[] = [];
+  for (const entry of entries.filter((item) => item.isDirectory()).sort((left, right) => right.name.localeCompare(left.name))) {
+    const backupDir = path.join(backupRoot, entry.name);
+    const manifest = await readBackupManifest(backupDir);
+    if (!manifest) continue;
+    results.push({ backup_dir: backupDir, manifest, verification: await verifyLocalPersistenceBackup(backupDir) });
+  }
+  return results;
+}
+
+export async function pruneLocalPersistenceBackups(rootDir: string, retain = 7): Promise<string[]> {
+  const backups = await listLocalPersistenceBackups(rootDir);
+  const removable = backups
+    .filter((item) => item.manifest.reason === "automatic")
+    .sort((left, right) => right.manifest.created_at.localeCompare(left.manifest.created_at))
+    .slice(Math.max(0, retain));
+  await Promise.all(removable.map((item) => fs.rm(item.backup_dir, { recursive: true, force: true })));
+  return removable.map((item) => item.backup_dir);
+}
+
+export async function createLocalPersistenceBackup(args: {
+  rootDir: string;
+  outputDir?: string;
+  reason?: string;
+}): Promise<LocalPersistenceBackupResult> {
+  const rootDir = path.resolve(args.rootDir);
+  const dbPath = sqliteDbPath(rootDir);
+  const fileLock = await acquireSqliteFileLock(dbPath);
+  try {
+    return await createLocalPersistenceBackupUnlocked({
+      rootDir,
+      outputDir: args.outputDir,
+      reason: args.reason ?? "manual"
+    });
+  } finally {
+    await releaseSqliteFileLock(fileLock);
+  }
+}
+
+async function createAutomaticBackupIfDue(rootDir: string): Promise<LocalPersistenceBackupResult | null> {
+  const intervalMs = nonNegativeIntegerEnv("HARNESS_SQLITE_AUTO_BACKUP_INTERVAL_MS", 86_400_000);
+  if (intervalMs === 0 || !await pathExists(sqliteDbPath(rootDir))) return null;
+  const latest = (await listLocalPersistenceBackups(rootDir))
+    .filter((item) => item.manifest.reason === "automatic" && item.verification.valid)
+    .sort((left, right) => right.manifest.created_at.localeCompare(left.manifest.created_at))[0];
+  if (latest && Date.now() - Date.parse(latest.manifest.created_at) < intervalMs) return null;
+  return createLocalPersistenceBackupUnlocked({ rootDir, reason: "automatic", pruneAutomatic: true });
+}
+
+export async function restoreLocalPersistenceBackup(args: {
+  rootDir: string;
+  backupDir: string;
+}): Promise<LocalPersistenceRestoreResult> {
+  const rootDir = path.resolve(args.rootDir);
+  const backupDir = path.resolve(args.backupDir);
+  const verification = await verifyLocalPersistenceBackup(backupDir);
+  if (!verification.valid) {
+    const code = verification.compatible ? "sqlite_backup_invalid" : "sqlite_backup_incompatible";
+    throw new SqlitePersistenceError(code, { cause: new Error(verification.issues.join(",")) });
+  }
+  const manifest = verification.manifest!;
+  const dbPath = sqliteDbPath(rootDir);
+  await fs.mkdir(rootDir, { recursive: true });
+  const fileLock = await acquireSqliteFileLock(dbPath);
+  let safetyBackupDir: string | null = null;
+  let rejectedDatabasePath: string | null = null;
+  const restoreTempPath = `${dbPath}.restore.${process.pid}.${Date.now()}.tmp`;
+  try {
+    if (await pathExists(dbPath)) {
+      try {
+        safetyBackupDir = (await createLocalPersistenceBackupUnlocked({ rootDir, reason: "pre-restore" })).backup_dir;
+      } catch (error) {
+        if (!(error instanceof SqlitePersistenceError) || error.persistence_code !== "sqlite_database_corrupt_or_unsupported") throw error;
+        rejectedDatabasePath = `${dbPath}.rejected.${Date.now()}`;
+        await fs.copyFile(dbPath, rejectedDatabasePath);
+      }
+    }
+    const restoredBytes = await fs.readFile(path.join(backupDir, manifest.database_file));
+    await validateSqliteBackupBytes(restoredBytes);
+    await fs.writeFile(restoreTempPath, restoredBytes, { mode: 0o600 });
+    await replaceSqliteFile(restoreTempPath, dbPath);
+    if (manifest.metadata_file) {
+      const metadataBytes = await fs.readFile(path.join(backupDir, manifest.metadata_file));
+      const metadataTempPath = `${localPersistenceMetadataPath(rootDir)}.restore.${process.pid}.${Date.now()}.tmp`;
+      await fs.writeFile(metadataTempPath, metadataBytes, { mode: 0o600 });
+      await replaceSqliteFile(metadataTempPath, localPersistenceMetadataPath(rootDir));
+    } else {
+      await fs.rm(localPersistenceMetadataPath(rootDir), { force: true });
+    }
+    await validateSqliteBackupBytes(await fs.readFile(dbPath));
+    return {
+      root: rootDir,
+      backup_dir: backupDir,
+      restored_schema_version: manifest.source_schema_version,
+      safety_backup_dir: safetyBackupDir,
+      rejected_database_path: rejectedDatabasePath,
+      verification
+    };
+  } catch (error) {
+    await fs.rm(restoreTempPath, { force: true }).catch(() => undefined);
+    if (error instanceof SqlitePersistenceError) throw error;
+    throw new SqlitePersistenceError("sqlite_restore_failed", { cause: error });
+  } finally {
+    await releaseSqliteFileLock(fileLock);
+  }
+}
+
 async function enqueueSqliteSave(dbPath: string, task: () => Promise<void>): Promise<void> {
   const previous = sqliteSaveQueues.get(dbPath) ?? Promise.resolve();
   const next = previous.catch(() => undefined).then(task);
@@ -601,11 +929,15 @@ export async function saveSqliteDatabase(rootDir: string, db: any, databaseMode:
   const original = sqliteOpenSnapshots.get(db) ?? new Map<string, SqliteRecordRow>();
   const current = readSqliteRecordSnapshot(db);
   const dbPath = sqliteDbPath(rootDir);
+  const { resolveBundleExportPolicy } = await import("./bundle-exports.js");
+  const resolvedBundleExportPolicy = bundleExportPolicy ?? resolveBundleExportPolicy(databaseMode);
   await enqueueSqliteSave(dbPath, async () => {
     const fileLock = await acquireSqliteFileLock(dbPath);
     try {
       sqliteSaveStageObserverForTests?.("after_lock_acquired");
       await cleanupOrphanedSqliteTempFiles(dbPath);
+      await cleanupOrphanedSqliteTempFiles(localPersistenceMetadataPath(rootDir));
+      await createAutomaticBackupIfDue(rootDir);
       const latestDb = await openLatestSqliteDatabase(rootDir);
       const tempPath = `${dbPath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
       try {
@@ -621,6 +953,7 @@ export async function saveSqliteDatabase(rootDir: string, db: any, databaseMode:
         }
         await replaceSqliteFile(tempPath, dbPath);
         sqliteSaveStageObserverForTests?.("after_replace");
+        await writePersistenceMetadata(rootDir, databaseMode, resolvedBundleExportPolicy);
       } catch (error) {
         await fs.rm(tempPath, { force: true }).catch(() => undefined);
         if (error instanceof SqlitePersistenceError) throw error;
@@ -633,8 +966,6 @@ export async function saveSqliteDatabase(rootDir: string, db: any, databaseMode:
     }
   });
   sqliteOpenSnapshots.set(db, current);
-  const { resolveBundleExportPolicy } = await import("./bundle-exports.js");
-  await writePersistenceMetadata(rootDir, databaseMode, bundleExportPolicy ?? resolveBundleExportPolicy(databaseMode));
 }
 
 export function ensureSqliteSchema(db: any): void {
