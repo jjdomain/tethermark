@@ -233,11 +233,11 @@ Hosted rollout order:
 
 ## Recommended Next Order
 
-Community Edition Phases 1–8 are complete within the documented platform scope. Phase 9 now has executable Inspect coverage for every Phase 7 runtime control, initial Garak and PyRIT profiles, normalized audit artifacts, and bounded worker cancellation/retry/failure handling; repeatability calibration remains.
+Community Edition Phases 1–9 are complete within the documented platform scope. Runtime evidence now has bounded confidence labels, explicit within-run and independent-run sample limits, semantic repeatability fingerprints, and fail-closed worker handling.
 
-1. Calibrate behavior tests for repeatability and label nondeterministic confidence and sample limits.
-2. Complete Phase 10 recovery and stress hardening.
-3. Complete Phase 11 packaging and cross-platform security.
+1. Complete Phase 10 recovery and stress hardening.
+2. Complete Phase 11 packaging and cross-platform security.
+3. Execute the Phase 12 release-candidate and beta gates.
 
 ## Deferred Hosted Worker Deployment
 

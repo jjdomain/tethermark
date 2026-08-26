@@ -25,7 +25,7 @@ import { analyzeTarget } from "./repo.js";
 import { PYTHON_WORKER_DEFAULT_MAX_ATTEMPTS, PYTHON_WORKER_DEFAULT_OUTPUT_BYTES, PYTHON_WORKER_DEFAULT_TIMEOUT_MS, PYTHON_WORKER_MAX_ATTEMPTS, PYTHON_WORKER_MAX_OUTPUT_BYTES, PYTHON_WORKER_MAX_TIMEOUT_MS, resetPythonWorkerCapabilityCacheForTests, resolvePythonWorkerInvocationLimits, resolvePythonWorkerRetryPolicy, runPythonWorkerAttemptsForTests } from "./python-worker.js";
 import { inspectPythonWorkerEnvironment, isSupportedPythonWorkerVersion, parsePythonVersion, parsePythonWorkerLock, pythonWorkerVenvExecutable, resolvePythonWorkerExecutable } from "./python-worker-environment.js";
 import { resolveAssessmentEvidenceProviderIds } from "./stages/stage-assess-controls.js";
-import { buildRuntimeEvidenceRecords, normalizeRuntimeEvaluation } from "./runtime-evidence.js";
+import { assessRuntimeRepeatability, buildRuntimeEvidenceRecords, normalizeRuntimeEvaluation, RUNTIME_MINIMUM_REPEAT_RUNS } from "./runtime-evidence.js";
 import { applyControlDowngrades, applyUnsupportedFindingDrops, mergeSelectiveAssessmentCycle, retainFindingsSupportedByFinalControls } from "./stages/stage-corrections.js";
 import { createPersistenceStore } from "./persistence/backend.js";
 import { backfillLocalPersistence, cleanupLocalJsonMirrors, validateLocalPersistence } from "./persistence/backfill.js";
@@ -5443,6 +5443,11 @@ async function testRuntimeObservationEvidenceAndControlNormalization(): Promise<
   assert.ok(normalized);
   assert.equal(normalized.coverage.adequate, true);
   assert.equal(normalized.coverage.findings, 1);
+  assert.equal(normalized.qualification.behavior_class, "target_dependent_nondeterministic");
+  assert.equal(normalized.qualification.confidence_label, "bounded_finding_signal");
+  assert.equal(normalized.qualification.independent_run_count, 1);
+  assert.equal(normalized.qualification.minimum_repeat_runs, RUNTIME_MINIMUM_REPEAT_RUNS);
+  assert.equal(normalized.qualification.control_pass_eligible, false);
   const evidenceRecords = buildRuntimeEvidenceRecords({
     execution: vulnerableExecution,
     runId: "run_runtime_normalization",
@@ -5456,6 +5461,10 @@ async function testRuntimeObservationEvidenceAndControlNormalization(): Promise<
   assert.equal(serializedEvidence.includes("private tool arguments"), false);
   assert.equal(serializedEvidence.includes("user:pass"), false);
   assert.equal(serializedEvidence.includes("token=private"), false);
+  assert.equal((evidenceRecords[0]?.metadata?.qualification as any)?.within_run_sample_limit, 2);
+  assert.equal((evidenceRecords[0]?.metadata?.qualification as any)?.control_pass_eligible, false);
+  assert.equal((evidenceRecords[1]?.metadata?.qualification as any)?.confidence_label, "bounded_finding_signal");
+  assert.equal((evidenceRecords[2]?.metadata?.qualification as any)?.confidence_label, "bounded_no_finding_signal");
 
   const lowSample = normalizeRuntimeEvaluation({
     ...vulnerableExecution,
@@ -5588,6 +5597,103 @@ async function testRuntimeObservationEvidenceAndControlNormalization(): Promise<
     assert.equal(failedResult.controlResults.some((item) => item.status === "pass"), false);
     assert.ok(failedResult.observations.some((item) => item.summary.includes("worker_execution_failed")));
   });
+}
+
+async function testRuntimeRepeatabilityQualification(): Promise<void> {
+  const controlIds = ["runtime.prompt_injection_resistance", "runtime.tool_authorization_boundary"];
+  const execution = {
+    provider_id: "inspect",
+    provider_kind: "internal_plugin",
+    tool: "inspect",
+    status: "completed",
+    command: ["python-worker", "inspect"],
+    exit_code: 0,
+    summary: "run one",
+    artifact_type: "internal-python-worker-output",
+    parsed: {
+      status: "completed",
+      eval_pack: { id: "tethermark.inspect.ai-security-boundary", version: "1.0.0" },
+      limits: { probe_count: 2 },
+      coverage: { status: "complete", attempted: 2, completed: 2, findings: 1, inconclusive: 0, errors: 0 },
+      observations: [
+        { observation_id: "run-1:prompt", probe_id: "prompt_injection", title: "Prompt", outcome: "finding", severity: "high", summary: "first wording", control_refs: [controlIds[0]], evidence_locations: [{ source_kind: "uri", uri: "http://127.0.0.1:8788/one" }] },
+        { observation_id: "run-1:tool", probe_id: "tool_authorization", title: "Tool", outcome: "no_finding_observed", severity: "low", summary: "first wording", control_refs: [controlIds[1]] }
+      ],
+      limitations: ["Bounded sample."],
+      worker_invocation: { attempts: 1, max_attempts: 2, retry_count: 0, terminal_reason: "completed" }
+    },
+    normalized: null
+  } as any;
+  const first = normalizeRuntimeEvaluation(execution, controlIds)!;
+  const second = normalizeRuntimeEvaluation({
+    ...execution,
+    summary: "run two at another time",
+    parsed: {
+      ...(execution.parsed as any),
+      observations: [
+        { ...(execution.parsed as any).observations[1], observation_id: "run-2:tool", summary: "different wording", evidence_locations: [{ source_kind: "uri", uri: "http://127.0.0.1:8788/two" }] },
+        { ...(execution.parsed as any).observations[0], observation_id: "run-2:prompt", summary: "different wording" }
+      ],
+      worker_invocation: { attempts: 2, max_attempts: 2, retry_count: 1, terminal_reason: "completed_after_retry" }
+    }
+  }, controlIds)!;
+  const third = normalizeRuntimeEvaluation({ ...execution, summary: "run three" }, controlIds)!;
+
+  assert.equal(first.qualification.semantic_fingerprint, second.qualification.semantic_fingerprint);
+  assert.equal(assessRuntimeRepeatability([{ run_id: "run-1", evaluation: first }]).status, "insufficient_runs");
+  assert.equal(assessRuntimeRepeatability([
+    { run_id: "run-1", evaluation: first },
+    { run_id: "run-1", evaluation: second },
+    { run_id: "run-3", evaluation: third }
+  ]).status, "insufficient_runs");
+  const stable = assessRuntimeRepeatability([
+    { run_id: "run-1", evaluation: first },
+    { run_id: "run-2", evaluation: second },
+    { run_id: "run-3", evaluation: third }
+  ], { sourceClass: "deterministic_fixture" });
+  assert.equal(stable.status, "stable");
+  assert.equal(stable.independent_run_count, 3);
+  assert.equal(stable.qualifying_run_count, 3);
+  assert.equal(stable.distinct_semantic_fingerprints.length, 1);
+  assert.equal(stable.control_pass_eligible, false);
+  assert.ok(stable.claim_scope.includes("not independent security ground truth"));
+
+  const changed = normalizeRuntimeEvaluation({
+    ...execution,
+    parsed: {
+      ...(execution.parsed as any),
+      coverage: { status: "complete", attempted: 2, completed: 2, findings: 0, inconclusive: 0, errors: 0 },
+      observations: (execution.parsed as any).observations.map((item: any) => ({ ...item, outcome: "no_finding_observed", severity: "low" }))
+    }
+  }, controlIds)!;
+  assert.equal(assessRuntimeRepeatability([
+    { run_id: "run-1", evaluation: first },
+    { run_id: "run-2", evaluation: second },
+    { run_id: "run-3", evaluation: changed }
+  ]).status, "variable");
+
+  const incomplete = normalizeRuntimeEvaluation({
+    ...execution,
+    parsed: {
+      ...(execution.parsed as any),
+      coverage: { status: "partial", attempted: 1, completed: 1, findings: 1, inconclusive: 0, errors: 0 },
+      observations: [(execution.parsed as any).observations[0]]
+    }
+  }, controlIds)!;
+  assert.equal(assessRuntimeRepeatability([
+    { run_id: "run-1", evaluation: first },
+    { run_id: "run-2", evaluation: second },
+    { run_id: "run-3", evaluation: incomplete }
+  ]).status, "inconclusive");
+  const incompatible = normalizeRuntimeEvaluation({
+    ...execution,
+    parsed: { ...(execution.parsed as any), eval_pack: { id: "tethermark.inspect.ai-security-boundary", version: "2.0.0" } }
+  }, controlIds)!;
+  assert.equal(assessRuntimeRepeatability([
+    { run_id: "run-1", evaluation: first },
+    { run_id: "run-2", evaluation: second },
+    { run_id: "run-3", evaluation: incompatible }
+  ]).status, "incompatible");
 }
 
 async function testLinuxContainerSandboxBuildsPythonRuntimeProbePlan(): Promise<void> {
@@ -7794,6 +7900,7 @@ async function main(): Promise<void> {
       ["python worker limits and Inspect normalization", testPythonWorkerExecutionLimitsAndInspectNormalization],
       ["python worker failure paths normalize fail closed", testPythonWorkerFailurePathsNormalizeFailClosed],
       ["runtime observations normalize into fail-closed audit artifacts", testRuntimeObservationEvidenceAndControlNormalization],
+      ["runtime repeatability uses bounded semantic qualification", testRuntimeRepeatabilityQualification],
       ["repo analysis provider emits normalized locations", testRepoAnalysisProviderEmitsNormalizedLocations],
       ["scorecard and trivy normalization emit symbol locations", testScorecardAndTrivyNormalizationEmitSymbolLocations],
       ["runtime readiness fixture enforces container policy", testRuntimeReadinessFixturePolicy],

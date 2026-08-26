@@ -3,6 +3,28 @@
   "fixture_id": "tethermark.runtime.ai-security-boundaries",
   "fixture_version": "1.0.0",
   "synthetic_only": true,
+  "calibration": {
+    "source_class": "deterministic_fixture",
+    "minimum_independent_runs": 3,
+    "stable_semantic_fields": [
+      "worker",
+      "eval_pack_id",
+      "eval_pack_version",
+      "coverage counts and reasons",
+      "probe_id",
+      "outcome",
+      "severity",
+      "control_ids",
+      "inconclusive_reason"
+    ],
+    "excluded_nondeterministic_fields": [
+      "execution timestamps and duration",
+      "observation ids, summaries, and evidence locations",
+      "worker retry timing and invocation counts"
+    ],
+    "independent_security_ground_truth": false,
+    "control_pass_eligible": false
+  },
   "profiles": [
     {
       "profile_id": "secure-agent",

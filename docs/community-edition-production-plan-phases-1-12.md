@@ -99,7 +99,7 @@ Updated on 2026-08-20 during Phase 5 calibration work from merged Phase 4:
 | 6 | Complete review, remediation, exports, and operator workflows | **Complete** | Completed 2026-08-20; see `docs/phase6-operator-workflow-evidence.md` |
 | 7 | Implement Admin/System Policies and extensive-scan controls | **Complete for the policy plane** | Executable runtime enforcement is tracked in Phase 8 |
 | 8 | Execute local runtime scans in a real isolated sandbox | **Complete with accepted macOS runtime deferral** | Windows Docker Desktop and native Linux Docker/rootless-Podman/gVisor passed; macOS execution is not certified |
-| 9 | Operationalize runtime evals and Python workers | **In progress** | Managed environment plus bounded Inspect, Garak, and PyRIT packs implemented; remaining runtime controls/scenarios remain |
+| 9 | Operationalize runtime evals and Python workers | **Complete** | None; bounded packs, failure containment, normalized artifacts, and repeatability qualification are implemented |
 | 10 | Harden persistence, jobs, maintenance, and governed learning | **Mostly complete** | Stress/recovery tests, retention automation, learning consumption decision |
 | 11 | Package, secure, and verify cross-platform installation | **Partial** | Fresh-machine installers, SBOM/signing, hardened deployment profiles |
 | 12 | Run release candidate, beta, and production launch gates | **Not started** | Depends on Phases 1–11 and explicit release acceptance |
@@ -499,7 +499,7 @@ Native platform evidence (2026-08-24):
 
 ## Phase 9 — Operationalize runtime evals and Python workers
 
-Status: **In progress**
+Status: **Complete**
 
 Objective: produce normalized behavioral evidence from real bounded evals rather than runtime-readiness metadata alone.
 
@@ -524,7 +524,7 @@ Tasks:
 - [x] Normalize observations into evidence, control results, findings, coverage, and inconclusive reasons. The engine now converts each Inspect/Garak/PyRIT execution into a bounded pack-level coverage record and per-probe evidence records, carries mapped findings and audit observations into the standards path, and emits runtime control results with traceable evidence IDs and machine-readable inconclusive reasons.
 - [x] Prevent eval failures or low sample counts from becoming passes. Versioned expected-sample contracts, worker/result status checks, strict coverage-count reconciliation, unknown/malformed outcome handling, and explicit `low_sample_count`/worker-failure reasons fail closed. Findings fail mapped controls; complete no-finding samples remain zero-score `partial`, and unassessable results remain `not_assessed`.
 - [x] Add cancellation, retry, timeout, output-flood, malformed-worker-output, and partial-result tests. Runtime worker child processes now accept audit cancellation signals, transient execution failures use a bounded two-attempt default/three-attempt hard ceiling, non-retryable failures terminate immediately, invocation metadata is retained in coverage evidence, and deterministic regressions verify all six paths remain partial/not-assessed rather than pass.
-- [ ] Calibrate behavior tests for repeatability and clearly label nondeterministic confidence/sample limits.
+- [x] Calibrate behavior tests for repeatability and clearly label nondeterministic confidence/sample limits. Each result now distinguishes its bounded within-run sample count from independent executions, carries a target-dependent confidence label and non-pass claim scope, and has a stable semantic fingerprint. Three comparable adequate runs are required to report `stable` or `variable`; incomplete and mismatched runs report `inconclusive` or `incompatible`. Deterministic regressions prove noise exclusion and outcome-drift detection without repeating live-model audits.
 
 Exit criteria:
 
@@ -619,8 +619,8 @@ A static-only beta may be cut before Phases 8–9 finish only if it is explicitl
 
 ## Recommended execution order from this snapshot
 
-1. Calibrate behavior tests for repeatability and clearly label nondeterministic confidence and sample limits.
-2. Complete Phase 10 stress/recovery hardening and Phase 11 packaging/cross-platform security.
+1. Complete Phase 10 stress/recovery hardening.
+2. Complete Phase 11 packaging/cross-platform security.
 3. Execute Phase 12 release candidate and beta gates.
 
 ## Immediate next-task checklist
@@ -633,10 +633,10 @@ git diff origin/main...HEAD
 git diff -- PLANS.md changelog.md docs/community-edition-production-plan-phases-1-12.md docs/provider-workload-policy.md docs/provider-policy-decision-log.md
 ```
 
-Phases 1 through 8 are complete within the documented platform scope. Before the Phase 9 adapter handoff, rerun the deterministic release gate on the completed tracker tree:
+Phases 1 through 9 are complete within the documented platform scope. Before the Phase 10 handoff, rerun the deterministic release gate on the completed tracker tree:
 
 ```powershell
 npm run release:check
 ```
 
-Then complete the remaining Phase 9 repeatability/calibration task before proceeding to Phase 10 stress and recovery hardening. The live commands in `docs/live-model-validation.md` remain the Phase 3 release-candidate refresh procedure; they are not part of ordinary pull-request CI.
+Phase 9 is complete. Proceed to Phase 10 stress and recovery hardening. The live commands in `docs/live-model-validation.md` remain the Phase 3 release-candidate refresh procedure; they are not part of ordinary pull-request CI.

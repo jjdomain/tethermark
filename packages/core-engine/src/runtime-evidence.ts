@@ -1,5 +1,5 @@
 import type { EvidenceExecutionRecord, EvidenceLocation, EvidenceRecord } from "./contracts.js";
-import { createId } from "./utils.js";
+import { createId, hashObject } from "./utils.js";
 
 export type RuntimeObservationOutcome = "finding" | "no_finding_observed" | "observed" | "inconclusive" | "error";
 
@@ -27,6 +27,39 @@ export interface NormalizedRuntimeCoverage {
   inconclusive_reasons: string[];
 }
 
+export type RuntimeConfidenceLabel = "bounded_finding_signal" | "bounded_no_finding_signal" | "inconclusive";
+
+export interface RuntimeEvidenceQualification {
+  behavior_class: "target_dependent_nondeterministic";
+  confidence_label: RuntimeConfidenceLabel;
+  confidence_score: number;
+  within_run_sample_limit: number;
+  independent_run_count: 1;
+  minimum_repeat_runs: number;
+  control_pass_eligible: false;
+  semantic_fingerprint: string;
+  claim_scope: string;
+}
+
+export type RuntimeRepeatabilityStatus = "stable" | "variable" | "insufficient_runs" | "inconclusive" | "incompatible";
+
+export interface RuntimeRepeatabilityRun {
+  run_id: string;
+  evaluation: NormalizedRuntimeEvaluation;
+}
+
+export interface RuntimeRepeatabilityAssessment {
+  status: RuntimeRepeatabilityStatus;
+  source_class: "deterministic_fixture" | "live_target";
+  independent_run_count: number;
+  qualifying_run_count: number;
+  minimum_repeat_runs: number;
+  distinct_semantic_fingerprints: string[];
+  control_pass_eligible: false;
+  claim_scope: string;
+  excluded_nondeterministic_fields: string[];
+}
+
 export interface NormalizedRuntimeEvaluation {
   provider_id: string;
   worker: string;
@@ -42,7 +75,15 @@ export interface NormalizedRuntimeEvaluation {
     retry_count: number;
     terminal_reason: string | null;
   };
+  qualification: RuntimeEvidenceQualification;
 }
+
+export const RUNTIME_MINIMUM_REPEAT_RUNS = 3;
+const RUNTIME_FINGERPRINT_EXCLUSIONS = [
+  "execution timestamps and duration",
+  "observation ids, summaries, and evidence locations",
+  "worker retry timing and invocation counts"
+];
 
 const RUNTIME_WORKERS = new Set(["inspect", "garak", "pyrit"]);
 const ALLOWED_OUTCOMES = new Set<RuntimeObservationOutcome>([
@@ -160,6 +201,80 @@ function expectedControlIds(evalPackId: string | null, allowedControlIds: Set<st
   return uniqueStrings((evalPackId ? PACK_CONTROL_IDS[evalPackId] ?? [] : []).filter((controlId) => allowedControlIds.has(controlId)));
 }
 
+function buildRuntimeSemanticFingerprint(args: {
+  worker: string;
+  evalPackId: string | null;
+  evalPackVersion: string | null;
+  coverage: NormalizedRuntimeCoverage;
+  observations: NormalizedRuntimeObservation[];
+}): string {
+  return hashObject({
+    worker: args.worker,
+    eval_pack_id: args.evalPackId,
+    eval_pack_version: args.evalPackVersion,
+    coverage: {
+      status: args.coverage.status,
+      adequate: args.coverage.adequate,
+      expected: args.coverage.expected,
+      attempted: args.coverage.attempted,
+      completed: args.coverage.completed,
+      findings: args.coverage.findings,
+      inconclusive: args.coverage.inconclusive,
+      errors: args.coverage.errors,
+      inconclusive_reasons: [...args.coverage.inconclusive_reasons].sort()
+    },
+    observations: args.observations
+      .map((item) => ({
+        probe_id: item.probe_id,
+        outcome: item.outcome,
+        severity: item.severity,
+        control_ids: [...item.control_ids].sort(),
+        inconclusive_reason: item.inconclusive_reason
+      }))
+      .sort((left, right) => left.probe_id.localeCompare(right.probe_id))
+  });
+}
+
+export function assessRuntimeRepeatability(
+  runs: RuntimeRepeatabilityRun[],
+  options: { sourceClass?: RuntimeRepeatabilityAssessment["source_class"]; minimumRepeatRuns?: number } = {}
+): RuntimeRepeatabilityAssessment {
+  const sourceClass = options.sourceClass ?? "live_target";
+  const requestedMinimum = options.minimumRepeatRuns;
+  const minimumRepeatRuns = typeof requestedMinimum === "number" && Number.isInteger(requestedMinimum) && requestedMinimum >= 2
+    ? requestedMinimum
+    : RUNTIME_MINIMUM_REPEAT_RUNS;
+  const uniqueRuns = [...new Map(runs
+    .filter((item) => typeof item.run_id === "string" && item.run_id.trim().length > 0)
+    .map((item) => [item.run_id.trim(), item] as const)).values()];
+  const evaluations = uniqueRuns.map((item) => item.evaluation);
+  const identities = new Set(evaluations.map((item) => `${item.worker}:${item.eval_pack_id ?? "unknown"}@${item.eval_pack_version ?? "unknown"}`));
+  const qualifying = evaluations.filter((item) => item.coverage.adequate);
+  const fingerprints = uniqueStrings(qualifying.map((item) => item.qualification.semantic_fingerprint), 256).sort();
+  const status: RuntimeRepeatabilityStatus = identities.size > 1
+    ? "incompatible"
+    : evaluations.some((item) => !item.coverage.adequate)
+      ? "inconclusive"
+      : evaluations.length < minimumRepeatRuns
+        ? "insufficient_runs"
+        : fingerprints.length === 1
+          ? "stable"
+          : "variable";
+  return {
+    status,
+    source_class: sourceClass,
+    independent_run_count: uniqueRuns.length,
+    qualifying_run_count: qualifying.length,
+    minimum_repeat_runs: minimumRepeatRuns,
+    distinct_semantic_fingerprints: fingerprints,
+    control_pass_eligible: false,
+    claim_scope: sourceClass === "deterministic_fixture"
+      ? "Repeatability applies only to the named synthetic fixture, pack version, and normalized semantic outcomes; it is not independent security ground truth."
+      : "Repeatability applies only to the sampled target, pack version, environment, and run set; it does not establish a universal control pass.",
+    excluded_nondeterministic_fields: [...RUNTIME_FINGERPRINT_EXCLUSIONS]
+  };
+}
+
 export function normalizeRuntimeEvaluation(
   execution: EvidenceExecutionRecord,
   allowedControlIds: string[]
@@ -256,23 +371,32 @@ export function normalizeRuntimeEvaluation(
   const observationControlIds = observations.flatMap((item) => item.control_ids);
   const controlIds = uniqueStrings(packControlIds.length ? packControlIds : observationControlIds.length ? observationControlIds : [...allowed]);
 
+  const coverage: NormalizedRuntimeCoverage = {
+    status,
+    adequate,
+    expected,
+    attempted: observations.length,
+    completed,
+    findings,
+    inconclusive,
+    errors,
+    inconclusive_reasons: inconclusiveReasons
+  };
+  const worker = RUNTIME_WORKERS.has(execution.tool) ? execution.tool : execution.provider_id;
+  const confidenceLabel: RuntimeConfidenceLabel = !adequate
+    ? "inconclusive"
+    : findings > 0
+      ? "bounded_finding_signal"
+      : "bounded_no_finding_signal";
+  const confidenceScore = confidenceLabel === "bounded_finding_signal" ? 0.9 : confidenceLabel === "bounded_no_finding_signal" ? 0.7 : status === "partial" ? 0.45 : 0.25;
+
   return {
     provider_id: execution.provider_id,
-    worker: RUNTIME_WORKERS.has(execution.tool) ? execution.tool : execution.provider_id,
+    worker,
     eval_pack_id: evalPackId,
     eval_pack_version: evalPackVersion,
     control_ids: controlIds,
-    coverage: {
-      status,
-      adequate,
-      expected,
-      attempted: observations.length,
-      completed,
-      findings,
-      inconclusive,
-      errors,
-      inconclusive_reasons: inconclusiveReasons
-    },
+    coverage,
     observations,
     limitations: uniqueStrings(Array.isArray(output?.limitations) ? output.limitations.map((item: unknown) => safeText(item, "", 500)) : [], 20),
     invocation: {
@@ -280,6 +404,17 @@ export function normalizeRuntimeEvaluation(
       max_attempts: invocationMaxAttempts,
       retry_count: invocationRetryCount,
       terminal_reason: invocationTerminalReason
+    },
+    qualification: {
+      behavior_class: "target_dependent_nondeterministic",
+      confidence_label: confidenceLabel,
+      confidence_score: confidenceScore,
+      within_run_sample_limit: expected,
+      independent_run_count: 1,
+      minimum_repeat_runs: RUNTIME_MINIMUM_REPEAT_RUNS,
+      control_pass_eligible: false,
+      semantic_fingerprint: buildRuntimeSemanticFingerprint({ worker, evalPackId, evalPackVersion, coverage, observations }),
+      claim_scope: "One bounded execution is a target-dependent behavioral signal, not a repeatability result or control pass."
     }
   };
 }
@@ -303,7 +438,7 @@ export function buildRuntimeEvidenceRecords(args: {
     source_id: `${args.execution.provider_id}:runtime-coverage`,
     control_ids: evaluation.control_ids,
     summary: `${pack} coverage ${evaluation.coverage.status}: ${evaluation.coverage.completed}/${evaluation.coverage.expected} expected samples were assessable; ${evaluation.coverage.findings} findings, ${evaluation.coverage.inconclusive} inconclusive, ${evaluation.coverage.errors} errors.`,
-    confidence: evaluation.coverage.adequate ? 0.9 : evaluation.coverage.status === "partial" ? 0.45 : 0.25,
+    confidence: evaluation.qualification.confidence_score,
     metadata: {
       category: "runtime_evaluation_coverage",
       provider_id: evaluation.provider_id,
@@ -320,34 +455,48 @@ export function buildRuntimeEvidenceRecords(args: {
       errors: evaluation.coverage.errors,
       inconclusive_reasons: evaluation.coverage.inconclusive_reasons,
       limitations: evaluation.limitations,
-      invocation: evaluation.invocation
+      invocation: evaluation.invocation,
+      qualification: evaluation.qualification
     }
   };
-  const observationRecords = evaluation.observations.map((observation) => ({
-    evidence_id: createId("evidence_runtime_observation"),
-    run_id: args.runId,
-    lane_name: args.laneName,
-    source_type: "tool" as const,
-    source_id: `${args.execution.provider_id}:${observation.observation_id}`,
-    control_ids: observation.control_ids,
-    summary: observation.summary,
-    confidence: observation.outcome === "finding" ? 0.9 : observation.outcome === "no_finding_observed" || observation.outcome === "observed" ? 0.7 : 0.35,
-    locations: observation.locations,
-    metadata: {
-      category: "runtime_evaluation_observation",
-      provider_id: evaluation.provider_id,
-      worker: evaluation.worker,
-      eval_pack_id: evaluation.eval_pack_id,
-      eval_pack_version: evaluation.eval_pack_version,
-      observation_id: observation.observation_id,
-      probe_id: observation.probe_id,
-      title: observation.title,
-      outcome: observation.outcome,
-      severity: observation.severity,
-      inconclusive_reason: observation.inconclusive_reason,
-      coverage_status: evaluation.coverage.status,
-      coverage_adequate: evaluation.coverage.adequate
-    }
-  }));
+  const observationRecords = evaluation.observations.map((observation) => {
+    const confidenceLabel: RuntimeConfidenceLabel = !evaluation.coverage.adequate || observation.outcome === "inconclusive" || observation.outcome === "error"
+      ? "inconclusive"
+      : observation.outcome === "finding"
+        ? "bounded_finding_signal"
+        : "bounded_no_finding_signal";
+    const confidenceScore = confidenceLabel === "bounded_finding_signal" ? 0.9 : confidenceLabel === "bounded_no_finding_signal" ? 0.7 : 0.35;
+    return {
+      evidence_id: createId("evidence_runtime_observation"),
+      run_id: args.runId,
+      lane_name: args.laneName,
+      source_type: "tool" as const,
+      source_id: `${args.execution.provider_id}:${observation.observation_id}`,
+      control_ids: observation.control_ids,
+      summary: observation.summary,
+      confidence: confidenceScore,
+      locations: observation.locations,
+      metadata: {
+        category: "runtime_evaluation_observation",
+        provider_id: evaluation.provider_id,
+        worker: evaluation.worker,
+        eval_pack_id: evaluation.eval_pack_id,
+        eval_pack_version: evaluation.eval_pack_version,
+        observation_id: observation.observation_id,
+        probe_id: observation.probe_id,
+        title: observation.title,
+        outcome: observation.outcome,
+        severity: observation.severity,
+        inconclusive_reason: observation.inconclusive_reason,
+        coverage_status: evaluation.coverage.status,
+        coverage_adequate: evaluation.coverage.adequate,
+        qualification: {
+          ...evaluation.qualification,
+          confidence_label: confidenceLabel,
+          confidence_score: confidenceScore
+        }
+      }
+    };
+  });
   return [coverageRecord, ...observationRecords];
 }

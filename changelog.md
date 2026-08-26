@@ -8,10 +8,12 @@
 - Added `tethermark.runtime.ai-security-boundaries@1.0.0`, a standalone synthetic loopback service with versioned secure, vulnerable, and partial prompt/tool/MCP/memory/data-boundary profiles, inert tool calls, a machine-readable expectation catalog, and bounded body-free traces.
 - Added deterministic runtime worker normalization that emits pack-level coverage evidence, per-probe evidence, mapped runtime findings, audit observations, and fail-closed runtime control results without retaining request/response bodies or tool arguments.
 - Added deterministic runtime worker failure-path coverage for cancellation, bounded retry, timeout, output flooding, malformed output, retry exhaustion, and partial results.
+- Added machine-readable runtime confidence qualification and semantic repeatability assessment with a three-independent-run minimum, explicit claim scope, and stable/variable/inconclusive/incompatible outcomes.
 
 ### Changed
 
 - Runtime findings now fail their mapped controls, complete bounded no-finding samples remain zero-score `partial`, and worker failures, malformed coverage, unknown outcomes, and low sample counts remain `not_assessed` or `partial` with explicit inconclusive reasons; none can become a pass.
+- Runtime evidence now distinguishes bounded within-run probe counts from independent executions and labels target-dependent findings, no-finding observations, and inconclusive results without making control-pass claims.
 - Python worker processes now receive audit cancellation signals, retry only transient execution failures under a two-attempt default and three-attempt ceiling, terminate non-retryable failures immediately, and retain attempt/terminal-reason metadata in normalized coverage evidence.
 
 ### Verified
@@ -21,6 +23,7 @@
 - Managed worker tests passed with the real Inspect packs executing every runtime attack-fixture profile; the same integration is release-gated on Windows, Ubuntu, and macOS with Python 3.11 and 3.13.
 - Core-engine regression coverage verifies runtime finding propagation, redacted evidence, no-finding-without-pass semantics, low-sample rejection, and worker-failure containment.
 - Core-engine regression coverage verifies distinct canceled, timeout, output-limit, malformed-output, retry-exhausted, recovered-retry, and partial-result semantics.
+- Core-engine regression coverage verifies that three semantically identical independent fixture runs are stable despite timestamp, wording, location, ordering, and retry noise; changed outcomes are variable and incomplete or mismatched runs fail closed.
 
 ## 2026-08-24
 

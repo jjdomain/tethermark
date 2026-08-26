@@ -26,6 +26,28 @@ The normalized evidence records flow through the existing persistence, review, e
 
 A finite no-finding sample never establishes `pass`. Runtime controls can only pass after a future policy explicitly defines sufficient independent evidence; the current Community Edition packs do not make that claim.
 
+## Confidence and repeatability contract
+
+Every normalized runtime record includes a machine-readable `qualification` object. It separates the bounded samples inside one worker execution from independent repeated executions:
+
+- `behavior_class` is `target_dependent_nondeterministic` because a behavioral result can change with target state, model behavior, dependencies, or environment.
+- `within_run_sample_limit` is the versioned pack's bounded probe count. It is not an independent-run count.
+- `independent_run_count` is `1` for a single execution and `minimum_repeat_runs` is `3` for a repeatability assessment.
+- `confidence_label` is `bounded_finding_signal`, `bounded_no_finding_signal`, or `inconclusive`. The numeric confidence remains available for compatibility but must be interpreted with this label and claim scope.
+- `control_pass_eligible` is always `false`; neither one run nor three stable runs establishes a runtime control pass.
+
+Repeatability compares normalized semantic fingerprints from distinct run IDs executing the same worker and pack version. Duplicate or missing run IDs do not increase the independent-run count. The fingerprint includes coverage counts/reasons plus sorted probe outcome, severity, control mapping, and inconclusive reason. It excludes timestamps, durations, observation IDs, prose summaries, evidence locations, retry timing, and invocation counts so harmless execution noise does not appear as behavioral drift.
+
+| Repeatability status | Meaning |
+| --- | --- |
+| `stable` | At least three adequate independent executions produced one semantic fingerprint. |
+| `variable` | At least three adequate independent executions produced different semantic fingerprints. |
+| `insufficient_runs` | Fewer than three comparable adequate executions were supplied. |
+| `inconclusive` | At least one supplied execution had incomplete or failed coverage. |
+| `incompatible` | Worker, pack ID, or pack version differs, so the executions cannot be compared. |
+
+For the repository-owned synthetic fixture, `stable` means only that the named fixture, pack version, and normalized outcomes repeat. The fixture remains engineering regression evidence, not independently reviewed security ground truth. For a live target, the claim is limited to that target, pack version, environment, and run set.
+
 ## Fail-closed coverage
 
 Coverage becomes partial or not-run when any of the following occurs:
