@@ -5,11 +5,14 @@
 ### Changed
 
 - Local SQLite persistence now validates existing databases before use, fails closed on corrupt or unreadable files, and preserves the last valid database when a temporary write or replacement fails.
+- Local SQLite writers in separate processes now coordinate through a bounded sidecar lock with exponential backoff, stale-lock recovery, ownership-safe release, and an explicit `sqlite_database_locked` timeout.
 - Async restart recovery now reconciles already-persisted terminal runs into their job and attempt records instead of executing those runs again.
+- Built-in system-policy initialization now coalesces concurrent in-process requests and treats an independently created built-in as an idempotent success.
 
 ### Verified
 
 - Deterministic persistence regressions cover corrupt-database rejection, disk-full/pre-replacement failure preservation, temporary-file cleanup, concurrent-write compatibility, and idempotent terminal-run recovery.
+- Persistence stress regressions cover simultaneous API queue requests, concurrent worker terminal transitions, lock contention/timeout/stale-owner recovery, and independent Node processes writing one database without record loss.
 
 ## 2026-08-25
 
