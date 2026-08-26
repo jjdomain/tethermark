@@ -1,0 +1,152 @@
+name: Native Runtime Verification
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/native-runtime-verification.yml"
+      - "apps/cli/src/runtime-fixtures.ts"
+      - "apps/cli/src/setup-runtime.ts"
+      - "fixtures/runtime-targets/**"
+      - "packages/core-engine/src/sandbox/**"
+      - "packages/validation-runner/src/**"
+      - "scripts/check-native-runtime.mjs"
+      - "package.json"
+
+concurrency:
+  group: native-runtime-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AUDIT_LLM_PROVIDER: mock
+  AUDIT_LLM_MODEL: mock-agent-runtime
+  HARNESS_DISABLE_LEARNING_SCHEDULER: "1"
+  HARNESS_DISABLE_LOCAL_BINARIES: "1"
+  HARNESS_DISABLE_PYTHON_WORKERS: "1"
+
+jobs:
+  linux-docker:
+    name: Linux Docker executable verification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Verify native Docker runtime
+        run: npm run production:runtime-native -- --backend docker
+      - name: Retain Linux Docker evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-runtime-linux-docker
+          path: .artifacts/runtime-native/linux-docker/native-runtime-verification.json
+          if-no-files-found: error
+          retention-days: 30
+
+  linux-rootless-podman:
+    name: Linux rootless Podman executable verification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install rootless Podman prerequisites
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman uidmap slirp4netns fuse-overlayfs
+          runner_user="$(id -un)"
+          grep -q "^${runner_user}:" /etc/subuid || echo "${runner_user}:100000:65536" | sudo tee -a /etc/subuid
+          grep -q "^${runner_user}:" /etc/subgid || echo "${runner_user}:100000:65536" | sudo tee -a /etc/subgid
+          podman system migrate
+          podman info --format '{{json .Host.Security}}'
+      - name: Install dependencies
+        run: npm ci
+      - name: Verify native rootless Podman runtime
+        run: npm run production:runtime-native -- --backend rootless_podman
+      - name: Retain rootless Podman evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-runtime-linux-rootless-podman
+          path: .artifacts/runtime-native/linux-rootless_podman/native-runtime-verification.json
+          if-no-files-found: error
+          retention-days: 30
+
+  linux-gvisor:
+    name: Linux gVisor executable verification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install gVisor from its signed apt repository
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apt-transport-https ca-certificates curl gnupg
+          curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor --yes -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" | sudo tee /etc/apt/sources.list.d/gvisor.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y runsc
+          sudo runsc install
+          sudo systemctl restart docker
+          runsc --version
+          docker info --format '{{json .Runtimes}}'
+      - name: Install dependencies
+        run: npm ci
+      - name: Verify native gVisor runtime
+        run: npm run production:runtime-native -- --backend gvisor_container
+      - name: Retain gVisor evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-runtime-linux-gvisor
+          path: .artifacts/runtime-native/linux-gvisor_container/native-runtime-verification.json
+          if-no-files-found: error
+          retention-days: 30
+
+  macos-native-boundary:
+    name: macOS native runtime boundary verification
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Verify native macOS boundary without claiming Docker execution
+        run: npm run production:runtime-native -- --backend docker_desktop --expect-blocked
+      - name: Retain macOS boundary evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-runtime-macos-boundary
+          path: .artifacts/runtime-native/darwin-docker_desktop/native-runtime-verification.json
+          if-no-files-found: error
+          retention-days: 30

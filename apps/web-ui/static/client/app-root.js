@@ -225,7 +225,7 @@ const builtinPackageConfig = {
     max_rerun_rounds: 2,
     publishability_threshold: "high"
   },
-  "premium-comprehensive": {
+  "comprehensive-local": {
     run_mode: "runtime",
     enabled_lanes: ["repo_posture", "supply_chain", "agentic_controls", "data_exposure", "runtime_validation"],
     max_agent_calls: 28,
@@ -234,8 +234,8 @@ const builtinPackageConfig = {
     publishability_threshold: "high"
   }
 };
-const auditPackageDisplayOrder = ["baseline-static", "agentic-static", "deep-static", "runtime-validated"];
-const hiddenOssAuditPackages = new Set(["premium-comprehensive"]);
+const auditPackageDisplayOrder = ["baseline-static", "agentic-static", "deep-static", "runtime-validated", "comprehensive-local"];
+const hiddenOssAuditPackages = new Set();
 const builtinAuditPackages = auditPackageDisplayOrder.map((id) => ({
   id,
   title: {
@@ -956,6 +956,7 @@ function deriveRunFormDefaults(project, effectiveSettings, auditPackages) {
     audit_policy_pack: "default",
     llm_provider: normalizedModelSelection.providerId,
     llm_model: normalizedModelSelection.modelId,
+    runtime_api_override_confirmed: false,
     preflight_strictness: preflightDefaults.strictness || "standard",
     runtime_allowed: selectedAuditDefaults.runtime_allowed || preflightDefaults.runtime_allowed || "targeted_only",
     review_severity: selectedAuditDefaults.review_severity || reviewDefaults.require_human_review_for_severity || "high",
@@ -1259,7 +1260,7 @@ function buildSettingsIntegrationPayload(settings, registry, drafts) {
   return { credentials: nextCredentials, integrations: nextIntegrations };
 }
 
-function buildRunRequest(form, effectiveSettings, llmRegistry, auditPackages) {
+function buildRunRequest(form, effectiveSettings, llmRegistry, auditPackages, acceptedBy = "local-operator") {
   const targetKind = form.target_kind === "repo" ? "repo" : "path";
   const payload = {
     llm_provider: form.llm_provider
@@ -1289,6 +1290,13 @@ function buildRunRequest(form, effectiveSettings, llmRegistry, auditPackages) {
       default_visibility: form.review_visibility
     }
   };
+  if (form.run_mode === "runtime" && form.llm_provider === "openai" && form.runtime_api_override_confirmed) {
+    payload.hints.runtime_model_api_override = {
+      accepted_at: new Date().toISOString(),
+      accepted_by: acceptedBy || "local-operator",
+      reason: "Operator explicitly selected API-key routing instead of the default local Codex ChatGPT session."
+    };
+  }
   if (!form.use_audit_presets) {
     payload.hints.audit_package_overrides = {
       enabled_lanes: sanitizeEnabledLanes(form.enabled_lanes, form.run_mode || "static"),
@@ -1377,7 +1385,7 @@ function buildDiagnosticsRunRequest({ kind, effectiveSettings, auditPackages, ta
 }
 
 function buildLaunchRunRequest(form, requestContext, launchIntentState, effectiveSettings, llmRegistry, auditPackages) {
-  const payload = buildRunRequest(form, effectiveSettings, llmRegistry, auditPackages);
+  const payload = buildRunRequest(form, effectiveSettings, llmRegistry, auditPackages, requestContext.actorId);
   payload.llm_workload_class = "interactive_operator";
   payload.hints = {
     ...(payload.hints || {}),
@@ -1449,6 +1457,9 @@ function validateRunForm(form) {
   if (form.use_audit_presets && !form.audit_package) issues.push("Select an audit package.");
   if (!form.run_mode) issues.push("Select a run mode.");
   if (!form.llm_provider || !form.llm_model) issues.push("Select a default model in Model Configuration before launching a real audit.");
+  if (form.run_mode === "runtime" && form.llm_provider === "openai" && !form.runtime_api_override_confirmed) {
+    issues.push("Runtime validation defaults to the local Codex ChatGPT session. Confirm the explicit API-key routing override or select OpenAI Codex OAuth.");
+  }
   return issues;
 }
 
@@ -1460,7 +1471,9 @@ function deriveLaunchReadiness(form, preflightSummary, preflightAcceptedAt, pref
   if (usingMockProvider) {
     issues.push("Mock Agent Runtime is for dev/test only. Select a live default model in Model Configuration to enable real audits.");
   } else if (form.llm_provider && form.llm_model && !providerCredential.configured) {
-    issues.push("Configure the API key for the selected default model in Model Configuration before launching a real audit.");
+    issues.push(selectedProvider?.mode === "agent_oauth"
+      ? "Connect the ChatGPT account for the selected Codex model in Model Configuration before launching a real audit."
+      : "Configure the API key for the selected default model in Model Configuration before launching a real audit.");
   }
   const preflightStatus = preflightSummary?.readiness?.status || "not_run";
   const blockers = preflightSummary?.readiness?.blockers || [];
@@ -2351,6 +2364,7 @@ function LaunchAuditModal({
   preflightCheckedAt,
   preflightAcceptedAt,
   preflightLoading,
+  launchLoading,
   applyProviderPreset,
   runPreflight,
   acceptPreflight,
@@ -2378,6 +2392,7 @@ function LaunchAuditModal({
       preflightCheckedAt,
       preflightAcceptedAt,
       preflightLoading,
+      launchLoading,
       applyProviderPreset,
       runPreflight,
       acceptPreflight,
@@ -2520,9 +2535,9 @@ function LaunchAuditModal({
       h(Button, { key: "preflight", variant: "outline", onClick: runPreflight, disabled: !requiredFieldsReady }, preflightLoading ? "Running Preflight..." : "Run Preflight"),
       h(Button, {
         key: "launch",
-        disabled: !requiredFieldsReady || !launchReadiness.canLaunch,
+        disabled: launchLoading || !requiredFieldsReady || !launchReadiness.canLaunch,
         onClick: launchRun
-      }, !requiredFieldsReady ? "Complete Required Fields" : preflightSummary && !launchReadiness.accepted ? "Accept Preflight First" : "Start Run")
+      }, launchLoading ? "Launching Audit..." : !requiredFieldsReady ? "Complete Required Fields" : preflightSummary && !launchReadiness.accepted ? "Accept Preflight First" : "Start Run")
       ]),
       h("div", { key: "times", className: "mt-3 flex flex-wrap gap-x-6 gap-y-2 text-sm text-slate-500" }, [
       h("div", { key: "checked" }, `Checked: ${formatDate(preflightCheckedAt)}`),
@@ -3320,6 +3335,15 @@ function App() {
   const [auditPackages, setAuditPackages] = useState(builtinAuditPackages);
   const [methodologyCatalog, setMethodologyCatalog] = useState(emptyMethodology);
   const [policyPacks, setPolicyPacks] = useState([]);
+  const [systemPolicyCatalog, setSystemPolicyCatalog] = useState({ policies: [], policy_details: [], templates: [], control_catalog: [], audit_packages: [] });
+  const [selectedSystemPolicyId, setSelectedSystemPolicyId] = useState("");
+  const [systemPolicyDraft, setSystemPolicyDraft] = useState("");
+  const [systemPolicyValidation, setSystemPolicyValidation] = useState(null);
+  const [systemPolicyPreview, setSystemPolicyPreview] = useState(null);
+  const [systemPolicyCompareVersionId, setSystemPolicyCompareVersionId] = useState("");
+  const [systemPolicyBindingDraft, setSystemPolicyBindingDraft] = useState({ binding_type: "project", value: "default", priority: 100 });
+  const [systemPolicySearch, setSystemPolicySearch] = useState("");
+  const [systemPolicyStatusFilter, setSystemPolicyStatusFilter] = useState("all");
   const [llmRegistry, setLlmRegistry] = useState(emptyLlmRegistry);
   const [oauthConnectionState, setOauthConnectionState] = useState(null);
   const oauthStatusRequestId = useRef(0);
@@ -3375,7 +3399,7 @@ function App() {
   const [benchmarkCompareCurrent, setBenchmarkCompareCurrent] = useState("");
   const [benchmarkComparison, setBenchmarkComparison] = useState(null);
   const [settingsSubpage, setSettingsSubpage] = useState("audit");
-  const [governanceTab, setGovernanceTab] = useState("gates");
+  const [governanceTab, setGovernanceTab] = useState("policy");
   const [artifactRetentionForm, setArtifactRetentionForm] = useState({
     kind: "runs",
     older_than_days: 30,
@@ -3434,10 +3458,12 @@ function App() {
     excluded_control_ids_text: "",
     llm_provider: "",
     llm_model: "",
+    runtime_api_override_confirmed: false,
     use_global_llm_config: true
   });
   const [preflightSummary, setPreflightSummary] = useState(null);
   const [preflightLoading, setPreflightLoading] = useState(false);
+  const [launchLoading, setLaunchLoading] = useState(false);
   const [preflightStale, setPreflightStale] = useState(true);
   const [preflightCheckedAt, setPreflightCheckedAt] = useState(null);
   const [preflightAcceptedAt, setPreflightAcceptedAt] = useState(null);
@@ -3978,6 +4004,7 @@ function triageDecisionFromReviewSummary(summary) {
       api("/audit-packages", undefined, requestContext),
       api("/methodology", undefined, requestContext),
       api("/policy-packs", undefined, requestContext),
+      api("/system/policies", undefined, requestContext),
       api("/llm-providers", undefined, requestContext),
       api("/review-notifications?reviewer_id=" + encodeURIComponent(requestContext.actorId || "anonymous"), undefined, requestContext),
       api("/runtime-followups", undefined, requestContext),
@@ -3988,7 +4015,7 @@ function triageDecisionFromReviewSummary(summary) {
       api("/benchmarks/suites", undefined, requestContext),
       api("/benchmarks/suites/ai-agent-static-v1", undefined, requestContext),
       api("/benchmarks/reports", undefined, requestContext)
-    ]).then(([authInfoPayload, runsPayload, jobsPayload, effectiveSettingsPayload, settingsPayload, documentsPayload, projectsPayload, auditPackagesPayload, methodologyPayload, policyPacksPayload, llmProvidersPayload, notificationsPayload, runtimeFollowupsPayload, learningEventsPayload, learningCandidatesPayload, learningPromotionsPayload, learningJobsPayload, benchmarkSuitesPayload, benchmarkSuitePayload, benchmarkReportsPayload]) => {
+    ]).then(([authInfoPayload, runsPayload, jobsPayload, effectiveSettingsPayload, settingsPayload, documentsPayload, projectsPayload, auditPackagesPayload, methodologyPayload, policyPacksPayload, systemPoliciesPayload, llmProvidersPayload, notificationsPayload, runtimeFollowupsPayload, learningEventsPayload, learningCandidatesPayload, learningPromotionsPayload, learningJobsPayload, benchmarkSuitesPayload, benchmarkSuitePayload, benchmarkReportsPayload]) => {
       setAuthInfo(authInfoPayload || defaultAuthInfo);
       setRuns(runsPayload.runs || []);
       setJobs(jobsPayload.jobs || []);
@@ -4005,6 +4032,14 @@ function triageDecisionFromReviewSummary(summary) {
       setAuditPackages(auditPackagesPayload.audit_packages?.length ? auditPackagesPayload.audit_packages : builtinAuditPackages);
       setMethodologyCatalog(methodologyPayload || emptyMethodology);
       setPolicyPacks((policyPacksPayload.policy_packs || []).filter((item) => item.id === "default"));
+      setSystemPolicyCatalog({
+        policies: systemPoliciesPayload.policies || [],
+        policy_details: systemPoliciesPayload.policy_details || [],
+        templates: systemPoliciesPayload.templates || [],
+        control_catalog: systemPoliciesPayload.control_catalog || [],
+        audit_packages: systemPoliciesPayload.audit_packages || []
+      });
+      setSelectedSystemPolicyId((current) => current || systemPoliciesPayload.policies?.find((item) => item.is_default)?.id || systemPoliciesPayload.policies?.[0]?.id || "");
       setLlmRegistry({
         providers: llmProvidersPayload.providers || [],
         presets: llmProvidersPayload.presets || [],
@@ -4953,6 +4988,15 @@ function triageDecisionFromReviewSummary(summary) {
     window.localStorage.setItem(contextStorageKey, JSON.stringify(requestContext));
   }, [requestContext]);
 
+  useEffect(() => {
+    const detail = (systemPolicyCatalog.policy_details || []).find((item) => item?.policy?.id === selectedSystemPolicyId);
+    const currentVersion = detail?.versions?.find((item) => item.id === detail.policy.current_version_id) || detail?.versions?.[0];
+    if (currentVersion?.definition_json) setSystemPolicyDraft(JSON.stringify(currentVersion.definition_json, null, 2));
+    setSystemPolicyValidation(null);
+    setSystemPolicyPreview(null);
+    setSystemPolicyCompareVersionId("");
+  }, [selectedSystemPolicyId, systemPolicyCatalog]);
+
   function act(task, message, options = {}) {
     setError("");
     if (options.scope === "run") {
@@ -4978,7 +5022,7 @@ function triageDecisionFromReviewSummary(summary) {
     setError("");
     setNotice("");
     setPreflightLoading(true);
-    api("/preflight", { method: "POST", body: JSON.stringify(buildRunRequest(runForm, effectiveSettings, llmRegistry, auditPackages)) }, requestContext)
+    api("/preflight", { method: "POST", body: JSON.stringify(buildRunRequest(runForm, effectiveSettings, llmRegistry, auditPackages, requestContext.actorId)) }, requestContext)
       .then((payload) => {
         setPreflightSummary(payload.preflight || null);
         setPreflightStale(false);
@@ -5050,23 +5094,31 @@ function triageDecisionFromReviewSummary(summary) {
   }
 
   function launchRun() {
-    if (!launchReadiness.canLaunch) return;
+    if (launchLoading || !launchReadiness.canLaunch) return;
+    setLaunchLoading(true);
+    const request = buildLaunchRunRequest(runForm, requestContext, {
+      preflightCheckedAt,
+      preflightAcceptedAt,
+      preflightStale
+    }, effectiveSettings, llmRegistry, auditPackages);
     act(
-      () => api("/runs", {
+      () => api("/runs/async", {
         method: "POST",
-        body: JSON.stringify(buildLaunchRunRequest(runForm, requestContext, {
-          preflightCheckedAt,
-          preflightAcceptedAt,
-          preflightStale
-        }, effectiveSettings, llmRegistry, auditPackages))
+        body: JSON.stringify({
+          request,
+          start_immediately: true
+        })
       }, requestContext).then((payload) => {
         setLaunchModalOpen(false);
-        if (payload?.run?.id) {
-          setSelectedRunId(payload.run.id);
+        if (payload?.job?.current_run_id) {
+          setSelectedRunId(payload.job.current_run_id);
           setView("runs");
+        } else {
+          setView("system");
+          setSystemSubpage("jobs");
         }
-      }),
-      "Run launched."
+      }).finally(() => setLaunchLoading(false)),
+      "Audit job queued."
     );
   }
 
@@ -6077,6 +6129,21 @@ function triageDecisionFromReviewSummary(summary) {
           h("div", { key: "credential", className: "mt-2" }, launchReadiness.providerCredential.note),
           selectedProvider.notes?.length ? h("ul", { key: "notes", className: "mt-2 space-y-1 text-xs" }, selectedProvider.notes.map((item, index) => h("li", { key: `${index}:${item}` }, "- " + item))) : null
         ]) : null,
+        runForm.run_mode === "runtime" && runForm.llm_provider === "openai"
+          ? h("label", { key: "runtime-api-override", className: "mt-4 flex items-start gap-3 rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950" }, [
+              h("input", {
+                key: "checkbox",
+                type: "checkbox",
+                className: "mt-1 h-4 w-4",
+                checked: Boolean(runForm.runtime_api_override_confirmed),
+                onChange: (event) => updateRunForm("runtime_api_override_confirmed", event.target.checked)
+              }),
+              h("span", { key: "copy" }, [
+                h("span", { key: "title", className: "block font-medium" }, "Use API-key routing for this runtime audit"),
+                h("span", { key: "detail", className: "mt-1 block text-xs leading-5" }, "The Community Edition runtime default is OpenAI Codex with your local ChatGPT session. Select this only when you intentionally want the metered OpenAI API provider for this run.")
+              ])
+            ])
+          : null,
         h("div", { key: "target-hint", className: "mt-4 rounded-2xl border border-border bg-white/70 px-4 py-3 text-sm text-muted" }, runForm.target_kind === "repo"
           ? "Use a repo URL when you want canonical GitHub/repository identity for scoring, outbound integrations, and repo-linked history."
           : "Local paths are ideal for self-hosted repos, local clones, and fixture-based regression checks."),
@@ -6126,19 +6193,9 @@ function triageDecisionFromReviewSummary(summary) {
           }, "Apply Recommended Profile"),
           h(Button, {
             key: "button",
-            disabled: !launchReadiness.canLaunch,
-            onClick: () => act(
-              () => api("/runs", {
-                method: "POST",
-                body: JSON.stringify(buildLaunchRunRequest(runForm, requestContext, {
-                  preflightCheckedAt,
-                  preflightAcceptedAt,
-                  preflightStale
-                }, effectiveSettings, llmRegistry, auditPackages))
-              }, requestContext),
-              "Run launched."
-            )
-          }, preflightSummary && !launchReadiness.accepted ? "Accept Preflight First" : "Start Run")
+            disabled: launchLoading || !launchReadiness.canLaunch,
+            onClick: launchRun
+          }, launchLoading ? "Launching Audit..." : preflightSummary && !launchReadiness.accepted ? "Accept Preflight First" : "Start Run")
         ]),
         h("div", { key: "preflight-state", className: "mt-3 grid gap-2 md:grid-cols-2 text-sm text-muted" }, [
           h("div", { key: "checked" }, "checked: " + formatDate(preflightCheckedAt)),
@@ -7644,6 +7701,7 @@ function triageDecisionFromReviewSummary(summary) {
     preflightCheckedAt,
     preflightAcceptedAt,
     preflightLoading,
+    launchLoading,
     applyProviderPreset,
     runPreflight,
     acceptPreflight,
@@ -8026,6 +8084,118 @@ function triageDecisionFromReviewSummary(summary) {
   const defaultPolicyObjectives = defaultPolicyPack?.policy?.objectives || [];
   const defaultPolicyDecisionRules = defaultPolicyPack?.policy?.control_decision_rules || [];
   const defaultPolicyPublicationRules = defaultPolicyPack?.policy?.publication_rules || [];
+  const selectedSystemPolicyDetail = (systemPolicyCatalog.policy_details || []).find((item) => item?.policy?.id === selectedSystemPolicyId) || null;
+  const selectedSystemPolicyVersion = selectedSystemPolicyDetail?.versions?.find((item) => item.id === selectedSystemPolicyDetail.policy.current_version_id) || selectedSystemPolicyDetail?.versions?.[0] || null;
+  const comparedSystemPolicyVersion = selectedSystemPolicyDetail?.versions?.find((item) => item.id === systemPolicyCompareVersionId) || null;
+  const visibleSystemPolicies = (systemPolicyCatalog.policies || []).filter((policy) => {
+    const query = systemPolicySearch.trim().toLowerCase();
+    return (systemPolicyStatusFilter === "all" || policy.status === systemPolicyStatusFilter)
+      && (!query || `${policy.name} ${policy.id} ${policy.description || ""}`.toLowerCase().includes(query));
+  });
+  const parsedSystemPolicyDraft = (() => { try { return JSON.parse(systemPolicyDraft || "{}"); } catch { return selectedSystemPolicyVersion?.definition_json || {}; } })();
+  const selectedRequiredControlIds = new Set(parsedSystemPolicyDraft.required_control_ids || []);
+  const systemPolicyControlGroups = Object.entries((systemPolicyCatalog.control_catalog || []).reduce((groups, control) => {
+    const framework = control.framework || "Other";
+    if (!groups[framework]) groups[framework] = [];
+    groups[framework].push(control);
+    return groups;
+  }, {}));
+  const systemPolicyEvidenceWarnings = (parsedSystemPolicyDraft.required_evidence_provider_ids || []).flatMap((providerId) => {
+    if (providerId === "repo_analysis") return [];
+    if (providerId === "local_runtime") return runtimeSandboxReadiness.status === "ready" ? [] : [`local_runtime is required but sandbox readiness is ${runtimeSandboxReadiness.status || "unknown"}.`];
+    const tool = (staticToolsReadiness.tools || []).find((item) => item.id === providerId);
+    return tool?.status === "ready" ? [] : [`${providerId} is required but is ${tool?.status || "not detected"} on this machine.`];
+  });
+
+  function createSystemPolicyFromTemplate(template) {
+    const name = window.prompt("Name for the cloned system policy", `${template.name} Copy`);
+    if (!name?.trim()) return;
+    act(() => api("/system/policies", {
+      method: "POST",
+      body: JSON.stringify({ name: name.trim(), template_id: template.id, reason: `cloned from ${template.id}` })
+    }, requestContext).then((payload) => {
+      if (payload?.system_policy?.policy?.id) setSelectedSystemPolicyId(payload.system_policy.policy.id);
+    }), "System policy created.");
+  }
+
+  function cloneSelectedSystemPolicy() {
+    if (!selectedSystemPolicyVersion) return;
+    const name = window.prompt("Name for the cloned system policy", `${selectedSystemPolicyDetail.policy.name} Copy`);
+    if (!name?.trim()) return;
+    act(() => api("/system/policies", { method: "POST", body: JSON.stringify({ name: name.trim(), definition: selectedSystemPolicyVersion.definition_json, reason: `cloned from ${selectedSystemPolicyId}` }) }, requestContext).then((payload) => {
+      if (payload?.system_policy?.policy?.id) setSelectedSystemPolicyId(payload.system_policy.policy.id);
+    }), "System policy cloned.");
+  }
+
+  function saveSystemPolicyDraft() {
+    if (!selectedSystemPolicyId) return;
+    let definition;
+    try { definition = JSON.parse(systemPolicyDraft); } catch { setError("System policy JSON is invalid."); return; }
+    act(() => api(`/system/policies/${encodeURIComponent(selectedSystemPolicyId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ definition, reason: "edited in System > Policy" })
+    }, requestContext), "New immutable policy version saved.");
+  }
+
+  function toggleSystemPolicyControl(controlId, checked) {
+    let definition;
+    try { definition = JSON.parse(systemPolicyDraft || "{}"); } catch { setError("Fix the policy JSON before changing controls."); return; }
+    const controls = new Set(Array.isArray(definition.required_control_ids) ? definition.required_control_ids : []);
+    if (checked) controls.add(controlId); else controls.delete(controlId);
+    definition.required_control_ids = [...controls].sort();
+    definition.template_id = "custom";
+    setSystemPolicyDraft(JSON.stringify(definition, null, 2));
+  }
+
+  function validateSystemPolicy() {
+    if (!selectedSystemPolicyId) return;
+    setError("");
+    api(`/system/policies/${encodeURIComponent(selectedSystemPolicyId)}/validate`, { method: "POST", body: "{}" }, requestContext)
+      .then((payload) => setSystemPolicyValidation(payload.validation || null))
+      .catch((validationError) => setError(formatUiError(validationError)));
+  }
+
+  function applySystemPolicyAction(action, body, message) {
+    if (!selectedSystemPolicyId) return;
+    act(() => api(`/system/policies/${encodeURIComponent(selectedSystemPolicyId)}/${action}`, { method: "POST", body: JSON.stringify(body || {}) }, requestContext), message);
+  }
+
+  function bindSelectedSystemPolicy() {
+    const bindingType = systemPolicyBindingDraft.binding_type;
+    const value = String(systemPolicyBindingDraft.value || "").trim();
+    if (!value) { setError("A binding value is required."); return; }
+    const scopedValue = bindingType === "project" ? { project_id: value } : bindingType === "target" ? { target_ref: value } : { audit_package: value };
+    applySystemPolicyAction("bindings", { binding_type: bindingType, ...scopedValue, priority: Number(systemPolicyBindingDraft.priority || 100) }, "System policy binding saved.");
+  }
+
+  function previewSystemPolicyResolution() {
+    setError("");
+    const request = buildRunRequest(runForm, effectiveSettings, llmRegistry, auditPackages, requestContext.actorId);
+    api("/system/policies/resolve-preview", { method: "POST", body: JSON.stringify({ request }) }, requestContext)
+      .then((payload) => setSystemPolicyPreview(payload.resolved_policy || null))
+      .catch((previewError) => setError(formatUiError(previewError)));
+  }
+
+  function exportSelectedSystemPolicy() {
+    if (!selectedSystemPolicyId) return;
+    api(`/system/policies/${encodeURIComponent(selectedSystemPolicyId)}/export`, undefined, requestContext).then((payload) => {
+      const href = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }));
+      const link = document.createElement("a");
+      link.href = href;
+      link.download = `${selectedSystemPolicyId}.system-policy.json`;
+      link.click();
+      URL.revokeObjectURL(href);
+    }).catch((exportError) => setError(formatUiError(exportError)));
+  }
+
+  function importSystemPolicyFile(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    file.text().then((text) => JSON.parse(text)).then((payload) => {
+      act(() => api("/system/policies/import", { method: "POST", body: JSON.stringify({ payload }) }, requestContext), "System policy imported.");
+    }).catch((importError) => setError(`Policy import failed: ${importError.message || importError}`));
+  }
 
   const settingsNavItems = [
     { id: "audit", label: "Audit Type", description: "Audit methodology, scope, and run-shape defaults." },
@@ -8249,7 +8419,7 @@ function triageDecisionFromReviewSummary(summary) {
         className: "mb-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 text-sm text-slate-700"
       }, [
         h("div", { key: "title", className: "font-medium text-slate-900" }, "Configure how models are chosen for audits"),
-        h("div", { key: "body", className: "mt-1" }, "Choose one default live model and API key for all agents. If a specific agent needs a different model, set it below in the agent-specific section. If a run sets its own agent model in the launch modal, that run-specific choice is used instead of the settings on this page.")
+        h("div", { key: "body", className: "mt-1" }, "Choose one default live model and connection for all agents. ChatGPT + Codex uses your local subscription sign-in by default; OpenAI API models remain available as an optional API-key route. If a specific agent needs a different model, set it below in the agent-specific section. If a run sets its own agent model in the launch modal, that run-specific choice is used instead of the settings on this page.")
       ]),
       h("div", { key: "global-model-header", className: "mb-3" }, [
         h("div", { key: "title", className: "font-medium text-slate-900" }, "Global Agent Default Model"),
@@ -9060,6 +9230,9 @@ function triageDecisionFromReviewSummary(summary) {
           h("div", { key: "fields", className: "mt-4 grid gap-4" }, [
             ...getIntegrationCredentialFields(integrationRegistry, "generic_webhook").map((field) => renderIntegrationCredentialField("generic_webhook", field)),
             !webhookConfigured ? h("div", { key: "skip", className: "rounded-xl border border-border bg-card px-3 py-2 text-sm opacity-90" }, "Skip this unless another system gave you a webhook URL to receive audit events.") : null,
+            webhookConfigured && !String(settings.integrations_json.generic_webhook_secret || "").trim()
+              ? h("div", { key: "unsigned-warning", className: "rounded-xl border border-amber-400/60 bg-amber-50 px-3 py-2 text-sm text-amber-950" }, "Unsigned webhook: treat delivery as untrusted and use only a loopback or otherwise trusted local receiver. Add a signing secret before sending to a shared or remote system.")
+              : null,
             h("div", { key: "events" }, [
               h("div", { key: "label", className: "mb-2 text-sm font-medium text-current" }, "Events To Send"),
               h("div", { key: "checks", className: "grid gap-2 sm:grid-cols-2" }, genericWebhookEventOptions.map(([value, label]) => h("label", { key: value, className: "flex items-center gap-2 rounded-xl border border-current/20 px-3 py-2" }, [
@@ -9076,7 +9249,7 @@ function triageDecisionFromReviewSummary(summary) {
         ])
       ])
     ]),
-    h(Card, { key: "async-callback", title: "Job Completion Callback", description: "Optional callback URL for background job completion. Most users can leave this blank.", className: "border-border bg-card shadow-sm" }, [
+    h(Card, { key: "async-callback", title: "Job Completion Callback", description: "Optional unsigned callback for trusted local automation only. Remote receivers must treat this payload as untrusted. Most users should leave it blank.", className: "border-border bg-card shadow-sm" }, [
       h("div", { key: "grid", className: "grid gap-4 md:grid-cols-2" }, [
         h(Field, { key: "completion-webhook", label: "Completion Callback URL" }, h(Input, {
           value: settings.integrations_json.completion_webhook_url || "",
@@ -9191,6 +9364,104 @@ function triageDecisionFromReviewSummary(summary) {
   ]);
 
   const settingsPolicyPanel = h("div", { className: "space-y-6" }, [
+    authInfo.auth_mode === "none" ? h("div", { key: "auth-warning", className: "rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900" }, "Authentication is disabled. Policy administration is safe only for a trusted local deployment; enable API-key authentication before exposing this service.") : null,
+    h(Card, { key: "system-policies", title: "System Policies", description: "Versioned administrative guardrails resolve before an audit is queued. Published versions are immutable and every run records its resolved checksum." }, [
+      h("div", { key: "templates", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4" }, [
+        h("div", { key: "label", className: "text-xs font-semibold uppercase tracking-[0.16em] text-slate-500" }, "Create from safe template"),
+        h("div", { key: "buttons", className: "mt-3 flex flex-wrap gap-2" }, (systemPolicyCatalog.templates || []).map((template) => h(Button, { key: template.id, variant: "outline", onClick: () => createSystemPolicyFromTemplate(template) }, template.name))),
+        h("label", { key: "import", className: "mt-3 inline-flex cursor-pointer items-center rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50" }, [
+          "Import policy JSON",
+          h("input", { key: "file", type: "file", accept: "application/json,.json", className: "hidden", onChange: importSystemPolicyFile })
+        ])
+      ]),
+      h("div", { key: "workspace", className: "mt-5 grid gap-5 xl:grid-cols-[280px_minmax(0,1fr)]" }, [
+        h("div", { key: "list", className: "space-y-2" }, [
+          h(Input, { key: "search", value: systemPolicySearch, placeholder: "Search policies", onChange: (event) => setSystemPolicySearch(event.target.value) }),
+          Select({ value: systemPolicyStatusFilter, onChange: (event) => setSystemPolicyStatusFilter(event.target.value) }, [h("option", { key: "all", value: "all" }, "All statuses"), h("option", { key: "active", value: "active" }, "Active"), h("option", { key: "draft", value: "draft" }, "Draft"), h("option", { key: "archived", value: "archived" }, "Archived")]),
+          ...visibleSystemPolicies.map((policy) => h("button", {
+          key: policy.id,
+          type: "button",
+          onClick: () => setSelectedSystemPolicyId(policy.id),
+          className: cn("w-full rounded-2xl border px-4 py-3 text-left transition", selectedSystemPolicyId === policy.id ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-white hover:bg-slate-50")
+        }, [
+          h("div", { key: "row", className: "flex items-center justify-between gap-2" }, [h("span", { key: "name", className: "font-medium" }, policy.name), h(Badge, { key: "status" }, policy.status)]),
+          h("div", { key: "meta", className: cn("mt-1 text-xs", selectedSystemPolicyId === policy.id ? "text-slate-300" : "text-slate-500") }, `${policy.id}${policy.is_default ? " / default" : ""}`)
+        ]))
+        ]),
+        selectedSystemPolicyDetail ? h("div", { key: "editor", className: "min-w-0" }, [
+          h("div", { key: "header", className: "flex flex-wrap items-start justify-between gap-3" }, [
+            h("div", { key: "copy" }, [
+              h("h3", { key: "name", className: "text-lg font-semibold text-slate-950" }, selectedSystemPolicyDetail.policy.name),
+              h("div", { key: "meta", className: "mt-1 text-sm text-slate-500" }, `Current ${selectedSystemPolicyVersion?.id || "none"} / active ${selectedSystemPolicyDetail.policy.active_version_id || "none"}`),
+              selectedSystemPolicyVersion ? h("div", { key: "checksum", className: "mt-1 break-all font-mono text-xs text-slate-500" }, `sha256 ${selectedSystemPolicyVersion.checksum}`) : null
+            ]),
+            h("div", { key: "actions", className: "flex flex-wrap gap-2" }, [
+              h(Button, { key: "validate", variant: "outline", onClick: validateSystemPolicy }, "Validate"),
+              h(Button, { key: "clone", variant: "outline", onClick: cloneSelectedSystemPolicy }, "Clone"),
+              h(Button, { key: "save", variant: "outline", onClick: saveSystemPolicyDraft }, "Save New Version"),
+              h(Button, { key: "publish", onClick: () => applySystemPolicyAction("publish", { reason: "published in System > Policy" }, "System policy published.") }, "Publish"),
+              h(Button, { key: "default", variant: "outline", disabled: selectedSystemPolicyDetail.policy.is_default || selectedSystemPolicyDetail.policy.status !== "active", onClick: () => applySystemPolicyAction("set-default", {}, "Default system policy updated.") }, "Set Default"),
+              h(Button, { key: "archive", variant: "outline", disabled: selectedSystemPolicyDetail.policy.is_default, onClick: () => applySystemPolicyAction("archive", { reason: "archived in System > Policy" }, "System policy archived.") }, "Archive"),
+              h(Button, { key: "export", variant: "outline", onClick: exportSelectedSystemPolicy }, "Export")
+            ])
+          ]),
+          systemPolicyValidation ? h("div", { key: "validation", className: cn("mt-4 rounded-2xl border px-4 py-3 text-sm", systemPolicyValidation.valid ? "border-emerald-300 bg-emerald-50 text-emerald-900" : "border-rose-300 bg-rose-50 text-rose-900") }, systemPolicyValidation.valid ? `Validation passed (${systemPolicyValidation.checksum}).` : systemPolicyValidation.errors.join(" ")) : null,
+          systemPolicyEvidenceWarnings.length ? h("div", { key: "evidence-warnings", className: "mt-4 rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900" }, [h("div", { key: "title", className: "font-medium" }, "Required evidence is not currently collectable"), h("ul", { key: "list", className: "mt-2 space-y-1" }, systemPolicyEvidenceWarnings.map((warning) => h("li", { key: warning }, `- ${warning}`)))]) : null,
+          h("div", { key: "policy-sections", className: "mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-4" }, [
+            h("div", { key: "execution", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm" }, [h("div", { key: "title", className: "font-medium text-slate-950" }, "Package & evidence"), h("div", { key: "package", className: "mt-2 text-slate-600" }, `${parsedSystemPolicyDraft.default_audit_package || "unset"} / ${(parsedSystemPolicyDraft.required_evidence_provider_ids || []).join(", ") || "no required providers"}`), h("div", { key: "failure", className: "mt-1 text-xs text-slate-500" }, `Failure policy: ${parsedSystemPolicyDraft.evidence_failure_policy || "unset"}`)]),
+            h("div", { key: "provider", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm" }, [h("div", { key: "title", className: "font-medium text-slate-950" }, "Provider, workload & budget"), h("div", { key: "providers", className: "mt-2 text-slate-600" }, (parsedSystemPolicyDraft.providers?.allowed_provider_ids || []).join(", ") || "none"), h("div", { key: "budget", className: "mt-1 text-xs text-slate-500" }, `${parsedSystemPolicyDraft.providers?.maximum_agent_calls ?? "-"} calls / ${parsedSystemPolicyDraft.providers?.maximum_total_tokens ?? "-"} tokens / ${parsedSystemPolicyDraft.providers?.maximum_wall_time_minutes ?? "-"} min`)]),
+            h("div", { key: "runtime", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm" }, [h("div", { key: "title", className: "font-medium text-slate-950" }, "Runtime & isolation"), h("div", { key: "allowed", className: "mt-2 text-slate-600" }, parsedSystemPolicyDraft.runtime?.allowed ? "Runtime allowed" : "Static only"), h("div", { key: "network", className: "mt-1 text-xs text-slate-500" }, `${parsedSystemPolicyDraft.runtime?.require_isolation ? "isolated" : "isolation not required"} / ${parsedSystemPolicyDraft.runtime?.no_host_fallback ? "no host fallback" : "host fallback permitted"} / network ${parsedSystemPolicyDraft.runtime?.network_policy || "unset"}`)]),
+            h("div", { key: "governance", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm" }, [h("div", { key: "title", className: "font-medium text-slate-950" }, "Review, retention & learning"), h("div", { key: "review", className: "mt-2 text-slate-600" }, `Publishability ${parsedSystemPolicyDraft.review?.publishability_threshold || "unset"}; learning ${parsedSystemPolicyDraft.learning?.enabled ? "on" : "off"}`), h("div", { key: "retention", className: "mt-1 text-xs text-slate-500" }, `Artifacts ${parsedSystemPolicyDraft.retention?.artifact_days ?? "-"}d / traces ${parsedSystemPolicyDraft.retention?.trace_days ?? "-"}d / exports ${parsedSystemPolicyDraft.retention?.export_days ?? "-"}d`)]),
+          ]),
+          h("div", { key: "controls", className: "mt-5 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4" }, [
+            h("div", { key: "title", className: "font-medium text-slate-950" }, `Required controls (${selectedRequiredControlIds.size}/${systemPolicyCatalog.control_catalog?.length || 0})`),
+            h("div", { key: "groups", className: "mt-3 grid gap-3 lg:grid-cols-2" }, systemPolicyControlGroups.map(([framework, controls]) => h("div", { key: framework, className: "rounded-xl border border-slate-200 bg-white px-3 py-3" }, [
+              h("div", { key: "framework", className: "text-xs font-semibold uppercase tracking-[0.12em] text-slate-500" }, framework),
+              h("div", { key: "items", className: "mt-2 space-y-2" }, controls.map((control) => h("label", { key: control.control_id, className: "flex items-start gap-2 text-sm" }, [
+                h("input", { key: "check", type: "checkbox", checked: selectedRequiredControlIds.has(control.control_id), onChange: (event) => toggleSystemPolicyControl(control.control_id, event.target.checked) }),
+                h("span", { key: "copy" }, [h("span", { key: "title", className: "font-medium text-slate-900" }, control.title), h("span", { key: "meta", className: "block text-xs text-slate-500" }, `${control.control_id} / ${control.static_assessable ? "static" : "not static"} / ${control.runtime_assessable ? "runtime" : "not runtime"} / ${control.audit_lane || "catalog lane"} / ${(control.applicability || []).join(", ")}`)])
+              ])))
+            ])))
+          ]),
+          h(Field, { key: "definition", label: "Draft definition (JSON)" }, h(Textarea, { value: systemPolicyDraft, rows: 24, className: "min-h-[34rem] font-mono text-xs", onChange: (event) => setSystemPolicyDraft(event.target.value) })),
+          h("div", { key: "versions", className: "mt-5 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4" }, [
+            h("div", { key: "title", className: "font-medium text-slate-950" }, "Version history, comparison, and rollback"),
+            h("div", { key: "select", className: "mt-3 grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]" }, [
+              Select({ value: systemPolicyCompareVersionId, onChange: (event) => setSystemPolicyCompareVersionId(event.target.value) }, [h("option", { key: "none", value: "" }, "Choose version to compare"), ...(selectedSystemPolicyDetail.versions || []).map((version) => h("option", { key: version.id, value: version.id }, `${version.id} / ${version.state}`))]),
+              comparedSystemPolicyVersion && comparedSystemPolicyVersion.id !== selectedSystemPolicyDetail.policy.active_version_id ? h(Button, { key: "rollback", variant: "outline", onClick: () => applySystemPolicyAction("rollback", { version_id: comparedSystemPolicyVersion.id, reason: "rollback in System > Policy" }, "System policy rolled back.") }, `Rollback to v${comparedSystemPolicyVersion.version}`) : h("span", { key: "spacer" })
+            ]),
+            comparedSystemPolicyVersion ? h("div", { key: "compare", className: "mt-3 grid gap-3 lg:grid-cols-2" }, [
+              h("pre", { key: "current", className: "max-h-80 overflow-auto rounded-xl border border-slate-200 bg-white p-3 text-xs" }, JSON.stringify(selectedSystemPolicyVersion?.definition_json || {}, null, 2)),
+              h("pre", { key: "other", className: "max-h-80 overflow-auto rounded-xl border border-slate-200 bg-white p-3 text-xs" }, JSON.stringify(comparedSystemPolicyVersion.definition_json, null, 2))
+            ]) : null
+          ]),
+          h("div", { key: "bindings", className: "mt-5 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4" }, [
+            h("div", { key: "title", className: "font-medium text-slate-950" }, "Project, target, or package binding"),
+            h("div", { key: "form", className: "mt-3 grid gap-3 md:grid-cols-[160px_minmax(0,1fr)_100px_auto]" }, [
+              Select({ value: systemPolicyBindingDraft.binding_type, onChange: (event) => setSystemPolicyBindingDraft((current) => ({ ...current, binding_type: event.target.value })) }, [h("option", { key: "project", value: "project" }, "Project"), h("option", { key: "target", value: "target" }, "Target"), h("option", { key: "package", value: "package" }, "Audit package")]),
+              h(Input, { key: "value", value: systemPolicyBindingDraft.value, placeholder: systemPolicyBindingDraft.binding_type === "target" ? "repository/path/endpoint" : systemPolicyBindingDraft.binding_type === "package" ? "agentic-static" : "project id", onChange: (event) => setSystemPolicyBindingDraft((current) => ({ ...current, value: event.target.value })) }),
+              h(Input, { key: "priority", type: "number", min: 0, value: systemPolicyBindingDraft.priority, onChange: (event) => setSystemPolicyBindingDraft((current) => ({ ...current, priority: event.target.value })) }),
+              h(Button, { key: "bind", variant: "outline", disabled: selectedSystemPolicyDetail.policy.status !== "active", onClick: bindSelectedSystemPolicy }, "Bind")
+            ]),
+            h("div", { key: "existing", className: "mt-3 space-y-2" }, (selectedSystemPolicyDetail.bindings || []).map((binding) => h("div", { key: binding.id, className: "flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" }, [h("span", { key: "value" }, `${binding.binding_type}: ${binding.project_id || binding.target_ref || binding.audit_package || "workspace default"} / priority ${binding.priority}`), h("div", { key: "actions", className: "flex items-center gap-2" }, [h(Badge, { key: "status" }, binding.active ? "active" : "inactive"), binding.active && binding.binding_type !== "default" ? h(Button, { key: "remove", variant: "outline", onClick: () => act(() => api(`/system/policy-bindings/${encodeURIComponent(binding.id)}`, { method: "DELETE" }, requestContext), "Policy binding deactivated.") }, "Remove") : null])])) )
+          ]),
+          h("div", { key: "history", className: "mt-5 grid gap-4 lg:grid-cols-2" }, [
+            h("div", { key: "events", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4" }, [
+              h("div", { key: "title", className: "font-medium text-slate-950" }, "Immutable change history"),
+              h("div", { key: "rows", className: "mt-3 space-y-2 text-sm" }, (selectedSystemPolicyDetail.events || []).slice(0, 12).map((event) => h("div", { key: event.id, className: "rounded-xl border border-slate-200 bg-white px-3 py-2" }, [h("div", { key: "type", className: "font-medium text-slate-900" }, event.event_type), h("div", { key: "meta", className: "mt-1 text-xs text-slate-500" }, `${event.actor_id} / ${formatDate(event.created_at)} / ${event.reason}`)])))
+            ]),
+            h("div", { key: "usage", className: "rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4" }, [
+              h("div", { key: "title", className: "font-medium text-slate-950" }, "Runs using each version"),
+              h("div", { key: "rows", className: "mt-3 space-y-2 text-sm" }, (selectedSystemPolicyDetail.runs_using_versions || []).map((item) => h("div", { key: item.policy_version_id, className: "rounded-xl border border-slate-200 bg-white px-3 py-2" }, [h("div", { key: "version", className: "font-mono text-xs text-slate-700" }, item.policy_version_id), h("div", { key: "runs", className: "mt-1 text-xs text-slate-500" }, item.run_ids?.length ? item.run_ids.join(", ") : "No completed runs")])) )
+            ])
+          ]),
+          h("div", { key: "preview", className: "mt-5 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4" }, [
+            h("div", { key: "row", className: "flex items-center justify-between gap-3" }, [h("div", { key: "copy" }, [h("div", { key: "title", className: "font-medium text-slate-950" }, "Resolved-policy preview"), h("div", { key: "note", className: "mt-1 text-sm text-slate-500" }, "Uses the current audit launch target and project context without queuing a run.")]), h(Button, { key: "run", variant: "outline", onClick: previewSystemPolicyResolution }, "Preview")]),
+            systemPolicyPreview ? h("pre", { key: "json", className: "mt-3 max-h-80 overflow-auto rounded-xl border border-slate-200 bg-white p-3 text-xs" }, JSON.stringify(systemPolicyPreview, null, 2)) : null
+          ])
+        ]) : h("div", { key: "empty", className: "rounded-2xl border border-dashed border-slate-300 px-4 py-8 text-sm text-slate-500" }, "Select a system policy to inspect or edit it.")
+      ])
+    ]),
     h(Card, { key: "policy-pack", title: "Policy Pack", description: "Community Edition includes the built-in default policy pack. Policy-pack management is read-only in this edition." }, [
       h("div", { key: "summary", className: "rounded-2xl border border-slate-200 bg-white/70 px-4 py-4 text-sm" }, [
         h("div", { key: "name", className: "font-medium text-foreground" }, defaultPolicyName),
@@ -9456,7 +9727,7 @@ function triageDecisionFromReviewSummary(summary) {
 
   const governanceTabs = [
     { id: "gates", label: "Gates" },
-    { id: "policy", label: "Policy Packs" },
+    { id: "policy", label: "System Policies & Packs" },
     { id: "documents", label: "Reference Documents" }
   ];
   const governanceTabContent = {
@@ -9584,7 +9855,7 @@ function triageDecisionFromReviewSummary(summary) {
     { id: "integrations", group: "setup", label: "Integrations", description: "Outbound delivery, repository integration, webhooks, and connector settings.", status: "Optional", settings: true },
     { id: "audit-configuration", group: "audit-behavior", label: "Audit Configuration", description: "Audit type defaults, run shape, methodology, lanes, and built-in controls.", status: "Configured", settings: true },
     { id: "agents", group: "audit-behavior", label: "Agents & Models", description: "Default models, credentials, assistant routing, and agent-specific overrides.", status: settingsProviderCredentialStatus.configured ? "Ready" : "Needs setup", settings: true },
-    { id: "policy", group: "audit-behavior", label: "Policy", description: "Review gates, policy packs, reference documents, and governance settings.", status: "Configured", settings: true },
+    { id: "policy", group: "audit-behavior", label: "Policies", description: "Versioned system policies, review gates, policy packs, and reference documents.", status: systemPolicyCatalog.policies?.some((item) => item.is_default && item.status === "active") ? "Active" : "Needs setup", settings: false },
     { id: "artifacts", group: "audit-behavior", label: "Artifacts & Exports", description: "Export behavior, report-related settings, artifact retention, and pruning.", status: "Configured", settings: true },
     { id: "self-learning-settings", group: "quality", label: "Self-Learning Settings", description: "Learning triggers, thresholds, LLM synthesis, and promotion guardrails.", status: learningSettings.enabled === false ? "Off" : "On", settings: true },
     { id: "benchmarks", group: "quality", label: "Benchmarks", description: "Product benchmark suite execution, report history, and baseline comparison.", status: benchmarkReports.length ? `${benchmarkReports.length} reports` : "Ready", settings: false },

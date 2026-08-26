@@ -1,0 +1,14 @@
+# Tethermark's minimal embedded Garak profile.
+#
+# These official wheels are installed into an isolated target directory with
+# --no-deps. The adapter executes only Garak's PromptInject resource builder,
+# Attempt/Message contract, and AttackRogueString detector. The full Garak CLI
+# and its optional generator/model stacks are intentionally not installed.
+
+colorama==0.4.6 \
+    --hash=sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44 \
+    --hash=sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6
+garak==0.16.0 \
+    --hash=sha256:871100d78e2bc5a7ee6de58ff8301bdd3de3a41236032690d1a6da21a05e9f06
+xdg-base-dirs==6.0.2 \
+    --hash=sha256:3c01d1b758ed4ace150ac960ac0bd13ce4542b9e2cdf01312dcda5012cfebabe

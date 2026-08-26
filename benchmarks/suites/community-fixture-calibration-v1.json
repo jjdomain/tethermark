@@ -1,0 +1,154 @@
+{
+  "suite_id": "community-fixture-calibration-v1",
+  "suite_version": "2026.08.20-v2",
+  "title": "Community Edition Deterministic Calibration Suite",
+  "summary": "Repo-owned good, mixed, risky, ordinary, runnable, agentic, and MCP targets for deterministic calibration before public-repository benchmarking.",
+  "default_run_mode": "static",
+  "default_audit_package": "agentic-static",
+  "acceptance_thresholds": {
+    "minimum_citation_coverage": 1,
+    "minimum_control_traceability": 1,
+    "maximum_false_negative_rate": 0.1,
+    "maximum_false_positive_rate": 0.05,
+    "maximum_duplicate_groups": 0,
+    "maximum_conflict_pairs": 0,
+    "maximum_score_drift": 3,
+    "maximum_repeat_score_spread": 1
+  },
+  "cases": [
+    {
+      "id": "ordinary-good",
+      "target_id": "repo-posture-good",
+      "target_name": "Ordinary repository with good posture",
+      "local_path": "fixtures/validation-targets/repo-posture-good",
+      "run_mode": "static",
+      "audit_package": "baseline-static",
+      "tier": "smoke",
+      "enabled_by_default": true,
+      "categories": ["ordinary", "runnable", "good", "repo_posture"],
+      "posture": "good",
+      "target_family": "ordinary",
+      "expected_target_classes": ["runnable_local_app"],
+      "expected_controls": ["openssf.security_policy", "openssf.dependency_update_tool", "openssf.pinned_dependencies"],
+      "expected_finding_families": [],
+      "critical_failures": ["finding_without_evidence", "unknown_control_mapping", "static_runtime_overclaim"],
+      "reviewed_expectations": {
+        "schema_version": "2026-08-18.review-labels.v1",
+        "review_status": "pending_human_review",
+        "reviewed_by_role": null,
+        "reviewed_at": null,
+        "expected_controls": [
+          { "control_id": "openssf.security_policy", "acceptable_statuses": ["pass"] },
+          { "control_id": "openssf.dependency_update_tool", "acceptable_statuses": ["pass"] },
+          { "control_id": "openssf.pinned_dependencies", "acceptable_statuses": ["pass"] }
+        ],
+        "expected_findings": [],
+        "expected_absent_finding_families": ["security_policy", "dependency_maintenance", "dependency_locking", "secret_exposure", "workflow_permissions", "agent_tool_policy", "mcp_permission_surface"],
+        "acceptable_not_assessed_controls": ["openssf.branch_protection", "slsa.provenance"]
+      }
+    },
+    {
+      "id": "runnable-mixed",
+      "target_id": "ordinary-app-mixed",
+      "target_name": "Runnable ordinary application with mixed posture",
+      "local_path": "fixtures/validation-targets/ordinary-app-mixed",
+      "run_mode": "static",
+      "audit_package": "baseline-static",
+      "tier": "smoke",
+      "enabled_by_default": true,
+      "categories": ["ordinary", "runnable", "mixed", "supply_chain"],
+      "posture": "mixed",
+      "target_family": "runnable",
+      "expected_target_classes": ["runnable_local_app"],
+      "expected_controls": ["openssf.security_policy", "openssf.dependency_update_tool", "openssf.pinned_dependencies"],
+      "expected_finding_families": ["security_policy", "dependency_maintenance", "dependency_locking"],
+      "critical_failures": ["finding_without_evidence", "unknown_control_mapping", "static_runtime_overclaim"],
+      "reviewed_expectations": {
+        "schema_version": "2026-08-18.review-labels.v1",
+        "review_status": "pending_human_review",
+        "reviewed_by_role": null,
+        "reviewed_at": null,
+        "expected_controls": [
+          { "control_id": "openssf.security_policy", "acceptable_statuses": ["fail"] },
+          { "control_id": "openssf.dependency_update_tool", "acceptable_statuses": ["fail"] },
+          { "control_id": "openssf.pinned_dependencies", "acceptable_statuses": ["fail"] }
+        ],
+        "expected_findings": [
+          { "category": "security_policy", "acceptable_severities": ["medium"], "minimum_count": 1, "maximum_count": 1, "evidence_requirement": "file_line_or_artifact" },
+          { "category": "dependency_maintenance", "acceptable_severities": ["medium"], "minimum_count": 1, "maximum_count": 1, "evidence_requirement": "file_line_or_artifact" },
+          { "category": "dependency_locking", "acceptable_severities": ["high"], "minimum_count": 1, "maximum_count": 1, "evidence_requirement": "file_line_or_artifact" }
+        ],
+        "expected_absent_finding_families": ["secret_exposure", "workflow_permissions", "agent_tool_policy", "mcp_permission_surface"],
+        "acceptable_not_assessed_controls": ["openssf.branch_protection", "slsa.provenance"]
+      }
+    },
+    {
+      "id": "agentic-risky",
+      "target_id": "agent-tool-boundary-risky",
+      "target_name": "Risky tool-using agent",
+      "local_path": "fixtures/validation-targets/agent-tool-boundary-risky",
+      "run_mode": "static",
+      "audit_package": "agentic-static",
+      "tier": "core",
+      "enabled_by_default": true,
+      "categories": ["agentic", "risky", "tool_boundary", "workflow", "secrets"],
+      "posture": "risky",
+      "target_family": "agentic",
+      "expected_target_classes": ["tool_using_multi_turn_agent"],
+      "expected_controls": ["owasp_llm.sensitive_information_disclosure", "owasp_agentic.tool_misuse_boundary", "mitre_atlas.tool_misuse_mitigation", "openssf.token_permissions"],
+      "expected_finding_families": ["secret_exposure", "workflow_permissions"],
+      "critical_failures": ["finding_without_evidence", "unknown_control_mapping", "static_runtime_overclaim"],
+      "reviewed_expectations": {
+        "schema_version": "2026-08-18.review-labels.v1",
+        "review_status": "pending_human_review",
+        "reviewed_by_role": null,
+        "reviewed_at": null,
+        "expected_controls": [
+          { "control_id": "owasp_llm.sensitive_information_disclosure", "acceptable_statuses": ["fail", "partial"] },
+          { "control_id": "owasp_agentic.tool_misuse_boundary", "acceptable_statuses": ["fail", "partial"] },
+          { "control_id": "mitre_atlas.tool_misuse_mitigation", "acceptable_statuses": ["fail", "partial"] },
+          { "control_id": "openssf.token_permissions", "acceptable_statuses": ["fail"] }
+        ],
+        "expected_findings": [
+          { "category": "secret_exposure", "acceptable_severities": ["high", "critical"], "minimum_count": 1, "maximum_count": 2, "evidence_requirement": "file_line_or_artifact" },
+          { "category": "workflow_permissions", "acceptable_severities": ["high"], "minimum_count": 1, "maximum_count": 1, "evidence_requirement": "file_line_or_artifact" },
+          { "category": "agent_permission_boundary", "acceptable_severities": ["high"], "minimum_count": 1, "maximum_count": 1, "evidence_requirement": "file_line_or_artifact" }
+        ],
+        "expected_absent_finding_families": ["mcp_permission_surface"],
+        "acceptable_not_assessed_controls": ["openssf.branch_protection", "slsa.provenance"]
+      }
+    },
+    {
+      "id": "mcp-risky",
+      "target_id": "mcp-tool-boundary-risky",
+      "target_name": "Risky MCP tool server",
+      "local_path": "fixtures/validation-targets/mcp-tool-boundary-risky",
+      "run_mode": "static",
+      "audit_package": "agentic-static",
+      "tier": "core",
+      "enabled_by_default": true,
+      "categories": ["mcp", "risky", "tool_boundary"],
+      "posture": "risky",
+      "target_family": "mcp",
+      "expected_target_classes": ["mcp_server_plugin_skill_package"],
+      "expected_controls": ["harness_internal.mcp_plugin_permissions", "owasp_agentic.tool_misuse_boundary"],
+      "expected_finding_families": ["mcp_permission_surface"],
+      "critical_failures": ["finding_without_evidence", "unknown_control_mapping", "static_runtime_overclaim"],
+      "reviewed_expectations": {
+        "schema_version": "2026-08-18.review-labels.v1",
+        "review_status": "pending_human_review",
+        "reviewed_by_role": null,
+        "reviewed_at": null,
+        "expected_controls": [
+          { "control_id": "harness_internal.mcp_plugin_permissions", "acceptable_statuses": ["fail", "partial"] },
+          { "control_id": "owasp_agentic.tool_misuse_boundary", "acceptable_statuses": ["not_assessed"] }
+        ],
+        "expected_findings": [
+          { "category": "mcp_permission_surface", "acceptable_severities": ["high"], "minimum_count": 1, "maximum_count": 1, "evidence_requirement": "file_line_or_artifact" }
+        ],
+        "expected_absent_finding_families": ["secret_exposure", "workflow_permissions"],
+        "acceptable_not_assessed_controls": ["owasp_agentic.tool_misuse_boundary", "openssf.branch_protection", "slsa.provenance"]
+      }
+    }
+  ]
+}

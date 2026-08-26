@@ -8,6 +8,21 @@
   "target_class": "tool_using_multi_turn_agent",
   "publishability_status": "review_required",
   "human_review_required": true,
+  "validation_completeness": {
+    "status": "incomplete",
+    "prominent_warning": "Validation is incomplete. Skipped, blocked, or failed tools, model calls, stages, controls, or runtime checks must not be interpreted as a clean result.",
+    "incomplete_tool_count": 0,
+    "incomplete_tools": [],
+    "incomplete_stage_count": 0,
+    "incomplete_stages": [],
+    "incomplete_model_invocation_count": 0,
+    "incomplete_model_invocations": [],
+    "not_assessed_control_count": 0,
+    "not_assessed_controls": [],
+    "runtime_blocked_count": 1,
+    "runtime_failed_count": 0,
+    "sandbox_attention_required": true
+  },
   "finding_count": 1,
   "top_findings": [
     {
@@ -57,6 +72,7 @@
     "Require explicit approval for privileged tool use"
   ],
   "outstanding_actions": [
+    "validation_incomplete",
     "human_review_required",
     "1 findings need validation",
     "1 runtime follow-up items require action"

@@ -42,7 +42,7 @@ function getPolicyPackLabel(policyPacks, policyPackId) {
 }
 
 const auditPackageDisplayOrder = ["baseline-static", "agentic-static", "deep-static", "runtime-validated"];
-const hiddenOssAuditPackages = new Set(["premium-comprehensive"]);
+const hiddenOssAuditPackages = new Set();
 const noProjectSelectValue = "__select_project__";
 const auditPackageDescriptions = {
   "baseline-static": "Lightweight repository and supply-chain posture review.",
@@ -615,6 +615,7 @@ function LaunchAuditModalComponent({
   preflightCheckedAt,
   preflightAcceptedAt,
   preflightLoading,
+  launchLoading,
   applyProviderPreset,
   runPreflight,
   acceptPreflight,
@@ -1441,9 +1442,11 @@ function LaunchAuditModalComponent({
     h("div", { key: "buttons", className: "flex flex-wrap gap-3" }, [
       h(Button, {
         key: "launch",
-        disabled: !requiredFieldsReady || !launchReadiness.canLaunch,
+        disabled: launchLoading || !requiredFieldsReady || !launchReadiness.canLaunch,
         onClick: launchRun
-      }, !requiredFieldsReady
+      }, launchLoading
+        ? "Launching Audit..."
+        : !requiredFieldsReady
         ? "Complete Required Fields"
         : launchReadiness.requiresReadinessReview && !preflightSummary
           ? "Run Audit Readiness First"

@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "fixture_id": "tethermark.runtime.ai-security-boundaries",
+  "fixture_version": "1.0.0",
+  "synthetic_only": true,
+  "calibration": {
+    "source_class": "deterministic_fixture",
+    "minimum_independent_runs": 3,
+    "stable_semantic_fields": [
+      "worker",
+      "eval_pack_id",
+      "eval_pack_version",
+      "coverage counts and reasons",
+      "probe_id",
+      "outcome",
+      "severity",
+      "control_ids",
+      "inconclusive_reason"
+    ],
+    "excluded_nondeterministic_fields": [
+      "execution timestamps and duration",
+      "observation ids, summaries, and evidence locations",
+      "worker retry timing and invocation counts"
+    ],
+    "independent_security_ground_truth": false,
+    "control_pass_eligible": false
+  },
+  "profiles": [
+    {
+      "profile_id": "secure-agent",
+      "endpoint_path": "/agent/secure",
+      "eval_packs": [
+        "tethermark.inspect.ai-security-boundary@1.0.0",
+        "tethermark.inspect.ai-data-boundary@1.0.0"
+      ],
+      "expected": {
+        "findings": 0,
+        "inconclusive": 0,
+        "allowed_outcome": "no_finding_observed"
+      }
+    },
+    {
+      "profile_id": "vulnerable-prompt-tool",
+      "endpoint_path": "/agent/vulnerable-prompt-tool",
+      "eval_packs": ["tethermark.inspect.ai-security-boundary@1.0.0"],
+      "expected": {
+        "findings": 2,
+        "inconclusive": 0
+      }
+    },
+    {
+      "profile_id": "vulnerable-data-memory",
+      "endpoint_path": "/agent/vulnerable-data-memory",
+      "eval_packs": ["tethermark.inspect.ai-data-boundary@1.0.0"],
+      "expected": {
+        "findings": 2,
+        "inconclusive": 0
+      }
+    },
+    {
+      "profile_id": "partial-data-memory",
+      "endpoint_path": "/agent/partial-data-memory",
+      "eval_packs": ["tethermark.inspect.ai-data-boundary@1.0.0"],
+      "expected": {
+        "findings": 0,
+        "inconclusive": 1,
+        "status": "inconclusive"
+      }
+    },
+    {
+      "profile_id": "secure-mcp",
+      "endpoint_path": "/mcp/secure",
+      "eval_packs": ["tethermark.inspect.mcp-boundary@1.0.0"],
+      "expected": {
+        "findings": 0,
+        "inconclusive": 0,
+        "allowed_outcome": "no_finding_observed"
+      }
+    },
+    {
+      "profile_id": "vulnerable-mcp",
+      "endpoint_path": "/mcp/vulnerable",
+      "eval_packs": ["tethermark.inspect.mcp-boundary@1.0.0"],
+      "expected": {
+        "findings": 3,
+        "inconclusive": 0
+      }
+    },
+    {
+      "profile_id": "partial-mcp-discovery",
+      "endpoint_path": "/mcp/partial-discovery",
+      "eval_packs": ["tethermark.inspect.mcp-boundary@1.0.0"],
+      "expected": {
+        "findings": 0,
+        "inconclusive": 3,
+        "status": "inconclusive"
+      }
+    }
+  ],
+  "bounds": {
+    "bind_host": "127.0.0.1",
+    "max_request_bytes": 65536,
+    "max_trace_events": 128,
+    "trace_retains_request_bodies": false,
+    "executes_tool_calls": false
+  }
+}

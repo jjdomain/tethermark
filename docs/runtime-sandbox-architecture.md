@@ -64,12 +64,16 @@ Runtime sandbox settings are stored in `preflight_json.runtime_sandbox`:
   "require_hardened_for_untrusted_repo": false,
   "network_policy": "none",
   "dependency_install_network": "explicit_only",
+  "runtime_probe_network": "never",
   "max_duration_ms": 300000,
   "step_timeout_ms": 60000,
   "memory_limit_mb": 2048,
   "pids_limit": 512,
   "max_stdout_bytes": 2000,
-  "max_stderr_bytes": 2000
+  "max_stderr_bytes": 2000,
+  "max_file_bytes": 67108864,
+  "max_workspace_bytes": 536870912,
+  "max_artifact_bytes": 134217728
 }
 ```
 
@@ -98,20 +102,26 @@ Every runtime execution records a policy snapshot:
 - provider id
 - selected backend
 - install/build/test/runtime-probe allowances
-- network policy and outbound allowlist
+- network policy, phase, and outbound allowlist
 - max duration and step timeout
 - stdout/stderr excerpt caps
-- memory and PID limits
+- memory, PID, per-file, and measured workspace/artifact limits
 - filesystem policy
 
 Defaults:
 
 - network blocked
-- dependency install network requires explicit configuration
+- dependency-install network requires explicit configuration and a non-empty hostname allowlist
+- Docker dependency-install containers attach only to an internal network; a separate pinned proxy attached to that network and the Docker bridge validates exact/wildcard hostnames, permits only HTTP/HTTPS ports, and rejects private/local resolved addresses
+- runtime probes remain network-none unless the policy authorizes runtime-probe egress and the exact step carries `external_network: true`; authorized probes use the same proxy boundary
+- Node and Python runtime probes are verified from inside the target container against bounded loopback port/path candidates derived from the detected framework; a running process without an HTTP response below status 500 fails closed
+- health polling is capped by the step/overall budget and a 10-second readiness ceiling; attempt evidence retains only port, path, status/error class, and duration, never response bodies
+- steps requesting `fake_tool_api` receive a separate internal-only network, fixed synthetic service/tool URLs, a fixed fake secret, and bounded method/path/body-hash traces in artifact scratch; synthetic-service and external-egress phases cannot be combined in one step
 - target mounted read-only where supported
 - artifacts written only to the per-run artifact directory
 - symlinks skipped during staging
 - stdout/stderr capped
+- only named synthetic credentials injected into target containers
 
 Static audit mode must never execute target code.
 
@@ -151,6 +161,7 @@ Each runtime validation stores:
 - plan steps and command arrays
 - stdout/stderr excerpts
 - exit code, duration, and timeout state
+- bounded health-probe strategy, attempted loopback targets, status/error classification, and successful target when present
 - artifact paths
 - linked run and finding ids
 - generated evidence ids
@@ -182,15 +193,19 @@ Release gates:
 
 ```bash
 npm run production:runtime-readiness
+npm run production:runtime-native -- --backend docker_desktop
 npm run production:harness-readiness
 ```
+
+`production:runtime-native` pins one named backend, runs the readiness fixture plus a real dependency-free Node target through the production provider, retains backend/host/resource evidence, and requires zero Tethermark-owned runtime resources before and after the run. The manually dispatched `Native Runtime Verification` workflow executes Docker, rootless Podman, and gVisor on native Ubuntu runners and records the expected fail-closed Docker Desktop boundary on a native macOS runner. See [`native-runtime-verification.md`](native-runtime-verification.md).
 
 `production:runtime-readiness` fails when no launchable local runtime backend is available or when the isolated runtime fixture does not execute successfully. The Docker/Docker Desktop fixture:
 
 - uses a digest-pinned Alpine image and exact argv with host shell execution disabled
 - runs as a non-root user with `--network none`, a read-only root filesystem, all capabilities dropped, and `no-new-privileges`
 - mounts only a generated read-only source directory and generated writable output directory
-- uses a bounded `noexec`, `nosuid`, `nodev` tmpfs plus CPU, memory, PID, time, and output limits
-- verifies source mutation and outbound HTTP fail, inspects the live container policy, persists structured evidence under `.artifacts/runtime-readiness/`, and proves container/temp cleanup
+- uses a bounded `noexec`, `nosuid`, `nodev` tmpfs plus CPU, memory, PID, time, output, and kernel per-file limits
+- verifies source mutation, host-secret access, oversized file creation, and outbound HTTP fail; only a named synthetic credential crosses the boundary
+- inspects the live container policy, persists structured evidence under `.artifacts/runtime-readiness/`, and proves container/temp cleanup
 
-This fixture proves the selected backend can enforce the readiness policy. It does not replace `localRuntimeProvider.execute()` for real audit targets.
+This fixture proves the selected backend can enforce the readiness policy. Real audit targets use `localRuntimeProvider.execute()`, which stages only regular source files/directories into a size-capped tmpfs-backed Docker workspace, uses a separate capped tmpfs for artifact scratch, keeps both mounts alive across isolated containers with a constrained non-root keeper, launches digest-pinned Node/Python/Alpine images with exact argv and no host fallback, applies a per-file kernel limit, measures both filesystems before accepting a step, copies only regular artifact files/directories to the host through a controlled collector, persists Docker state/stats and execution/cleanup metadata, and removes containers, networks, and volumes. Quota-exhaustion fixtures prove both filesystems fail with `ENOSPC`. Docker Desktop execution, governed dependency-install/runtime-probe allowlisting, and the synthetic service/tool backend are verified. Linux Docker, Podman, and gVisor evidence is produced by the native release workflow; macOS Docker Desktop remains a separate real-Mac gate.

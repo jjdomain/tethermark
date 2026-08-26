@@ -8,11 +8,13 @@ import type {
   CommitDiffGateArtifact,
   ControlResult,
   Finding,
+  FindingQualitySummary,
   LaunchIntentArtifact,
   MethodologyArtifact,
   PlannerArtifact,
   PreflightSummary,
   ResolvedConfigurationArtifact,
+  RunVersionManifest,
   RunEnvelope,
   ScoreSummary,
   SkepticArtifact,
@@ -21,7 +23,8 @@ import type {
   TraceRecord
 } from "./contracts.js";
 import { resolveAuditPolicy } from "./audit-policy.js";
-import { getBuiltinAuditPackage, resolveAuditPackage, type AuditPackageDefinition } from "./audit-packages.js";
+import { AUDIT_PACKAGE_CATALOG_VERSION, getBuiltinAuditPackage, resolveAuditPackage, type AuditPackageDefinition } from "./audit-packages.js";
+import { AUDIT_PROMPT_SET_VERSION } from "./agent-context-builders.js";
 import { ArtifactStore } from "./artifact-store.js";
 import { computeCommitDiffGate } from "./commit-diff.js";
 import { refreshLaneArtifacts } from "./lane-analyzers.js";
@@ -32,11 +35,11 @@ import { buildPreflightSummary } from "./preflight.js";
 import { registerRunArtifactLocation } from "./run-registry.js";
 import { RunObserver } from "./observability/run-observer.js";
 import { InMemoryJobQueue } from "./queue.js";
-import { computeBaselineDimensionScores, computeStaticBaselineScore, getCandidateControls, getMethodologyArtifact, getStaticBaselineMethodology } from "./standards.js";
+import { CONTROL_CATALOG_VERSION, computeBaselineDimensionScores, computeStaticBaselineScore, getCandidateControls, getMethodologyArtifact, getStaticBaselineMethodology } from "./standards.js";
 import { createId, nowIso } from "./utils.js";
 import { stageAssessControls } from "./stages/stage-assess-controls.js";
 import { stageAllocateLanes } from "./stages/stage-allocate-lanes.js";
-import { applyControlDowngrades, applyUnsupportedFindingDrops, buildCorrectionPlanArtifact, buildCorrectionResultArtifact, hasSkepticActions, mergeSelectiveAssessmentCycle, selectEvidenceSubset, selectLaneSubset, selectToolSubset } from "./stages/stage-corrections.js";
+import { applyControlDowngrades, applyUnsupportedFindingDrops, buildCorrectionPlanArtifact, buildCorrectionResultArtifact, hasSkepticActions, mergeSelectiveAssessmentCycle, retainFindingsSupportedByFinalControls, selectEvidenceSubset, selectLaneSubset, selectToolSubset } from "./stages/stage-corrections.js";
 import { stagePlanScope } from "./stages/stage-plan-scope.js";
 import { stagePrepareTarget } from "./stages/stage-prepare-target.js";
 import { computeLaneReuseDecisions } from "./lane-reuse.js";
@@ -60,6 +63,7 @@ import { stageResolveConfig } from "./stages/stage-resolve-config.js";
 import { isAutoRunModeRequest, resolveRequestedOrAutoRunMode } from "./planner.js";
 import { AUDIT_LANES, type AuditLaneName } from "./audit-lanes.js";
 import { assertAuditRequestProviderPolicy } from "./provider-policy.js";
+import { persistPolicyResolutionSnapshot, resolveAndApplySystemPolicy, type ResolvedSystemPolicySnapshot } from "./system-policies.js";
 
 type AssessmentCycle = Awaited<ReturnType<typeof stageAssessControls>>;
 
@@ -140,9 +144,9 @@ async function exportArtifactsToOutputDir(runId: string, canonicalArtifactDir: s
   );
 }
 
-function applySkepticReview(findings: Finding[], skeptic: SkepticArtifact): Finding[] {
+function applySkepticReview(findings: Finding[], skeptic: SkepticArtifact, findingQuality?: FindingQualitySummary | null): Finding[] {
   const graderMap = new Map(skeptic.grader_outputs.map((item) => [item.finding_id, item]));
-  return applyUnsupportedFindingDrops(findings, skeptic).map((finding) => {
+  return applyUnsupportedFindingDrops(findings, skeptic, findingQuality).map((finding) => {
     const grader = graderMap.get(finding.finding_id);
     if (!grader) return finding;
     const confidenceAdjustment = grader.evidence_sufficiency === "high"
@@ -163,10 +167,10 @@ function applySkepticReview(findings: Finding[], skeptic: SkepticArtifact): Find
   });
 }
 
-function updateControlResultsWithFindings(controlResults: ControlResult[], findings: Finding[]): ControlResult[] {
+export function updateControlResultsWithFindings(controlResults: ControlResult[], findings: Finding[]): ControlResult[] {
   return controlResults.map((control) => {
     const linkedFindings = findings.filter((finding) => finding.control_ids.includes(control.control_id));
-    if (linkedFindings.length === 0) return control;
+    if (linkedFindings.length === 0) return { ...control, finding_ids: [] };
     const worstSeverity = linkedFindings.some((finding) => finding.severity === "critical")
       ? "critical"
       : linkedFindings.some((finding) => finding.severity === "high")
@@ -179,17 +183,25 @@ function updateControlResultsWithFindings(controlResults: ControlResult[], findi
       return sum + (Math.min(control.max_score, finding.score_impact) * multiplier);
     }, 0);
     const adjustedScore = Math.max(0, Math.round(control.max_score - Math.min(control.max_score, scorePenalty)));
+    const findingStatus = worstSeverity === "critical" || worstSeverity === "high"
+      ? "fail"
+      : worstSeverity === "medium"
+        ? "partial"
+        : control.status;
+    const status = control.status === "fail" || findingStatus === "fail"
+      ? "fail"
+      : control.status === "partial" || findingStatus === "partial"
+        ? "partial"
+        : control.status;
     return {
       ...control,
       status: control.status === "not_assessed" || control.status === "not_applicable"
         ? control.status
-        : worstSeverity === "critical" || worstSeverity === "high"
-          ? "fail"
-          : worstSeverity === "medium"
-            ? "partial"
-            : control.status,
-      score_awarded: control.status === "not_assessed" || control.status === "not_applicable" ? control.score_awarded : adjustedScore,
-      finding_ids: [...new Set([...control.finding_ids, ...linkedFindings.map((finding) => finding.finding_id)])]
+        : status,
+      score_awarded: control.status === "not_assessed" || control.status === "not_applicable"
+        ? control.score_awarded
+        : Math.min(control.score_awarded, adjustedScore),
+      finding_ids: [...new Set(linkedFindings.map((finding) => finding.finding_id))]
     };
   });
 }
@@ -563,6 +575,7 @@ function findIncompleteReusableStaticTools(selectedTools: string[], previousExec
 export class AuditEngine {
   private readonly queue = new InMemoryJobQueue();
   private readonly cancelRequested = new Set<string>();
+  private readonly runAbortControllers = new Map<string, AbortController>();
 
   private ensureRunNotCanceled(runId: string): void {
     if (this.cancelRequested.has(runId)) {
@@ -571,9 +584,12 @@ export class AuditEngine {
   }
 
   async run(request: AuditRequest, options?: { runId?: string; retryOfRunId?: string }): Promise<AuditResult> {
-    request = assertAuditRequestProviderPolicy(request, "interactive_operator");
     const runId = options?.runId ?? createId("run", deriveRunLabel(request));
+    const initialSystemPolicy = await resolveAndApplySystemPolicy(request, { run_id: runId, rootDirOrOptions: { dbMode: request.db_mode } });
+    request = assertAuditRequestProviderPolicy(initialSystemPolicy.request, "interactive_operator");
+    let resolvedSystemPolicy: ResolvedSystemPolicySnapshot | null = initialSystemPolicy.snapshot;
     this.cancelRequested.delete(runId);
+    const runAbortController = new AbortController();
     const existing = this.queue.get(runId);
     if (existing) {
       this.queue.update(runId, { status: "running", error: undefined, result: undefined });
@@ -620,6 +636,7 @@ export class AuditEngine {
       }
     });
 
+    this.runAbortControllers.set(runId, runAbortController);
     try {
     const preflightSummary = await observer.observeStage({
       stage: "preflight",
@@ -636,9 +653,17 @@ export class AuditEngine {
     effectiveRequest = preflightRunMode === request.run_mode
       ? request
       : { ...request, run_mode: preflightRunMode };
+    const classifiedSystemPolicy = await resolveAndApplySystemPolicy(effectiveRequest, {
+      run_id: runId,
+      target_class: preflightSummary.target.target_class,
+      rootDirOrOptions: { dbMode: effectiveRequest.db_mode }
+    });
+    effectiveRequest = classifiedSystemPolicy.request;
+    resolvedSystemPolicy = classifiedSystemPolicy.snapshot;
     trace.steps.push({ step: 1, actor: "stage_preflight", action: "preflight", summary: `Preflight classified target as ${preflightSummary.target.target_class} with readiness ${preflightSummary.readiness.status}.`, artifacts: ["preflight-summary.json"], timestamp: nowIso() });
     await artifactStore.writeJson(runId, "preflight-summary", preflightSummary);
     await artifactStore.writeJson(runId, "launch-intent", launchIntent);
+    if (resolvedSystemPolicy) await artifactStore.writeJson(runId, "resolved-system-policy", resolvedSystemPolicy);
     this.ensureRunNotCanceled(runId);
 
     const resolvedConfigInitial: ResolvedConfigurationArtifact = await observer.observeStage({
@@ -670,6 +695,8 @@ export class AuditEngine {
         runtime: prepared.sandbox.container_workspace?.runtime ?? "unconfigured",
         plan: prepared.sandbox.execution_plan ?? { readiness_status: "blocked", detected_stack: [], entry_signals: [], steps: [], warnings: ["No sandbox execution plan was generated."] },
         results: prepared.sandbox.execution_results ?? [],
+        provider_plan: prepared.sandbox.runtime_provider_plan ?? null,
+        provider_result: prepared.sandbox.runtime_provider_result ?? null,
         runtime_sandbox: prepared.sandbox.runtime_sandbox_readiness && prepared.sandbox.runtime_execution_policy
           ? {
               provider_id: "local_runtime",
@@ -698,6 +725,15 @@ export class AuditEngine {
     this.ensureRunNotCanceled(runId);
 
     const initialTargetClass = prepared.analysis.mcp_indicators.length > 0 ? "mcp_server_plugin_skill_package" : prepared.analysis.agent_indicators.length > 0 || prepared.analysis.tool_execution_indicators.length > 0 ? "tool_using_multi_turn_agent" : prepared.analysis.entry_points.length > 0 ? "runnable_local_app" : "repo_posture_only";
+    const analyzedSystemPolicy = await resolveAndApplySystemPolicy(effectiveRequest, {
+      run_id: runId,
+      target_class: initialTargetClass,
+      analysis: prepared.analysis,
+      rootDirOrOptions: { dbMode: effectiveRequest.db_mode }
+    });
+    effectiveRequest = analyzedSystemPolicy.request;
+    resolvedSystemPolicy = analyzedSystemPolicy.snapshot;
+    if (resolvedSystemPolicy) await artifactStore.writeJson(runId, "resolved-system-policy", resolvedSystemPolicy);
     let auditPackage = applyAuditPackageOverrides(
       effectiveRequest,
       resolveAuditPackage({ request: effectiveRequest, analysis: prepared.analysis, initialTargetClass: initialTargetClass as any })
@@ -898,7 +934,8 @@ export class AuditEngine {
           agentRuntime,
           lanePlans: rerunLanePlans.length ? rerunLanePlans : lanePlans,
           analysisSummaryForEvidence: { analysis: prepared.analysis, repoContext: prepared.repoContext },
-          auditPackageId: auditPackage.id
+          auditPackageId: auditPackage.id,
+          signal: runAbortController.signal
         })
       });
     }
@@ -1093,7 +1130,8 @@ export class AuditEngine {
           lanePlans: laneSubset.length ? lanePlans.filter((plan) => laneSubset.includes(plan.lane_name)) : lanePlans,
           analysisSummaryForEvidence: { analysis: prepared.analysis, repoContext: prepared.repoContext },
           evidenceOverrideIds: evidenceSubset.length ? evidenceSubset : undefined,
-          auditPackageId: auditPackage.id
+          auditPackageId: auditPackage.id,
+          signal: runAbortController.signal
         });
         if (correctionPlan.merge_strategy === "merge_selective") {
           const selectiveMerge = mergeSelectiveAssessmentCycle({
@@ -1204,7 +1242,10 @@ export class AuditEngine {
       observer.metrics.increment("provider_execution_total", 1, { provider_id: execution.provider_id, status: execution.status });
     }
 
-    const findingsPrePolicy = applySkepticReview(cycle.findings, skepticReview);
+    const findingsPrePolicy = retainFindingsSupportedByFinalControls(
+      applySkepticReview(cycle.findings, skepticReview, preSupervisorEvidencePacket),
+      cycle.controlResults
+    );
     let controlResultsPrePolicy = updateControlResultsWithFindings(cycle.controlResults, findingsPrePolicy);
     controlResultsPrePolicy = applyControlDowngrades(controlResultsPrePolicy, skepticReview);
     const policyApplied = stageApplyPolicyOverrides({
@@ -1282,7 +1323,9 @@ export class AuditEngine {
       remediation,
       auditPackage,
       auditPolicy,
-      evidenceExecutions: cycle.evidenceExecutions
+      evidenceExecutions: cycle.evidenceExecutions,
+      requiredEvidenceProviderIds: resolvedSystemPolicy?.required_evidence_provider_ids,
+      evidenceFailurePolicy: resolvedSystemPolicy?.definition_json.evidence_failure_policy
     });
     await artifactStore.writeJson(runId, "publishability", publishability);
     trace.steps.push({ step: trace.steps.length + 1, actor: "stage_score_and_publishability", action: "score_and_publishability", summary: `Publishability evaluated as ${publishability.publishability_status} with ${publishability.gating_findings.length} gating findings.`, artifacts: ["publishability.json"], timestamp: nowIso() });
@@ -1301,6 +1344,31 @@ export class AuditEngine {
 
     observer.emit({ level: "info", stage: "run", actor: "orchestrator", eventType: "run_completed", status: "success", details: { static_score: staticScore, findings: findings.length } });
 
+    const seenModelIdentities = new Set<string>();
+    const modelIdentities: RunVersionManifest["model_identities"] = [];
+    for (const config of agentRuntime.artifacts.configSummary) {
+      const identityKey = `${config.provider}\u0000${config.model}\u0000${config.credential_class}`;
+      if (seenModelIdentities.has(identityKey)) continue;
+      seenModelIdentities.add(identityKey);
+      modelIdentities.push({ provider: config.provider, model: config.model, credential_class: config.credential_class });
+    }
+    const versionManifest: RunVersionManifest = {
+      schema_version: "2026-08-18.run-versions.v1",
+      methodology_version: methodology.version,
+      static_baseline_version: staticBaseline.version,
+      control_catalog_version: CONTROL_CATALOG_VERSION,
+      policy_version: auditPolicy.version ?? "unversioned",
+      audit_package_catalog_version: AUDIT_PACKAGE_CATALOG_VERSION,
+      audit_package_id: auditPackage.id,
+      prompt_set_version: AUDIT_PROMPT_SET_VERSION,
+      tool_versions: (preflightSummary.static_tools?.tools ?? []).map((tool) => ({
+        tool_id: tool.id,
+        version: tool.version,
+        status: tool.status
+      })),
+      model_identities: modelIdentities
+    };
+
     const artifacts = [
       await artifactStore.writeJson(runId, "preflight-summary", preflightSummary),
       await artifactStore.writeJson(runId, "launch-intent", launchIntent),
@@ -1312,6 +1380,8 @@ export class AuditEngine {
       await artifactStore.writeJson(runId, "methodology", methodology),
       await artifactStore.writeJson(runId, "static-baseline", staticBaseline),
       await artifactStore.writeJson(runId, "audit-policy", auditPolicy),
+      ...(resolvedSystemPolicy ? [await artifactStore.writeJson(runId, "resolved-system-policy", resolvedSystemPolicy)] : []),
+      await artifactStore.writeJson(runId, "run-versions", versionManifest),
       await artifactStore.writeJson(runId, "resolved-config", resolvedConfiguration),
       await artifactStore.writeJson(runId, "commit-diff", commitDiff),
       await artifactStore.writeJson(runId, "planner-artifact", plannerArtifact),
@@ -1391,6 +1461,7 @@ export class AuditEngine {
       static_score: staticScore,
       observations: finalObservations,
       score_summary: scoreSummary,
+      version_manifest: versionManifest,
       skeptic_review: skepticReview,
       finding_quality: findingQuality,
       correction_plan: correctionPlan,
@@ -1410,6 +1481,9 @@ export class AuditEngine {
     };
 
     const persistence = await persistAuditResult({ result, packageDefinition: auditPackage, request: effectiveRequest });
+    if (resolvedSystemPolicy) {
+      await persistPolicyResolutionSnapshot(resolvedSystemPolicy, runId, { dbMode: effectiveRequest.db_mode });
+    }
     result.persistence = persistence;
     await persistPersistenceSummary({
       runId,
@@ -1431,10 +1505,12 @@ export class AuditEngine {
 
     this.queue.update(runId, { status: "succeeded", result });
     this.cancelRequested.delete(runId);
+    this.runAbortControllers.delete(runId);
     return result;
     } catch (error) {
       const canceled = error instanceof CanceledRunError || this.cancelRequested.has(runId);
       this.cancelRequested.delete(runId);
+      this.runAbortControllers.delete(runId);
       observer.emit({
         level: canceled ? "warn" : "error",
         stage: "run",
@@ -1497,6 +1573,7 @@ export class AuditEngine {
     }
     if (run.status === "running") {
       this.cancelRequested.add(runId);
+      this.runAbortControllers.get(runId)?.abort(new CanceledRunError(runId));
       return this.queue.update(runId, { error: "cancel_requested" });
     }
     return run;

@@ -1,5 +1,7 @@
 import type { AuditLanePlan, AuditPolicyArtifact, ControlResult, EvalSelectionArtifact, Finding, FindingQualitySummary, PlannerArtifact, RepoContextArtifact, ScoreSummary, StandardControlDefinition, TargetDescriptor, TargetProfileArtifact, ThreatModelArtifact } from "./contracts.js";
 
+export const AUDIT_PROMPT_SET_VERSION = "2026-08-18.agent-context.v2";
+
 function truncate(text: string, max = 400): string {
   return text.length <= max ? text : `${text.slice(0, max)}...`;
 }
@@ -75,6 +77,7 @@ export function buildPlannerContext(args: {
     target: { target_type: args.target.target_type, snapshot: args.target.snapshot },
     analysis: compactAnalysis(args.analysis),
     repoContext: compactRepoContext(args.repoContext),
+    targetClass: args.targetProfile.semantic_review.final_class,
     targetProfile: args.targetProfile,
     controlCatalog: compactControlCatalog(args.controlCatalog),
     methodology: { version: args.methodology.version, summary: args.methodology.summary },

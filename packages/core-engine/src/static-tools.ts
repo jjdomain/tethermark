@@ -97,7 +97,7 @@ const TOOL_DEFS: Array<{
     default_enabled: true,
     mandatory: false,
     fallback: null,
-    fix: "Install and configure the Inspect adapter before runtime validation."
+    fix: "Run npm run scan -- setup-workers --yes, then verify Inspect with worker-doctor and worker-smoke."
   },
   {
     id: "garak",
@@ -109,7 +109,7 @@ const TOOL_DEFS: Array<{
     default_enabled: true,
     mandatory: false,
     fallback: null,
-    fix: "Install and configure the garak adapter before prompt-stress runtime validation."
+    fix: "Run npm run scan -- setup-workers --yes, then verify bounded Garak with worker-doctor, worker-tests, and worker-smoke."
   },
   {
     id: "pyrit",
@@ -121,7 +121,7 @@ const TOOL_DEFS: Array<{
     default_enabled: true,
     mandatory: false,
     fallback: null,
-    fix: "Install and configure the PyRIT adapter before adversarial runtime validation."
+    fix: "Run setup-workers and configure an explicit runtime endpoint before bounded PyRIT adversarial validation."
   }
 ];
 

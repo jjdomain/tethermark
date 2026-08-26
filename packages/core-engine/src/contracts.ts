@@ -1,6 +1,6 @@
 import type { HandoffRecord } from "../../handoff-contracts/src/index.js";
 import type { AgentInvocationRecord } from "../../trace-recorder/src/index.js";
-import type { LocalSandboxBackendResolution, RuntimeExecutionPolicy, RuntimeSandboxReadiness } from "../../validation-runner/src/index.js";
+import type { LocalSandboxBackendResolution, RuntimeExecutionPolicy, RuntimeSandboxReadiness, RuntimeValidationPlan, RuntimeValidationResult } from "../../validation-runner/src/index.js";
 
 export type TargetKind = "path" | "repo" | "endpoint";
 export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
@@ -37,7 +37,7 @@ export type SkepticActionType =
 export type HarnessEventLevel = "debug" | "info" | "warn" | "error";
 export type HarnessMetricKind = "counter" | "gauge" | "histogram";
 export type DatabaseMode = "local" | "postgres" | "supabase";
-export type AuditPackageId = "baseline-static" | "agentic-static" | "deep-static" | "runtime-validated" | "premium-comprehensive";
+export type AuditPackageId = "baseline-static" | "agentic-static" | "deep-static" | "runtime-validated" | "comprehensive-local";
 export type HumanReviewStatus = "not_required" | "review_required" | "in_review" | "approved" | "rejected" | "requires_rerun";
 export type ProviderReadinessStatus = "available" | "blocked" | "conditional" | "deferred";
 export type PreflightReadinessStatus = "ready" | "ready_with_warnings" | "blocked";
@@ -157,6 +157,8 @@ export interface SandboxExecutionArtifact {
   runtime: ContainerWorkspaceContract["runtime"] | "unconfigured";
   plan: SandboxExecutionPlan;
   results: SandboxExecutionResult[];
+  provider_plan?: RuntimeValidationPlan | null;
+  provider_result?: RuntimeValidationResult | null;
   runtime_sandbox?: {
     provider_id: "local_runtime";
     selected_backend: string;
@@ -192,6 +194,8 @@ export interface SandboxSession {
   runtime_sandbox_readiness?: RuntimeSandboxReadiness;
   runtime_backend_resolution?: LocalSandboxBackendResolution;
   runtime_execution_policy?: RuntimeExecutionPolicy;
+  runtime_provider_plan?: RuntimeValidationPlan;
+  runtime_provider_result?: RuntimeValidationResult;
   source_provenance: SandboxSourceProvenance;
   storage_usage: SandboxStorageUsage;
 }
@@ -762,9 +766,12 @@ export interface StandardControlDefinition {
   description: string;
   weight: number;
   static_assessable: boolean;
+  runtime_assessable?: boolean;
+  audit_lane?: "repo_posture" | "supply_chain" | "agentic_controls" | "data_exposure" | "runtime_validation";
+  evidence_provider_ids?: string[];
   baseline_dimension: BaselineDimensionKey;
   catalog: "external_standard" | "harness_internal";
-  applicability: Array<"all" | "repo" | "agentic" | "mcp" | "ci" | "dependency" | "container">;
+  applicability: Array<"all" | "repo" | "agentic" | "mcp" | "api" | "ci" | "dependency" | "container">;
 }
 
 export interface BaselineDimensionScore {
@@ -828,6 +835,27 @@ export interface ScoreSummary {
   leaderboard_summary: string;
 }
 
+export interface RunVersionManifest {
+  schema_version: "2026-08-18.run-versions.v1";
+  methodology_version: string;
+  static_baseline_version: string;
+  control_catalog_version: string;
+  policy_version: string;
+  audit_package_catalog_version: string;
+  audit_package_id: AuditPackageId;
+  prompt_set_version: string;
+  tool_versions: Array<{
+    tool_id: string;
+    version: string | null;
+    status: "available" | "missing" | "blocked" | "unknown";
+  }>;
+  model_identities: Array<{
+    provider: string;
+    model: string;
+    credential_class: "chatgpt_session" | "api_key" | "enterprise_access_token" | "none";
+  }>;
+}
+
 export interface MethodologyArtifact {
   version: string;
   summary: string;
@@ -850,7 +878,7 @@ export interface CommitDiffGateArtifact {
   previous_run_id: string | null;
   current_commit_sha: string | null;
   previous_commit_sha: string | null;
-  comparison_mode: "no_prior_run" | "policy_changed" | "same_commit" | "git_diff" | "git_diff_unavailable" | "non_git_target";
+  comparison_mode: "no_prior_run" | "reuse_disabled" | "policy_changed" | "same_commit" | "git_diff" | "git_diff_unavailable" | "non_git_target";
   changed_files: string[];
   stage_decisions: {
     planner: "reuse" | "rerun";
@@ -1088,6 +1116,7 @@ export interface AuditResult {
   static_score: number;
   observations: AuditObservation[];
   score_summary: ScoreSummary;
+  version_manifest?: RunVersionManifest;
   skeptic_review: SkepticArtifact;
   finding_quality: FindingQualitySummary;
   correction_plan?: CorrectionPlanArtifact | null;

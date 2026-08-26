@@ -6,7 +6,7 @@ import { evaluateStandardsAudit } from "../standards-audit.js";
 import { createId } from "../utils.js";
 
 function shouldRunLaneSpecialists(auditPackageId?: AuditPackageId): boolean {
-  return auditPackageId === "deep-static" || auditPackageId === "premium-comprehensive";
+  return auditPackageId === "deep-static" || auditPackageId === "comprehensive-local";
 }
 
 export async function stageRunLanes(args: {

@@ -13,4 +13,6 @@ dist/
 
 *.log
 *.tsbuildinfo
+__pycache__/
+*.py[cod]
 Thumbs.db

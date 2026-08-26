@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 
 import { buildToolPathEnv, staticToolPathDetails } from "../../../packages/core-engine/src/tool-paths.js";
 import { resolvePostgresConnectionConfig } from "../../../packages/core-engine/src/persistence/postgres.js";
+import { inspectPythonWorkerEnvironment } from "../../../packages/core-engine/src/python-worker-environment.js";
 import { buildRuntimeSandboxReadiness } from "../../../packages/validation-runner/src/index.js";
 import { resolveAgentProviderConfig } from "../../../packages/llm-provider/src/index.js";
 import { BUNDLED_SEMGREP_RULESET, BUNDLED_SEMGREP_RULESET_SHA256, BUNDLED_SEMGREP_RULESET_VERSION, evaluateStaticToolVersion, resolveStaticToolInvocation, STATIC_TOOL_POLICIES, type ProductionStaticToolId } from "../../../packages/core-engine/src/static-tool-policy.js";
@@ -322,7 +323,28 @@ export function buildDoctorReport(): DoctorReport {
   addCommandCheck(checks, { id: "node", label: "Node.js", command: "node", required: true, fix: ["Install Node.js 20+ from https://nodejs.org/."] });
   addCommandCheck(checks, { id: "npm", label: "npm", command: "npm", shell: process.platform === "win32", required: true, fix: ["Install npm with Node.js 20+."] });
   addCommandCheck(checks, { id: "git", label: "Git", command: "git", required: true, fix: ["Install Git and ensure git is on PATH."] });
-  addCommandCheck(checks, { id: "python", label: "Python", command: envValue("PYTHON_BIN") ?? "python", required: false, fix: ["Install Python 3.10+ for runtime worker adapters."] });
+  addCommandCheck(checks, { id: "python", label: "Python", command: envValue("PYTHON_BIN") ?? "python", required: false, fix: ["Install Python >=3.11 <3.14 for runtime worker adapters."] });
+  const pythonWorkers = inspectPythonWorkerEnvironment();
+  checks.push({
+    id: "python-worker-environment",
+    label: "Python Worker Environment",
+    status: pythonWorkers.ready ? "pass" : "warn",
+    summary: pythonWorkers.summary,
+    details: {
+      ready: pythonWorkers.ready,
+      python_version: pythonWorkers.python_version?.raw ?? null,
+      python_executable: pythonWorkers.python_executable,
+      venv_root: pythonWorkers.venv_root,
+      lock_path: pythonWorkers.lock_path,
+      lock_sha256: pythonWorkers.lock_sha256,
+      lock_current: pythonWorkers.lock_current,
+      packages_current: pythonWorkers.packages_current,
+      adapter_implementation_status: pythonWorkers.self_check?.["adapter_implementation_status"] ?? null,
+      adapter_statuses: pythonWorkers.self_check?.["adapter_statuses"] ?? null,
+      inspect_ai_version: pythonWorkers.self_check?.["inspect_ai_version"] ?? null
+    },
+    fix: pythonWorkers.ready ? undefined : ["Run npm run scan -- setup-workers --dry-run, review the exact commands, then rerun with --yes."]
+  });
   checks.push({
     id: "static-tools-path",
     label: "Managed Static Tools Path",
@@ -472,15 +494,16 @@ export function printOnboarding(args: { dryRun?: boolean } = {}): void {
   console.log("2. Run npm run scan -- doctor.");
   console.log("3. Install static tools flagged by doctor: scorecard, semgrep, trivy.");
   console.log("4. Configure Local Runtime Sandbox with npm run scan -- setup-runtime --dry-run.");
-  console.log("5. Run npm run scan -- validate-fixtures --llm-provider mock.");
-  console.log("6. Run npm run scan -- validate-runtime-fixtures when local runtime is ready.");
-  console.log("7. Start the local app with npm run oss and open http://127.0.0.1:8788.");
+  console.log("5. Configure the Python worker environment with npm run scan -- setup-workers --dry-run.");
+  console.log("6. Run npm run scan -- validate-fixtures --llm-provider mock.");
+  console.log("7. Run npm run scan -- validate-runtime-fixtures when local runtime is ready.");
+  console.log("8. Start the local app with npm run oss and open http://127.0.0.1:8788.");
 }
 
 export function runOnboarding(args: { dryRun?: boolean; skipDoctor?: boolean; skipFixtures?: boolean } = {}): DoctorReport | null {
   const envExists = fs.existsSync(path.resolve(process.cwd(), ".env"));
   console.log("Tethermark onboarding");
-  console.log("Step 1/5: Workspace configuration");
+  console.log("Step 1/7: Workspace configuration");
   if (!envExists) {
     if (args.dryRun) {
       console.log("Would create .env from .env.example.");
@@ -496,13 +519,13 @@ export function runOnboarding(args: { dryRun?: boolean; skipDoctor?: boolean; sk
 
   if (args.skipDoctor) {
     console.log("");
-    console.log("Step 2/5: Doctor skipped by flag.");
+    console.log("Step 2/7: Doctor skipped by flag.");
     console.log("Next: run npm run scan -- doctor when ready.");
     return null;
   }
 
   console.log("");
-  console.log("Step 2/5: Readiness check");
+  console.log("Step 2/7: Readiness check");
   const report = buildDoctorReport();
   printDoctorReport(report);
 
@@ -510,7 +533,7 @@ export function runOnboarding(args: { dryRun?: boolean; skipDoctor?: boolean; sk
     .filter((check) => ["scorecard", "semgrep", "trivy"].includes(check.id) && check.status !== "pass")
     .map((check) => check.id);
   console.log("");
-  console.log("Step 3/5: External audit tools");
+  console.log("Step 3/7: External audit tools");
   if (missingExternalTools.length) {
     console.log(`Missing required static audit tools: ${missingExternalTools.join(", ")}`);
     console.log("Preview the safe installer plan:");
@@ -524,7 +547,7 @@ export function runOnboarding(args: { dryRun?: boolean; skipDoctor?: boolean; sk
   }
 
   console.log("");
-  console.log("Step 4/5: Local Runtime Sandbox");
+  console.log("Step 4/7: Local Runtime Sandbox");
   const runtimeCheck = report.checks.find((check) => check.id === "local-runtime-sandbox");
   console.log(runtimeCheck?.summary || "Local Runtime Sandbox readiness was not reported.");
   if (runtimeCheck?.status !== "pass") {
@@ -537,7 +560,18 @@ export function runOnboarding(args: { dryRun?: boolean; skipDoctor?: boolean; sk
   }
 
   console.log("");
-  console.log("Step 5/6: Fixture validation");
+  console.log("Step 5/7: Python worker environment");
+  const pythonWorkerCheck = report.checks.find((check) => check.id === "python-worker-environment");
+  console.log(pythonWorkerCheck?.summary || "Python worker environment readiness was not reported.");
+  if (pythonWorkerCheck?.status !== "pass") {
+    console.log("Preview the hash-locked worker setup plan:");
+    console.log("  npm run scan -- setup-workers --dry-run");
+  } else {
+    console.log("Inspect, bounded Garak, and bounded PyRIT are executable.");
+  }
+
+  console.log("");
+  console.log("Step 6/7: Fixture validation");
   if (args.skipFixtures) {
     console.log("Fixture validation skipped by flag.");
   } else {
@@ -548,7 +582,7 @@ export function runOnboarding(args: { dryRun?: boolean; skipDoctor?: boolean; sk
   }
 
   console.log("");
-  console.log("Step 6/6: Start local UI");
+  console.log("Step 7/7: Start local UI");
   console.log("  npm run oss");
   console.log("  open http://127.0.0.1:8788");
   console.log("The web UI will use the external tool paths recorded in .env when the local API starts.");

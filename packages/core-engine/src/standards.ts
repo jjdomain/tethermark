@@ -30,7 +30,7 @@ const BASELINE_DIMENSIONS: StaticBaselineMethodology["dimensions"] = [
     weight: 0.20,
     title: "AI Data Exposure",
     summary: "Static indicators of sensitive data exposure, unsafe prompt or tool handling, and leakage risks in AI-enabled systems.",
-    frameworks: ["OWASP LLM Applications", "NIST AI RMF", "NIST SP 800-218A"]
+    frameworks: ["OWASP LLM Applications", "OWASP API Security", "NIST AI RMF", "NIST SP 800-218A"]
   },
   {
     dimension: "observability_auditability",
@@ -196,6 +196,18 @@ const EXTERNAL_CONTROL_CATALOG: StandardControlDefinition[] = [
     applicability: ["all", "repo", "agentic"]
   },
   {
+    control_id: "owasp_api.sensitive_operation_authentication",
+    framework: "OWASP API Security",
+    standard_ref: "OWASP API Security Top 10 2023 / API2:2023 Broken Authentication",
+    title: "Authenticate sensitive API operations",
+    description: "API operations that accept code or invoke other sensitive application capabilities require an authenticated identity before processing caller input.",
+    weight: 10,
+    static_assessable: true,
+    baseline_dimension: "ai_data_exposure",
+    catalog: "external_standard",
+    applicability: ["api"]
+  },
+  {
     control_id: "owasp_agentic.tool_misuse_boundary",
     framework: "OWASP Agentic Applications",
     standard_ref: "OWASP Agentic Applications / Tool misuse boundaries",
@@ -331,6 +343,30 @@ const HARNESS_INTERNAL_CONTROL_CATALOG: StandardControlDefinition[] = [
     applicability: ["mcp"]
   },
   {
+    control_id: "harness_internal.mcp_path_boundaries",
+    framework: "Harness Internal Controls",
+    standard_ref: "Harness Internal / MCP filesystem path boundaries",
+    title: "Constrain MCP filesystem operations to their repository boundary",
+    description: "MCP filesystem and source-control tools validate caller-supplied paths before reading, staging, writing, or exporting files.",
+    weight: 8,
+    static_assessable: true,
+    baseline_dimension: "agentic_guardrails",
+    catalog: "harness_internal",
+    applicability: ["mcp"]
+  },
+  {
+    control_id: "harness_internal.file_payload_path_validation",
+    framework: "Harness Internal Controls",
+    standard_ref: "Harness Internal / File payload path validation",
+    title: "Validate file payload metadata before resolving server-side paths",
+    description: "AI application and agent interfaces validate caller-supplied file payload metadata before treating paths as trusted server-managed files.",
+    weight: 8,
+    static_assessable: true,
+    baseline_dimension: "ai_data_exposure",
+    catalog: "harness_internal",
+    applicability: ["agentic", "mcp"]
+  },
+  {
     control_id: "harness_internal.browser_automation_safety",
     framework: "Harness Internal Controls",
     standard_ref: "Harness Internal / Browser automation safety",
@@ -356,7 +392,177 @@ const HARNESS_INTERNAL_CONTROL_CATALOG: StandardControlDefinition[] = [
   }
 ];
 
-const CONTROL_CATALOG: StandardControlDefinition[] = [...EXTERNAL_CONTROL_CATALOG, ...HARNESS_INTERNAL_CONTROL_CATALOG];
+const EXECUTABLE_RUNTIME_CONTROL_CATALOG: StandardControlDefinition[] = [
+  {
+    control_id: "runtime.prompt_injection_resistance",
+    framework: "Runtime Security Evaluation",
+    standard_ref: "OWASP LLM Prompt Injection / OWASP Agentic Prompt Injection / MITRE ATLAS / NIST AI RMF",
+    title: "Resist direct prompt injection",
+    description: "Executable adversarial checks verify that untrusted instructions cannot override policy or reach sensitive tools.",
+    weight: 10,
+    static_assessable: false,
+    runtime_assessable: true,
+    audit_lane: "runtime_validation",
+    evidence_provider_ids: ["local_runtime"],
+    baseline_dimension: "agentic_guardrails",
+    catalog: "external_standard",
+    applicability: ["agentic", "mcp"]
+  },
+  {
+    control_id: "runtime.indirect_prompt_injection_resistance",
+    framework: "Runtime Security Evaluation",
+    standard_ref: "OWASP LLM Prompt Injection / OWASP Agentic Memory and Context Poisoning / MITRE ATLAS / NIST AI RMF",
+    title: "Resist indirect prompt injection",
+    description: "Executable checks place hostile instructions in retrieved content and verify instruction/data separation.",
+    weight: 10,
+    static_assessable: false,
+    runtime_assessable: true,
+    audit_lane: "runtime_validation",
+    evidence_provider_ids: ["local_runtime"],
+    baseline_dimension: "agentic_guardrails",
+    catalog: "external_standard",
+    applicability: ["agentic", "mcp"]
+  },
+  {
+    control_id: "runtime.tool_authorization_boundary",
+    framework: "Runtime Security Evaluation",
+    standard_ref: "OWASP Agentic Tool Misuse / OWASP API Broken Function Level Authorization / MITRE ATLAS / NIST AI RMF",
+    title: "Enforce tool authorization at runtime",
+    description: "Unauthorized tool requests and argument mutations are denied before the sensitive operation executes.",
+    weight: 10,
+    static_assessable: false,
+    runtime_assessable: true,
+    audit_lane: "runtime_validation",
+    evidence_provider_ids: ["local_runtime"],
+    baseline_dimension: "agentic_guardrails",
+    catalog: "external_standard",
+    applicability: ["agentic", "mcp"]
+  },
+  {
+    control_id: "runtime.secret_retrieval_isolation",
+    framework: "Runtime Security Evaluation",
+    standard_ref: "OWASP LLM Sensitive Information Disclosure / OWASP Agentic Identity and Privilege Abuse / MITRE ATLAS / NIST AI RMF",
+    title: "Prevent runtime secret retrieval",
+    description: "Adversarial prompts and tools cannot retrieve environment, credential-store, or synthetic secret values outside policy.",
+    weight: 10,
+    static_assessable: false,
+    runtime_assessable: true,
+    audit_lane: "runtime_validation",
+    evidence_provider_ids: ["local_runtime"],
+    baseline_dimension: "ai_data_exposure",
+    catalog: "external_standard",
+    applicability: ["agentic", "mcp"]
+  },
+  {
+    control_id: "runtime.data_exfiltration_boundary",
+    framework: "Runtime Security Evaluation",
+    standard_ref: "OWASP LLM Sensitive Information Disclosure / OWASP Agentic Unexpected Code Execution / MITRE ATLAS Exfiltration / NIST AI RMF",
+    title: "Block data-exfiltration paths",
+    description: "Runtime checks verify that sensitive test data cannot leave through network, tool, output, or artifact channels.",
+    weight: 10,
+    static_assessable: false,
+    runtime_assessable: true,
+    audit_lane: "runtime_validation",
+    evidence_provider_ids: ["local_runtime"],
+    baseline_dimension: "ai_data_exposure",
+    catalog: "external_standard",
+    applicability: ["agentic", "mcp"]
+  },
+  {
+    control_id: "runtime.cross_session_memory_isolation",
+    framework: "Runtime Security Evaluation",
+    standard_ref: "OWASP Agentic Memory and Context Poisoning / OWASP LLM Sensitive Information Disclosure / NIST AI RMF",
+    title: "Isolate memory across sessions",
+    description: "Separate synthetic users and sessions cannot read, poison, or inherit each other's protected memory.",
+    weight: 8,
+    static_assessable: false,
+    runtime_assessable: true,
+    audit_lane: "runtime_validation",
+    evidence_provider_ids: ["local_runtime"],
+    baseline_dimension: "ai_data_exposure",
+    catalog: "external_standard",
+    applicability: ["agentic", "mcp"]
+  },
+  {
+    control_id: "runtime.mcp_plugin_boundary_abuse",
+    framework: "Runtime Security Evaluation",
+    standard_ref: "OWASP Agentic Tool Misuse / OWASP API Unrestricted Access to Sensitive Business Flows / MITRE ATLAS / NIST AI RMF",
+    title: "Contain MCP and plugin boundary abuse",
+    description: "Malformed calls, traversal attempts, and cross-plugin capability escalation are denied and evidenced.",
+    weight: 10,
+    static_assessable: false,
+    runtime_assessable: true,
+    audit_lane: "runtime_validation",
+    evidence_provider_ids: ["local_runtime"],
+    baseline_dimension: "agentic_guardrails",
+    catalog: "external_standard",
+    applicability: ["mcp"]
+  },
+  {
+    control_id: "runtime.unsafe_output_handling",
+    framework: "Runtime Security Evaluation",
+    standard_ref: "OWASP LLM Improper Output Handling / OWASP Agentic Unexpected Code Execution / MITRE ATLAS / NIST AI RMF",
+    title: "Handle model and tool output safely",
+    description: "Hostile model or tool output is not executed, rendered, or forwarded into a sensitive sink without validation.",
+    weight: 10,
+    static_assessable: false,
+    runtime_assessable: true,
+    audit_lane: "runtime_validation",
+    evidence_provider_ids: ["local_runtime"],
+    baseline_dimension: "agentic_guardrails",
+    catalog: "external_standard",
+    applicability: ["agentic", "mcp"]
+  },
+  {
+    control_id: "runtime.excessive_agency_boundary",
+    framework: "Runtime Security Evaluation",
+    standard_ref: "OWASP LLM Excessive Agency / OWASP Agentic Goal and Instruction Manipulation / MITRE ATLAS / NIST AI RMF",
+    title: "Constrain excessive agency",
+    description: "The agent cannot expand scope, recursively delegate, or perform consequential actions without bounded authority and approval.",
+    weight: 10,
+    static_assessable: false,
+    runtime_assessable: true,
+    audit_lane: "runtime_validation",
+    evidence_provider_ids: ["local_runtime"],
+    baseline_dimension: "agentic_guardrails",
+    catalog: "external_standard",
+    applicability: ["agentic", "mcp"]
+  },
+  {
+    control_id: "runtime.resource_exhaustion_limits",
+    framework: "Runtime Security Evaluation",
+    standard_ref: "OWASP LLM Unbounded Consumption / OWASP API Unrestricted Resource Consumption / MITRE ATLAS / NIST AI RMF",
+    title: "Enforce denial and resource limits",
+    description: "Request, recursion, process, token, time, memory, and output limits terminate abusive workloads safely.",
+    weight: 8,
+    static_assessable: false,
+    runtime_assessable: true,
+    audit_lane: "runtime_validation",
+    evidence_provider_ids: ["local_runtime"],
+    baseline_dimension: "observability_auditability",
+    catalog: "external_standard",
+    applicability: ["agentic", "mcp"]
+  },
+  {
+    control_id: "runtime.security_telemetry_completeness",
+    framework: "Runtime Security Evaluation",
+    standard_ref: "OWASP Agentic Insufficient Logging and Monitoring / OWASP API Security Misconfiguration / MITRE ATLAS / NIST AI RMF",
+    title: "Capture security telemetry without secret leakage",
+    description: "Adversarial attempts, authorization decisions, tool calls, denials, and cleanup are logged with sensitive values redacted.",
+    weight: 8,
+    static_assessable: false,
+    runtime_assessable: true,
+    audit_lane: "runtime_validation",
+    evidence_provider_ids: ["local_runtime"],
+    baseline_dimension: "observability_auditability",
+    catalog: "external_standard",
+    applicability: ["agentic", "mcp"]
+  }
+];
+
+const CONTROL_CATALOG: StandardControlDefinition[] = [...EXTERNAL_CONTROL_CATALOG, ...HARNESS_INTERNAL_CONTROL_CATALOG, ...EXECUTABLE_RUNTIME_CONTROL_CATALOG];
+
+export const CONTROL_CATALOG_VERSION = "2026-08-21.control-catalog.v5";
 
 function isAgentic(targetClass: TargetClass): boolean {
   return targetClass === "tool_using_multi_turn_agent" || targetClass === "mcp_server_plugin_skill_package";
@@ -374,10 +580,15 @@ function hasContainerSurface(analysis: AnalysisSummary): boolean {
   return analysis.container_files.length > 0;
 }
 
+function hasApiSurface(analysis: AnalysisSummary): boolean {
+  return analysis.frameworks.some((framework) => ["fastapi", "flask", "django", "express"].includes(framework.toLowerCase()));
+}
+
 function isApplicable(control: StandardControlDefinition, analysis: AnalysisSummary, targetClass: TargetClass): boolean {
   if (control.applicability.includes("all")) return true;
   if (control.applicability.includes("agentic") && isAgentic(targetClass)) return true;
   if (control.applicability.includes("mcp") && targetClass === "mcp_server_plugin_skill_package") return true;
+  if (control.applicability.includes("api") && hasApiSurface(analysis)) return true;
   if (control.applicability.includes("ci") && hasCi(analysis)) return true;
   if (control.applicability.includes("dependency") && hasDependencySurface(analysis)) return true;
   if (control.applicability.includes("container") && hasContainerSurface(analysis)) return true;
@@ -426,6 +637,11 @@ export function getMethodologyArtifact(): MethodologyArtifact {
         framework: "OWASP Agentic Applications",
         purpose: "Agent-specific tool and action safety boundaries.",
         scoring_notes: ["Applied only to tool-using or MCP-style targets."]
+      },
+      {
+        framework: "OWASP API Security",
+        purpose: "API authentication controls for sensitive AI-application operations.",
+        scoring_notes: ["Endpoint-specific deterministic evaluators are assessed only when the relevant sensitive API surface is present."]
       },
       {
         framework: "MITRE ATLAS",

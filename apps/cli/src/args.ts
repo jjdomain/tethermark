@@ -8,6 +8,14 @@ export function readFlag(args: string[], name: string): string | undefined {
   return index >= 0 ? args[index + 1] : undefined;
 }
 
+export function readFlags(args: string[], name: string): string[] {
+  const values: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === name && args[index + 1]) values.push(args[index + 1]!);
+  }
+  return values;
+}
+
 export function readBooleanFlag(args: string[], name: string): boolean | undefined {
   const raw = readFlag(args, name);
   if (!raw) return undefined;
@@ -44,6 +52,13 @@ export function buildScanRequest(args: string[]): { request: AuditRequest; targe
     audit_package: readFlag(args, "--package") as AuditRequest["audit_package"] | undefined,
     db_mode: readFlag(args, "--db-mode") as AuditRequest["db_mode"] | undefined
   };
+
+  if (readBooleanFlag(args, "--accept-runtime-warning") === true) {
+    request.hints = {
+      runtime_sandbox_accepted_at: new Date().toISOString(),
+      launch_intent: { source_surface: "cli", preflight_accepted_at: new Date().toISOString() }
+    };
+  }
 
   if (targetType === "path" && targetValue) request.local_path = path.resolve(targetValue);
   else if (targetType === "repo" && targetValue) request.repo_url = targetValue;

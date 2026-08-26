@@ -1,6 +1,6 @@
 import type { AgentRuntime } from "../../../agent-runtime/src/index.js";
 import { buildPlannerContext } from "../agent-context-builders.js";
-import type { AuditPolicyArtifact, AuditRequest, MethodologyArtifact, PlannerArtifact, RepoContextArtifact, SandboxSession, StandardControlDefinition, TargetDescriptor, TargetProfileArtifact } from "../contracts.js";
+import type { AuditPolicyArtifact, AuditRequest, HeuristicTargetProfile, MethodologyArtifact, PlannerArtifact, RepoContextArtifact, SandboxSession, StandardControlDefinition, TargetClass, TargetDescriptor, TargetProfileArtifact } from "../contracts.js";
 import { buildHeuristicTargetProfile } from "../planner.js";
 
 function getPlannerControlConstraints(request: AuditRequest): {
@@ -105,6 +105,81 @@ function applyPlannerControlConstraints(artifact: PlannerArtifact, controlCatalo
   };
 }
 
+const TARGET_CLASSES = new Set<TargetClass>([
+  "repo_posture_only",
+  "runnable_local_app",
+  "hosted_endpoint_black_box",
+  "tool_using_multi_turn_agent",
+  "mcp_server_plugin_skill_package"
+]);
+
+function isTargetClass(value: unknown): value is TargetClass {
+  return typeof value === "string" && TARGET_CLASSES.has(value as TargetClass);
+}
+
+function enforceTargetClassFloor(heuristicClass: TargetClass, modelClass: unknown): TargetClass {
+  if (!isTargetClass(modelClass)) return heuristicClass;
+  if (heuristicClass === "hosted_endpoint_black_box" || modelClass === "hosted_endpoint_black_box") return heuristicClass;
+  const rank: Record<Exclude<TargetClass, "hosted_endpoint_black_box">, number> = {
+    repo_posture_only: 1,
+    runnable_local_app: 2,
+    tool_using_multi_turn_agent: 3,
+    mcp_server_plugin_skill_package: 4
+  };
+  return rank[modelClass] < rank[heuristicClass] ? heuristicClass : modelClass;
+}
+
+export function applyDeterministicPlannerFloor(args: {
+  artifact: PlannerArtifact;
+  heuristic: HeuristicTargetProfile;
+  controlCatalog: StandardControlDefinition[];
+  request: AuditRequest;
+}): PlannerArtifact {
+  const controlById = new Map(args.controlCatalog.map((control) => [control.control_id, control]));
+  const applicable = new Set(args.artifact.applicable_control_ids.filter((controlId) => controlById.has(controlId)));
+  const deferred = new Set(args.artifact.deferred_control_ids.filter((controlId) => controlById.has(controlId) && !applicable.has(controlId)));
+  const nonApplicable = new Set(args.artifact.non_applicable_control_ids.filter((controlId) => controlById.has(controlId) && !applicable.has(controlId) && !deferred.has(controlId)));
+  let floorApplied = false;
+
+  for (const control of args.controlCatalog) {
+    if (control.static_assessable) {
+      if (!applicable.has(control.control_id)) floorApplied = true;
+      applicable.add(control.control_id);
+      deferred.delete(control.control_id);
+      nonApplicable.delete(control.control_id);
+    } else if (args.request.run_mode === "static" && !applicable.has(control.control_id)) {
+      if (!deferred.has(control.control_id)) floorApplied = true;
+      deferred.add(control.control_id);
+      nonApplicable.delete(control.control_id);
+    }
+  }
+
+  const semanticClass = enforceTargetClassFloor(args.heuristic.primary_class, args.artifact.classification_review.semantic_class);
+  const finalClass = enforceTargetClassFloor(args.heuristic.primary_class, args.artifact.classification_review.final_class);
+  const classificationCorrected = semanticClass !== args.artifact.classification_review.semantic_class || finalClass !== args.artifact.classification_review.final_class;
+  const frameworks = new Set(args.artifact.frameworks_in_scope);
+  for (const controlId of [...applicable, ...deferred]) frameworks.add(controlById.get(controlId)!.framework);
+
+  return {
+    ...args.artifact,
+    classification_review: {
+      ...args.artifact.classification_review,
+      semantic_class: semanticClass,
+      final_class: finalClass,
+      override_reason: classificationCorrected
+        ? [args.artifact.classification_review.override_reason, "Unsupported or weaker model-generated class replaced with the deterministic classification floor."].filter(Boolean).join(" ")
+        : args.artifact.classification_review.override_reason
+    },
+    frameworks_in_scope: [...frameworks],
+    applicable_control_ids: [...applicable],
+    deferred_control_ids: [...deferred].filter((controlId) => !applicable.has(controlId)),
+    non_applicable_control_ids: [...nonApplicable].filter((controlId) => !applicable.has(controlId) && !deferred.has(controlId)),
+    rationale: floorApplied || classificationCorrected
+      ? [...args.artifact.rationale, "Applied the deterministic candidate-control and target-class safety floor before operator constraints."]
+      : args.artifact.rationale
+  };
+}
+
 export async function stagePlanScope(args: {
   runId: string;
   request: AuditRequest;
@@ -154,11 +229,19 @@ export async function stagePlanScope(args: {
     stageName: "plan_scope"
   });
 
+  const flooredArtifact = applyDeterministicPlannerFloor({
+    artifact: call.artifact,
+    heuristic,
+    controlCatalog: args.controlCatalog,
+    request: args.request
+  });
+  const plannerArtifact = applyPlannerControlConstraints(flooredArtifact, args.controlCatalog, args.request);
+
   return {
-    plannerArtifact: applyPlannerControlConstraints(call.artifact, args.controlCatalog, args.request),
+    plannerArtifact,
     targetProfile: {
       heuristic,
-      semantic_review: call.artifact.classification_review
+      semantic_review: plannerArtifact.classification_review
     }
   };
 }

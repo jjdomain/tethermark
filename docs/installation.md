@@ -44,14 +44,21 @@ npm run scan -- setup-tools --dry-run
 npm run scan -- setup-tools --yes
 npm run scan -- setup-runtime --dry-run
 npm run scan -- setup-runtime --yes
+npm run scan -- setup-workers --dry-run
+npm run scan -- setup-workers --yes
 npm run scan -- doctor
 npm run scan -- runtime-doctor
+npm run scan -- worker-doctor
+npm run scan -- worker-tests
+npm run scan -- worker-smoke
 npm run scan -- validate-runtime-fixtures
 npm run scan -- validate-fixtures --llm-provider mock
 npm run oss
 ```
 
 The web UI opens at `http://127.0.0.1:8788`.
+
+For the complete first-run, audit, review, remediation, export, restart, backup, and upgrade path, follow [Community Edition Operator Workflow](./operator-workflow.md). The bounded release walkthrough is recorded in [Phase 6 Operator Workflow Evidence](./phase6-operator-workflow-evidence.md).
 
 The Community Edition assistant is enabled by default and runs locally against persisted Tethermark audit data. It supports selected run and target-history Q&A, deterministic evidence-grounded fallback answers, draft outputs, and confirmed local actions. If no usable assistant/global LLM is configured, the assistant drawer remains available and shows fallback/limitations rather than requiring a separate enable flag. Tethermark Cloud project/workspace/org scopes and external connector sends are not enabled in Community Edition. Community Edition does not create GitHub issues or receive GitHub webhooks; paste manual external issue or PR links into local remediation items when needed. To surface findings in GitHub code scanning from Community Edition, export SARIF and upload it with GitHub Actions; see [GitHub SARIF Upload](./github-sarif-upload.md).
 
@@ -86,9 +93,9 @@ Required static scanners for production static audits:
 
 Advanced runtime validation tools:
 
-- Python 3.10+
+- Python `>=3.11 <3.14`
 - Local Runtime Sandbox backend: gVisor `runsc`, rootless Podman, Podman, Docker, or Docker Desktop
-- garak, Inspect, and PyRIT once their real adapters are enabled
+- executable Inspect packs, bounded Garak PromptInject, and bounded PyRIT adversarial-text profiles
 
 Runtime validation is a primary Community Edition feature, but it is launch-gated by Local Runtime Sandbox readiness. The launch UI shows one option, **Local Runtime Sandbox**. Admin -> Runtime Sandbox shows the resolved backend, candidate list, warnings, blockers, network policy, resource limits, and setup guidance.
 
@@ -118,6 +125,7 @@ For automation:
 ```bash
 npm run scan -- doctor --json
 npm run scan -- runtime-doctor --json
+npm run scan -- worker-doctor --json
 ```
 
 `doctor` reports required failures separately from optional runtime warnings. Missing Scorecard, Semgrep, or Trivy blocks production readiness for static audits. Development and diagnostic runs may still proceed in degraded mode, but release validation requires all three scanners to be available.
@@ -139,6 +147,25 @@ npm run production:harness-readiness
 ```
 
 `production:runtime-readiness` intentionally fails when no launchable local runtime backend is available or when isolated runtime fixtures do not execute successfully.
+
+## Python Worker Environment
+
+Python worker setup is separate from the container runtime. Tethermark supports Python `>=3.11 <3.14` for this environment and installs it into `.tethermark/python-worker` without modifying system packages.
+
+Preview the exact commands:
+
+```bash
+npm run scan -- setup-workers --dry-run
+```
+
+After review, create the environment and install the hash-locked packages:
+
+```bash
+npm run scan -- setup-workers --yes
+npm run scan -- worker-doctor
+```
+
+The setup consumes [`workers/python/requirements-bootstrap.lock`](../workers/python/requirements-bootstrap.lock), [`workers/python/requirements.lock`](../workers/python/requirements.lock), and the isolated [`workers/python/requirements-garak-profile.lock`](../workers/python/requirements-garak-profile.lock) and [`workers/python/requirements-pyrit-profile.lock`](../workers/python/requirements-pyrit-profile.lock) with pip hash enforcement. It installs the local worker package without dependency resolution or build isolation, records all runtime-lock digests and the base installed-package inventory, and runs an import-boundary self-check. Inspect is executable through the bounded packs in [`inspect-adapter.md`](inspect-adapter.md), Garak through [`garak-adapter.md`](garak-adapter.md), and PyRIT through [`pyrit-adapter.md`](pyrit-adapter.md).
 
 ## External Tool Setup
 

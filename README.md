@@ -215,9 +215,9 @@ npm run production:runtime-readiness
 npm run production:harness-readiness
 ```
 
-`production:runtime-readiness` requires both a launchable Local Runtime Sandbox backend and successful execution of an isolated runtime fixture. The Docker fixture uses a digest-pinned image, default-deny networking, a read-only source mount, bounded writable scratch, non-root execution, dropped capabilities, resource limits, and verified cleanup. Evidence is written under `.artifacts/runtime-readiness/`. Static audits are still valid when runtime readiness is blocked; passing this readiness fixture does not by itself mean arbitrary audit targets can execute until the runtime provider path is complete.
+`production:runtime-readiness` requires both a launchable Local Runtime Sandbox backend and successful execution of an isolated runtime fixture. The Docker fixture uses a digest-pinned image, default-deny networking, a read-only source mount, bounded writable scratch, non-root execution, dropped capabilities, resource limits, and verified cleanup. Evidence is written under `.artifacts/runtime-readiness/`. Static audits remain available when runtime readiness is blocked. Runtime audits now stage the source through a read-only mount into a disposable workspace volume and execute exact command arrays in the selected container backend without host fallback.
 
-When real operator-started runtime validation is implemented, its model-backed planning, supervision, and remediation also default to local Codex with ChatGPT sign-in. Target commands must still execute only inside the selected isolated sandbox. Phase 8 must separately prove that the Codex model subprocess cannot become a host-execution fallback; the provider's `read-only` setting alone is not runtime-isolation evidence. API-key routing is an explicit secondary override, not the Community Edition default.
+Operator-started runtime validation defaults its model-backed planning, supervision, and remediation to local Codex with ChatGPT sign-in. The Codex subprocess runs inference-only from an empty ephemeral directory with command and interactive tool features disabled and a credential-scrubbed environment; its `read-only` flag is defense in depth, not the runtime-isolation boundary. Target commands execute only in the selected container sandbox. API-key routing is an explicit, separately confirmed secondary override.
 
 ### 3. Run a Local Static Audit
 
@@ -448,7 +448,13 @@ The optional publisher module is reserved for AI Security Base-style operation, 
 - `agentic-static`: static audit with explicit AI and agentic controls
 - `deep-static`: deeper multi-lane static audit
 - `runtime-validated`: bounded AI/agent runtime validation for isolated repo or local-path targets
-- `premium-comprehensive`: most expansive package, with stricter review posture
+- `comprehensive-local`: most expansive local package, with stricter review posture
+
+## System Policies
+
+Community Edition initializes four versioned safe policies and manages them under **System -> Policies**. Policy versions are checksummed and immutable after publication; default, project, target, and audit-package bindings resolve before an async audit is queued. Every successful run persists and exports its exact `resolved-system-policy` snapshot.
+
+When `HARNESS_API_AUTH_MODE=api_key`, system-policy administration requires `HARNESS_API_KEY`. With authentication disabled, the UI displays a trusted-local-deployment warning. The admin API is rooted at `/system/policies`; catalog metadata is available from `/system/controls` and `/system/audit-packages`.
 
 ## Persistence and Artifacts
 

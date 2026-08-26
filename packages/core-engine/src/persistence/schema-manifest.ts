@@ -163,6 +163,41 @@ export const SELF_LEARNING_TABLE_DEFINITIONS: PersistenceTableDefinition[] = [
   }
 ];
 
+export const SYSTEM_POLICY_TABLE_DEFINITIONS: PersistenceTableDefinition[] = [
+  {
+    name: "system_policies",
+    description: "Workspace-scoped system-policy identities and lifecycle pointers.",
+    primary_key: ["id"],
+    fields: [field("id", "text"), field("workspace_id", "text"), field("name", "text"), field("description", "text"), field("status", "text"), field("scope", "text"), field("current_version_id", "text"), field("active_version_id", "text", true), field("is_default", "boolean"), field("created_by", "text"), field("created_at", "timestamp"), field("updated_by", "text"), field("updated_at", "timestamp")]
+  },
+  {
+    name: "system_policy_versions",
+    description: "Immutable, checksummed system-policy definitions and publication state.",
+    primary_key: ["id"],
+    fields: [field("id", "text"), field("policy_id", "text"), field("workspace_id", "text"), field("version", "integer"), field("state", "text"), field("schema_version", "text"), field("definition_json", "json"), field("checksum", "text"), field("created_by", "text"), field("created_reason", "text"), field("created_at", "timestamp"), field("published_at", "timestamp", true)]
+  },
+  {
+    name: "system_policy_bindings",
+    description: "Default, project, target, and audit-package policy bindings used by deterministic resolution.",
+    primary_key: ["id"],
+    fields: [field("id", "text"), field("workspace_id", "text"), field("project_id", "text", true), field("target_ref", "text", true), field("audit_package", "text", true), field("binding_type", "text"), field("policy_id", "text"), field("policy_version_id", "text"), field("priority", "integer"), field("active", "boolean"), field("created_by", "text"), field("created_at", "timestamp"), field("updated_at", "timestamp")]
+  },
+  {
+    name: "policy_resolution_snapshots",
+    description: "Immutable per-run snapshots of the fully resolved system policy.",
+    primary_key: ["run_id"],
+    fields: [field("run_id", "text"), field("workspace_id", "text"), field("project_id", "text"), field("target_ref", "text", true), field("target_class", "text", true), field("policy_id", "text"), field("policy_version_id", "text"), field("policy_version", "integer"), field("policy_checksum", "text"), field("control_catalog_version", "text"), field("audit_package", "text"), field("applicable_required_control_ids", "json"), field("required_evidence_provider_ids", "json"), field("definition_json", "json"), field("resolution_layers", "json"), field("warnings", "json"), field("resolved_at", "timestamp"), field("checksum", "text")]
+  },
+  {
+    name: "policy_change_events",
+    description: "Append-only policy lifecycle and administrative audit events.",
+    primary_key: ["id"],
+    fields: [field("id", "text"), field("workspace_id", "text"), field("policy_id", "text"), field("policy_version_id", "text", true), field("event_type", "text"), field("actor_id", "text"), field("reason", "text"), field("details_json", "json"), field("created_at", "timestamp")]
+  }
+];
+
+export const PERSISTENCE_TABLE_DEFINITIONS: PersistenceTableDefinition[] = [...SELF_LEARNING_TABLE_DEFINITIONS, ...SYSTEM_POLICY_TABLE_DEFINITIONS];
+
 function postgresColumnType(type: PersistenceFieldDefinition["type"]): string {
   switch (type) {
     case "integer":
@@ -191,5 +226,9 @@ export function buildPostgresCreateTableStatement(definition: PersistenceTableDe
 }
 
 export const SELF_LEARNING_POSTGRES_DDL = SELF_LEARNING_TABLE_DEFINITIONS
+  .map(buildPostgresCreateTableStatement)
+  .join("\n\n");
+
+export const PERSISTENCE_POSTGRES_DDL = PERSISTENCE_TABLE_DEFINITIONS
   .map(buildPostgresCreateTableStatement)
   .join("\n\n");

@@ -1,0 +1,12 @@
+# Direct dependencies for the managed Tethermark Python worker environment.
+# Compile universally for Python >=3.11 <3.14 with hashes; do not edit the
+# generated requirements.lock by hand.
+
+inspect-ai==0.3.260
+
+# Environment bootstrap packages are direct dependencies because setup-workers
+# must also support portable Python distributions without the stdlib venv module.
+pip==26.2.1
+setuptools==84.0.0
+virtualenv==21.7.4
+wheel==0.48.0

@@ -4,6 +4,18 @@ import type { AgentRuntime } from "../../../agent-runtime/src/index.js";
 import { stageCollectEvidence } from "./stage-collect-evidence.js";
 import { stageRunLanes } from "./stage-run-lanes.js";
 import { createId } from "../utils.js";
+import { getFixedCalibrationEvidenceProviderIds } from "../evidence-selection-policy.js";
+
+export function resolveAssessmentEvidenceProviderIds(args: {
+  request: AuditRequest;
+  runPlanProviderIds: string[];
+  requestedOverrideIds?: string[];
+}): string[] {
+  const fixedCalibrationIds = getFixedCalibrationEvidenceProviderIds(args.request);
+  if (fixedCalibrationIds) return fixedCalibrationIds;
+  if (args.requestedOverrideIds?.length) return [...new Set(args.requestedOverrideIds)];
+  return [...new Set(args.runPlanProviderIds)];
+}
 
 function buildSandboxEvidenceRecords(args: {
   runId: string;
@@ -110,6 +122,7 @@ export async function stageAssessControls(args: {
   analysisSummaryForEvidence?: unknown;
   evidenceOverrideIds?: string[];
   auditPackageId?: any;
+  signal?: AbortSignal;
 }): Promise<{ runPlan: any; evidenceExecutions: any[]; evidenceRecords: EvidenceRecord[]; laneResults: any[]; laneSpecialistOutputs: LaneSpecialistRunArtifact[]; findings: Finding[]; controlResults: ControlResult[]; observations: AuditObservation[]; scoreSummary: ScoreSummary; dimensionScores: any[]; staticScore: number; }> {
   const runPlan = assembleRunPlan({
     runId: args.runId,
@@ -118,12 +131,17 @@ export async function stageAssessControls(args: {
     plannerArtifact: args.plannerArtifact,
     evalSelection: args.evalSelectionArtifact
   });
+  const assessmentProviderIds = resolveAssessmentEvidenceProviderIds({
+    request: args.request,
+    runPlanProviderIds: [...runPlan.baseline_tools, ...runPlan.runtime_tools],
+    requestedOverrideIds: args.evidenceOverrideIds
+  });
 
   const lanePlans = args.lanePlans ?? [{
     lane_name: "repo_posture",
     controls_in_scope: runPlan.applicable_control_ids,
     evidence_requirements: ["Assess all controls in a single compatibility lane."],
-    allowed_tools: args.evidenceOverrideIds?.length ? args.evidenceOverrideIds : [...runPlan.baseline_tools, ...runPlan.runtime_tools],
+    allowed_tools: assessmentProviderIds,
     rationale: ["Compatibility wrapper lane around legacy assess_controls stage."],
     token_budget: 40000,
     rerun_budget: 1
@@ -137,8 +155,9 @@ export async function stageAssessControls(args: {
     repoContext: (args.analysisSummaryForEvidence as any)?.repoContext ?? { summary: [], capability_signals: [], documents: [] },
     lanePlans: lanePlans.map((plan) => ({
       ...plan,
-      allowed_tools: args.evidenceOverrideIds?.length ? args.evidenceOverrideIds : plan.allowed_tools
-    }))
+      allowed_tools: getFixedCalibrationEvidenceProviderIds(args.request) ? assessmentProviderIds : args.evidenceOverrideIds?.length ? assessmentProviderIds : plan.allowed_tools
+    })),
+    signal: args.signal
   });
   const sandboxEvidenceRecords = buildSandboxEvidenceRecords({
     runId: args.runId,

@@ -1,0 +1,56 @@
+name: Python Worker Environment
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/python-worker-environment.yml"
+      - "apps/cli/src/doctor.ts"
+      - "apps/cli/src/index.ts"
+      - "apps/cli/src/setup-workers.ts"
+      - "packages/core-engine/src/python-worker.ts"
+      - "packages/core-engine/src/python-worker-environment.ts"
+      - "fixtures/runtime-targets/ai-security-boundaries/**"
+      - "workers/python/**"
+
+jobs:
+  managed-worker-environment:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025, macos-15]
+        python: ["3.11", "3.13"]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+          cache: npm
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: |
+            workers/python/requirements-bootstrap.lock
+            workers/python/requirements-garak-profile.lock
+            workers/python/requirements-pyrit-profile.lock
+            workers/python/requirements.lock
+      - name: Install Node dependencies
+        run: npm ci
+      - name: Build managed Python worker environment
+        run: npm run scan -- setup-workers --yes --python python
+      - name: Verify worker doctor
+        run: npm run scan -- worker-doctor --json
+      - name: Run executable Inspect, Garak, and PyRIT adapter tests
+        run: npm run scan -- worker-tests
+      - name: Run TypeScript to Python worker smoke
+        run: npm run scan -- worker-smoke
