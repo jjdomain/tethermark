@@ -608,6 +608,9 @@ export interface PersistedAsyncJobRecord {
   completion_webhook_status: "pending" | "delivered" | "failed" | null;
   completion_webhook_last_attempt_at: string | null;
   completion_webhook_error: string | null;
+  terminal_followup_status?: "pending" | "completed" | "failed" | null;
+  terminal_followup_last_attempt_at?: string | null;
+  terminal_followup_error?: string | null;
   error: string | null;
   created_at: string;
   updated_at: string;

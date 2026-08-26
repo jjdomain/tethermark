@@ -30,4 +30,12 @@ An audit result can become durable immediately before its async job record is up
 4. Concurrent recovery requests in one process share the same recovery pass, preventing duplicate terminal hooks.
 5. If no terminal run exists, the existing queued/restart behavior remains in effect.
 
-The persistence stress suite exercises simultaneous API queue requests, concurrent worker lifecycle transitions, and independent Node processes writing the same database. First-request API concurrency also verifies that built-in system-policy initialization is coalesced and idempotent. The remaining Phase 10 recovery work covers per-stage crash injection, automated backup/restore, and upgrade fixtures.
+Terminal completion follow-up uses a durable status on the async job. The terminal job/attempt are first saved with follow-up `pending`; the completion webhook and internal terminal hook then run; finally the job is saved as follow-up `completed`. Startup retries `pending` or `failed` follow-up work. A completion webhook already marked `delivered` is not sent again. If interruption occurs after an internal hook returns but before its completed marker is durable, the hook can run again and therefore must remain idempotent.
+
+## Crash-stage matrix
+
+The deterministic recovery suite interrupts SQLite with a real child-process exit after lock acquisition, after temporary-file write, and after replacement. The next writer reclaims the stale lock under the normal stale threshold, removes orphaned database temporary files while holding the recovered lock, and preserves either the last valid database or the fully replaced database according to the durable boundary reached.
+
+Async lifecycle injection covers the durable boundaries after queued persistence, starting persistence, engine start, running persistence, terminal persistence, completion-webhook handling, internal terminal hook handling, and terminal-follow-up persistence. Recovery retains the same job, attempt, and run identifiers. The engine-start uncertainty window is intentionally at-least-once: after a process dies, the same run identifier can be started again, while no additional async attempt or terminal state is created.
+
+The persistence stress suite exercises simultaneous API queue requests, concurrent worker lifecycle transitions, and independent Node processes writing the same database. First-request API concurrency also verifies that built-in system-policy initialization is coalesced and idempotent. The remaining Phase 10 persistence work covers automated backup/restore and upgrade fixtures.

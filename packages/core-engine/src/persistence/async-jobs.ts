@@ -142,6 +142,16 @@ function asyncMonitorMaxPolls(): number {
   return Number.isFinite(configured) && configured > 0 ? Math.floor(configured) : 14_400;
 }
 
+export type AsyncJobLifecycleStageForTests =
+  | "after_queued_persist"
+  | "after_starting_persist"
+  | "after_engine_start"
+  | "after_running_persist"
+  | "after_terminal_persist"
+  | "after_completion_webhook"
+  | "after_terminal_hook"
+  | "after_terminal_followup_persist";
+
 export class PersistedAsyncJobManager {
   private recoveryPromise: Promise<void> | null = null;
 
@@ -154,8 +164,16 @@ export class PersistedAsyncJobManager {
         envelope: RunEnvelope;
         rootDirOrOptions?: string | PersistenceReadOptions;
       }) => Promise<void> | void;
+      onLifecycleStageForTests?: (stage: AsyncJobLifecycleStageForTests, details: {
+        job: PersistedAsyncJobRecord;
+        attempt: PersistedAsyncJobAttemptRecord;
+      }) => Promise<void> | void;
     }
   ) {}
+
+  private async observeLifecycleStage(stage: AsyncJobLifecycleStageForTests, job: PersistedAsyncJobRecord, attempt: PersistedAsyncJobAttemptRecord): Promise<void> {
+    await this.hooks?.onLifecycleStageForTests?.(stage, { job, attempt });
+  }
 
   private async deliverWebhook(rootDirOrOptions: string | PersistenceReadOptions | undefined, job: PersistedAsyncJobRecord, attempts: PersistedAsyncJobAttemptRecord[]): Promise<PersistedAsyncJobRecord> {
     if (!job.completion_webhook_url) return job;
@@ -197,6 +215,49 @@ export class PersistedAsyncJobManager {
     return nextJob;
   }
 
+  private async completeTerminalFollowup(args: {
+    location: ReturnType<typeof resolveLocation>;
+    job: PersistedAsyncJobRecord;
+    attempt: PersistedAsyncJobAttemptRecord;
+    attempts: PersistedAsyncJobAttemptRecord[];
+    envelope: RunEnvelope;
+  }): Promise<PersistedAsyncJobRecord> {
+    const deliveredJob = args.job.completion_webhook_url && args.job.completion_webhook_status !== "delivered"
+      ? await this.deliverWebhook(args.location, args.job, args.attempts)
+      : args.job;
+    await this.observeLifecycleStage("after_completion_webhook", deliveredJob, args.attempt);
+    const attemptedAt = nowIso();
+    try {
+      await this.hooks?.onTerminalJob?.({
+        job: deliveredJob,
+        attempt: args.attempt,
+        envelope: args.envelope,
+        rootDirOrOptions: args.location
+      });
+      await this.observeLifecycleStage("after_terminal_hook", deliveredJob, args.attempt);
+    } catch (error) {
+      const failedJob: PersistedAsyncJobRecord = {
+        ...deliveredJob,
+        terminal_followup_status: "failed",
+        terminal_followup_last_attempt_at: attemptedAt,
+        terminal_followup_error: error instanceof Error ? error.message : String(error),
+        updated_at: attemptedAt
+      };
+      await writeRecords({ rootDir: args.location.rootDir, dbMode: args.location.mode, job: failedJob });
+      return failedJob;
+    }
+    const completedJob: PersistedAsyncJobRecord = {
+      ...deliveredJob,
+      terminal_followup_status: "completed",
+      terminal_followup_last_attempt_at: attemptedAt,
+      terminal_followup_error: null,
+      updated_at: attemptedAt
+    };
+    await writeRecords({ rootDir: args.location.rootDir, dbMode: args.location.mode, job: completedJob });
+    await this.observeLifecycleStage("after_terminal_followup_persist", completedJob, args.attempt);
+    return completedJob;
+  }
+
   private monitorAttempt(rootDirOrOptions: string | PersistenceReadOptions | undefined, jobId: string, runId: string): void {
     void (async () => {
       const found = await findPersistedAsyncJob(jobId, rootDirOrOptions);
@@ -219,7 +280,10 @@ export class PersistedAsyncJobManager {
             status: toAttemptStatus(envelope.status),
             error: envelope.error ?? null,
             updated_at: completedAt,
-            completed_at: completedAt
+            completed_at: completedAt,
+            terminal_followup_status: "pending",
+            terminal_followup_last_attempt_at: null,
+            terminal_followup_error: null
           };
           await writeRecords({
             rootDir: found.location.rootDir,
@@ -227,12 +291,13 @@ export class PersistedAsyncJobManager {
             job: nextJob,
             attempt: nextAttempt
           });
-          await this.deliverWebhook(found.location, nextJob, attempts.map((item) => item.run_id === runId ? nextAttempt : item));
-          await this.hooks?.onTerminalJob?.({
+          await this.observeLifecycleStage("after_terminal_persist", nextJob, nextAttempt);
+          await this.completeTerminalFollowup({
+            location: found.location,
             job: nextJob,
             attempt: nextAttempt,
-            envelope,
-            rootDirOrOptions: found.location
+            attempts: attempts.map((item) => item.run_id === runId ? nextAttempt : item),
+            envelope
           });
           return;
         }
@@ -266,6 +331,9 @@ export class PersistedAsyncJobManager {
       completion_webhook_status: args.completionWebhookUrl ? "pending" : null,
       completion_webhook_last_attempt_at: null,
       completion_webhook_error: null,
+      terminal_followup_status: null,
+      terminal_followup_last_attempt_at: null,
+      terminal_followup_error: null,
       error: null,
       created_at: createdAt,
       updated_at: createdAt,
@@ -286,6 +354,7 @@ export class PersistedAsyncJobManager {
       retry_of_run_id: null
     };
     await writeRecords({ rootDir: location.rootDir, dbMode: location.mode, job, attempt });
+    await this.observeLifecycleStage("after_queued_persist", job, attempt);
     if (args.startImmediately ?? true) {
       const started = await this.startJob(jobId, location);
       return started ?? { job, attempts: [attempt] };
@@ -329,8 +398,10 @@ export class PersistedAsyncJobManager {
       error: null
     };
     await writeRecords({ rootDir: found.location.rootDir, dbMode: found.location.mode, job: startingJob, attempt: startingAttempt });
+    await this.observeLifecycleStage("after_starting_persist", startingJob, startingAttempt);
     this.engine.hydrateRun(toQueuedEnvelope(startingJob, startingAttempt));
     await this.engine.startRun(startingAttempt.run_id);
+    await this.observeLifecycleStage("after_engine_start", startingJob, startingAttempt);
     const runningAt = nowIso();
     const runningJob: PersistedAsyncJobRecord = {
       ...startingJob,
@@ -344,6 +415,7 @@ export class PersistedAsyncJobManager {
       started_at: startingAttempt.started_at ?? runningAt
     };
     await writeRecords({ rootDir: found.location.rootDir, dbMode: found.location.mode, job: runningJob, attempt: runningAttempt });
+    await this.observeLifecycleStage("after_running_persist", runningJob, runningAttempt);
     this.monitorAttempt(found.location, jobId, runningAttempt.run_id);
     return { job: runningJob, attempts: attempts.map((item) => item.id === runningAttempt.id ? runningAttempt : item) };
   }
@@ -371,8 +443,14 @@ export class PersistedAsyncJobManager {
       return { job: found.job, attempts };
     }
     const canceledAt = nowIso();
-    this.engine.hydrateRun(toQueuedEnvelope(found.job, currentAttempt));
-    this.engine.cancelRun(currentAttempt.run_id);
+    const queuedEnvelope = toQueuedEnvelope(found.job, currentAttempt);
+    this.engine.hydrateRun(queuedEnvelope);
+    const canceledEnvelope = this.engine.cancelRun(currentAttempt.run_id) ?? {
+      ...queuedEnvelope,
+      status: "canceled" as const,
+      updated_at: canceledAt,
+      error: "canceled_by_user"
+    };
     const nextAttempt: PersistedAsyncJobAttemptRecord = {
       ...currentAttempt,
       status: "canceled",
@@ -385,11 +463,22 @@ export class PersistedAsyncJobManager {
       updated_at: canceledAt,
       completed_at: canceledAt,
       canceled_at: canceledAt,
-      error: "canceled_by_user"
+      error: "canceled_by_user",
+      terminal_followup_status: "pending",
+      terminal_followup_last_attempt_at: null,
+      terminal_followup_error: null
     };
     await writeRecords({ rootDir: found.location.rootDir, dbMode: found.location.mode, job: nextJob, attempt: nextAttempt });
-    await this.deliverWebhook(found.location, nextJob, attempts.map((item) => item.id === nextAttempt.id ? nextAttempt : item));
-    return { job: nextJob, attempts: attempts.map((item) => item.id === nextAttempt.id ? nextAttempt : item) };
+    await this.observeLifecycleStage("after_terminal_persist", nextJob, nextAttempt);
+    const nextAttempts = attempts.map((item) => item.id === nextAttempt.id ? nextAttempt : item);
+    const completedJob = await this.completeTerminalFollowup({
+      location: found.location,
+      job: nextJob,
+      attempt: nextAttempt,
+      attempts: nextAttempts,
+      envelope: canceledEnvelope
+    });
+    return { job: completedJob, attempts: nextAttempts };
   }
 
   async retryJob(jobId: string, rootDirOrOptions?: string | PersistenceReadOptions): Promise<PersistedAsyncJobDetails | null> {
@@ -422,6 +511,9 @@ export class PersistedAsyncJobManager {
       completion_webhook_status: found.job.completion_webhook_url ? "pending" : null,
       completion_webhook_last_attempt_at: null,
       completion_webhook_error: null,
+      terminal_followup_status: null,
+      terminal_followup_last_attempt_at: null,
+      terminal_followup_error: null,
       error: null,
       updated_at: createdAt,
       completed_at: null,
@@ -442,6 +534,30 @@ export class PersistedAsyncJobManager {
     for (const dbMode of ["local"] as const) {
       const location = resolveLocation({ dbMode });
       const jobs = await listPersistedAsyncJobs(location);
+      for (const job of jobs.filter((item) => ["succeeded", "failed", "canceled"].includes(item.status)
+        && (item.terminal_followup_status === "pending" || item.terminal_followup_status === "failed"))) {
+        const attempts = await readPersistedAsyncJobAttempts(job.job_id, location);
+        const currentAttempt = attempts.find((item) => item.run_id === job.current_run_id) ?? attempts.at(-1) ?? null;
+        if (!currentAttempt) continue;
+        const persistedRun = await getPersistedRun(currentAttempt.run_id, location);
+        await this.completeTerminalFollowup({
+          location,
+          job,
+          attempt: currentAttempt,
+          attempts,
+          envelope: {
+            run_id: currentAttempt.run_id,
+            status: job.status as "succeeded" | "failed" | "canceled",
+            request: job.request_json,
+            created_at: currentAttempt.created_at,
+            updated_at: job.completed_at ?? job.updated_at,
+            error: job.error ?? undefined,
+            result: this.engine.getRun(currentAttempt.run_id)?.result,
+            retry_of_run_id: currentAttempt.retry_of_run_id ?? undefined,
+            ...(persistedRun?.completed_at ? { updated_at: persistedRun.completed_at } : {})
+          }
+        });
+      }
       for (const job of jobs.filter((item) => item.status === "queued" || item.status === "starting" || item.status === "running")) {
         const attempts = await readPersistedAsyncJobAttempts(job.job_id, location);
         const currentAttempt = attempts.find((item) => item.run_id === job.current_run_id) ?? attempts.at(-1) ?? null;
@@ -464,13 +580,18 @@ export class PersistedAsyncJobManager {
             updated_at: completedAt,
             completed_at: completedAt,
             canceled_at: persistedTerminalStatus === "canceled" ? completedAt : null,
-            error: reconciledAttempt.error
+            error: reconciledAttempt.error,
+            terminal_followup_status: "pending",
+            terminal_followup_last_attempt_at: null,
+            terminal_followup_error: null
           };
           await writeRecords({ rootDir: location.rootDir, dbMode: location.mode, job: reconciledJob, attempt: reconciledAttempt });
-          const deliveredJob = await this.deliverWebhook(location, reconciledJob, attempts.map((item) => item.id === reconciledAttempt.id ? reconciledAttempt : item));
-          await this.hooks?.onTerminalJob?.({
-            job: deliveredJob,
+          await this.observeLifecycleStage("after_terminal_persist", reconciledJob, reconciledAttempt);
+          await this.completeTerminalFollowup({
+            location,
+            job: reconciledJob,
             attempt: reconciledAttempt,
+            attempts: attempts.map((item) => item.id === reconciledAttempt.id ? reconciledAttempt : item),
             envelope: {
               run_id: currentAttempt.run_id,
               status: persistedTerminalStatus,
@@ -479,8 +600,7 @@ export class PersistedAsyncJobManager {
               updated_at: completedAt,
               error: reconciledAttempt.error ?? undefined,
               retry_of_run_id: currentAttempt.retry_of_run_id ?? undefined
-            },
-            rootDirOrOptions: location
+            }
           });
           continue;
         }

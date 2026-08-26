@@ -919,6 +919,66 @@ async function testConcurrentSqliteProcessWritesAreMerged(): Promise<void> {
   });
 }
 
+async function testSqliteCrashStageRecovery(): Promise<void> {
+  await withTempDir("tethermark-sqlite-crash-stages-", async (rootDir) => {
+    const workerPath = path.resolve(process.cwd(), "scripts", "sqlite-crash-worker.mjs");
+    for (const stage of ["after_lock_acquired", "after_temp_write", "after_replace"] as const) {
+      const stageRoot = path.join(rootDir, stage);
+      await fs.mkdir(stageRoot, { recursive: true });
+      const seed = await openSqliteDatabase(stageRoot);
+      try {
+        ensureSqliteSchema(seed);
+        upsertSqliteRecord({ db: seed, tableName: "crash_test", recordKey: "seed", payload: { id: "seed" } });
+        await saveSqliteDatabase(stageRoot, seed);
+      } finally {
+        seed.close();
+      }
+      const databasePath = path.join(stageRoot, "harness.sqlite");
+      const beforeCrash = await fs.readFile(databasePath);
+      const exitCode = await new Promise<number>((resolve, reject) => {
+        const child = spawn(process.execPath, [workerPath, stageRoot, stage], {
+          cwd: process.cwd(),
+          env: { ...process.env },
+          shell: false,
+          windowsHide: true,
+          stdio: ["ignore", "ignore", "pipe"]
+        });
+        const stderr: Buffer[] = [];
+        child.stderr.on("data", (chunk) => stderr.push(Buffer.from(chunk)));
+        child.once("error", reject);
+        child.once("close", (code) => code == null
+          ? reject(new Error(`sqlite crash worker ended without an exit code: ${Buffer.concat(stderr).toString("utf8")}`))
+          : resolve(code));
+      });
+      assert.notEqual(exitCode, 0, `Crash worker did not stop at ${stage}`);
+      const crashedFiles = await fs.readdir(stageRoot);
+      assert.equal(crashedFiles.includes("harness.sqlite.lock"), true);
+      assert.equal(crashedFiles.some((item) => item.endsWith(".tmp")), stage === "after_temp_write");
+      if (stage !== "after_replace") assert.deepEqual(await fs.readFile(databasePath), beforeCrash);
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const recovery = await openSqliteDatabase(stageRoot);
+      try {
+        ensureSqliteSchema(recovery);
+        upsertSqliteRecord({ db: recovery, tableName: "crash_test", recordKey: "recovery", payload: { id: "recovery" } });
+        await withEnv({ HARNESS_SQLITE_LOCK_STALE_MS: "1" }, async () => saveSqliteDatabase(stageRoot, recovery));
+      } finally {
+        recovery.close();
+      }
+
+      const verification = await openSqliteDatabase(stageRoot);
+      try {
+        ensureSqliteSchema(verification);
+        const ids = readSqliteTable<{ id: string }>(verification, "crash_test").map((item) => item.id).sort();
+        assert.deepEqual(ids, stage === "after_replace" ? ["crash", "recovery", "seed"] : ["recovery", "seed"]);
+      } finally {
+        verification.close();
+      }
+      assert.equal((await fs.readdir(stageRoot)).some((item) => item.includes("harness.sqlite.lock") || item.endsWith(".tmp")), false);
+    }
+  });
+}
+
 async function testSqliteFileLockBackoffAndRecovery(): Promise<void> {
   await withTempDir("tethermark-sqlite-lock-", async (rootDir) => {
     const databasePath = path.join(rootDir, "harness.sqlite");
@@ -1130,6 +1190,219 @@ async function testAsyncRecoveryReconcilesDurableTerminalRun(): Promise<void> {
   });
 }
 
+async function testAsyncLifecycleCrashStageRecovery(): Promise<void> {
+  await withTempDir("tethermark-async-crash-stages-", async (rootDir) => {
+    const requestFor = (projectId: string) => ({
+      local_path: rootDir,
+      run_mode: "static" as const,
+      audit_package: "deep-static" as const,
+      llm_provider: "mock" as const,
+      llm_model: "mock-agent-runtime",
+      workspace_id: "crash-workspace",
+      project_id: projectId
+    });
+
+    for (const stage of ["after_queued_persist", "after_starting_persist", "after_engine_start", "after_running_persist"] as const) {
+      const stageRoot = path.join(rootDir, stage);
+      await fs.mkdir(stageRoot, { recursive: true });
+      const preCrashRuns = new Map<string, any>();
+      let preCrashStarts = 0;
+      const preCrashEngine = {
+        hydrateRun: (envelope: any) => preCrashRuns.set(envelope.run_id, envelope),
+        startRun: async (runId: string) => {
+          preCrashStarts += 1;
+          const envelope = preCrashRuns.get(runId);
+          preCrashRuns.set(runId, { ...envelope, status: "running", updated_at: new Date().toISOString() });
+        },
+        getRun: (runId: string) => preCrashRuns.get(runId) ?? null,
+        cancelRun: () => false
+      } as any;
+      const crashManager = new PersistedAsyncJobManager(preCrashEngine, {
+        onLifecycleStageForTests: (observedStage) => {
+          if (observedStage === stage) throw new Error(`simulated_async_crash:${stage}`);
+        }
+      });
+
+      await withEnv({ HARNESS_LOCAL_DB_ROOT: stageRoot }, async () => {
+        if (stage === "after_queued_persist") {
+          await assert.rejects(
+            () => crashManager.createJob({ request: requestFor(stage) }),
+            new RegExp(`simulated_async_crash:${stage}`)
+          );
+        } else {
+          const seedManager = new PersistedAsyncJobManager(preCrashEngine);
+          const seeded = await seedManager.createJob({ request: requestFor(stage), startImmediately: false });
+          await assert.rejects(
+            () => crashManager.startJob(seeded.job.job_id, stageRoot),
+            new RegExp(`simulated_async_crash:${stage}`)
+          );
+        }
+
+        const interruptedJobs = await crashManager.listJobs(stageRoot);
+        assert.equal(interruptedJobs.length, 1);
+        const interruptedJob = interruptedJobs[0]!;
+        const interruptedAttempts = await readPersistedAsyncJobAttempts(interruptedJob.job_id, stageRoot);
+        assert.equal(interruptedAttempts.length, 1);
+        assert.equal(interruptedJob.status, stage === "after_queued_persist" ? "queued" : stage === "after_running_persist" ? "running" : "starting");
+        assert.equal(preCrashStarts, stage === "after_engine_start" || stage === "after_running_persist" ? 1 : 0);
+
+        const recoveredRuns = new Map<string, any>();
+        let recoveryStarts = 0;
+        let terminalHooks = 0;
+        const recoveryManager = new PersistedAsyncJobManager({
+          hydrateRun: (envelope: any) => recoveredRuns.set(envelope.run_id, envelope),
+          startRun: async (runId: string) => {
+            recoveryStarts += 1;
+            const envelope = recoveredRuns.get(runId);
+            recoveredRuns.set(runId, { ...envelope, status: "succeeded", updated_at: new Date().toISOString(), result: { run_id: runId } });
+          },
+          getRun: (runId: string) => recoveredRuns.get(runId) ?? null,
+          cancelRun: () => false
+        } as any, {
+          onTerminalJob: () => { terminalHooks += 1; }
+        });
+        await recoveryManager.recoverJobs();
+        let recoveredJob = await readPersistedAsyncJob(interruptedJob.job_id, stageRoot);
+        for (let attempt = 0; attempt < 100 && recoveredJob?.terminal_followup_status !== "completed"; attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          recoveredJob = await readPersistedAsyncJob(interruptedJob.job_id, stageRoot);
+        }
+        const recoveredAttempts = await readPersistedAsyncJobAttempts(interruptedJob.job_id, stageRoot);
+        assert.equal(recoveryStarts, 1);
+        assert.equal(terminalHooks, 1);
+        assert.equal(recoveredJob?.status, "succeeded");
+        assert.equal(recoveredJob?.terminal_followup_status, "completed");
+        assert.equal(recoveredAttempts.length, 1);
+        assert.equal(recoveredAttempts[0]?.run_id, interruptedAttempts[0]?.run_id);
+        assert.equal(recoveredAttempts[0]?.status, "succeeded");
+      });
+    }
+  });
+}
+
+async function testAsyncTerminalFollowupCrashRecovery(): Promise<void> {
+  await withTempDir("tethermark-async-terminal-followup-crash-", async (rootDir) => {
+    const webhookCounts = new Map<string, number>();
+    const webhookServer = http.createServer(async (req, res) => {
+      for await (const _chunk of req) { /* consume request */ }
+      const key = String(req.url ?? "/");
+      webhookCounts.set(key, (webhookCounts.get(key) ?? 0) + 1);
+      res.writeHead(204);
+      res.end();
+    });
+    await new Promise<void>((resolve, reject) => {
+      webhookServer.once("error", reject);
+      webhookServer.listen(0, "127.0.0.1", () => resolve());
+    });
+    const webhookPort = getListeningPort(webhookServer);
+
+    try {
+      for (const stage of ["after_terminal_persist", "after_completion_webhook", "after_terminal_hook", "after_terminal_followup_persist"] as const) {
+        const stageRoot = path.join(rootDir, stage);
+        await fs.mkdir(stageRoot, { recursive: true });
+        const webhookPath = `/${stage}`;
+        let terminalHookCalls = 0;
+        await withEnv({ HARNESS_LOCAL_DB_ROOT: stageRoot }, async () => {
+          const seedManager = new PersistedAsyncJobManager({
+            hydrateRun: () => undefined,
+            startRun: async () => undefined,
+            getRun: () => null,
+            cancelRun: () => false
+          } as any);
+          const seeded = await seedManager.createJob({
+            request: {
+              local_path: rootDir,
+              run_mode: "static",
+              audit_package: "deep-static",
+              llm_provider: "mock",
+              llm_model: "mock-agent-runtime",
+              workspace_id: "crash-workspace",
+              project_id: stage
+            },
+            startImmediately: false,
+            completionWebhookUrl: `http://127.0.0.1:${webhookPort}${webhookPath}`
+          });
+          const runId = seeded.attempts[0]!.run_id;
+          const timestamp = new Date().toISOString();
+          const db = await openSqliteDatabase(stageRoot);
+          try {
+            ensureSqliteSchema(db);
+            upsertSqliteRecord({
+              db,
+              tableName: "runs",
+              recordKey: runId,
+              runId,
+              createdAt: timestamp,
+              targetId: `target-${stage}`,
+              payload: {
+                id: runId,
+                target_id: `target-${stage}`,
+                target_snapshot_id: `snapshot-${stage}`,
+                workspace_id: "crash-workspace",
+                project_id: stage,
+                requested_by: null,
+                policy_pack_id: null,
+                status: "succeeded",
+                run_mode: "static",
+                audit_package: "deep-static",
+                artifact_root: stageRoot,
+                started_at: timestamp,
+                completed_at: timestamp,
+                static_score: 90,
+                overall_score: 90,
+                rating: "strong",
+                created_at: timestamp
+              }
+            });
+            await saveSqliteDatabase(stageRoot, db);
+          } finally {
+            db.close();
+          }
+
+          const crashManager = new PersistedAsyncJobManager({
+            hydrateRun: () => undefined,
+            startRun: async () => undefined,
+            getRun: () => null,
+            cancelRun: () => false
+          } as any, {
+            onTerminalJob: () => { terminalHookCalls += 1; },
+            onLifecycleStageForTests: (observedStage) => {
+              if (observedStage === stage) throw new Error(`simulated_async_crash:${stage}`);
+            }
+          });
+          await crashManager.recoverJobs().catch((error) => {
+            assert.match(error instanceof Error ? error.message : String(error), new RegExp(`simulated_async_crash:${stage}`));
+          });
+
+          const interrupted = await readPersistedAsyncJob(seeded.job.job_id, stageRoot);
+          assert.equal(interrupted?.status, "succeeded");
+          assert.equal(interrupted?.terminal_followup_status,
+            stage === "after_terminal_followup_persist" ? "completed" : stage === "after_terminal_hook" ? "failed" : "pending");
+
+          const recoveryManager = new PersistedAsyncJobManager({
+            hydrateRun: () => undefined,
+            startRun: async () => undefined,
+            getRun: () => null,
+            cancelRun: () => false
+          } as any, {
+            onTerminalJob: () => { terminalHookCalls += 1; }
+          });
+          await recoveryManager.recoverJobs();
+          const recovered = await readPersistedAsyncJob(seeded.job.job_id, stageRoot);
+          const attempts = await readPersistedAsyncJobAttempts(seeded.job.job_id, stageRoot);
+          assert.equal(recovered?.terminal_followup_status, "completed");
+          assert.equal(recovered?.terminal_followup_error, null);
+          assert.equal(attempts.length, 1);
+          assert.equal(webhookCounts.get(webhookPath), 1);
+          assert.equal(terminalHookCalls, stage === "after_terminal_hook" ? 2 : 1);
+        });
+      }
+    } finally {
+      await new Promise<void>((resolve, reject) => webhookServer.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+}
+
 async function testConcurrentAsyncWorkerPersistenceStress(): Promise<void> {
   await withTempDir("tethermark-async-worker-stress-", async (rootDir) => {
     const runs = new Map<string, any>();
@@ -1166,12 +1439,13 @@ async function testConcurrentAsyncWorkerPersistenceStress(): Promise<void> {
       assert.equal(new Set(created.map((item) => item.job.job_id)).size, jobCount);
 
       let persistedJobs = await manager.listJobs(rootDir);
-      for (let attempt = 0; attempt < 100 && persistedJobs.some((item) => item.status !== "succeeded"); attempt += 1) {
+      for (let attempt = 0; attempt < 100 && persistedJobs.some((item) => item.status !== "succeeded" || item.terminal_followup_status !== "completed"); attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 20));
         persistedJobs = await manager.listJobs(rootDir);
       }
       assert.equal(persistedJobs.length, jobCount);
       assert.equal(persistedJobs.every((item) => item.status === "succeeded"), true);
+      assert.equal(persistedJobs.every((item) => item.terminal_followup_status === "completed"), true);
       assert.equal(startCalls, jobCount);
       const attempts = await Promise.all(persistedJobs.map((job) => readPersistedAsyncJobAttempts(job.job_id, rootDir)));
       assert.equal(attempts.every((items) => items.length === 1 && items[0]?.status === "succeeded"), true);
@@ -8256,9 +8530,12 @@ async function main(): Promise<void> {
     ["local persistence uses configured root", testLocalPersistenceUsesConfiguredRoot],
     ["concurrent sqlite writes are merged", testConcurrentSqliteWritesAreMerged],
     ["concurrent sqlite process writes are merged", testConcurrentSqliteProcessWritesAreMerged],
+    ["sqlite crash stage recovery", testSqliteCrashStageRecovery],
     ["sqlite corruption and failed saves fail closed", testSqliteCorruptionAndFailedSavesFailClosed],
     ["sqlite file lock backoff and recovery", testSqliteFileLockBackoffAndRecovery],
     ["async recovery reconciles durable terminal run", testAsyncRecoveryReconcilesDurableTerminalRun],
+    ["async lifecycle crash stage recovery", testAsyncLifecycleCrashStageRecovery],
+    ["async terminal followup crash recovery", testAsyncTerminalFollowupCrashRecovery],
     ["concurrent async worker persistence stress", testConcurrentAsyncWorkerPersistenceStress],
     ["concurrent async api persistence stress", testConcurrentAsyncApiPersistenceStress],
     ["psql credentials use process environment", testPsqlCredentialsUseEnvironment],

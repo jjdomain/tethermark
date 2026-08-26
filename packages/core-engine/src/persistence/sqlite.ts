@@ -15,6 +15,7 @@ let sqlJsPromise: Promise<any> | null = null;
 const sqliteSaveQueues = new Map<string, Promise<void>>();
 const sqliteOpenSnapshots = new WeakMap<object, Map<string, SqliteRecordRow>>();
 let sqliteSaveFailureForTests: "before_temp_write" | "before_replace" | null = null;
+let sqliteSaveStageObserverForTests: ((stage: "after_lock_acquired" | "after_temp_write" | "after_replace") => void) | null = null;
 
 export class SqlitePersistenceError extends Error {
   constructor(
@@ -28,6 +29,10 @@ export class SqlitePersistenceError extends Error {
 
 export function setSqliteSaveFailureForTests(stage: "before_temp_write" | "before_replace" | null): void {
   sqliteSaveFailureForTests = stage;
+}
+
+export function setSqliteSaveStageObserverForTests(observer: typeof sqliteSaveStageObserverForTests): void {
+  sqliteSaveStageObserverForTests = observer;
 }
 
 interface SqliteRecordRow {
@@ -411,6 +416,21 @@ async function releaseSqliteFileLock(lock: Awaited<ReturnType<typeof acquireSqli
   }
 }
 
+async function cleanupOrphanedSqliteTempFiles(dbPath: string): Promise<void> {
+  const directory = path.dirname(dbPath);
+  const prefix = `${path.basename(dbPath)}.`;
+  let entries: string[];
+  try {
+    entries = await fs.readdir(directory);
+  } catch (error) {
+    if (filesystemErrorCode(error) === "ENOENT") return;
+    throw error;
+  }
+  await Promise.all(entries
+    .filter((entry) => entry.startsWith(prefix) && entry.endsWith(".tmp"))
+    .map((entry) => fs.rm(path.join(directory, entry), { force: true })));
+}
+
 async function pathExists(filePath: string): Promise<boolean> {
   try {
     await fs.access(filePath);
@@ -584,6 +604,8 @@ export async function saveSqliteDatabase(rootDir: string, db: any, databaseMode:
   await enqueueSqliteSave(dbPath, async () => {
     const fileLock = await acquireSqliteFileLock(dbPath);
     try {
+      sqliteSaveStageObserverForTests?.("after_lock_acquired");
+      await cleanupOrphanedSqliteTempFiles(dbPath);
       const latestDb = await openLatestSqliteDatabase(rootDir);
       const tempPath = `${dbPath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
       try {
@@ -593,10 +615,12 @@ export async function saveSqliteDatabase(rootDir: string, db: any, databaseMode:
           throw Object.assign(new Error("simulated_sqlite_disk_full"), { code: "ENOSPC" });
         }
         await fs.writeFile(tempPath, Buffer.from(latestDb.export()));
+        sqliteSaveStageObserverForTests?.("after_temp_write");
         if (sqliteSaveFailureForTests === "before_replace") {
           throw Object.assign(new Error("simulated_sqlite_replace_failure"), { code: "EIO" });
         }
         await replaceSqliteFile(tempPath, dbPath);
+        sqliteSaveStageObserverForTests?.("after_replace");
       } catch (error) {
         await fs.rm(tempPath, { force: true }).catch(() => undefined);
         if (error instanceof SqlitePersistenceError) throw error;
