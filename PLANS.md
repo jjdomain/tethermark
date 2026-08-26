@@ -239,7 +239,7 @@ Community Edition Phases 1–9 are complete within the documented platform scope
 2. Complete Phase 11 packaging and cross-platform security.
 3. Execute the Phase 12 release-candidate and beta gates.
 
-Current Phase 10 recovery progress: local SQLite opens reject corrupt/unreadable databases, failed pre-replacement saves preserve the prior valid file, and restart recovery reconciles already-durable terminal runs without adding attempts or duplicate terminal state. Cross-process writers use a bounded sidecar lock with backoff and stale-owner recovery; simultaneous API requests, worker transitions, and independent process writes retain every record. True-process-exit SQLite tests and deterministic async interruption now cover each durable lifecycle boundary, including resumable terminal follow-up. Automated backup/restore and upgrade fixtures are next.
+Current Phase 10 recovery progress: local SQLite opens reject corrupt/unreadable databases, failed pre-replacement saves preserve the prior valid file, and restart recovery reconciles already-durable terminal runs without adding attempts or duplicate terminal state. Cross-process writers use a bounded sidecar lock with backoff and stale-owner recovery; simultaneous API requests, worker transitions, and independent process writes retain every record. True-process-exit SQLite tests and deterministic async interruption cover each durable lifecycle boundary, including resumable terminal follow-up. Verified scheduled snapshots, fail-closed restore, migration rollback guidance, and an immutable 1.2.0-to-1.3.0 upgrade fixture are complete. Retention scheduling with database-row/artifact consistency is next.
 
 ## Deferred Hosted Worker Deployment
 

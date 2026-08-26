@@ -1,7 +1,7 @@
 import process from "node:process";
 
 import { loadEnvironment } from "../../../packages/core-engine/src/env.js";
-import { backfillLocalPersistence, cleanupLocalJsonMirrors, compactBundleExports, createEngine, getPersistedRun, listPersistedReviewNotifications, listPersistedReviewWorkflows, normalizeLearningSettings, normalizeProjectId, normalizeWorkspaceId, pruneArtifacts, readPersistedReviewActions, readPersistedReviewWorkflow, reconstructLocalRun, reconstructLocalRuns, resolvePersistedUiSettings, runLearningPipeline, runPostgresMigration, submitPersistedReviewAction, validateLocalPersistence, type ArtifactRetentionKind } from "../../../packages/core-engine/src/index.js";
+import { backfillLocalPersistence, cleanupLocalJsonMirrors, compactBundleExports, createEngine, createLocalPersistenceBackup, defaultPersistenceRoot, getPersistedRun, listLocalPersistenceBackups, listPersistedReviewNotifications, listPersistedReviewWorkflows, normalizeLearningSettings, normalizeProjectId, normalizeWorkspaceId, pruneArtifacts, readPersistedReviewActions, readPersistedReviewWorkflow, reconstructLocalRun, reconstructLocalRuns, resolvePersistedUiSettings, restoreLocalPersistenceBackup, runLearningPipeline, runPostgresMigration, submitPersistedReviewAction, validateLocalPersistence, verifyLocalPersistenceBackup, type ArtifactRetentionKind } from "../../../packages/core-engine/src/index.js";
 import { buildScanRequest, readBooleanFlag, readFlag, readFlags, readNumberFlag } from "./args.js";
 import { analyzeBenchmarkVariance, compareBenchmarkReports, formatBenchmarkCaseLine, loadBenchmarkSuite, printBenchmarkCompare, printBenchmarkSummary, printBenchmarkVariance, runBenchmarkSuite, selectBenchmarkCases } from "./benchmark-suite.js";
 import { buildDoctorReport, buildStaticScannerDoctorReport, printDoctorReport, runOnboarding } from "./doctor.js";
@@ -42,6 +42,10 @@ npm run scan -- benchmark variance --report <report.json> --report <report.json>
   npm run scan -- reconstruct run <run-id> [--root <dir>] [--dry-run]
   npm run scan -- reconstruct runs [--root <dir>] [--target-id <id>] [--status <status>] [--audit-package <id>] [--run-mode <mode>] [--target-class <class>] [--rating <rating>] [--publishability-status <status>] [--policy-pack-id <id>] [--since <iso>] [--until <iso>] [--requires-human-review true|false] [--has-findings true|false] [--limit <n>] [--dry-run]
   npm run scan -- validate-persistence [--root <dir>] [--target-id <id>] [--status <status>] [--audit-package <id>] [--run-mode <mode>] [--target-class <class>] [--rating <rating>] [--publishability-status <status>] [--policy-pack-id <id>] [--since <iso>] [--until <iso>] [--requires-human-review true|false] [--has-findings true|false] [--limit <n>]
+  npm run scan -- backup create [--root <dir>] [--output <backup-dir>] [--reason <label>]
+  npm run scan -- backup list [--root <dir>] [--json]
+  npm run scan -- backup verify --backup <backup-dir> [--json]
+  npm run scan -- backup restore --backup <backup-dir> [--root <dir>]
 npm run scan -- artifacts prune [--root <dir>] [--kind runs|sandboxes|all] [--older-than <days|30d>] [--retention-days <n>] [--max-gb <n>] [--dry-run]
 npm run scan -- validate-fixtures [--root <dir>] [--fixture <id>] [--package <id>] [--db-mode local|postgres|supabase] [--persistence-root <dir>] [--llm-provider openai|mock] [--llm-model <id>]
 npm run scan -- review queue [--root <dir>] [--db-mode local|postgres|supabase] [--status <review-status>] [--limit <n>]
@@ -375,6 +379,65 @@ async function runValidatePersistence(args: string[]): Promise<void> {
   if (summary.invalid_runs > 0) {
     process.exitCode = 1;
   }
+}
+
+async function runBackup(args: string[]): Promise<void> {
+  const command = args[1];
+  const rootDir = readFlag(args, "--root") ?? defaultPersistenceRoot("local");
+  if (command === "create") {
+    const result = await createLocalPersistenceBackup({
+      rootDir,
+      outputDir: readFlag(args, "--output"),
+      reason: readFlag(args, "--reason") ?? "manual"
+    });
+    console.log(`Backup: ${result.backup_dir}`);
+    console.log(`Schema: ${result.manifest.source_schema_version}`);
+    console.log(`SHA-256: ${result.manifest.database_sha256}`);
+    console.log(`Verified: ${result.verification.valid ? "yes" : "no"}`);
+    return;
+  }
+
+  if (command === "list") {
+    const backups = await listLocalPersistenceBackups(rootDir);
+    if (args.includes("--json")) {
+      console.log(JSON.stringify({ root: rootDir, backups }, null, 2));
+      return;
+    }
+    console.log(`Root: ${rootDir}`);
+    console.log(`Backups: ${backups.length}`);
+    for (const item of backups) {
+      console.log(`- ${item.manifest.created_at} ${item.manifest.reason} schema=${item.manifest.source_schema_version} verified=${item.verification.valid ? "yes" : "no"} ${item.backup_dir}`);
+    }
+    return;
+  }
+
+  const backupDir = readFlag(args, "--backup");
+  if (!backupDir) throw new Error("backup_directory_required: pass --backup <backup-dir>");
+  if (command === "verify") {
+    const verification = await verifyLocalPersistenceBackup(backupDir);
+    if (args.includes("--json")) console.log(JSON.stringify(verification, null, 2));
+    else {
+      console.log(`Backup: ${verification.backup_dir}`);
+      console.log(`Valid: ${verification.valid ? "yes" : "no"}`);
+      console.log(`Compatible: ${verification.compatible ? "yes" : "no"}`);
+      console.log(`Issues: ${verification.issues.join(", ") || "none"}`);
+    }
+    if (!verification.valid) process.exitCode = 1;
+    return;
+  }
+
+  if (command === "restore") {
+    const result = await restoreLocalPersistenceBackup({ rootDir, backupDir });
+    console.log(`Restored: ${result.backup_dir}`);
+    console.log(`Root: ${result.root}`);
+    console.log(`Schema: ${result.restored_schema_version}`);
+    console.log(`Safety backup: ${result.safety_backup_dir ?? "none (no prior valid database)"}`);
+    console.log(`Rejected database copy: ${result.rejected_database_path ?? "none"}`);
+    console.log("Run `npm run scan -- migrate local-db --root <dir>` before starting the upgraded service when the restored schema is legacy.");
+    return;
+  }
+
+  throw new Error("unsupported_backup_command: use create, list, verify, or restore");
 }
 
 async function triggerLearningForCliReviewAction(args: {
@@ -735,6 +798,11 @@ async function main(): Promise<void> {
 
   if (args[0] === "validate-persistence") {
     await runValidatePersistence(args);
+    return;
+  }
+
+  if (args[0] === "backup") {
+    await runBackup(args);
     return;
   }
 

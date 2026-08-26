@@ -1,0 +1,54 @@
+{
+  "fixture_id": "sqlite-release-1.2.0",
+  "source_schema_version": "1.2.0",
+  "source_release_commit": "9a430b1",
+  "description": "A minimal release-to-release SQLite record set from the final schema before System Policies raised persistence to 1.3.0.",
+  "records": [
+    {
+      "table_name": "runs",
+      "record_key": "run_upgrade_fixture",
+      "run_id": "run_upgrade_fixture",
+      "created_at": "2026-08-17T00:00:00.000Z",
+      "target_id": "target_upgrade_fixture",
+      "target_snapshot_id": "snapshot_upgrade_fixture",
+      "parent_key": null,
+      "payload": {
+        "id": "run_upgrade_fixture",
+        "target_id": "target_upgrade_fixture",
+        "target_snapshot_id": "snapshot_upgrade_fixture",
+        "policy_pack_id": null,
+        "status": "succeeded",
+        "run_mode": "static",
+        "audit_package": "deep-static",
+        "artifact_root": ".artifacts/runs/run_upgrade_fixture",
+        "started_at": "2026-08-17T00:00:00.000Z",
+        "completed_at": "2026-08-17T00:01:00.000Z",
+        "static_score": 77,
+        "overall_score": 77,
+        "rating": "B",
+        "created_at": "2026-08-17T00:00:00.000Z"
+      }
+    },
+    {
+      "table_name": "review_comments",
+      "record_key": "comment_upgrade_fixture",
+      "run_id": "run_upgrade_fixture",
+      "created_at": "2026-08-17T00:02:00.000Z",
+      "target_id": null,
+      "target_snapshot_id": null,
+      "parent_key": "run_upgrade_fixture",
+      "payload": {
+        "id": "comment_upgrade_fixture",
+        "run_id": "run_upgrade_fixture",
+        "finding_id": null,
+        "author_id": "fixture-reviewer",
+        "body": "Release 1.2 review history must survive upgrade.",
+        "created_at": "2026-08-17T00:02:00.000Z"
+      }
+    }
+  ],
+  "expected": {
+    "run_ids": ["run_upgrade_fixture"],
+    "review_comment_ids": ["comment_upgrade_fixture"]
+  }
+}

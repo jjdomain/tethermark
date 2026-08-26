@@ -18,7 +18,21 @@ Writers in separate Tethermark processes coordinate through an atomically create
 
 The defaults are a 10-second acquisition budget, 20–500 ms backoff, and a two-minute stale threshold. Operators can tune these with `HARNESS_SQLITE_LOCK_TIMEOUT_MS`, `HARNESS_SQLITE_LOCK_BACKOFF_BASE_MS`, `HARNESS_SQLITE_LOCK_BACKOFF_MAX_MS`, and `HARNESS_SQLITE_LOCK_STALE_MS`. The stale threshold should remain comfortably above the longest expected database save.
 
-This protection covers failures detected by the running process. Abrupt power loss and platform filesystem guarantees still require regular verified backups, which remain a separate Phase 10 deliverable.
+This protection covers failures detected by the running process. Abrupt power loss and platform filesystem guarantees still require regular verified backups.
+
+## Backup and restore contract
+
+Before the first database replacement in each 24-hour period, Tethermark snapshots the last valid `harness.sqlite` while holding the same cross-process lock used by writers. It stores the snapshot under `<persistence-root>/backups`, verifies its SHA-256, size, schema compatibility, and SQLite `quick_check`, and only then permits the replacement. Backup failure fails the save closed. The default retention is the newest seven automatic snapshots; manual and `pre-restore` snapshots are not automatically pruned. `HARNESS_SQLITE_AUTO_BACKUP_INTERVAL_MS=0` disables automatic snapshots, and `HARNESS_SQLITE_BACKUP_RETENTION` changes automatic retention.
+
+`backup create`, `backup list`, and `backup verify` expose the same format to operators. A backup manifest binds the database and optional persistence metadata to their checksums and source schema version. `backup restore` refuses missing, modified, corrupt, malformed, or newer-major backups before changing live data. Restore uses an atomic database replacement, creates a verified safety backup when the current database is valid, and preserves an invalid current database as a timestamped rejected copy. Services must still be stopped during restore because a process holding an older in-memory database could later write stale state.
+
+Run artifacts are deliberately outside the SQLite snapshot and must be copied separately when they need to survive host loss.
+
+## Migration and release upgrade contract
+
+The first local-migration file replacement due in the configured snapshot interval receives the same automatic pre-replacement backup. A failed migration save leaves both the prior database and its prior metadata version unchanged. Restoring that backup is the supported rollback path; SQLite files must never be merged by hand. Backups from a future persistence version or another major schema line are rejected rather than guessed compatible.
+
+The immutable `fixtures/persistence-upgrades/sqlite-1.2.0.json` release fixture records its originating schema and commit. The regression suite seeds that legacy record set, injects a failed 1.2.0-to-1.3.0 save, verifies rollback and backup integrity, then completes the upgrade and proves run and review-history records remain readable. New persistence releases must add another fixture instead of rewriting this one.
 
 ## Async restart reconciliation
 
@@ -38,4 +52,4 @@ The deterministic recovery suite interrupts SQLite with a real child-process exi
 
 Async lifecycle injection covers the durable boundaries after queued persistence, starting persistence, engine start, running persistence, terminal persistence, completion-webhook handling, internal terminal hook handling, and terminal-follow-up persistence. Recovery retains the same job, attempt, and run identifiers. The engine-start uncertainty window is intentionally at-least-once: after a process dies, the same run identifier can be started again, while no additional async attempt or terminal state is created.
 
-The persistence stress suite exercises simultaneous API queue requests, concurrent worker lifecycle transitions, and independent Node processes writing the same database. First-request API concurrency also verifies that built-in system-policy initialization is coalesced and idempotent. The remaining Phase 10 persistence work covers automated backup/restore and upgrade fixtures.
+The persistence stress suite exercises simultaneous API queue requests, concurrent worker lifecycle transitions, and independent Node processes writing the same database. First-request API concurrency also verifies that built-in system-policy initialization is coalesced and idempotent. Backup creation uses the same lock, and crash/concurrency regressions continue to run with automatic backups enabled. The remaining Phase 10 persistence work is retention scheduling and row/artifact consistency after pruning.

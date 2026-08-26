@@ -106,19 +106,38 @@ Use this matrix during a release walkthrough. These states are also exercised by
 
 ## Backup And Restore
 
-Stop Tethermark before taking a consistent filesystem copy. Back up the directory configured by `HARNESS_LOCAL_DB_ROOT`; when unset, use the local persistence location reported by the persistence metadata endpoint. Also back up any run artifacts you intentionally retain under `.artifacts`.
+Tethermark automatically creates a verified SQLite snapshot before the first database replacement in each 24-hour period and retains the newest seven automatic snapshots under `<persistence-root>/backups`. Set `HARNESS_SQLITE_AUTO_BACKUP_INTERVAL_MS` to another non-negative interval (`0` disables automatic snapshots) and `HARNESS_SQLITE_BACKUP_RETENTION` to the number of automatic snapshots to retain. Manual and pre-restore safety backups are not removed by automatic retention.
 
-Restore by stopping Tethermark, replacing the local database directory with the backed-up copy, and restarting. Do not merge SQLite files by hand. Run `npm run scan -- doctor` and open several historical runs after restore.
+Create and verify an operator backup before maintenance or an upgrade:
+
+```powershell
+npm run scan -- backup create --reason before-upgrade
+npm run scan -- backup list
+npm run scan -- backup verify --backup <backup-directory>
+```
+
+Use `--root <dir>` when `HARNESS_LOCAL_DB_ROOT` is not set, and use `--output <backup-dir>` to place a manual backup outside the persistence root. Each backup contains `harness.sqlite`, the persistence metadata when present, and `backup-manifest.json` with the schema version, byte length, and SHA-256 checksums. Verification checks the manifest, checksums, supported schema range, and SQLite `quick_check`; a missing, modified, corrupt, or future-schema backup fails closed.
+
+Stop every Tethermark API and worker process before restore so an older in-memory writer cannot save stale state afterward. Then run:
+
+```powershell
+npm run scan -- backup restore --backup <backup-directory>
+npm run scan -- migrate local-db
+npm run scan -- validate-persistence
+npm run scan -- doctor
+```
+
+Restore accepts only a verified, compatible backup and replaces the database atomically. A valid current database is first captured as a `pre-restore` safety backup. An invalid current database is retained as `harness.sqlite.rejected.<timestamp>` for diagnosis. Do not merge SQLite files by hand. Run validation and open several historical runs before resuming audits. Back up retained run artifacts under `.artifacts` separately; the SQLite snapshot does not copy those artifact directories.
 
 ## Upgrade
 
 Before upgrading:
 
-1. Back up local persistence and retained artifacts.
+1. Stop Tethermark and run `npm run scan -- backup create --reason before-upgrade`; verify the resulting backup and separately copy retained artifacts.
 2. Review `changelog.md` for schema, environment, and tool-pin changes.
 3. Update the checkout and run `npm install`.
-4. Run `npm run scan -- doctor` and `npm run release:check`.
-5. Start `npm run oss`, confirm persistence compatibility, and open an older run and export.
+4. Run `npm run scan -- migrate local-db`, `npm run scan -- validate-persistence`, `npm run scan -- doctor`, and `npm run release:check`.
+5. Start `npm run oss`, confirm persistence compatibility, and open an older run and export. If migration or validation fails, stop Tethermark and restore the verified pre-upgrade backup before returning to the previous release.
 
 ## Troubleshooting
 
