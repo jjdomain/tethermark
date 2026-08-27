@@ -4733,7 +4733,8 @@ export function createApiServer(options: { enableArtifactRetentionScheduler?: bo
         outputDir: benchmarkReportRoot(),
         dbMode: body.db_mode as any,
         llmProvider: body.llm_provider ?? (typeof providers.default_provider === "string" ? providers.default_provider as AuditRequest["llm_provider"] : undefined),
-        llmModel: body.llm_model ?? (typeof providers.default_model === "string" ? providers.default_model : undefined)
+        llmModel: body.llm_model ?? (typeof providers.default_model === "string" ? providers.default_model : undefined),
+        requestedBy: context.actorId
       });
       sendJson(res, 200, {
         benchmark_summary: summary,

@@ -275,6 +275,7 @@ export interface BenchmarkRunOptions {
   llmProvider?: AuditRequest["llm_provider"];
   llmModel?: string;
   llmWorkloadClass?: AuditRequest["llm_workload_class"];
+  requestedBy?: string;
   llmCredentialClass?: AuditRequest["llm_credential_class"];
   llmMaxRequests?: number;
   llmMaxTokens?: number;
@@ -918,6 +919,11 @@ export async function runBenchmarkSuite(options?: BenchmarkRunOptions): Promise<
   const selected = selectBenchmarkCases(suite, options);
   const results: BenchmarkCaseResult[] = [];
   const executed = Boolean(options?.execute);
+  const workloadClass = options?.llmWorkloadClass ?? "interactive_operator";
+  const requestedBy = options?.requestedBy?.trim();
+  if (executed && workloadClass === "interactive_operator" && !requestedBy) {
+    throw new Error("benchmark_operator_required");
+  }
   const dbMode = options?.dbMode ?? "local";
   const envVar = "HARNESS_LOCAL_DB_ROOT";
   const previousRoot = process.env[envVar];
@@ -950,7 +956,8 @@ export async function runBenchmarkSuite(options?: BenchmarkRunOptions): Promise<
           db_mode: dbMode,
           llm_provider: llmProvider,
           llm_model: options?.llmModel ?? (llmProvider === "mock" ? "mock-agent-runtime" : undefined),
-          llm_workload_class: options?.llmWorkloadClass ?? "interactive_operator",
+          llm_workload_class: workloadClass,
+          requested_by: requestedBy,
           llm_credential_class: options?.llmCredentialClass,
           llm_max_requests: options?.llmMaxRequests,
           llm_max_tokens: options?.llmMaxTokens,

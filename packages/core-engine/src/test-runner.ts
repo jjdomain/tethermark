@@ -5404,6 +5404,14 @@ async function testCalibrationBenchmarkMetricsAndComparisonGuards(): Promise<voi
     assert.deepEqual(new Set(suite.cases.map((item) => item.target_family)), new Set(["ordinary", "runnable", "agentic", "mcp"]));
     assert.deepEqual(new Set(suite.cases.map((item) => item.posture)), new Set(["good", "mixed", "risky"]));
 
+    await assert.rejects(() => runBenchmarkSuite({
+      suitePath: "community-fixture-calibration-v1",
+      caseId: "runnable-mixed",
+      outputDir: rootDir,
+      execute: true,
+      llmProvider: "mock"
+    }), /benchmark_operator_required/);
+
     const summary = await withEnv({
       HARNESS_DISABLE_LOCAL_BINARIES: "1",
       HARNESS_DISABLE_PYTHON_WORKERS: "1"
@@ -5413,7 +5421,8 @@ async function testCalibrationBenchmarkMetricsAndComparisonGuards(): Promise<voi
       outputDir: rootDir,
       execute: true,
       llmProvider: "mock",
-      llmModel: "mock-agent-runtime"
+      llmModel: "mock-agent-runtime",
+      requestedBy: "calibration-benchmark-reviewer"
     }));
     const result = summary.results[0]!;
     assert.equal(result.passed, true, result.issues.join("; "));

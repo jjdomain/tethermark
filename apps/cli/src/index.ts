@@ -522,6 +522,7 @@ async function runBenchmark(args: string[]): Promise<void> {
   }
 
   if (command === "run") {
+    const benchmarkWorkloadClass = (readFlag(args, "--llm-workload") as any) ?? "interactive_operator";
     const summary = await runBenchmarkSuite({
       suitePath: readFlag(args, "--suite"),
       caseIds: readFlags(args, "--case"),
@@ -534,7 +535,10 @@ async function runBenchmark(args: string[]): Promise<void> {
       dbMode: readFlag(args, "--db-mode") as any,
       llmProvider: readFlag(args, "--llm-provider") as any,
       llmModel: readFlag(args, "--llm-model") ?? undefined,
-      llmWorkloadClass: readFlag(args, "--llm-workload") as any,
+      llmWorkloadClass: benchmarkWorkloadClass,
+      requestedBy: benchmarkWorkloadClass === "interactive_operator"
+        ? (process.env.USERNAME ?? process.env.USER ?? "local-cli-operator")
+        : undefined,
       llmCredentialClass: readFlag(args, "--llm-credential-class") as any,
       llmMaxRequests: readNumberFlag(args, "--llm-max-requests"),
       llmMaxTokens: readNumberFlag(args, "--llm-max-tokens"),
