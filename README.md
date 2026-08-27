@@ -366,6 +366,8 @@ See [`docs/product-benchmark-suite.md`](docs/product-benchmark-suite.md) for sui
 
 ## Community Edition Support Boundary
 
+The canonical CE/hosted capability and repository split is documented in [`docs/community-edition-hosted-boundary.md`](docs/community-edition-hosted-boundary.md). The governed audit, review, policy, and learning core remains shared and available in CE. A hosted service may add multi-tenant identity and policy, distributed scheduling, fleet analytics, managed connectors, and service operations outside this repository, but cannot weaken the shared evidence or approval rules.
+
 Tethermark Community Edition is intended for:
 
 - solo developers

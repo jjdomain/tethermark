@@ -233,13 +233,12 @@ Hosted rollout order:
 
 ## Recommended Next Order
 
-Community Edition Phases 1–9 are complete within the documented platform scope. Runtime evidence now has bounded confidence labels, explicit within-run and independent-run sample limits, semantic repeatability fingerprints, and fail-closed worker handling.
+Community Edition Phases 1–10 are complete within the documented platform scope. Runtime evidence now has bounded confidence labels, explicit within-run and independent-run sample limits, semantic repeatability fingerprints, and fail-closed worker handling. Persistence recovery, local retention, human-approved and reversible learning, synthesis authorization, learning-input minimization, and the CE/hosted ownership boundary are closed.
 
-1. Complete Phase 10 recovery and stress hardening.
-2. Complete Phase 11 packaging and cross-platform security.
-3. Execute the Phase 12 release-candidate and beta gates.
+1. Complete Phase 11 packaging and cross-platform security.
+2. Execute the Phase 12 release-candidate and beta gates.
 
-Current Phase 10 recovery progress: local SQLite opens reject corrupt/unreadable databases, failed pre-replacement saves preserve the prior valid file, and restart recovery reconciles already-durable terminal runs without adding attempts or duplicate terminal state. Cross-process writers use a bounded sidecar lock with backoff and stale-owner recovery; simultaneous API requests, worker transitions, and independent process writes retain every record. True-process-exit SQLite tests and deterministic async interruption cover each durable lifecycle boundary, including resumable terminal follow-up. Verified scheduled snapshots, fail-closed restore, migration rollback guidance, immutable upgrade fixtures, scheduled retention consistency, and content-versioned additive-only learning overlay consumption are complete.
+Phase 10 completion evidence: local SQLite opens reject corrupt/unreadable databases, failed pre-replacement saves preserve the prior valid file, and restart recovery reconciles already-durable terminal runs without adding attempts or duplicate terminal state. Cross-process writers use a bounded sidecar lock with backoff and stale-owner recovery; simultaneous API requests, worker transitions, and independent process writes retain every record. True-process-exit SQLite tests and deterministic async interruption cover each durable lifecycle boundary, including resumable terminal follow-up. Verified scheduled snapshots, fail-closed restore, migration rollback guidance, immutable upgrade fixtures, scheduled retention consistency, content-versioned additive-only learning overlay consumption, human-approval boundaries, operator/background synthesis authorization, learning-input minimization, and the canonical CE/hosted boundary are complete.
 
 ## Deferred Hosted Worker Deployment
 

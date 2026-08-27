@@ -4,6 +4,7 @@
 
 ### Changed
 
+- Phase 10 now has a canonical Community Edition/hosted boundary: CE retains the complete governed audit, review, policy, learning, local-job, and operator-managed scheduling core; hosted code outside this repository may add tenant policy, distributed scheduling, fleet aggregation, managed connectors, and service operations without weakening shared invariants.
 - Governed learning now applies the versioned `learning-input.v1` allowlist to new and legacy events, retaining only categorical review signals and audit metadata. Raw notes, evidence excerpts, rerun requests, nested metadata, prompts, transcripts, and provider responses are excluded; synthesized candidate wording is review-only and deterministic copy is used for promoted future-run overlays.
 - Learning model synthesis now requires a checksum-verified, exact-scope operator launch by default. Scheduled and event-driven synthesis can proceed only through the Phase 2 `unattended_local` API-key/mock policy, while Codex/ChatGPT-session background use fails closed; learning records retain the non-secret authorization decision.
 - Permissive governance actions now require content-hashed human approval records. Policy/control changes, severity downgrades, suppressions, waivers, package/evidence/lane reduction, and runtime-probe removal are tied to authenticated API or local interactive CLI launches and append-only reviewer/policy events; unattended and model-driven weakening fails closed.

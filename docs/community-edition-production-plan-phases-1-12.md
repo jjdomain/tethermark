@@ -100,7 +100,7 @@ Updated on 2026-08-20 during Phase 5 calibration work from merged Phase 4:
 | 7 | Implement Admin/System Policies and extensive-scan controls | **Complete for the policy plane** | Executable runtime enforcement is tracked in Phase 8 |
 | 8 | Execute local runtime scans in a real isolated sandbox | **Complete with accepted macOS runtime deferral** | Windows Docker Desktop and native Linux Docker/rootless-Podman/gVisor passed; macOS execution is not certified |
 | 9 | Operationalize runtime evals and Python workers | **Complete** | None; bounded packs, failure containment, normalized artifacts, and repeatability qualification are implemented |
-| 10 | Harden persistence, jobs, maintenance, and governed learning | **Mostly complete** | Remaining model-synthesis, learning-input, and CE/hosted boundary decisions |
+| 10 | Harden persistence, jobs, maintenance, and governed learning | **Complete** | None; recovery, retention, governed overlays, approval, synthesis, learning-input, and edition boundaries are closed |
 | 11 | Package, secure, and verify cross-platform installation | **Partial** | Fresh-machine installers, SBOM/signing, hardened deployment profiles |
 | 12 | Run release candidate, beta, and production launch gates | **Not started** | Depends on Phases 1–11 and explicit release acceptance |
 
@@ -534,7 +534,7 @@ Exit criteria:
 
 ## Phase 10 — Harden persistence, async lifecycle, maintenance, and governed learning
 
-Status: **Mostly complete**
+Status: **Complete**
 
 Objective: make long-running local use and recovery dependable without turning learning into uncontrolled autonomous policy change.
 
@@ -543,7 +543,7 @@ Completed foundation:
 - SQLite local persistence, concurrent-write protection, durable async jobs/attempts, cancellation/retry, restart recovery, webhooks, artifact pruning, validation/backfill, and governed learning records exist.
 - Learning is CE-capable, off by default, consent governed, and requires explicit promotion for sensitive changes.
 
-Remaining tasks:
+Completed tasks:
 
 - [x] Add crash-at-every-stage recovery tests, concurrent API/worker stress tests, database lock/backoff tests, and disk-full/corruption behavior.
   - [x] Fail closed when the local SQLite file is unreadable, corrupt, or unsupported instead of silently opening an empty database; run `quick_check` on every existing database before use.
@@ -558,7 +558,7 @@ Remaining tasks:
 - [x] Keep policy/control changes, severity downgrades, suppressions, waivers, evidence reduction, and runtime-probe removal human approved. Executable permissive changes now carry content-hashed approval records tied to an authenticated API operator, a local interactive CLI operator, or an append-only review action; policy activation/default/binding events retain approval evidence, unattended/model requests fail closed, and only exact built-in safe-policy bootstrap actions have a system exception.
 - [x] Keep model synthesis for learning operator initiated unless Phase 2 explicitly approves a different credential/workload combination. Manual API synthesis now requires a checksum-verified operator-launch record tied to the exact workspace, project, and optional run. Event-driven or scheduled synthesis is reclassified as `unattended_local` and can proceed only when `provider-policy.v1` approves the non-secret workload/provider/credential decision and an API-key credential is actually configured (or the deterministic mock provider is selected); local Codex/ChatGPT-session credentials fail closed before model work. Learning jobs and synthesized candidates retain the authorization decision without retaining credentials.
 - [x] Ensure learning inputs are review signals and audit metadata, not a reusable corpus for imitating or distilling provider behavior. `2026-08-26.learning-input.v1` now projects each supported source into an explicit categorical/identifier allowlist; raw records, free-form notes, evidence excerpts, rerun requests, nested metadata, prompts, transcripts, and provider responses are excluded. Legacy events are re-projected on read and before candidate/synthesis use. Synthesis output is review-only, cannot become a later learning input or prompt context, and promoted overlays use deterministic candidate copy (or a fail-closed categorical fallback) rather than provider-generated wording.
-- [ ] Document CE versus hosted scope: the governed core is shared/CE; hosted may add tenant policy, fleet aggregation, and managed scheduling outside this repo.
+- [x] Document CE versus hosted scope: the governed core is shared/CE; hosted may add tenant policy, fleet aggregation, and managed scheduling outside this repo. The canonical boundary is `docs/community-edition-hosted-boundary.md`: CE retains the complete governed audit/review/learning core plus operator-managed local jobs and schedules, while hosted code outside this repository may add tenant identity and policy, distributed scheduling, fleet/portfolio aggregation, managed connectors, metered infrastructure, and service operations without weakening shared invariants.
 
 Exit criteria:
 
@@ -625,9 +625,8 @@ A static-only beta may be cut before Phases 8–9 finish only if it is explicitl
 
 ## Recommended execution order from this snapshot
 
-1. Complete Phase 10 stress/recovery hardening.
-2. Complete Phase 11 packaging/cross-platform security.
-3. Execute Phase 12 release candidate and beta gates.
+1. Complete Phase 11 packaging/cross-platform security.
+2. Execute Phase 12 release candidate and beta gates.
 
 ## Immediate next-task checklist
 
@@ -639,10 +638,10 @@ git diff origin/main...HEAD
 git diff -- PLANS.md changelog.md docs/community-edition-production-plan-phases-1-12.md docs/provider-workload-policy.md docs/provider-policy-decision-log.md
 ```
 
-Phases 1 through 9 are complete within the documented platform scope. Before the Phase 10 handoff, rerun the deterministic release gate on the completed tracker tree:
+Phases 1 through 10 are complete within the documented platform scope. Before closing Phase 11, rerun the deterministic release gate on the completed tracker tree:
 
 ```powershell
 npm run release:check
 ```
 
-Phase 9 is complete. Proceed to Phase 10 stress and recovery hardening. The live commands in `docs/live-model-validation.md` remain the Phase 3 release-candidate refresh procedure; they are not part of ordinary pull-request CI.
+Phase 10 is complete. Proceed to Phase 11 packaging and cross-platform security. The live commands in `docs/live-model-validation.md` remain the Phase 3 release-candidate refresh procedure; they are not part of ordinary pull-request CI.

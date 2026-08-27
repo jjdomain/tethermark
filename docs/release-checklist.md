@@ -89,6 +89,8 @@ Before release, confirm the public docs still present these boundaries accuratel
 - `auth=api_key` is the enforced Community Edition auth mode
 - non-SQLite persistence is not yet part of the Community Edition release
 - Community Edition does not create GitHub issues or receive GitHub webhooks; Tethermark Cloud connector automation is documented separately
+- the governed core and hosted extension claims still match `docs/community-edition-hosted-boundary.md`
+- local CE scheduling is not described as highly available managed scheduling, and hosted features are not implied to ship from the CE repository
 
 ## 6. Release Hygiene
 

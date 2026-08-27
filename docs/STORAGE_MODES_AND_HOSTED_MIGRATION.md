@@ -4,10 +4,12 @@ The Community Edition repository defaults to one zero-config runtime persistence
 
 - `local`
 
-It also supports remote logical-record persistence through Postgres-compatible databases:
+The repository also contains remote logical-record compatibility adapters for Postgres-compatible databases:
 
 - `postgres`
 - `supabase`
+
+These adapters and bootstrap commands support migration, contract verification, and hosted integration development. They are not currently a release-supported Community Edition production persistence claim and do not provide tenant isolation, enterprise identity, managed backups, or a hosted control plane. The canonical edition boundary is [Community Edition And Hosted Boundary](./community-edition-hosted-boundary.md).
 
 ## Community Edition Local Storage
 
@@ -16,7 +18,7 @@ It also supports remote logical-record persistence through Postgres-compatible d
 - Queryable run state is stored in the SQLite `records` table, keyed by logical table name and record key. JSON bundle exports are optional debug material.
 - The SQLite database also stores `record_schemas` metadata for self-learning logical tables and settings fields. Current self-learning logical tables are `learning_events`, `learning_candidates`, `learning_experiments`, `learning_promotions`, `learning_jobs`, and `ui_settings.learning_json`.
 
-## Postgres/Supabase Runtime And Bootstrap
+## Postgres/Supabase Compatibility Runtime And Bootstrap
 
 Use the migration command to generate or apply the remote schema:
 

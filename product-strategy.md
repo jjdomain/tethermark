@@ -149,6 +149,8 @@ Some features should exist in both products, with broader capability in hosted:
 
 The OSS version should provide a capable baseline. The hosted version should add scale, collaboration, governance, and convenience.
 
+For scheduling and policy specifically, the CE baseline is operator-managed and local: durable jobs, in-process maintenance/learning schedules, and versioned project/target/run policy. Hosted differentiation is managed distributed scheduling, worker fleets, tenant policy distribution, organization defaults, quotas, and service operations. The canonical implementation boundary is [`docs/community-edition-hosted-boundary.md`](docs/community-edition-hosted-boundary.md).
+
 Notification boundary:
 
 - OSS keeps simple generic webhooks for automation hooks and completion callbacks.
