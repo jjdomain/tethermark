@@ -1,11 +1,23 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
 import process from "node:process";
+import { enforceNetworkExposurePolicy, resolveNetworkExposureConfig } from "../dist/apps/shared/src/network-exposure.js";
+import { loadEnvironment } from "../dist/packages/core-engine/src/env.js";
 
 const children = [];
 let shuttingDown = false;
 const apiEntrypoint = path.resolve(process.cwd(), "dist/apps/api-server/src/index.js");
 const webEntrypoint = path.resolve(process.cwd(), "dist/apps/web-ui/src/index.js");
+
+loadEnvironment();
+
+try {
+  const exposure = enforceNetworkExposurePolicy(resolveNetworkExposureConfig(), ["api", "web-ui"]);
+  if (exposure.warning) console.warn(`[tethermark:network-exposure] ${exposure.warning}`);
+} catch (error) {
+  console.error(`[tethermark:network-exposure] ${error instanceof Error ? error.message : String(error)}`);
+  process.exit(1);
+}
 
 function terminate(child) {
   if (child.killed) {

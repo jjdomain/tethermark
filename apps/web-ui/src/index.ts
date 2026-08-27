@@ -4,8 +4,11 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { listenWithFriendlyErrors } from "../../shared/src/listen.js";
+import { enforceNetworkExposurePolicy, formatHostForUrl, resolveNetworkExposureConfig } from "../../shared/src/network-exposure.js";
+import { loadEnvironment } from "../../../packages/core-engine/src/env.js";
 
-const host = "127.0.0.1";
+loadEnvironment();
+
 const port = Number(process.env.WEB_UI_PORT ?? "8788");
 const defaultApiBaseUrl = process.env.WEB_UI_API_BASE_URL ?? "http://127.0.0.1:8787";
 const staticDir = path.resolve(process.cwd(), "apps", "web-ui", "static");
@@ -99,7 +102,7 @@ async function serveIndex(res: http.ServerResponse): Promise<void> {
 export function createWebUiServer(options?: { apiBaseUrl?: string }): http.Server {
   const apiBaseUrl = options?.apiBaseUrl ?? defaultApiBaseUrl;
   return http.createServer(async (req, res) => {
-    const url = new URL(req.url ?? "/", `http://${host}:${port}`);
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
 
     if (url.pathname.startsWith("/api/")) {
       try {
@@ -131,8 +134,16 @@ export function createWebUiServer(options?: { apiBaseUrl?: string }): http.Serve
 
 const entryHref = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : null;
 if (entryHref && import.meta.url === entryHref) {
-  const server = createWebUiServer();
-  listenWithFriendlyErrors({ server, host, port, serviceName: "Web UI", portEnvVar: "WEB_UI_PORT", onListening: () => {
-    console.log(`Web UI listening on http://${host}:${port}`);
-  } });
+  try {
+    const exposure = enforceNetworkExposurePolicy(resolveNetworkExposureConfig(), ["web-ui"]);
+    if (exposure.warning) console.warn(`[tethermark:network-exposure] ${exposure.warning}`);
+    const host = exposure.config.webUiHost;
+    const server = createWebUiServer();
+    listenWithFriendlyErrors({ server, host, port, serviceName: "Web UI", portEnvVar: "WEB_UI_PORT", onListening: () => {
+      console.log(`Web UI listening on http://${formatHostForUrl(host)}:${port}`);
+    } });
+  } catch (error) {
+    console.error(`[tethermark:network-exposure] ${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 1;
+  }
 }

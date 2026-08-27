@@ -2,9 +2,11 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { timingSafeEqual } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
 import { listenWithFriendlyErrors } from "../../shared/src/listen.js";
+import { enforceNetworkExposurePolicy, formatHostForUrl, resolveNetworkExposureConfig } from "../../shared/src/network-exposure.js";
 import { compareBenchmarkReports, listBenchmarkSuites, loadBenchmarkSuite, runBenchmarkSuite, selectBenchmarkCases } from "../../cli/src/benchmark-suite.js";
 import { buildRuntimeSetupPlan, executeRuntimeSetupPlan, runtimeSetupCommandLine } from "../../cli/src/setup-runtime.js";
 import { describeArtifactType } from "../../../packages/core-engine/src/artifact-policy.js";
@@ -237,7 +239,6 @@ const asyncJobs = new PersistedAsyncJobManager(engine, {
     }, rootDirOrOptions);
   }
 });
-const host = "127.0.0.1";
 const port = Number(process.env.PORT ?? "8787");
 
 type RunSubresource =
@@ -1525,6 +1526,12 @@ function getExpectedApiKey(): string {
   return process.env.HARNESS_API_KEY ?? "";
 }
 
+function apiKeysMatch(provided: string, expected: string): boolean {
+  const providedBytes = Buffer.from(provided, "utf8");
+  const expectedBytes = Buffer.from(expected, "utf8");
+  return providedBytes.length === expectedBytes.length && timingSafeEqual(providedBytes, expectedBytes);
+}
+
 function buildAuthInfo() {
   const authMode = getAuthMode();
   const identityEnforced = authMode !== "none";
@@ -1558,7 +1565,7 @@ async function authenticateRequest(req: http.IncomingMessage): Promise<{ ok: tru
     if (!providedApiKey) {
       return { ok: false, status: 401, error: "unauthorized" };
     }
-    if (expectedApiKey && providedApiKey === expectedApiKey) {
+    if (expectedApiKey && apiKeysMatch(providedApiKey, expectedApiKey)) {
       return {
         ok: true,
         context: await finalizeContext()
@@ -2515,7 +2522,7 @@ export function createApiServer(options: { enableArtifactRetentionScheduler?: bo
     })
     : null;
   const server = http.createServer(async (req, res) => {
-    const url = new URL(req.url ?? "/", `http://${host}:${port}`);
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
 
   if (req.method === "GET" && url.pathname === "/health") {
     sendJson(res, 200, { status: "ok", service: "tethermark-api", language: "TypeScript/Node", ...buildAuthInfo() });
@@ -5752,10 +5759,18 @@ export function createApiServer(options: { enableArtifactRetentionScheduler?: bo
 
 const entryHref = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : null;
 if (entryHref && import.meta.url === entryHref) {
-  const server = createApiServer({ enableArtifactRetentionScheduler: true });
-  listenWithFriendlyErrors({ server, host, port, serviceName: "API", portEnvVar: "PORT", onListening: () => {
-    console.log(`API listening on http://${host}:${port}`);
-  } });
+  try {
+    const exposure = enforceNetworkExposurePolicy(resolveNetworkExposureConfig(), ["api"]);
+    if (exposure.warning) console.warn(`[tethermark:network-exposure] ${exposure.warning}`);
+    const host = exposure.config.apiHost;
+    const server = createApiServer({ enableArtifactRetentionScheduler: true });
+    listenWithFriendlyErrors({ server, host, port, serviceName: "API", portEnvVar: "PORT", onListening: () => {
+      console.log(`API listening on http://${formatHostForUrl(host)}:${port}`);
+    } });
+  } catch (error) {
+    console.error(`[tethermark:network-exposure] ${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 1;
+  }
 }
 
 

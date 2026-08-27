@@ -18,6 +18,7 @@ That command currently covers:
 - regression test suite
 - native install/update/first-run/guarded-uninstall lifecycle checks
 - Playwright package/manifest, static-tool archive, and runtime-image integrity-lock checks
+- fail-closed API/web UI network-exposure policy and direct/combined startup checks
 - export golden/schema checks
 - bundled fixture validation
 - deterministic live-validation opt-in, budget, usage, and redaction harness checks
@@ -50,6 +51,7 @@ Confirm:
 - web UI loads on `http://127.0.0.1:8788`
 - the web UI can fetch runs, settings, and auth metadata
 - `GET /assistant/capabilities` returns enabled Community Edition capabilities by default, unless an explicit disable override is set
+- `HARNESS_API_HOST=0.0.0.0 npm run api` (or the shell-equivalent environment assignment) refuses to start without API-key auth and the exact exposure acknowledgement
 
 ## 3. End-To-End Community Edition Workflow Smoke Test
 

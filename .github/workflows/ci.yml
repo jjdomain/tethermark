@@ -80,5 +80,8 @@ jobs:
       - name: Verify pinned toolchain integrity
         run: npm run build --silent && npm run toolchain:check
 
+      - name: Verify fail-closed network exposure policy
+        run: npm run test:network-exposure
+
       - name: Smoke test combined OSS launcher
         run: npm run oss:check

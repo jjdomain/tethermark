@@ -260,16 +260,27 @@ npm run oss
 
 The `oss` launcher builds once, then starts the API and web UI together from the compiled Node entrypoints. It is intended to work across Windows, macOS, and Linux, and the repository CI includes an `oss:check` smoke path for all three OS families.
 
-By default the web UI serves on `http://127.0.0.1:8788` and proxies its backend calls to the API at `http://127.0.0.1:8787`.
+By default the web UI serves on `http://127.0.0.1:8788` and proxies its backend calls to the API at `http://127.0.0.1:8787`. Both services bind only to loopback; changing a port does not change that boundary.
 
 Useful environment variables:
 
 - `PORT`
+- `HARNESS_API_HOST`
 - `WEB_UI_PORT`
+- `WEB_UI_HOST`
 - `WEB_UI_API_BASE_URL`
 - `HARNESS_API_AUTH_MODE`
 - `HARNESS_API_KEY`
+- `HARNESS_EXTERNAL_BIND_ACKNOWLEDGEMENT`
 - `HARNESS_DB_MODE`
+
+Binding either service to a non-loopback address exposes audit operations because the web UI proxies `/api` requests. Tethermark therefore refuses to start unless all of these conditions are met:
+
+1. `HARNESS_API_AUTH_MODE=api_key`
+2. `HARNESS_API_KEY` contains at least 32 characters
+3. `HARNESS_EXTERNAL_BIND_ACKNOWLEDGEMENT=I_UNDERSTAND_TETHERMARK_WILL_BE_NETWORK_ACCESSIBLE`
+
+An allowed external start prints a security warning. Community Edition does not terminate TLS, so external binding must remain behind a trusted TLS reverse proxy and firewall; it is not a safe direct Internet deployment. The API, web UI, and combined `npm run oss` launcher all enforce the same policy before listening.
 
 The web UI is also deployable as a plain static app. It reads its backend origin from `apps/web-ui/static/config.js`, which defaults to `/api`. For Vercel or other static hosting, point `apiBaseUrl` at the hosted API origin or add a platform rewrite so `/api/*` reaches the API server.
 
@@ -373,7 +384,7 @@ Tethermark Community Edition is not claiming:
 - Cloud notification routing or managed ops workflows
 - non-SQLite production persistence backends
 
-If you need enforced auth in Community Edition, use `HARNESS_API_AUTH_MODE=api_key` and put the service behind your own trusted network or reverse proxy controls.
+If you need enforced auth in Community Edition, use `HARNESS_API_AUTH_MODE=api_key`. External binding additionally requires the explicit acknowledgement described above and a trusted TLS reverse proxy and firewall.
 
 ## Release Checklist
 

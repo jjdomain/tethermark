@@ -56,6 +56,18 @@ npm run oss
 
 The web UI opens at `http://127.0.0.1:8788`.
 
+## Network Binding and Authentication
+
+The API and web UI default to `127.0.0.1` through `HARNESS_API_HOST` and `WEB_UI_HOST`. This is the supported single-user workstation configuration and requires no network-exposure acknowledgement.
+
+The web UI proxies audit API calls, so exposing either service is security-sensitive. A non-loopback host fails closed unless `HARNESS_API_AUTH_MODE=api_key`, `HARNESS_API_KEY` is at least 32 characters, and the operator sets this exact acknowledgement after reviewing the risk:
+
+```text
+HARNESS_EXTERNAL_BIND_ACKNOWLEDGEMENT=I_UNDERSTAND_TETHERMARK_WILL_BE_NETWORK_ACCESSIBLE
+```
+
+Tethermark prints a warning on every permitted external start. It does not provide TLS termination; put an external binding behind a trusted TLS reverse proxy and firewall, restrict the reachable network, and never expose the plain HTTP service directly to the Internet. `npm run api`, `npm run web`, and `npm run oss` enforce the same rule. The combined launcher validates both services before starting either one.
+
 For the complete first-run, audit, review, remediation, export, restart, backup, and upgrade path, follow [Community Edition Operator Workflow](./operator-workflow.md). The bounded release walkthrough is recorded in [Phase 6 Operator Workflow Evidence](./phase6-operator-workflow-evidence.md).
 
 The Community Edition assistant is enabled by default and runs locally against persisted Tethermark audit data. It supports selected run and target-history Q&A, deterministic evidence-grounded fallback answers, draft outputs, and confirmed local actions. If no usable assistant/global LLM is configured, the assistant drawer remains available and shows fallback/limitations rather than requiring a separate enable flag. Tethermark Cloud project/workspace/org scopes and external connector sends are not enabled in Community Edition. Community Edition does not create GitHub issues or receive GitHub webhooks; paste manual external issue or PR links into local remediation items when needed. To surface findings in GitHub code scanning from Community Edition, export SARIF and upload it with GitHub Actions; see [GitHub SARIF Upload](./github-sarif-upload.md).
