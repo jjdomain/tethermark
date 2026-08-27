@@ -29,6 +29,7 @@ export * from "./run-registry.js";
 export * from "./audit-policy.js";
 export * from "./request-scope.js";
 export * from "./provider-policy.js";
+export * from "./security-boundaries.js";
 export * from "./review-summary.js";
 export * from "./finding-evaluation.js";
 export * from "./finding-quality.js";

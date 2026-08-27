@@ -3,22 +3,23 @@ import path from "node:path";
 
 import type { SandboxSourceProvenance, SandboxStorageUsage } from "../../contracts.js";
 import { gitErrorText, isGitTlsCertificateError, runGit, type GitTlsMode } from "../../git-utils.js";
+import { assertSafeRepositoryUrl, publicRepositoryUrl, redactUrlCredentials } from "../../security-boundaries.js";
 
 const SKIP_NAMES = new Set([".git", "node_modules", ".artifacts", ".npm-cache", ".legacy-js-archive", "dist", "build", "__pycache__", ".venv"]);
 
 async function cloneRepoWithGit(repoUrl: string, destination: string, checkoutRef: string | null, tlsMode: GitTlsMode): Promise<void> {
   if (checkoutRef) {
-    await runGit(["clone", "--no-checkout", repoUrl, destination], tlsMode);
+    await runGit(["clone", "--no-checkout", "--", repoUrl, destination], tlsMode);
     await runGit(["-C", destination, "checkout", "--detach", checkoutRef], tlsMode);
   } else {
-    await runGit(["clone", "--depth", "1", repoUrl, destination], tlsMode);
+    await runGit(["clone", "--depth", "1", "--", repoUrl, destination], tlsMode);
   }
 }
 
 function getPinnedCheckoutRef(requestHints: unknown): string | null {
   const value = (requestHints as any)?.diagnostic_run?.pinned_reference ?? (requestHints as any)?.repo_checkout_ref ?? null;
   const text = typeof value === "string" ? value.trim() : "";
-  return /^[A-Za-z0-9._/-]{6,80}$/.test(text) ? text : null;
+  return text && !text.startsWith("-") && !text.split("/").includes("..") && /^[A-Za-z0-9._/-]{6,80}$/.test(text) ? text : null;
 }
 
 export function resolvePinnedCheckoutRef(requestHints: unknown): string | null {
@@ -26,17 +27,20 @@ export function resolvePinnedCheckoutRef(requestHints: unknown): string | null {
 }
 
 export async function cloneRepo(repoUrl: string, destination: string, checkoutRef?: string | null): Promise<string | null> {
+  repoUrl = assertSafeRepositoryUrl(repoUrl);
   const ref = checkoutRef?.trim() || null;
   try {
     await cloneRepoWithGit(repoUrl, destination, ref, "default");
   } catch (error) {
     const shouldRetryWithWindowsTrust = process.platform === "win32" && isGitTlsCertificateError(error);
-    if (!shouldRetryWithWindowsTrust) throw error;
+    if (!shouldRetryWithWindowsTrust) {
+      throw new Error(`Git clone failed. ${redactUrlCredentials(gitErrorText(error))}`);
+    }
     await fs.rm(destination, { recursive: true, force: true });
     try {
       await cloneRepoWithGit(repoUrl, destination, ref, "windows_schannel");
     } catch (retryError) {
-      throw new Error(`Git clone failed after retrying with the Windows certificate store. ${gitErrorText(retryError)}`);
+      throw new Error(`Git clone failed after retrying with the Windows certificate store. ${redactUrlCredentials(gitErrorText(retryError))}`);
     }
   }
   try {
@@ -75,7 +79,7 @@ async function resolveGitDir(source: string): Promise<string | null> {
 function normalizeRepoUrl(rawUrl: string): string | null {
   const trimmed = rawUrl.trim();
   if (!trimmed) return null;
-  if (/^https?:\/\//i.test(trimmed)) return trimmed.replace(/\.git$/i, "");
+  if (/^https?:\/\//i.test(trimmed)) return publicRepositoryUrl(trimmed).replace(/\.git$/i, "");
   const sshMatch = trimmed.match(/^(?:ssh:\/\/)?git@([^/:]+)[:/](.+)$/i);
   if (sshMatch) {
     return "https://" + sshMatch[1] + "/" + sshMatch[2].replace(/\.git$/i, "");
@@ -196,9 +200,9 @@ export function buildSourceProvenance(args: {
   if (args.repoUrl) {
     return {
       source_type: "repo",
-      source_value: args.repoUrl,
+      source_value: publicRepositoryUrl(args.repoUrl),
       commit_sha: args.commitSha ?? null,
-      upstream_repo_url: args.repoUrl
+      upstream_repo_url: publicRepositoryUrl(args.repoUrl)
     };
   }
   if (args.localPath) {

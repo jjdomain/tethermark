@@ -473,6 +473,11 @@ export function printDoctorReport(report: DoctorReport, json = false): void {
   }
 }
 
+function hardenLocalEnvFile(): void {
+  const envPath = path.resolve(process.cwd(), ".env");
+  if (process.platform !== "win32" && fs.existsSync(envPath)) fs.chmodSync(envPath, 0o600);
+}
+
 export function printOnboarding(args: { dryRun?: boolean } = {}): void {
   const envExists = fs.existsSync(path.resolve(process.cwd(), ".env"));
   console.log("Tethermark onboarding");
@@ -488,6 +493,7 @@ export function printOnboarding(args: { dryRun?: boolean } = {}): void {
   } else {
     console.log(".env already exists; leaving it unchanged.");
   }
+  if (!args.dryRun) hardenLocalEnvFile();
   console.log("");
   console.log("Next steps:");
   console.log("1. Configure provider credentials in .env or the web UI Settings page.");
@@ -516,6 +522,7 @@ export function runOnboarding(args: { dryRun?: boolean; skipDoctor?: boolean; sk
   } else {
     console.log(".env already exists; leaving it unchanged.");
   }
+  if (!args.dryRun) hardenLocalEnvFile();
 
   if (args.skipDoctor) {
     console.log("");

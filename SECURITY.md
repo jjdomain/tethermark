@@ -36,6 +36,8 @@ Tethermark OSS is designed for local or trusted self-hosted environments.
 
 Misconfigurations that ignore that deployment boundary may still be important operational risks, even if they are not code vulnerabilities by themselves.
 
+The maintained Community Edition trust-boundary and residual-risk register is [docs/security-threat-model.md](docs/security-threat-model.md).
+
 ## Please Avoid Public Disclosure Until Fixed
 
 Public issues, PRs, or discussions should not contain:

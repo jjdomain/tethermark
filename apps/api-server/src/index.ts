@@ -175,6 +175,7 @@ import {
   normalizeActorId,
   normalizeProjectId,
   normalizeWorkspaceId,
+  assertSafeWebhookTarget,
   type PersistenceReadOptions,
   type ReviewActorRole,
   type GenericWebhookEventType,
@@ -705,6 +706,10 @@ function stringifyEnvValue(value: string): string {
   return JSON.stringify(value);
 }
 
+async function hardenEnvFilePermissions(envPath: string): Promise<void> {
+  if (process.platform !== "win32") await fs.chmod(envPath, 0o600);
+}
+
 function parseEnvFileValue(contents: string, key: string): { exists: boolean; value: string } {
   for (const line of contents.split(/\r?\n/)) {
     if (line.trim().startsWith("#")) continue;
@@ -774,6 +779,7 @@ async function writeEnvFileValue(key: string, value: string): Promise<{ env_path
   if (!wrote && trimmedValue) nextLines.push(`${key}=${trimmedValue}`);
   const nextContents = `${nextLines.join("\n").replace(/\n*$/, "")}${nextLines.length ? "\n" : ""}`;
   await fs.writeFile(envPath, nextContents, "utf8");
+  await hardenEnvFilePermissions(envPath);
   if (trimmedValue) process.env[key] = trimmedValue;
   else delete process.env[key];
   return {
@@ -813,6 +819,7 @@ async function writeEnvValues(updates: Record<string, string | null | undefined>
     nextLines.push(`${key}=${stringifyEnvValue(value)}`);
   }
   await fs.writeFile(envPath, `${nextLines.join("\n").replace(/\n*$/, "")}\n`, "utf8");
+  await hardenEnvFilePermissions(envPath);
 }
 
 function inferLlmProviderForModel(model: string | undefined): string | undefined {
@@ -1156,6 +1163,8 @@ async function readCodexAuthFileStatus(): Promise<Record<string, unknown> | null
   const authPath = path.join(codexHomeDirectory(), "auth.json");
   let parsed: Record<string, any>;
   try {
+    const stat = await fs.lstat(authPath);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 1024 * 1024) return null;
     parsed = JSON.parse(await fs.readFile(authPath, "utf8")) as Record<string, any>;
   } catch {
     return null;
@@ -1172,7 +1181,7 @@ async function readCodexAuthFileStatus(): Promise<Record<string, unknown> | null
   const expired = exp ? exp * 1000 <= Date.now() : false;
   const openaiAuth = tokenPayload?.["https://api.openai.com/auth"];
   const planType = openaiAuth && typeof openaiAuth === "object" && "chatgpt_plan_type" in openaiAuth
-    ? String((openaiAuth as Record<string, unknown>).chatgpt_plan_type ?? "")
+    ? String((openaiAuth as Record<string, unknown>).chatgpt_plan_type ?? "").slice(0, 64)
     : null;
   const hasChatGptTokens = Boolean(accessToken && idToken && refreshToken);
   if (authMode === "chatgpt" && hasChatGptTokens && !expired) {
@@ -1331,7 +1340,7 @@ async function persistLlmEnvironmentSettings(input: UiSettingsBody): Promise<voi
   if (Object.keys(updates).length) await writeEnvValues(updates);
 }
 
-function stripLlmSecretsFromSettingsInput(input: UiSettingsBody): UiSettingsBody {
+function stripLlmSecretsFromSettingsInput(input: UiSettingsBody, currentSettings?: any): UiSettingsBody {
   const credentials = input.credentials && typeof input.credentials === "object"
     ? { ...(input.credentials as Record<string, unknown>) }
     : input.credentials;
@@ -1351,11 +1360,48 @@ function stripLlmSecretsFromSettingsInput(input: UiSettingsBody): UiSettingsBody
     }
     providers.agent_overrides = nextOverrides;
   }
+  const integrations = input.integrations && typeof input.integrations === "object"
+    ? { ...(input.integrations as Record<string, unknown>) }
+    : input.integrations;
+  if (integrations && typeof integrations === "object" && integrations.generic_webhook_secret === MASKED_SECRET_PLACEHOLDER) {
+    integrations.generic_webhook_secret = currentSettings?.integrations_json?.generic_webhook_secret ?? null;
+  }
   return {
     ...input,
     providers,
-    credentials
+    credentials,
+    integrations
   };
+}
+
+function maskUiSettingsSecrets(settings: any): any {
+  if (!settings || typeof settings !== "object") return settings;
+  const credentials = settings.credentials_json && typeof settings.credentials_json === "object"
+    ? { ...settings.credentials_json }
+    : settings.credentials_json;
+  if (credentials && typeof credentials === "object") {
+    for (const key of Object.keys(credentials)) {
+      if (/api[_-]?key|token|password|secret/i.test(key) && credentials[key]) credentials[key] = MASKED_SECRET_PLACEHOLDER;
+    }
+  }
+  const integrations = settings.integrations_json && typeof settings.integrations_json === "object"
+    ? { ...settings.integrations_json }
+    : settings.integrations_json;
+  if (integrations && typeof integrations === "object" && integrations.generic_webhook_secret) {
+    integrations.generic_webhook_secret = MASKED_SECRET_PLACEHOLDER;
+  }
+  const providers = settings.providers_json && typeof settings.providers_json === "object"
+    ? { ...settings.providers_json }
+    : settings.providers_json;
+  if (providers && typeof providers === "object" && providers.agent_overrides && typeof providers.agent_overrides === "object") {
+    providers.agent_overrides = Object.fromEntries(Object.entries(providers.agent_overrides).map(([agentId, override]: [string, any]) => [
+      agentId,
+      override && typeof override === "object" && override.api_key
+        ? { ...override, api_key: MASKED_SECRET_PLACEHOLDER }
+        : override
+    ]));
+  }
+  return { ...settings, credentials_json: credentials, integrations_json: integrations, providers_json: providers };
 }
 
 type ProjectBody = {
@@ -2991,13 +3037,16 @@ export function createApiServer(options: { enableArtifactRetentionScheduler?: bo
     if (scopeLevel === "effective") {
       const resolution = await resolvePersistedUiSettings(undefined, context);
       sendJson(res, 200, {
-        settings: resolution.effective,
-        layers: resolution.layers
+        settings: maskUiSettingsSecrets(resolution.effective),
+        layers: {
+          global: maskUiSettingsSecrets(resolution.layers.global),
+          project: maskUiSettingsSecrets(resolution.layers.project)
+        }
       });
       return;
     }
     const settings = await readPersistedUiSettingsLayer(scopeLevel, undefined, context);
-    sendJson(res, 200, { settings: scopeLevel === "global" ? applyEnvironmentLlmSettings(settings) : settings });
+    sendJson(res, 200, { settings: maskUiSettingsSecrets(scopeLevel === "global" ? applyEnvironmentLlmSettings(settings) : settings) });
     return;
   }
 
@@ -3009,9 +3058,27 @@ export function createApiServer(options: { enableArtifactRetentionScheduler?: bo
         sendJson(res, 404, { error: "hosted_only", feature: "workspace_settings" });
         return;
       }
+      const currentSettings = await readPersistedUiSettingsLayer(scopeLevel, undefined, context);
+      const sanitizedBody = stripLlmSecretsFromSettingsInput(body, currentSettings);
+      const integrations = sanitizedBody.integrations && typeof sanitizedBody.integrations === "object"
+        ? sanitizedBody.integrations as Record<string, unknown>
+        : null;
+      const genericWebhookUrl = typeof integrations?.generic_webhook_url === "string"
+        ? integrations.generic_webhook_url.trim()
+        : "";
+      if (genericWebhookUrl) {
+        const genericWebhookSecret = typeof integrations?.generic_webhook_secret === "string" && integrations.generic_webhook_secret
+          ? integrations.generic_webhook_secret
+          : null;
+        await assertSafeWebhookTarget(
+          genericWebhookUrl,
+          genericWebhookSecret ? "generic_signed" : "generic_unsigned",
+          { allowPrivateNetwork: process.env.HARNESS_ALLOW_PRIVATE_WEBHOOKS === "1" }
+        );
+      }
       await persistLlmEnvironmentSettings(body);
-      const settings = await updatePersistedUiSettings(stripLlmSecretsFromSettingsInput(body), undefined, { ...context, scopeLevel });
-      sendJson(res, 200, { settings });
+      const settings = await updatePersistedUiSettings(sanitizedBody, undefined, { ...context, scopeLevel });
+      sendJson(res, 200, { settings: maskUiSettingsSecrets(settings) });
     } catch (error) {
       sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
     }

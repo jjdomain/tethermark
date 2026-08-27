@@ -13,9 +13,11 @@ export class ArtifactStore {
 
   private async writeArtifact(runId: string, type: string, filename: string, content: string): Promise<ArtifactRecord> {
     const runDir = this.resolveRunDir(runId);
-    await fs.mkdir(runDir, { recursive: true });
+    await fs.mkdir(runDir, { recursive: true, mode: 0o700 });
+    if (process.platform !== "win32") await fs.chmod(runDir, 0o700);
     const filePath = path.join(runDir, filename);
-    await fs.writeFile(filePath, content, "utf8");
+    await fs.writeFile(filePath, content, { encoding: "utf8", mode: 0o600 });
+    if (process.platform !== "win32") await fs.chmod(filePath, 0o600);
     return {
       artifact_id: createId("artifact"),
       run_id: runId,

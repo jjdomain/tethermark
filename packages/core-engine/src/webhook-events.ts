@@ -3,6 +3,7 @@ import { createHmac, randomUUID } from "node:crypto";
 import type { PersistedWebhookDeliveryRecord } from "./persistence/contracts.js";
 import { createPersistedWebhookDelivery } from "./persistence/webhook-deliveries.js";
 import type { PersistenceReadOptions } from "./persistence/backend.js";
+import { assertSafeWebhookTarget, publicWebhookUrl, redactUrlCredentials } from "./security-boundaries.js";
 
 export interface WebhookRunRecord {
   id: string;
@@ -100,22 +101,29 @@ export async function emitGenericWebhookEvent(args: {
 
   let record: PersistedWebhookDeliveryRecord;
   try {
-    const response = await fetch(args.config.url, {
+    const targetUrl = await assertSafeWebhookTarget(
+      args.config.url,
+      args.config.secret ? "generic_signed" : "generic_unsigned",
+      { allowPrivateNetwork: process.env.HARNESS_ALLOW_PRIVATE_WEBHOOKS === "1" }
+    );
+    const response = await fetch(targetUrl, {
       method: "POST",
       headers,
-      body
+      body,
+      redirect: "error",
+      signal: AbortSignal.timeout(10_000)
     });
-    const text = await response.text().catch(() => "");
+    await response.body?.cancel().catch(() => undefined);
     record = {
       id: eventId,
       run_id: args.run.id,
       workspace_id: args.run.workspace_id,
       project_id: args.run.project_id,
       event_type: args.eventType,
-      target_url: args.config.url,
+      target_url: publicWebhookUrl(args.config.url),
       status: response.ok ? "sent" : "failed",
       http_status: response.status,
-      response_summary: text.slice(0, 400) || response.statusText || null,
+      response_summary: response.statusText.slice(0, 120) || null,
       attempted_at: occurredAt,
       triggered_by: args.triggeredBy ?? null,
       payload_json: envelope
@@ -127,10 +135,10 @@ export async function emitGenericWebhookEvent(args: {
       workspace_id: args.run.workspace_id,
       project_id: args.run.project_id,
       event_type: args.eventType,
-      target_url: args.config.url,
+      target_url: publicWebhookUrl(args.config.url),
       status: "failed",
       http_status: null,
-      response_summary: error instanceof Error ? error.message : String(error),
+      response_summary: redactUrlCredentials(error instanceof Error ? error.message : String(error)).slice(0, 400),
       attempted_at: occurredAt,
       triggered_by: args.triggeredBy ?? null,
       payload_json: envelope

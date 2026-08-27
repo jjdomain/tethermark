@@ -386,6 +386,8 @@ Tethermark Community Edition is not claiming:
 
 If you need enforced auth in Community Edition, use `HARNESS_API_AUTH_MODE=api_key`. External binding additionally requires the explicit acknowledgement described above and a trusted TLS reverse proxy and firewall.
 
+The credential, webhook, archive, repository, artifact, and runtime-mount trust boundaries are documented in [`docs/security-threat-model.md`](docs/security-threat-model.md).
+
 ## Release Checklist
 
 The maintainer release checklist lives at [`docs/release-checklist.md`](docs/release-checklist.md). The short version is:

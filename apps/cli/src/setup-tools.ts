@@ -14,6 +14,7 @@ import {
   type StaticToolReleaseAsset
 } from "../../../packages/core-engine/src/static-tool-policy.js";
 import { buildToolPathEnv } from "../../../packages/core-engine/src/tool-paths.js";
+import { assertSafeArchiveListing, verifyExtractedArchiveTree } from "./archive-security.js";
 
 type ToolId = ProductionStaticToolId;
 type SetupKind = "detected" | "managed_archive" | "managed_python" | "manual";
@@ -210,6 +211,7 @@ function recordManagedToolPath(installedDirs: string[]): string[] {
     process.env.HARNESS_SEMGREP_RUNNER = semgrepRunner;
   }
   fs.writeFileSync(envPath, updatedContents, "utf8");
+  if (process.platform !== "win32") fs.chmodSync(envPath, 0o600);
   process.env.HARNESS_STATIC_TOOLS_PATH = dirs.join(path.delimiter);
   return dirs;
 }
@@ -363,12 +365,21 @@ async function installManagedArchive(item: SetupCommand): Promise<string> {
     const extractRoot = path.join(tempRoot, "extract");
     await fsp.mkdir(extractRoot, { recursive: true });
     await downloadFile(asset.url, archivePath);
+    const archiveStat = await fsp.stat(archivePath);
+    if (archiveStat.size > 512 * 1024 * 1024) throw new Error("downloaded archive exceeds the 512 MiB safety limit");
     const digest = await sha256File(archivePath);
     if (digest !== asset.sha256) throw new Error(`checksum mismatch: expected ${asset.sha256}, received ${digest}`);
+    const listing = spawnSync("tar", ["-tf", archivePath], { encoding: "utf8", windowsHide: true, timeout: 30_000, maxBuffer: 4 * 1024 * 1024 });
+    const verboseListing = spawnSync("tar", ["-tvf", archivePath], { encoding: "utf8", windowsHide: true, timeout: 30_000, maxBuffer: 4 * 1024 * 1024 });
+    if (listing.status !== 0 || listing.error || verboseListing.status !== 0 || verboseListing.error) {
+      throw new Error(`archive listing failed: ${listing.error?.message ?? verboseListing.error?.message ?? listing.stderr ?? verboseListing.stderr ?? "unknown error"}`);
+    }
+    assertSafeArchiveListing(String(listing.stdout ?? ""), String(verboseListing.stdout ?? ""));
     const extraction = spawnSync("tar", ["-xf", archivePath, "-C", extractRoot], { encoding: "utf8", windowsHide: true, timeout: 120_000 });
     if (extraction.status !== 0 || extraction.error) {
       throw new Error(`archive extraction failed: ${extraction.error?.message ?? extraction.stderr ?? `exit ${extraction.status}`}`);
     }
+    await verifyExtractedArchiveTree(extractRoot);
     const binaryNames = new Set([policy.command.toLowerCase(), `${policy.command}.exe`]);
     const extractedBinary = await findFile(extractRoot, binaryNames);
     if (!extractedBinary) throw new Error(`${policy.command} executable was not present in ${asset.filename}`);

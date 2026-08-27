@@ -19,6 +19,7 @@ That command currently covers:
 - native install/update/first-run/guarded-uninstall lifecycle checks
 - Playwright package/manifest, static-tool archive, and runtime-image integrity-lock checks
 - fail-closed API/web UI network-exposure policy and direct/combined startup checks
+- credential, webhook SSRF, repository-clone, archive-extraction, and log-redaction boundary checks
 - export golden/schema checks
 - bundled fixture validation
 - deterministic live-validation opt-in, budget, usage, and redaction harness checks
@@ -80,6 +81,7 @@ Confirm these docs still match the released behavior:
 Specifically re-check:
 
 - auth mode/trust model wording
+- the threat-model register and every credential/outbound/archive/clone/runtime-mount boundary
 - supported persistence modes
 - runtime limitations
 - assistant default-on behavior, explicit disable override, model routing, fallback, and Community Edition/Cloud boundaries

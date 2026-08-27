@@ -311,7 +311,8 @@ export async function writePersistenceMetadata(rootDir: string, databaseMode: Da
     warnings: [],
     updated_at: new Date().toISOString()
   };
-  await fs.mkdir(rootDir, { recursive: true });
+  await fs.mkdir(rootDir, { recursive: true, mode: 0o700 });
+  if (process.platform !== "win32") await fs.chmod(rootDir, 0o700);
   const metadataPath = localPersistenceMetadataPath(rootDir);
   const tempPath = `${metadataPath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
   try {
@@ -765,7 +766,8 @@ export async function restoreLocalPersistenceBackup(args: {
   }
   const manifest = verification.manifest!;
   const dbPath = sqliteDbPath(rootDir);
-  await fs.mkdir(rootDir, { recursive: true });
+  await fs.mkdir(rootDir, { recursive: true, mode: 0o700 });
+  if (process.platform !== "win32") await fs.chmod(rootDir, 0o700);
   const fileLock = await acquireSqliteFileLock(dbPath);
   let safetyBackupDir: string | null = null;
   let rejectedDatabasePath: string | null = null;
@@ -946,12 +948,13 @@ export async function saveSqliteDatabase(rootDir: string, db: any, databaseMode:
         if (sqliteSaveFailureForTests === "before_temp_write") {
           throw Object.assign(new Error("simulated_sqlite_disk_full"), { code: "ENOSPC" });
         }
-        await fs.writeFile(tempPath, Buffer.from(latestDb.export()));
+        await fs.writeFile(tempPath, Buffer.from(latestDb.export()), { mode: 0o600 });
         sqliteSaveStageObserverForTests?.("after_temp_write");
         if (sqliteSaveFailureForTests === "before_replace") {
           throw Object.assign(new Error("simulated_sqlite_replace_failure"), { code: "EIO" });
         }
         await replaceSqliteFile(tempPath, dbPath);
+        if (process.platform !== "win32") await fs.chmod(dbPath, 0o600);
         sqliteSaveStageObserverForTests?.("after_replace");
         await writePersistenceMetadata(rootDir, databaseMode, resolvedBundleExportPolicy);
       } catch (error) {

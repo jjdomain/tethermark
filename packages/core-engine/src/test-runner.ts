@@ -4548,6 +4548,11 @@ async function testWebUiAndPersistedUiSettingsApi(): Promise<void> {
               disposition_renewal_days: 45,
               disposition_review_window_days: 14
             },
+            integrations: {
+              generic_webhook_url: "http://127.0.0.1:9999/events",
+              generic_webhook_secret: "ui-settings-webhook-secret",
+              generic_webhook_events: ["run_completed"]
+            },
             test_mode: { preset: "fixture_validation", deterministic_planning: true, fixture_validation_enabled: true, reduced_cost_mode: false }
           })
         });
@@ -4559,6 +4564,7 @@ async function testWebUiAndPersistedUiSettingsApi(): Promise<void> {
         assert.equal(updatePayload.settings.review_json.publishability_threshold, "medium");
         assert.equal(updatePayload.settings.review_json.disposition_renewal_days, 45);
         assert.equal(updatePayload.settings.review_json.disposition_review_window_days, 14);
+        assert.equal(updatePayload.settings.integrations_json.generic_webhook_secret, "************");
         assert.equal(updatePayload.settings.test_mode_json.preset, "fixture_validation");
 
         const documentCreateResponse = await fetch(`${webBaseUrl}/api/ui/documents`, {
@@ -4594,9 +4600,12 @@ async function testWebUiAndPersistedUiSettingsApi(): Promise<void> {
         assert.equal(deleteResponse.status, 200);
         assert.equal(deletePayload.deleted, true);
 
-        const persistedSettings = await readPersistedUiSettings({ rootDir: LocalRoot, dbMode: "local" }, { workspaceId: "team-alpha", projectId: "project-red" });
+        // Community Edition deliberately normalizes every authenticated request to the
+        // single local workspace. Project scoping still applies.
+        const persistedSettings = await readPersistedUiSettings({ rootDir: LocalRoot, dbMode: "local" }, { workspaceId: "default", projectId: "project-red" });
         const persistedDocuments = await listPersistedUiDocuments({ rootDir: LocalRoot, dbMode: "local" }, { workspaceId: "team-alpha", projectId: "project-red" });
         assert.ok(persistedSettings);
+        assert.equal((persistedSettings.integrations_json as any).generic_webhook_secret, "ui-settings-webhook-secret");
         assert.equal(persistedDocuments.length, 0);
       } finally {
         for (const [key, value] of savedEnv.entries()) {

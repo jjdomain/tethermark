@@ -3,6 +3,7 @@ import path from "node:path";
 
 import type { AuditRequest, AnalysisSummary, SandboxSession, TargetDescriptor } from "./contracts.js";
 import { normalizeEndpointUrl, normalizeLocalPath, normalizeRepoUrl } from "./target-identity.js";
+import { assertSafeRepositoryUrl, publicRepositoryUrl } from "./security-boundaries.js";
 import { createStableId, unique, nowIso } from "./utils.js";
 
 const TEXT_FILE_RE = /\.(ts|tsx|js|jsx|mjs|cjs|py|json|md|yml|yaml|toml)$/i;
@@ -179,13 +180,15 @@ async function detectAgenticSignals(root: string, files: string[]): Promise<{
 
 function computeTargetIdentity(request: AuditRequest): { targetId: string; snapshotValue: string } {
   if (request.repo_url) {
-    const normalized = normalizeRepoUrl(request.repo_url);
+    const safeRepoUrl = assertSafeRepositoryUrl(request.repo_url);
+    const normalized = normalizeRepoUrl(safeRepoUrl);
     const pinnedRef = typeof (request.hints as any)?.diagnostic_run?.pinned_reference === "string"
       ? String((request.hints as any).diagnostic_run.pinned_reference).trim()
       : typeof (request.hints as any)?.repo_checkout_ref === "string"
         ? String((request.hints as any).repo_checkout_ref).trim()
         : "";
-    const snapshotValue = pinnedRef ? `${request.repo_url}#${pinnedRef}` : request.repo_url;
+    const publicRepoUrl = publicRepositoryUrl(safeRepoUrl);
+    const snapshotValue = pinnedRef ? `${publicRepoUrl}#${pinnedRef}` : publicRepoUrl;
     return {
       targetId: createStableId("target", `repo:${normalized}${pinnedRef ? `#${pinnedRef}` : ""}`),
       snapshotValue
@@ -235,10 +238,11 @@ export async function prepareTarget(request: AuditRequest, sandbox: SandboxSessi
   }
 
   if (request.repo_url) {
+    const publicRepoUrl = publicRepositoryUrl(assertSafeRepositoryUrl(request.repo_url));
     return {
       target_id: identity.targetId,
       target_type: "repo",
-      repo_url: request.repo_url,
+      repo_url: publicRepoUrl,
       local_path: sandbox.target_dir,
       endpoint_url: null,
       snapshot: { type: "repo_url", value: identity.snapshotValue, captured_at: nowIso(), commit_sha: sandbox.source_provenance.commit_sha },

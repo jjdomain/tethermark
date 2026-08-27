@@ -2,6 +2,7 @@ import type { AsyncJobStatus, AuditRequest, RunEnvelope } from "../contracts.js"
 import type { AuditEngine } from "../orchestrator.js";
 import { deriveRequestScope, normalizeProjectId, normalizeWorkspaceId } from "../request-scope.js";
 import { assertAuditRequestProviderPolicy } from "../provider-policy.js";
+import { assertRequestSafeForDurableQueue, assertSafeWebhookTarget, redactUrlCredentials } from "../security-boundaries.js";
 import { createId, nowIso } from "../utils.js";
 import { resolvePersistenceLocation, type PersistenceReadOptions } from "./backend.js";
 import type { PersistedAsyncJobAttemptRecord, PersistedAsyncJobRecord } from "./contracts.js";
@@ -181,7 +182,8 @@ export class PersistedAsyncJobManager {
     const deliveredAt = nowIso();
     let nextJob = { ...job };
     try {
-      await fetch(job.completion_webhook_url, {
+      const targetUrl = await assertSafeWebhookTarget(job.completion_webhook_url, "completion_unsigned");
+      const response = await fetch(targetUrl, {
         method: "POST",
         headers: { "content-type": "application/json; charset=utf-8" },
         body: JSON.stringify({
@@ -189,8 +191,12 @@ export class PersistedAsyncJobManager {
           attempts,
           latest_attempt: latestAttempt,
           run: latestAttempt?.run_id ? this.engine.getRun(latestAttempt.run_id) ?? null : null
-        })
+        }),
+        redirect: "error",
+        signal: AbortSignal.timeout(10_000)
       });
+      await response.body?.cancel().catch(() => undefined);
+      if (!response.ok) throw new Error(`completion_webhook_http_${response.status}`);
       nextJob = {
         ...job,
         completion_webhook_status: "delivered",
@@ -203,7 +209,7 @@ export class PersistedAsyncJobManager {
         ...job,
         completion_webhook_status: "failed",
         completion_webhook_last_attempt_at: deliveredAt,
-        completion_webhook_error: error instanceof Error ? error.message : String(error),
+        completion_webhook_error: redactUrlCredentials(error instanceof Error ? error.message : String(error)).slice(0, 400),
         updated_at: deliveredAt
       };
     }
@@ -311,7 +317,10 @@ export class PersistedAsyncJobManager {
     startImmediately?: boolean;
     completionWebhookUrl?: string | null;
   }): Promise<PersistedAsyncJobDetails> {
-    const request = assertAuditRequestProviderPolicy(args.request, "unattended_local");
+    const request = assertRequestSafeForDurableQueue(assertAuditRequestProviderPolicy(args.request, "unattended_local"));
+    const completionWebhookUrl = args.completionWebhookUrl
+      ? await assertSafeWebhookTarget(args.completionWebhookUrl, "completion_unsigned")
+      : null;
     const location = resolveLocation({ dbMode: request.db_mode });
     const scope = deriveRequestScope(request);
     const createdAt = nowIso();
@@ -327,8 +336,8 @@ export class PersistedAsyncJobManager {
       requested_by: scope.requested_by,
       current_run_id: runId,
       latest_attempt_number: 1,
-      completion_webhook_url: args.completionWebhookUrl ?? null,
-      completion_webhook_status: args.completionWebhookUrl ? "pending" : null,
+      completion_webhook_url: completionWebhookUrl,
+      completion_webhook_status: completionWebhookUrl ? "pending" : null,
       completion_webhook_last_attempt_at: null,
       completion_webhook_error: null,
       terminal_followup_status: null,

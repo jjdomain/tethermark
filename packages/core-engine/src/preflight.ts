@@ -12,6 +12,7 @@ import { analyzeTarget } from "./repo.js";
 import { buildStaticToolsReadiness } from "./static-tools.js";
 import { checkGitRepoAccess } from "./git-utils.js";
 import { assertAuditRequestProviderPolicy } from "./provider-policy.js";
+import { assertSafeRepositoryUrl } from "./security-boundaries.js";
 
 function emptyAnalysis(rootPath: string): AnalysisSummary {
   return {
@@ -225,9 +226,12 @@ export async function buildPreflightSummary(request: AuditRequest): Promise<Pref
       blockers.push(`Local path '${resolvedLocalPath}' could not be accessed.`);
     }
   } else if (request.repo_url) {
-    const repoAccess = await checkGitRepoAccess(request.repo_url);
-    if (!repoAccess.ok) {
-      blockers.push(repoAccess.summary);
+    try {
+      assertSafeRepositoryUrl(request.repo_url);
+      const repoAccess = await checkGitRepoAccess(request.repo_url);
+      if (!repoAccess.ok) blockers.push(repoAccess.summary);
+    } catch (error) {
+      blockers.push(error instanceof Error ? error.message : String(error));
     }
     warnings.push("Remote repository preflight does not clone contents yet; file-level analysis is deferred until run start.");
     analysis = emptyAnalysis(request.repo_url);

@@ -83,5 +83,8 @@ jobs:
       - name: Verify fail-closed network exposure policy
         run: npm run test:network-exposure
 
+      - name: Verify credential and untrusted-input boundaries
+        run: npm run test:security-boundaries
+
       - name: Smoke test combined OSS launcher
         run: npm run oss:check
