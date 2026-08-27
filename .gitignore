@@ -6,6 +6,7 @@ dist/
 .tmp/
 .git-home/
 .codex/status.*
+.tethermark-install.json
 
 .env
 .env.local

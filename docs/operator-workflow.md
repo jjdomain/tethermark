@@ -7,8 +7,7 @@ This guide covers the complete local audit lifecycle for a first-time Community 
 From the repository root:
 
 ```bash
-npm install
-npm run scan -- onboard
+npm run first-run
 npm run scan -- doctor
 npm run oss
 ```
@@ -150,7 +149,7 @@ Before upgrading:
 
 1. Stop Tethermark and run `npm run scan -- backup create --reason before-upgrade`; verify the resulting backup and separately copy retained artifacts.
 2. Review `changelog.md` for schema, environment, and tool-pin changes.
-3. Update the checkout and run `npm install`.
+3. Run the ref-pinned update command for the target release from [Tethermark Installation](./installation.md). It checks out the resolved commit and runs `npm ci`; do not replace this with a mutable dependency install.
 4. Run `npm run scan -- migrate local-db`, `npm run scan -- validate-persistence`, `npm run scan -- doctor`, and `npm run release:check`.
 5. Start `npm run oss`, confirm persistence compatibility, and open an older run and export. If migration or validation fails, stop Tethermark and restore the verified pre-upgrade backup before returning to the previous release.
 

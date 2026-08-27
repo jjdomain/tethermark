@@ -2,40 +2,38 @@
 
 Tethermark should be installed with a guided workflow first, then verified with `doctor`.
 
-## One-Line Install
+## Reproducible Install
+
+The supported source distribution is the repository-local installer. Download or clone a trusted Tethermark source ref, inspect the script, and preview the exact operation before running it. The `tethermark.dev` hosted one-line URLs are not published and must not be used.
+
+For a release, replace `<release-tag-or-commit>` with the published tag or full commit SHA. The default `main` ref is convenient for development but is intentionally rolling and is not a reproducible release identifier.
 
 macOS and Linux:
 
 ```bash
-curl -fsSL https://tethermark.dev/install.sh | bash
+bash scripts/install.sh --dry-run --ref=<release-tag-or-commit>
+bash scripts/install.sh --ref=<release-tag-or-commit>
 ```
 
 Windows PowerShell:
 
 ```powershell
-irm https://tethermark.dev/install.ps1 | iex
+powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -DryRun -Ref <release-tag-or-commit>
+powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -Ref <release-tag-or-commit>
 ```
 
-Until the public install host is live, run the repo-local scripts directly:
-
-```bash
-bash scripts/install.sh --dry-run
-```
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -DryRun
-```
-
-The installer clones or updates Tethermark, runs `npm install`, then launches onboarding. Onboarding creates/checks `.env`, runs `doctor`, explains external tool readiness, points to the safe tool setup plan, and prints the next smoke-test/UI commands.
+The installer requires Git, Node.js, and npm; clones the requested ref; checks out the resolved commit in detached mode; runs the lockfile-enforced first-run workflow; and records the requested ref and resolved commit in ignored local file `.tethermark-install.json`. A fresh install refuses to overwrite an existing destination.
 
 ## Guided Onboarding
 
 From a checked-out repo:
 
 ```bash
-npm install
-npm run scan -- onboard
+npm run first-run -- --dry-run
+npm run first-run
 ```
+
+`first-run` accepts only Node.js 22.x or 24.x, installs the exact `package-lock.json` dependency graph with `npm ci`, builds Tethermark, creates/checks `.env`, runs `doctor`, explains external tool readiness, and prints the next setup, fixture-validation, and UI commands. Use `npm run first-run -- --no-onboard` only for automation that will run onboarding separately.
 
 Onboarding will tell you whether to run:
 
@@ -265,20 +263,44 @@ If no assistant LLM is configured or the configured model cannot be reached, Com
 
 The Community Edition web UI defaults to dark mode. Use the sidebar theme button to switch between dark and light mode. The browser stores the preference in `localStorage` as `tethermark-theme`.
 
-## Safe Installer Options
+## Update And Rollback
+
+Stop Tethermark and create a verified backup before updating. The installer refuses a checkout with uncommitted or untracked files, fetches only the requested ref, checks out its resolved commit in detached mode, and reruns `npm ci`, the build, and onboarding.
 
 macOS/Linux:
 
 ```bash
-curl -fsSL https://tethermark.dev/install.sh | bash -s -- --dry-run
-curl -fsSL https://tethermark.dev/install.sh | bash -s -- --no-onboard
-curl -fsSL https://tethermark.dev/install.sh | bash -s -- --prefix="$HOME/tools/tethermark"
+npm run scan -- backup create --reason before-upgrade
+bash scripts/install.sh --update --prefix="$HOME/.tethermark/tethermark" --ref=<release-tag-or-commit>
 ```
 
 Windows:
 
 ```powershell
-irm https://tethermark.dev/install.ps1 | iex
-powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -DryRun
-powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -NoOnboard
+npm run scan -- backup create --reason before-upgrade
+powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -Update -InstallDir "$HOME\.tethermark\tethermark" -Ref <release-tag-or-commit>
 ```
+
+For code rollback, repeat the update command with the previous release tag or commit, then restore the verified pre-upgrade database backup if the newer release changed persisted state. Review `changelog.md` before either operation.
+
+Optional installer arguments are `--prefix=`, `--repo=`, `--ref=`, `--no-onboard`, and `--dry-run` on macOS/Linux, with equivalent `-InstallDir`, `-RepoUrl`, `-Ref`, `-NoOnboard`, and `-DryRun` PowerShell parameters.
+
+## Guarded Uninstall
+
+Preview uninstall first. By default, the uninstaller moves `.env`, `.env.local`, `.artifacts`, and `.tethermark` to a timestamped sibling `uninstall-backups` directory, then removes only the verified application checkout. It rejects filesystem roots, the user profile, and directories that do not identify as Tethermark.
+
+macOS/Linux:
+
+```bash
+bash scripts/uninstall.sh --dry-run --prefix="$HOME/.tethermark/tethermark"
+bash scripts/uninstall.sh --yes --prefix="$HOME/.tethermark/tethermark"
+```
+
+Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/uninstall.ps1 -DryRun -InstallDir "$HOME\.tethermark\tethermark"
+powershell -ExecutionPolicy Bypass -File scripts/uninstall.ps1 -Yes -InstallDir "$HOME\.tethermark\tethermark"
+```
+
+`--purge-data`/`-PurgeData` deletes checkout-local configuration and data instead of preserving it. User-scoped static tools installed outside the checkout are deliberately retained; their complete removal is documented separately when the credential/data-removal Phase 11 task is complete.

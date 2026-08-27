@@ -145,18 +145,13 @@ The supported baseline is Node.js 22.x or 24.x with npm 10.x or 11.x. Python-bac
 ### 1. Install
 
 ```bash
-npm install
+npm run first-run -- --dry-run
+npm run first-run
 ```
 
 For a guided installation and readiness workflow, see [`docs/installation.md`](docs/installation.md).
 
-Local checkout onboarding:
-
-```bash
-npm run scan -- onboard
-```
-
-Onboarding creates/checks `.env`, runs `doctor`, explains external tool readiness, and prints the next `setup-tools`, fixture validation, and UI commands.
+The one-command first run enforces the supported Node major, installs the lockfile with `npm ci`, builds the application, creates/checks `.env`, runs `doctor`, and prints the next `setup-tools`, fixture-validation, and UI commands.
 
 Runtime readiness is part of onboarding. Use:
 
@@ -168,15 +163,7 @@ npm run scan -- validate-runtime-fixtures
 
 The web UI exposes Admin -> Runtime Sandbox for selected backend, candidate probes, warning/blocker status, network/resource defaults, and setup guidance.
 
-Future public one-line installers:
-
-```bash
-curl -fsSL https://tethermark.dev/install.sh | bash
-```
-
-```powershell
-irm https://tethermark.dev/install.ps1 | iex
-```
+Repository-local install, ref-pinned update/rollback, and guarded uninstall commands for Windows, macOS, and Linux are documented in [`docs/installation.md`](docs/installation.md). No hosted one-line installer is currently published.
 
 ### 2. Build and Test
 

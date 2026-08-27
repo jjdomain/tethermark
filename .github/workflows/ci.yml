@@ -74,5 +74,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Verify native install and uninstall lifecycle
+        run: npm run test:install-lifecycle
+
       - name: Smoke test combined OSS launcher
         run: npm run oss:check

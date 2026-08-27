@@ -575,7 +575,7 @@ Objective: turn a source checkout into a supportable CE distribution.
 Tasks:
 
 - [x] Define supported Node, Python, Windows, macOS, Linux, Docker/Podman, and browser versions. `docs/supported-platforms.md` is the canonical contract: Node 22/24 and npm 10/11 are package-enforced, Python 3.11–3.13 matches worker/scanner gates, CI uses explicit Ubuntu 24.04/Windows Server 2025/macOS 15 runners, executable runtime claims are limited to retained Ubuntu and Windows evidence, real macOS container execution remains uncertified, and the manual UI release gate covers the exact Playwright 1.60.0 Chromium/Firefox/WebKit bundle.
-- [ ] Provide reproducible installation/update/uninstall paths and a one-command first-run setup/doctor.
+- [x] Provide reproducible installation/update/uninstall paths and a one-command first-run setup/doctor. Repository-local Windows and Unix installers now fetch an explicit tag/commit, check out the resolved commit detached, install exactly from `package-lock.json` with `npm ci`, run a single cross-platform `npm run first-run` build/onboarding/doctor path, and record the resolved revision. Updates refuse dirty checkouts; rollback uses the same ref-pinned path; guarded uninstall verifies its target and preserves checkout-local configuration/data by default. Native lifecycle dry runs execute in CI and `release:check`.
 - [ ] Package or securely bootstrap required browser and static/runtime tools with pinned checksums.
 - [ ] Default API/UI binding to localhost; make external binding require explicit auth and warning acknowledgement.
 - [ ] Threat-model API key storage, Codex sign-in/session-cache discovery, logs, artifacts, webhooks, archive extraction, repository cloning, and runtime mounts.

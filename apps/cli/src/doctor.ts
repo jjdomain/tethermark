@@ -320,8 +320,8 @@ export function buildDoctorReport(): DoctorReport {
     summary: fs.existsSync(path.resolve(process.cwd(), ".env")) ? ".env found." : ".env not found; defaults and process environment will be used.",
     fix: fs.existsSync(path.resolve(process.cwd(), ".env")) ? undefined : ["Copy .env.example to .env and configure provider credentials before live runs."]
   });
-  addCommandCheck(checks, { id: "node", label: "Node.js", command: "node", required: true, fix: ["Install Node.js 20+ from https://nodejs.org/."] });
-  addCommandCheck(checks, { id: "npm", label: "npm", command: "npm", shell: process.platform === "win32", required: true, fix: ["Install npm with Node.js 20+."] });
+  addCommandCheck(checks, { id: "node", label: "Node.js", command: "node", required: true, fix: ["Install supported Node.js 22.x or 24.x from https://nodejs.org/."] });
+  addCommandCheck(checks, { id: "npm", label: "npm", command: "npm", shell: process.platform === "win32", required: true, fix: ["Install supported npm 10.x or 11.x with Node.js 22.x or 24.x."] });
   addCommandCheck(checks, { id: "git", label: "Git", command: "git", required: true, fix: ["Install Git and ensure git is on PATH."] });
   addCommandCheck(checks, { id: "python", label: "Python", command: envValue("PYTHON_BIN") ?? "python", required: false, fix: ["Install Python >=3.11 <3.14 for runtime worker adapters."] });
   const pythonWorkers = inspectPythonWorkerEnvironment();
@@ -435,7 +435,7 @@ export function buildStaticScannerDoctorReport(): DoctorReport {
     summary: `${os.type()} ${os.release()} (${process.platform}/${process.arch}).`,
     details: { platform: process.platform, arch: process.arch, homedir: os.homedir() }
   });
-  addCommandCheck(checks, { id: "node", label: "Node.js", command: "node", required: true, fix: ["Install Node.js 20+ from https://nodejs.org/."] });
+  addCommandCheck(checks, { id: "node", label: "Node.js", command: "node", required: true, fix: ["Install supported Node.js 22.x or 24.x from https://nodejs.org/."] });
   addCommandCheck(checks, { id: "git", label: "Git", command: "git", required: true, fix: ["Install Git and ensure git is on PATH."] });
   checks.push({
     id: "static-tools-path",

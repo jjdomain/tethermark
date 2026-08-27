@@ -16,6 +16,7 @@ That command currently covers:
 
 - TypeScript build
 - regression test suite
+- native install/update/first-run/guarded-uninstall lifecycle checks
 - export golden/schema checks
 - bundled fixture validation
 - deterministic live-validation opt-in, budget, usage, and redaction harness checks
@@ -31,6 +32,8 @@ npm run production:static-release
 That command adds the deterministic Codex OAuth first-run smoke, Pi Agent static API E2E, Pi Agent browser/UI E2E, and export checks. See `docs/static-audit-production-readiness.md` for the full gate and release evidence requirements.
 
 ## 2. Local Runtime Smoke Test
+
+Before the runtime smoke, verify a fresh ref-pinned install and an update preview on the release operating system using [`docs/installation.md`](./installation.md). Run the guarded uninstall dry run against the test installation and confirm that it identifies the exact checkout and preservation directory without changing either.
 
 In a fresh shell with `.env` based on `.env.example`:
 

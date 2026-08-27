@@ -12,11 +12,12 @@
     "npm": "^10.0.0 || ^11.0.0"
   },
   "scripts": {
+    "first-run": "node scripts/first-run.mjs",
     "build": "tsc -p tsconfig.json",
     "test": "npm run build --silent && node dist/packages/core-engine/src/test-runner.js",
     "exports:check": "npm run build --silent && node dist/packages/core-engine/src/export-maintenance.js check",
     "exports:refresh": "npm run build --silent && node dist/packages/core-engine/src/export-maintenance.js refresh",
-    "release:check": "npm run build --silent && npm test --silent && npm run exports:check && npm run scan -- validate-fixtures && npm run test:live-validation-harness",
+    "release:check": "npm run build --silent && npm test --silent && npm run test:install-lifecycle && npm run exports:check && npm run scan -- validate-fixtures && npm run test:live-validation-harness",
     "benchmark:product": "npm run scan -- benchmark run",
     "benchmark:product:execute": "npm run scan -- benchmark run --execute",
     "oss": "npm run build --silent && node scripts/run-api-web.mjs",
@@ -26,6 +27,7 @@
     "smoke:openai-codex-oauth": "npm run build --silent && node scripts/check-openai-codex-oauth.mjs",
     "smoke:openai-codex-oauth:real": "npm run build --silent && node scripts/check-openai-codex-oauth.mjs --real",
     "test:live-validation-harness": "node scripts/check-live-validation-harness.mjs",
+    "test:install-lifecycle": "node scripts/check-install-lifecycle.mjs",
     "test:static-scanners:real": "npm run build --silent && node scripts/check-static-scanner-fixtures.mjs",
     "test:integration:llm:live": "npm run build --silent && node scripts/test-live-llm-integration.mjs --codex",
     "test:integration:llm:api:live": "npm run build --silent && node scripts/test-live-llm-integration.mjs --provider openai",
