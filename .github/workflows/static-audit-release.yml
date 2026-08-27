@@ -33,7 +33,7 @@ on:
 
 jobs:
   deterministic-release-checks:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     steps:
@@ -71,9 +71,9 @@ jobs:
       fail-fast: false
       matrix:
         os:
-          - ubuntu-latest
-          - windows-latest
-          - macos-latest
+          - ubuntu-24.04
+          - windows-2025
+          - macos-15
     env:
       HARNESS_DISABLE_LOCAL_BINARIES: "0"
 
@@ -115,7 +115,7 @@ jobs:
 
   static-pi-api-e2e:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_network_e2e == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     needs: deterministic-release-checks
 
@@ -137,9 +137,16 @@ jobs:
 
   static-pi-ui-e2e:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ui_e2e == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     needs: deterministic-release-checks
+    strategy:
+      fail-fast: false
+      matrix:
+        browser:
+          - chromium
+          - firefox
+          - webkit
 
     steps:
       - name: Checkout repository
@@ -154,8 +161,10 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install Playwright Chromium
-        run: npx playwright install chromium
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps ${{ matrix.browser }}
 
       - name: Run Pi static UI E2E
+        env:
+          TETHERMARK_STATIC_PI_UI_BROWSER: ${{ matrix.browser }}
         run: npm run e2e:static-pi-ui --silent

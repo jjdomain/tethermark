@@ -1,5 +1,12 @@
 ﻿# Changelog
 
+## 2026-08-27
+
+### Changed
+
+- Phase 11 now defines a canonical platform/version contract. Package engines constrain Node 22/24 and npm 10/11, CI runner operating systems are explicit, Python 3.11–3.13 and native runtime certification match their executable evidence, Playwright is pinned to 1.60.0, and the manual UI release gate covers its Chromium, Firefox, and WebKit builds without claiming unverified macOS container execution.
+- Executed benchmark suites now require an identified interactive operator, and the CLI/API propagate that identity into immutable launch approvals. Anonymous direct execution fails closed instead of breaking later inside system-policy evidence-reduction enforcement.
+
 ## 2026-08-26
 
 ### Changed

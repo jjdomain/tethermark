@@ -140,6 +140,8 @@ flowchart TD
 
 ## Quick Start
 
+The supported baseline is Node.js 22.x or 24.x with npm 10.x or 11.x. Python-backed workers support Python 3.11–3.13. Exact operating-system, sandbox, and browser certification is maintained in [`docs/supported-platforms.md`](docs/supported-platforms.md); notably, real macOS Docker Desktop execution is not yet certified.
+
 ### 1. Install
 
 ```bash

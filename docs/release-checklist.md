@@ -4,6 +4,8 @@ Use this checklist before tagging or publicly announcing a Tethermark Community 
 
 ## 1. Verification Commands
 
+Confirm the release candidate still matches [`docs/supported-platforms.md`](./supported-platforms.md): package engines, Python constraints, explicit GitHub runner labels, exact Playwright dependency, and native-runtime evidence must agree.
+
 Run the full maintainer verification path:
 
 ```bash
@@ -104,3 +106,5 @@ Before cutting a public release:
 6. Verify `npm run smoke:openai-codex-oauth:real` on a signed-in workstation when Codex ChatGPT-session behavior changed
 7. Verify example consumers under `examples/` still work against current export shapes
 8. Tag and publish only after the checklist is green
+
+For the browser release gate, manually dispatch `Static Audit Release Gate` with `run_ui_e2e=true` and require passing Chromium, Firefox, and WebKit matrix jobs. A default local Chromium pass alone does not certify all three browser engines.

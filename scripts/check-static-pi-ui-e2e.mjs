@@ -104,9 +104,14 @@ async function main() {
     throw new Error(`Built web UI server not found at ${distWebUiServer}. Run npm run build first.`);
   }
 
-  let chromium;
+  const browserName = (process.env.TETHERMARK_STATIC_PI_UI_BROWSER ?? "chromium").trim().toLowerCase();
+  if (!new Set(["chromium", "firefox", "webkit"]).has(browserName)) {
+    throw new Error(`Unsupported TETHERMARK_STATIC_PI_UI_BROWSER=${browserName}. Expected chromium, firefox, or webkit.`);
+  }
+  let browserType;
   try {
-    ({ chromium } = await import("playwright"));
+    const playwright = await import("playwright");
+    browserType = playwright[browserName];
   } catch (error) {
     throw new Error(`Playwright is required for the static Pi UI E2E. Run npm install first. ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -192,7 +197,8 @@ async function main() {
       title: "UI E2E seeded assistant chat"
     }, 201);
 
-    browser = await chromium.launch({ headless: process.env.TETHERMARK_STATIC_PI_UI_HEADLESS !== "0" });
+    log(`launching Playwright ${browserName}`);
+    browser = await browserType.launch({ headless: process.env.TETHERMARK_STATIC_PI_UI_HEADLESS !== "0" });
     const page = await browser.newPage({
       viewport: { width: 1440, height: 1200 },
       ignoreHTTPSErrors: true

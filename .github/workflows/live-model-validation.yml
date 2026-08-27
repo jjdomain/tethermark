@@ -31,7 +31,7 @@ on:
 jobs:
   live-validation:
     if: ${{ inputs.confirm_live_usage == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment: optional-api-live-validation
 

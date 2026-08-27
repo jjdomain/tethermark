@@ -574,7 +574,7 @@ Objective: turn a source checkout into a supportable CE distribution.
 
 Tasks:
 
-- [ ] Define supported Node, Python, Windows, macOS, Linux, Docker/Podman, and browser versions.
+- [x] Define supported Node, Python, Windows, macOS, Linux, Docker/Podman, and browser versions. `docs/supported-platforms.md` is the canonical contract: Node 22/24 and npm 10/11 are package-enforced, Python 3.11–3.13 matches worker/scanner gates, CI uses explicit Ubuntu 24.04/Windows Server 2025/macOS 15 runners, executable runtime claims are limited to retained Ubuntu and Windows evidence, real macOS container execution remains uncertified, and the manual UI release gate covers the exact Playwright 1.60.0 Chromium/Firefox/WebKit bundle.
 - [ ] Provide reproducible installation/update/uninstall paths and a one-command first-run setup/doctor.
 - [ ] Package or securely bootstrap required browser and static/runtime tools with pinned checksums.
 - [ ] Default API/UI binding to localhost; make external binding require explicit auth and warning acknowledgement.

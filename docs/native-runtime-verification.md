@@ -2,6 +2,8 @@
 
 Tethermark records native runtime evidence separately for each operating-system and backend combination. A backend passes only when the named engine actually launches both the isolation readiness fixture and the real Node target through `localRuntimeProvider.execute()`.
 
+The canonical release version and operating-system contract is [Supported Platforms And Versions](./supported-platforms.md). This document supplies the runtime evidence behind that matrix.
+
 ## Commands
 
 Build and verify one explicitly selected local backend:
