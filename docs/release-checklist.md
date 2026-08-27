@@ -17,6 +17,7 @@ That command currently covers:
 - TypeScript build
 - regression test suite
 - native install/update/first-run/guarded-uninstall lifecycle checks
+- Playwright package/manifest, static-tool archive, and runtime-image integrity-lock checks
 - export golden/schema checks
 - bundled fixture validation
 - deterministic live-validation opt-in, budget, usage, and redaction harness checks
@@ -111,3 +112,5 @@ Before cutting a public release:
 8. Tag and publish only after the checklist is green
 
 For the browser release gate, manually dispatch `Static Audit Release Gate` with `run_ui_e2e=true` and require passing Chromium, Firefox, and WebKit matrix jobs. A default local Chromium pass alone does not certify all three browser engines.
+
+The browser matrix must use `npm run setup:browser -- --yes --with-deps --browser <browser>`. Do not replace it with `npx playwright install`: the repository-owned command verifies the locked npm package integrity and browser revision manifest before download, then launches and version-checks the selected browser.

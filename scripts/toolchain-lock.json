@@ -1,0 +1,45 @@
+{
+  "schema_version": "2026-08-27.toolchain-lock.v1",
+  "browser": {
+    "package_version": "1.60.0",
+    "package_integrity": "sha512-hheHdokM8cdqCb0lcE3s+zT4t4W+vvjpGxsZlDnikarzx8tSzMebh3UiFtgqwFwnTnjYQcsyMF8ei2mCO/tpeA==",
+    "core_package_integrity": "sha512-9bW6zvX/m0lEbgTKJ6YppOKx8H3VOPBMOCFh2irXFOT4BbHgrx5hPjwJYLT40Lu+4qtD36qKc/Hn56StUW57IA==",
+    "manifest_sha256": "af53e32ffe35a024ddb34563700956b01ada00ac7e9270ba5df0604ec57e38e1",
+    "default_browsers": [
+      "chromium"
+    ],
+    "revisions": {
+      "chromium": {
+        "revision": "1223",
+        "browser_version": "148.0.7778.96"
+      },
+      "chromium-headless-shell": {
+        "revision": "1223",
+        "browser_version": "148.0.7778.96"
+      },
+      "firefox": {
+        "revision": "1522",
+        "browser_version": "150.0.2"
+      },
+      "webkit": {
+        "revision": "2287",
+        "browser_version": "26.4"
+      },
+      "ffmpeg": {
+        "revision": "1011",
+        "browser_version": null
+      }
+    }
+  },
+  "static_tools": {
+    "scorecard": "5.5.0",
+    "semgrep": "1.172.0",
+    "trivy": "0.73.0"
+  },
+  "runtime_images": {
+    "alpine": "docker.io/library/alpine@sha256:1e42bbe2508154c9126d48c2b8a75420c3544343bf86fd041fb7527e017a4b4a",
+    "node": "docker.io/library/node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293",
+    "python": "docker.io/library/python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a"
+  },
+  "runtime_engine_acquisition": "operator-confirmed signed operating-system package manager; supported version and capabilities are verified after installation"
+}

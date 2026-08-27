@@ -214,6 +214,27 @@ npm run test:static-scanners:real
 
 The fixture covers symlinks where the host permits them, traversal-like and hostile filenames, large and binary files, nested repositories, secret-like content, malformed manifests, plus deterministic timeout/output-flood failure tests in the regression suite.
 
+## Browser Bootstrap
+
+Browsers are required for the maintainer UI release gate, not for ordinary CLI/API static audits. Preview the repository-owned bootstrap before installing the default Chromium revision:
+
+```bash
+npm run setup:browser -- --dry-run --browser chromium
+npm run setup:browser -- --yes --browser chromium
+```
+
+Use `--browser firefox`, `--browser webkit`, or `--all` for the complete release matrix. `--with-deps` permits Playwright to request operating-system browser dependencies and should be used only in a reviewed CI image or by an operator who accepts those package-manager changes.
+
+The bootstrap never invokes `npx` and therefore cannot substitute a registry package at execution time. It first verifies the exact Playwright and Playwright Core SHA-512 npm integrity values, the SHA-256 of Playwright's embedded browser-revision manifest, and every locked revision/version in [`scripts/toolchain-lock.json`](../scripts/toolchain-lock.json). After installation it launches each selected browser and requires the reported version to match the lock. Playwright's CDN browser archive is transported by the pinned Playwright implementation; because upstream does not expose archive checksums in its embedded manifest, Tethermark does not describe the browser ZIP itself as checksum-verified.
+
+Run the complete non-downloading integrity check with:
+
+```bash
+npm run toolchain:check
+```
+
+That gate also verifies all direct scanner downloads have SHA-256 allowlists and all runtime workload images are content-addressed by SHA-256 digest.
+
 ## Local Runtime Sandbox Setup
 
 Preview platform-specific runtime setup guidance:
@@ -228,7 +249,7 @@ Confirm that you have reviewed the guidance and execute any auto-supported packa
 npm run scan -- setup-runtime --yes
 ```
 
-`setup-runtime --yes` may run supported package-manager commands such as `winget install Docker.DockerDesktop`, `choco install docker-desktop`, `brew install --cask docker`, or Linux Podman package installs. It never runs those commands silently; `--dry-run` shows the exact plan first, and `--yes` is required for execution.
+`setup-runtime --yes` may run supported package-manager commands such as `winget install Docker.DockerDesktop`, `choco install docker-desktop`, `brew install --cask docker`, or Linux Podman package installs. It never runs those commands silently; `--dry-run` shows the exact plan first, and `--yes` is required for execution. Runtime engines remain externally signed operating-system/vendor packages rather than Tethermark-downloaded archives. After installation, `runtime-doctor` must prove required capabilities and the native verifier records the installed version; release certification remains limited to the ranges in [Supported Platforms And Versions](./supported-platforms.md). Images launched by Tethermark use the SHA-256 digest pins in [`scripts/toolchain-lock.json`](../scripts/toolchain-lock.json); mutable image tags are not accepted by the governed runtime plans.
 
 The web UI exposes the same flow in `System -> Setup -> Runtime Sandbox`. When a supported installer is detected, use **Install Runtime Backend** to run the auto-supported command after confirmation. If the operator skips setup, the install fails, or no supported package manager is available, Tethermark keeps static audits available and blocks only runtime-validated launches until readiness passes.
 

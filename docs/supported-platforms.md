@@ -20,6 +20,8 @@ A newer patch release within a supported major/minor line remains supported when
 
 `package.json` enforces the Node/npm major-version contract. `.nvmrc` selects Node 22 as the reproducible development and CI baseline. `workers/python/pyproject.toml` rejects Python versions below 3.11 and Python 3.14 or later.
 
+[`scripts/toolchain-lock.json`](../scripts/toolchain-lock.json) is the acquisition integrity contract for the exact Playwright packages/browser revisions, production static-tool pins, and digest-addressed runtime images. `npm run toolchain:check` fails when that lock, the npm lockfile, compiled policies, or Playwright's embedded manifest diverge.
+
 ## Operating Systems
 
 | Operating system | Architecture | Core build, static audit, API/UI, and Python workers | Local runtime execution |

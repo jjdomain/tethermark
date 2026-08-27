@@ -77,5 +77,8 @@ jobs:
       - name: Verify native install and uninstall lifecycle
         run: npm run test:install-lifecycle
 
+      - name: Verify pinned toolchain integrity
+        run: npm run build --silent && npm run toolchain:check
+
       - name: Smoke test combined OSS launcher
         run: npm run oss:check

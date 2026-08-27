@@ -162,7 +162,7 @@ jobs:
         run: npm ci
 
       - name: Install Playwright browser
-        run: npx playwright install --with-deps ${{ matrix.browser }}
+        run: npm run setup:browser -- --yes --with-deps --browser ${{ matrix.browser }}
 
       - name: Run Pi static UI E2E
         env:

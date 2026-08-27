@@ -189,6 +189,8 @@ For a release-candidate verification pass, run:
 npm run release:check
 ```
 
+The release gate includes `npm run toolchain:check`, which verifies the checked-in Playwright package/browser revision, static scanner checksum, and runtime image digest contract. Browser binaries for UI testing are previewed and installed through `npm run setup:browser`; see [`docs/installation.md`](docs/installation.md).
+
 Primary real-model release validation uses the local Codex CLI with ChatGPT subscription sign-in. It is separate from ordinary CI and requires an explicit quota acknowledgement:
 
 ```bash
