@@ -37,6 +37,8 @@ type AnyRecord = Record<string, any>;
 
 const learningPipelineQueues = new Map<string, Promise<void>>();
 
+export const LEARNING_INPUT_POLICY_VERSION = "2026-08-26.learning-input.v1";
+
 export interface LearningSettings {
   operator_consent_version: number;
   enabled: boolean;
@@ -168,6 +170,158 @@ function normalizeSignature(input: { category?: string | null; title?: string | 
   return findingDispositionSignature(input);
 }
 
+function boundedIdentifier(value: unknown, maxLength = 256): string | null {
+  const normalized = typeof value === "string" ? value.trim() : value == null ? "" : String(value).trim();
+  return normalized ? normalized.slice(0, maxLength) : null;
+}
+
+function boundedIdentifiers(value: unknown, limit = 50): string[] {
+  return [...new Set(asStringArray(value).map((item) => boundedIdentifier(item)).filter((item): item is string => Boolean(item)))].slice(0, limit);
+}
+
+function learningInputEnvelope(fields: AnyRecord): AnyRecord {
+  return Object.fromEntries(Object.entries({
+    learning_input_policy_version: LEARNING_INPUT_POLICY_VERSION,
+    content_class: "review_signal_and_audit_metadata",
+    raw_source_record_retained: false,
+    provider_generated_content_allowed: false,
+    ...fields
+  }).filter(([, value]) => value !== undefined));
+}
+
+export function projectLearningInputPayload(sourceTable: string, value: unknown, legacySummary = ""): AnyRecord {
+  const payload = asObject(value);
+  if (sourceTable === "review_actions") {
+    return learningInputEnvelope({
+      action_type: boundedIdentifier(payload.action_type),
+      finding_id: boundedIdentifier(payload.finding_id),
+      previous_severity: boundedIdentifier(payload.previous_severity),
+      updated_severity: boundedIdentifier(payload.updated_severity),
+      visibility_override: boundedIdentifier(payload.visibility_override),
+      triage_decision: boundedIdentifier(payload.triage_decision),
+      review_priority: boundedIdentifier(payload.review_priority),
+      validation_intent: boundedIdentifier(payload.validation_intent)
+    });
+  }
+  if (sourceTable === "finding_dispositions") {
+    const summary = legacySummary.toLowerCase();
+    return learningInputEnvelope({
+      disposition_type: boundedIdentifier(payload.disposition_type)
+        ?? (summary.includes("waiver") ? "waiver" : summary.includes("suppression") ? "suppression" : null),
+      scope_level: boundedIdentifier(payload.scope_level)
+        ?? (summary.includes("project scope") ? "project" : summary.includes("run scope") ? "run" : null),
+      status: boundedIdentifier(payload.status),
+      finding_id: boundedIdentifier(payload.finding_id),
+      finding_signature: boundedIdentifier(payload.finding_signature, 500),
+      expires_at: boundedIdentifier(payload.expires_at)
+    });
+  }
+  if (sourceTable === "finding_quality") {
+    return learningInputEnvelope({
+      finding_id: boundedIdentifier(payload.finding_id ?? payload.id),
+      evidence_support_verdict: boundedIdentifier(payload.evidence_support_verdict ?? payload.evidence_support),
+      qa_blocking: Boolean(payload.qa_blocking),
+      validation_recommendation: boundedIdentifier(payload.validation_recommendation),
+      duplicate_with_finding_ids: boundedIdentifiers(payload.duplicate_with_finding_ids),
+      conflict_with_finding_ids: boundedIdentifiers(payload.conflict_with_finding_ids),
+      reason_count: boundedIdentifiers(payload.reasons ?? payload.blocking_reasons ?? payload.validation_reasons).length
+    });
+  }
+  if (sourceTable === "runtime_followups") {
+    return learningInputEnvelope({
+      finding_id: boundedIdentifier(payload.finding_id),
+      status: boundedIdentifier(payload.status),
+      followup_policy: boundedIdentifier(payload.followup_policy),
+      completed_status: boundedIdentifier(payload.completed_status),
+      rerun_outcome: boundedIdentifier(payload.rerun_outcome),
+      linked_run_id: boundedIdentifier(payload.linked_run_id),
+      resolution_action_type: boundedIdentifier(payload.resolution_action_type)
+    });
+  }
+  if (sourceTable === "remediation_items") {
+    return learningInputEnvelope({
+      finding_id: boundedIdentifier(payload.finding_id),
+      finding_signature: boundedIdentifier(payload.finding_signature, 500),
+      status: boundedIdentifier(payload.status),
+      priority: boundedIdentifier(payload.priority),
+      external_provider: boundedIdentifier(payload.external_provider),
+      has_external_issue: Boolean(payload.external_issue_url || payload.external_issue_number),
+      has_external_pr: Boolean(payload.external_pr_url || payload.external_pr_number),
+      fix_commit_sha: boundedIdentifier(payload.fix_commit_sha),
+      validation_run_id: boundedIdentifier(payload.validation_run_id)
+    });
+  }
+  if (sourceTable === "assistant_action_executions") {
+    return learningInputEnvelope({
+      action_id: boundedIdentifier(payload.action_id),
+      action_type: boundedIdentifier(payload.action_type),
+      status: boundedIdentifier(payload.status),
+      confirmation_result: boundedIdentifier(payload.confirmation_result)
+    });
+  }
+  return learningInputEnvelope({});
+}
+
+function learningSignalSummary(args: {
+  eventType: PersistedLearningEventType;
+  payload: AnyRecord;
+  findingSignature?: string | null;
+  findingId?: string | null;
+}): string {
+  const subject = signatureDisplayName(args.findingSignature || args.findingId || "run-level-signal");
+  if (args.eventType === "review_false_positive") return `Reviewer recorded a false-positive decision for ${subject}.`;
+  if (args.eventType === "review_out_of_scope") return `Reviewer recorded an out-of-scope decision for ${subject}.`;
+  if (args.eventType === "review_accepted_risk") {
+    const previousSeverity = boundedIdentifier(args.payload.previous_severity);
+    const updatedSeverity = boundedIdentifier(args.payload.updated_severity);
+    return previousSeverity && updatedSeverity
+      ? `Reviewer changed severity from ${previousSeverity} to ${updatedSeverity}.`
+      : `Reviewer recorded an accepted-risk decision for ${subject}.`;
+  }
+  if (args.eventType === "review_needs_validation") return `Reviewer requested additional validation for ${subject}.`;
+  if (args.eventType === "finding_disposition") {
+    const type = boundedIdentifier(args.payload.disposition_type) ?? "finding";
+    const scope = boundedIdentifier(args.payload.scope_level);
+    return `Active ${type} disposition${scope ? ` at ${scope} scope` : ""}.`;
+  }
+  if (args.eventType === "finding_quality_gap") {
+    const verdict = boundedIdentifier(args.payload.evidence_support_verdict) ?? "quality gap";
+    return `Finding quality recorded ${verdict}${args.payload.qa_blocking ? " with blocking status" : ""}.`;
+  }
+  if (args.eventType === "duplicate_or_conflict") {
+    return `Finding quality recorded ${boundedIdentifiers(args.payload.duplicate_with_finding_ids).length} duplicate(s) and ${boundedIdentifiers(args.payload.conflict_with_finding_ids).length} conflict(s).`;
+  }
+  if (args.eventType === "runtime_followup_outcome") return `Runtime follow-up outcome is ${boundedIdentifier(args.payload.rerun_outcome) ?? "unclassified"}.`;
+  if (args.eventType === "remediation_state") return `Remediation item moved to ${boundedIdentifier(args.payload.status) ?? "unclassified"}.`;
+  return `Operator confirmed an assistant-proposed action for ${subject}.`;
+}
+
+export function applyLearningInputPolicy(event: PersistedLearningEventRecord): PersistedLearningEventRecord {
+  const payload = projectLearningInputPayload(event.source_table, event.payload_json, event.signal_summary);
+  const controlIds = boundedIdentifiers(event.control_ids_json);
+  const evidenceRefs = [
+    `source:${boundedIdentifier(event.source_table) ?? "unknown"}:${boundedIdentifier(event.source_id) ?? "unknown"}`,
+    ...(event.finding_id ? [`finding:${boundedIdentifier(event.finding_id)}`] : []),
+    ...controlIds.map((controlId) => `control:${controlId}`)
+  ];
+  return {
+    ...event,
+    source_table: boundedIdentifier(event.source_table) ?? "unknown",
+    source_id: boundedIdentifier(event.source_id) ?? "unknown",
+    finding_id: boundedIdentifier(event.finding_id),
+    finding_signature: boundedIdentifier(event.finding_signature, 500),
+    control_ids_json: controlIds,
+    signal_summary: learningSignalSummary({
+      eventType: event.event_type,
+      payload,
+      findingSignature: boundedIdentifier(event.finding_signature, 500),
+      findingId: boundedIdentifier(event.finding_id)
+    }),
+    evidence_refs_json: evidenceRefs.filter((item) => !item.endsWith(":null")),
+    payload_json: payload
+  };
+}
+
 function findingById(findings: PersistedFindingRecord[], findingId: string | null | undefined): PersistedFindingRecord | null {
   if (!findingId) return null;
   return findings.find((item) => item.id === findingId) ?? null;
@@ -199,10 +353,9 @@ function baseEvent(args: {
   signalSummary: string;
   confidence: number;
   actorId?: string | null;
-  evidenceRefs?: string[];
   payload?: unknown;
 }): PersistedLearningEventRecord {
-  return {
+  return applyLearningInputPolicy({
     id: buildEventId({ runId: args.run.id, sourceTable: args.sourceTable, sourceId: args.sourceId, eventType: args.eventType }),
     run_id: args.run.id,
     target_id: args.targetId,
@@ -217,10 +370,10 @@ function baseEvent(args: {
     signal_summary: args.signalSummary,
     confidence: clampConfidence(args.confidence),
     actor_id: args.actorId ?? null,
-    evidence_refs_json: args.evidenceRefs ?? asStringArray(args.finding?.evidence_json),
+    evidence_refs_json: [],
     payload_json: args.payload ?? null,
     created_at: new Date().toISOString()
-  };
+  });
 }
 
 export async function extractLearningEventsForRun(runId: string, rootDirOrOptions?: string | PersistenceReadOptions): Promise<PersistedLearningEventRecord[]> {
@@ -302,7 +455,7 @@ export function extractLearningEventsFromRecords(args: {
       sourceId: disposition.id,
       finding,
       findingSignature: disposition.finding_signature,
-      signalSummary: `Active ${disposition.disposition_type} disposition at ${disposition.scope_level} scope${disposition.reason ? `: ${disposition.reason}` : ""}.`,
+      signalSummary: `Active ${disposition.disposition_type} disposition at ${disposition.scope_level} scope.`,
       confidence: finding || disposition.finding_signature ? 0.86 : 0.5,
       actorId: disposition.created_by,
       payload: disposition
@@ -316,7 +469,6 @@ export function extractLearningEventsFromRecords(args: {
     const finding = findingById(args.findings, String(item.finding_id ?? item.id ?? ""));
     const evidenceVerdict = String(item.evidence_support_verdict ?? item.evidence_support ?? "");
     const qaBlocking = Boolean(item.qa_blocking);
-    const reasons = asStringArray(item.reasons ?? item.blocking_reasons ?? item.validation_reasons);
     if (qaBlocking || ["unsupported", "partially_supported"].includes(evidenceVerdict)) {
       add(baseEvent({
         run: args.run,
@@ -327,7 +479,6 @@ export function extractLearningEventsFromRecords(args: {
         finding,
         signalSummary: `Finding quality flagged ${evidenceVerdict || "a QA gap"}${qaBlocking ? " with blocking status" : ""}.`,
         confidence: 0.8,
-        evidenceRefs: reasons,
         payload: item
       }));
     }
@@ -426,6 +577,7 @@ export async function listPersistedLearningEvents(args?: {
   const workspaceId = args?.workspaceId ? normalizeWorkspaceId(args.workspaceId) : null;
   const projectId = args?.projectId ? normalizeProjectId(args.projectId) : null;
   return rows
+    .map(applyLearningInputPolicy)
     .filter((item) => !workspaceId || item.workspace_id === workspaceId)
     .filter((item) => !projectId || item.project_id === projectId)
     .filter((item) => !args?.runId || item.run_id === args.runId)
@@ -744,7 +896,31 @@ function refreshCandidateDisplayCopy(candidate: PersistedLearningCandidateRecord
   };
 }
 
+function candidateCopyForReusableOverlay(candidate: PersistedLearningCandidateRecord, sourceEvents: PersistedLearningEventRecord[]): PersistedLearningCandidateRecord {
+  if (sourceEvents.length) return refreshCandidateDisplayCopy(candidate, sourceEvents.map(applyLearningInputPolicy));
+  const synthesis = asObject(asObject(candidate.metadata_json).llm_synthesis);
+  const deterministicCopy = asObject(synthesis.deterministic_candidate_copy);
+  if (synthesis.status === "completed") {
+    const signature = asStringArray(candidate.affected_finding_signatures_json)[0]
+      || String(asObject(candidate.proposed_change_json).finding_signature ?? "run-level-signal");
+    const subject = signatureDisplayName(signature);
+    const trustedDeterministicCopy = synthesis.learning_input_policy_version === LEARNING_INPUT_POLICY_VERSION;
+    const fallbackSummary = `Human-approved ${humanizeIdentifier(candidate.candidate_type)} for ${scopeDisplayName(candidate)}. Provider-generated synthesis is excluded from future prompt context.`;
+    const fallbackRationale = "The reusable overlay is limited to deterministic audit metadata because its source events are unavailable.";
+    return {
+      ...candidate,
+      title: trustedDeterministicCopy
+        ? boundedIdentifier(deterministicCopy.title, 200) ?? `Reviewed learning signal: ${subject}`
+        : `Reviewed learning signal: ${subject}`,
+      summary: trustedDeterministicCopy ? boundedIdentifier(deterministicCopy.summary, 500) ?? fallbackSummary : fallbackSummary,
+      rationale: trustedDeterministicCopy ? boundedIdentifier(deterministicCopy.rationale, 500) ?? fallbackRationale : fallbackRationale
+    };
+  }
+  return candidate;
+}
+
 export function generateLearningCandidatesFromEvents(events: PersistedLearningEventRecord[], existing: PersistedLearningCandidateRecord[] = []): PersistedLearningCandidateRecord[] {
+  events = events.map(applyLearningInputPolicy);
   const groups = new Map<string, PersistedLearningEventRecord[]>();
   for (const event of events) {
     const signature = event.finding_signature || event.finding_id || `${event.event_type}:${event.source_id}`;
@@ -813,7 +989,11 @@ export function generateLearningCandidatesFromEvents(events: PersistedLearningEv
       expires_at: null,
       metadata_json: {
         dedupe_key: dedupeKey,
-        event_types: [...new Set(groupedEvents.map((item) => item.event_type))]
+        event_types: [...new Set(groupedEvents.map((item) => item.event_type))],
+        learning_input_policy_version: LEARNING_INPUT_POLICY_VERSION,
+        source_content_class: "review_signal_and_audit_metadata",
+        raw_source_records_retained: false,
+        provider_output_reuse: "prohibited"
       }
     };
     candidates.push(candidate);
@@ -908,17 +1088,21 @@ const learningSynthesisSchema = {
 };
 
 function compactEventForSynthesis(event: PersistedLearningEventRecord, includeSourceExcerpts: boolean): AnyRecord {
-  const payload = asObject(event.payload_json);
+  const governedEvent = applyLearningInputPolicy(event);
+  const payload = asObject(governedEvent.payload_json);
   return {
-    id: event.id,
-    run_id: event.run_id,
-    event_type: event.event_type,
-    finding_id: event.finding_id,
-    finding_signature: event.finding_signature,
-    confidence: event.confidence,
-    signal_summary: includeSourceExcerpts ? event.signal_summary : learningEventLabel(event.event_type),
-    source_table: event.source_table,
-    actor_id: event.actor_id,
+    learning_input_policy_version: LEARNING_INPUT_POLICY_VERSION,
+    content_class: "review_signal_and_audit_metadata",
+    provider_generated_content_included: false,
+    id: governedEvent.id,
+    run_id: governedEvent.run_id,
+    event_type: governedEvent.event_type,
+    finding_id: governedEvent.finding_id,
+    finding_signature: governedEvent.finding_signature,
+    confidence: governedEvent.confidence,
+    signal_summary: includeSourceExcerpts ? governedEvent.signal_summary : learningEventLabel(governedEvent.event_type),
+    source_table: governedEvent.source_table,
+    actor_id: governedEvent.actor_id,
     disposition_type: payload.disposition_type ?? null,
     review_action: payload.action_type ?? null,
     triage_decision: payload.triage_decision ?? null
@@ -1079,6 +1263,11 @@ async function synthesizeCandidateWithLlm(args: {
     return { candidate, synthesized: false, reason: "provider_not_configured" };
   }
   const sourceEvents = args.sourceEvents.map((event) => compactEventForSynthesis(event, args.settings.llm_send_source_excerpts));
+  const deterministicCandidateCopy = {
+    title: args.candidate.title,
+    summary: args.candidate.summary,
+    rationale: args.candidate.rationale
+  };
   let result;
   let modelProvider: ReturnType<typeof createModelProvider> | null = null;
   try {
@@ -1090,6 +1279,8 @@ async function synthesizeCandidateWithLlm(args: {
       systemPrompt: [
         "You synthesize governed self-learning candidates for a security audit engine.",
         "Use only the supplied candidate and source events.",
+        "The supplied events are allowlisted review signals and audit metadata, never a provider-output corpus.",
+        "Do not imitate, reproduce, distill, or infer provider behavior from prior model output.",
         "Do not promote candidates, suppress findings, lower severity, or claim behavior has changed.",
         "Write concise reviewer-facing copy and explicitly preserve human approval."
       ].join("\n"),
@@ -1106,7 +1297,12 @@ async function synthesizeCandidateWithLlm(args: {
         },
         source_events: sourceEvents
       }),
-      metadata: { candidate_id: args.candidate.id },
+      metadata: {
+        candidate_id: args.candidate.id,
+        learning_input_policy_version: LEARNING_INPUT_POLICY_VERSION,
+        input_content_class: "review_signal_and_audit_metadata",
+        provider_output_reuse: "prohibited"
+      },
       temperature: 0.1,
       maxRetries: 1
     });
@@ -1148,8 +1344,14 @@ async function synthesizeCandidateWithLlm(args: {
         reason: eligibility.reason,
         agent_name: "learning_synthesizer_agent",
         provider: result.provider,
-        model: result.model,
-        authorization: args.synthesisAuthorization ?? null,
+          model: result.model,
+          authorization: args.synthesisAuthorization ?? null,
+          learning_input_policy_version: LEARNING_INPUT_POLICY_VERSION,
+          input_content_class: "review_signal_and_audit_metadata",
+          deterministic_candidate_copy: deterministicCandidateCopy,
+          output_use: "current_candidate_review_only",
+          eligible_as_future_learning_input: false,
+          eligible_for_future_prompt_context: false,
         usage: result.usage ?? null,
         recommended_review: result.parsed.recommended_review ?? null,
         risk_notes: Array.isArray(result.parsed.risk_notes) ? result.parsed.risk_notes : [],
@@ -1197,6 +1399,12 @@ async function runLearningPipelineUnlocked(args: {
   const workspaceId = normalizeWorkspaceId(args.workspaceId);
   const projectId = normalizeProjectId(args.projectId);
   const startedAt = new Date().toISOString();
+  const learningInputMetadata = {
+    learning_input_policy_version: LEARNING_INPUT_POLICY_VERSION,
+    input_content_class: "review_signal_and_audit_metadata",
+    raw_source_records_retained: false,
+    provider_output_reuse: "prohibited"
+  };
   const baseJob = {
     id: `learn_job:${crypto.randomUUID()}`,
     workspace_id: workspaceId,
@@ -1208,7 +1416,7 @@ async function runLearningPipelineUnlocked(args: {
     candidates_synthesized: 0,
     synthesis_skipped: 0,
     settings_snapshot_json: settings,
-    metadata_json: {},
+    metadata_json: learningInputMetadata,
     error: null,
     created_by: args.actorId ?? "system_learning",
     started_at: startedAt
@@ -1230,6 +1438,7 @@ async function runLearningPipelineUnlocked(args: {
       ...baseJob,
       status: "running",
       metadata_json: {
+        ...learningInputMetadata,
         synthesis_calls_reserved: synthesisCallsReserved,
         ...metadata
       },
@@ -1348,6 +1557,7 @@ async function runLearningPipelineUnlocked(args: {
       completed_at: completedAt
       ,
       metadata_json: {
+        ...learningInputMetadata,
         synthesis_calls_reserved: synthesisCallsReserved,
         synthesis_budget_used_today: usedSynthesisCallsToday,
         synthesis_budget_remaining_after_job: remainingSynthesisCalls,
@@ -1371,6 +1581,7 @@ async function runLearningPipelineUnlocked(args: {
       status: "failed",
       error: error instanceof Error ? error.message : String(error),
       metadata_json: {
+        ...learningInputMetadata,
         synthesis_calls_reserved: synthesisCallsReserved
       },
       completed_at: completedAt
@@ -1555,14 +1766,22 @@ export async function promoteLearningCandidate(args: {
   const priorPromotions = (await listPersistedLearningPromotions({ rootDir: location.rootDir, dbMode: location.mode, limit: Number.MAX_SAFE_INTEGER }))
     .filter((item) => item.candidate_id === candidate.id);
   const previousPromotion = priorPromotions[0] ?? null;
+  const learningEvents = await listPersistedLearningEvents({
+    rootDir: location.rootDir,
+    dbMode: location.mode,
+    workspaceId: candidate.workspace_id,
+    projectId: candidate.project_id,
+    limit: Number.MAX_SAFE_INTEGER
+  });
+  const reusableCandidate = candidateCopyForReusableOverlay(candidate, sourceEventsForCandidate(candidate, learningEvents));
   const now = new Date().toISOString();
   const effectMode = learningOverlayEffectMode(candidate.candidate_type);
   const appliedChange = {
     schema_version: "2026-08-26.learning-overlay.v1",
     effect_mode: effectMode,
     candidate_type: candidate.candidate_type,
-    title: candidate.title,
-    summary: candidate.summary,
+    title: reusableCandidate.title,
+    summary: reusableCandidate.summary,
     proposed_change: asObject(candidate.proposed_change_json),
     affected_finding_signatures: asStringArray(candidate.affected_finding_signatures_json),
     safety_boundary: effectMode === "governed_no_runtime_effect"

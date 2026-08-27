@@ -78,6 +78,28 @@ function boundedText(value: unknown, max = 500): string {
   return normalized.length <= max ? normalized : `${normalized.slice(0, max)}...`;
 }
 
+function reusableOverlayCopy(candidate: PersistedLearningCandidateRecord, appliedChange: Record<string, unknown>): { title: string; summary: string } {
+  const synthesis = asObject(asObject(candidate.metadata_json).llm_synthesis);
+  if (synthesis.status !== "completed") {
+    return {
+      title: boundedText(appliedChange.title ?? candidate.title, 200),
+      summary: boundedText(appliedChange.summary ?? candidate.summary)
+    };
+  }
+  const deterministicCopy = asObject(synthesis.deterministic_candidate_copy);
+  if (synthesis.learning_input_policy_version === "2026-08-26.learning-input.v1") {
+    return {
+      title: boundedText(deterministicCopy.title ?? "Reviewed learning signal", 200),
+      summary: boundedText(deterministicCopy.summary ?? "Human-approved learning signal retained as deterministic audit metadata.")
+    };
+  }
+  const signatures = asStringArray(candidate.affected_finding_signatures_json);
+  return {
+    title: boundedText(`Reviewed ${candidate.candidate_type.replaceAll("_", " ")}`, 200),
+    summary: boundedText(`Human-approved learning signal${signatures.length ? ` for ${signatures[0]}` : ""}. Provider-generated synthesis is excluded from future prompt context.`)
+  };
+}
+
 export function learningOverlayEffectMode(candidateType: PersistedLearningCandidateType): LearningOverlayEffectMode {
   if (candidateType === "evidence_requirement_adjustment") return "additive_evidence_guardrail";
   if (candidateType === "eval_fixture_candidate" || candidateType === "runtime_followup_heuristic") return "additive_validation";
@@ -133,6 +155,7 @@ function buildResolution(args: {
       continue;
     }
     const appliedChange = asObject(promotion.applied_change_json);
+    const reusableCopy = reusableOverlayCopy(candidate, appliedChange);
     const appliedSignatures = asStringArray(appliedChange.affected_finding_signatures);
     active.push({
       promotion_id: promotion.id,
@@ -143,8 +166,8 @@ function buildResolution(args: {
       scope_type: promotion.scope_type,
       scope_id: promotion.scope_id,
       target_id: promotion.target_id,
-      title: boundedText(appliedChange.title ?? candidate.title, 200),
-      summary: boundedText(appliedChange.summary ?? candidate.summary),
+      title: reusableCopy.title,
+      summary: reusableCopy.summary,
       finding_signatures: (appliedSignatures.length ? appliedSignatures : asStringArray(candidate.affected_finding_signatures_json)).slice(0, 20),
       promoted_by: promotion.promoted_by,
       promoted_at: promotion.promoted_at,

@@ -18,7 +18,7 @@ function field(name: string, type: PersistenceFieldDefinition["type"], nullable 
 export const SELF_LEARNING_TABLE_DEFINITIONS: PersistenceTableDefinition[] = [
   {
     name: "learning_events",
-    description: "Immutable self-learning signals extracted from review, disposition, quality, runtime, remediation, and assistant records.",
+    description: "Immutable allowlisted review signals and audit metadata. Raw source records, prompts, provider responses, and assistant transcripts are excluded by the learning-input policy.",
     primary_key: ["id"],
     fields: [
       field("id", "text"),

@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { extractLearningEventsFromRecords, generateLearningCandidatesFromEvents } from "./learning.js";
+import { applyLearningInputPolicy, extractLearningEventsFromRecords, generateLearningCandidatesFromEvents, LEARNING_INPUT_POLICY_VERSION, projectLearningInputPayload } from "./learning.js";
 import { SELF_LEARNING_POSTGRES_DDL, SELF_LEARNING_TABLE_DEFINITIONS } from "./schema-manifest.js";
 import { ensureSqliteSchema, openSqliteDatabase } from "./sqlite.js";
 import type { PersistedLearningEventRecord } from "./contracts.js";
@@ -93,9 +93,73 @@ test("learning candidates use reviewer-facing copy and compact repeated concrete
   assert.match(candidate.summary, /2 signals from active suppression across 2 runs indicate reviewers may be suppressing this pattern for the project/);
   assert.equal(
     candidate.rationale,
-    "Observed reviewer decisions: Active suppression disposition at project scope."
+    "Observed reviewer decisions: Project-scope suppression."
   );
   assert.equal((candidate.rationale.match(/support this candidate/g) ?? []).length, 0);
+});
+
+test("learning inputs retain only allowlisted review signals and audit metadata", () => {
+  const forbidden = "PROVIDER_OUTPUT_CORPUS_MARKER";
+  const projected = [
+    projectLearningInputPayload("review_actions", {
+      action_type: "triage_finding",
+      finding_id: "finding_1",
+      triage_decision: "false_positive",
+      notes: forbidden,
+      metadata_json: { raw_model_response: forbidden, prompt: forbidden }
+    }),
+    projectLearningInputPayload("finding_dispositions", {
+      disposition_type: "suppression",
+      scope_level: "project",
+      reason: forbidden,
+      notes: forbidden,
+      metadata_json: { assistant_output: forbidden }
+    }),
+    projectLearningInputPayload("finding_quality", {
+      finding_id: "finding_1",
+      evidence_support_verdict: "unsupported",
+      reasons: [forbidden],
+      model_analysis: forbidden
+    }),
+    projectLearningInputPayload("runtime_followups", {
+      finding_id: "finding_1",
+      rerun_outcome: "confirmed",
+      rerun_request_json: { hints: { prompt: forbidden } },
+      rerun_outcome_summary: forbidden,
+      resolution_notes: forbidden
+    }),
+    projectLearningInputPayload("remediation_items", {
+      finding_id: "finding_1",
+      status: "resolved",
+      summary: forbidden,
+      acceptance_criteria: forbidden,
+      resolution_notes: forbidden
+    })
+  ];
+  for (const payload of projected) {
+    assert.equal(payload.learning_input_policy_version, LEARNING_INPUT_POLICY_VERSION);
+    assert.equal(payload.content_class, "review_signal_and_audit_metadata");
+    assert.equal(payload.raw_source_record_retained, false);
+    assert.equal(payload.provider_generated_content_allowed, false);
+    assert.doesNotMatch(JSON.stringify(payload), new RegExp(forbidden));
+  }
+
+  const governed = applyLearningInputPolicy(learningEvent({
+    event_type: "review_false_positive",
+    source_table: "review_actions",
+    signal_summary: forbidden,
+    finding_id: "finding_1",
+    finding_signature: "security_policy::missing security policy",
+    control_ids_json: ["control_1"],
+    evidence_refs_json: [forbidden],
+    payload_json: { action_type: "triage_finding", triage_decision: "false_positive", notes: forbidden }
+  }));
+  assert.doesNotMatch(JSON.stringify(governed), new RegExp(forbidden));
+  assert.deepEqual(governed.evidence_refs_json, [
+    "source:review_actions:disp_1",
+    "finding:finding_1",
+    "control:control_1"
+  ]);
 });
 
 test("high-risk learning candidates require recurrence across runs", () => {

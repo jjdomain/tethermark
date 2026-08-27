@@ -8373,7 +8373,12 @@ async function testApprovedLearningOverlayConsumptionAndRollback(): Promise<void
     try {
       ensureSqliteSchema(db);
       for (const item of [
-        candidate("candidate_evidence", "evidence_requirement_adjustment", "auth::missing-evidence", "medium"),
+        {
+          ...candidate("candidate_evidence", "evidence_requirement_adjustment", "auth::missing-evidence", "medium"),
+          title: "PROVIDER_OUTPUT_CORPUS_MARKER title",
+          summary: "PROVIDER_OUTPUT_CORPUS_MARKER summary",
+          metadata_json: { llm_synthesis: { status: "completed", output_use: "current_candidate_review_only" } }
+        },
         candidate("candidate_severity", "severity_calibration_suggestion", "auth::accepted-risk", "high")
       ]) {
         upsertSqliteRecord({
@@ -8418,6 +8423,7 @@ async function testApprovedLearningOverlayConsumptionAndRollback(): Promise<void
     assert.deepEqual(resolution.additive_rules.evidence_requirement_signatures, ["auth::missing-evidence"]);
     assert.equal(resolution.active_overlays.find((item) => item.candidate_id === "candidate_severity")?.effect_mode, "governed_no_runtime_effect");
     assert.deepEqual(resolution.prompt_guidance.map((item) => item.promotion_id), [evidencePromotion.promotion.id]);
+    assert.doesNotMatch(JSON.stringify(resolution), /PROVIDER_OUTPUT_CORPUS_MARKER/);
 
     const plannerArtifact = applyLearningOverlayPlannerRules({
       selected_profile: "deep-static",
@@ -8550,7 +8556,12 @@ async function testLearningApiLifecycle(): Promise<void> {
         assert.equal(eventsResponse.status, 200, JSON.stringify(eventsPayload));
         assert.equal(eventsPayload.export_schema.schema_name, "learning_events.v1");
         await assertExportSchemaMatches("learning_events.v1.json", eventsPayload.export_schema);
-        assert.equal(eventsPayload.learning_events.some((item: any) => item.event_type === "review_false_positive"), true);
+        const falsePositiveEvent = eventsPayload.learning_events.find((item: any) => item.event_type === "review_false_positive");
+        assert.ok(falsePositiveEvent);
+        assert.equal(falsePositiveEvent.payload_json.learning_input_policy_version, "2026-08-26.learning-input.v1");
+        assert.equal(falsePositiveEvent.payload_json.raw_source_record_retained, false);
+        assert.equal(Object.hasOwn(falsePositiveEvent.payload_json, "notes"), false);
+        assert.equal(falsePositiveEvent.evidence_refs_json.every((item: string) => /^(source|finding|control):/.test(item)), true);
 
         const globalEventsResponse = await fetch(`${baseUrl}/learning/events`);
         const globalEventsPayload = await globalEventsResponse.json() as any;

@@ -66,6 +66,6 @@ Authentication tokens, API keys, authorization headers, and local authentication
 
 ## Language and output boundary
 
-Tethermark uses model output only to produce the current audit's structured planning, review, and remediation artifacts or to summarize bounded human-reviewed improvement candidates. It does not build a model-output corpus or use provider output to develop a competing model. User-facing copy, prompts, job names, and learning workflows must describe the actual audit or governed-review purpose and must not imply model replication.
+Tethermark uses model output only to produce the current audit's structured planning, review, and remediation artifacts or to summarize a bounded human-reviewed improvement candidate. Learning inputs are enforced by `2026-08-26.learning-input.v1`: source-specific allowlists retain categorical review signals and audit metadata while excluding raw records, free-form notes, evidence excerpts, prompts, transcripts, nested provider metadata, and provider responses. Synthesized candidate copy is review-only and cannot be fed into later learning synthesis or future-run prompt context; promoted overlays use deterministic pre-synthesis copy. Tethermark does not build training, imitation, preference, or distillation corpora from provider output.
 
 See [Provider Policy Decision Log](./provider-policy-decision-log.md) for the dated source review behind this matrix.

@@ -4,6 +4,7 @@
 
 ### Changed
 
+- Governed learning now applies the versioned `learning-input.v1` allowlist to new and legacy events, retaining only categorical review signals and audit metadata. Raw notes, evidence excerpts, rerun requests, nested metadata, prompts, transcripts, and provider responses are excluded; synthesized candidate wording is review-only and deterministic copy is used for promoted future-run overlays.
 - Learning model synthesis now requires a checksum-verified, exact-scope operator launch by default. Scheduled and event-driven synthesis can proceed only through the Phase 2 `unattended_local` API-key/mock policy, while Codex/ChatGPT-session background use fails closed; learning records retain the non-secret authorization decision.
 - Permissive governance actions now require content-hashed human approval records. Policy/control changes, severity downgrades, suppressions, waivers, package/evidence/lane reduction, and runtime-probe removal are tied to authenticated API or local interactive CLI launches and append-only reviewer/policy events; unattended and model-driven weakening fails closed.
 - Approved learning promotions now resolve into immutable per-run overlay snapshots. Additive evidence/validation and bounded advisory effects reach planner/model contexts and deterministic selection rules; permissive suppression/severity promotions remain non-executable without governed policy/disposition records, and rollback changes the resolution version for future runs.
@@ -19,6 +20,7 @@
 
 ### Verified
 
+- Learning-input regressions inject corpus markers into every supported raw source class and prove they are absent from projected events, evidence references, candidates, promotions, and future-run overlay prompt context.
 - Learning-synthesis regressions cover exact-scope operator approvals, approval reuse rejection, Codex/ChatGPT-session background denial, Phase 2 API-key background authorization, API lifecycle evidence, and atomic synthesis-attempt budgets.
 - Human-approval regressions cover checksum tampering, unapproved policy-pack exceptions, protected review actions, policy activation evidence, authenticated interactive reduction requests, and unattended-request rejection.
 - Learning overlay regressions cover content-derived artifact versions, scope/approval resolution, additive planner and evidence effects, prompt trust boundaries, non-executable permissive overlays, and rollback removal on subsequent resolutions.

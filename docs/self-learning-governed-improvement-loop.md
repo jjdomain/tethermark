@@ -29,6 +29,12 @@ V1 must not:
 - mutate policy packs, control mappings, or evidence thresholds during a live run
 - run scheduled background tuning jobs that deploy changes without review
 
+## Learning Input Boundary
+
+The executable `2026-08-26.learning-input.v1` contract permits only bounded review signals and audit metadata. Each review action, disposition, finding-quality result, runtime follow-up, remediation item, or confirmed assistant action is projected through a source-specific field allowlist. Learning events retain categorical decisions, statuses, identifiers, counts, scope, confidence, and traceability references; they do not copy raw source records, free-form notes, evidence excerpts, rerun requests, nested metadata, prompts, assistant transcripts, or provider responses. Previously persisted events are re-projected when read and again before candidate generation or synthesis.
+
+Model synthesis produces reviewer-facing copy for the current candidate only. It is marked ineligible as a future learning input or prompt context. If that candidate is promoted, future-run overlays use the deterministic pre-synthesis candidate copy reconstructed from governed events. A legacy synthesized candidate without deterministic source copy falls back to categorical audit metadata; its provider-generated wording is never forwarded. Tethermark does not aggregate these records into training examples, imitation datasets, preference datasets, or model-distillation corpora.
+
 ## Approved Overlay Consumption
 
 Each future run resolves active promotions for its workspace, project, target, and run scope. The resolver accepts only unexpired promotions with an explicit human approval record and a corresponding reviewed candidate. It writes the exact `learning-overlay-resolution.v1` content version into the run-version manifest and persists the full resolution as a normalized stage artifact. A resolution-version change invalidates planner, threat-model, and evidence-selection reuse.
@@ -79,7 +85,7 @@ This boundary is executable, not advisory. Approval records use the versioned `2
 
 V1 persists six record families/settings surfaces:
 
-- `learning_events`: immutable signals from existing persisted workflow records
+- `learning_events`: immutable, allowlisted review signals and audit metadata projected from existing workflow records
 - `learning_candidates`: proposed improvements with scope, rationale, source events, expected effect, risk, and approval requirement
 - `learning_experiments`: dry-run replay records with baseline/candidate metrics and regression notes
 - `learning_promotions`: approved overlays with reviewer, scope, content-derived version, expiry, rollback pointer, effect mode, and status
