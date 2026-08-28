@@ -398,6 +398,19 @@ async function waitForAsyncRun(baseUrl: string, jobId: string, timeoutMs = 18000
   throw new Error(`Timed out waiting for async job ${jobId}`);
 }
 
+async function waitForAsyncTerminalFollowup(baseUrl: string, jobId: string, timeoutMs = 45000): Promise<any> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const response = await fetch(`${baseUrl}/runs/async/${jobId}`);
+    if (response.ok) {
+      const payload = await response.json() as any;
+      if (payload.job?.terminal_followup_status === "completed" || payload.job?.terminal_followup_status === "failed") return payload;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`Timed out waiting for async terminal follow-up ${jobId}`);
+}
+
 async function waitForCondition(label: string, predicate: () => boolean, timeoutMs = 45000): Promise<void> {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
@@ -4305,6 +4318,10 @@ async function testAsyncRunLifecycleApi(): Promise<void> {
         assert.equal(listResponse.status, 200);
         assert.equal(listPayload.jobs.some((item: any) => item.job_id === queuedPayload.job.job_id), true);
         assert.equal(listPayload.jobs.some((item: any) => item.job_id === queuedCancelPayload.job.job_id), true);
+        for (const jobId of [queuedPayload.job.job_id, pendingPayload.job.job_id, queuedCancelPayload.job.job_id]) {
+          const terminalPayload = await waitForAsyncTerminalFollowup(baseUrl, jobId);
+          assert.equal(terminalPayload.job.terminal_followup_status, "completed");
+        }
       } finally {
         await new Promise<void>((resolve, reject) => {
           server.close((error) => {
