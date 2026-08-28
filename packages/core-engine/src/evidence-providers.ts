@@ -297,6 +297,7 @@ function normalizeScorecard(parsed: any): NormalizedEvidenceSummary {
 function normalizeSemgrep(parsed: any): NormalizedEvidenceSummary {
   const results = Array.isArray(parsed?.results) ? parsed.results : [];
   const errors = Array.isArray(parsed?.errors) ? parsed.errors : [];
+  const scannedPaths = Array.isArray(parsed?.paths?.scanned) ? parsed.paths.scanned : [];
   const coverage = new Set<string>();
   const locations: EvidenceLocation[] = [];
   const summary = emptyNormalized("semgrep", {
@@ -304,6 +305,9 @@ function normalizeSemgrep(parsed: any): NormalizedEvidenceSummary {
     issue_count: results.length,
     error_count: errors.length
   });
+  for (const scannedPath of scannedPaths) {
+    if (typeof scannedPath === "string" && scannedPath) coverage.add(scannedPath);
+  }
   for (const result of results) {
     pushSeverity(summary, result?.extra?.severity);
     if (typeof result?.path === "string" && result.path) coverage.add(result.path);
@@ -717,6 +721,7 @@ export async function executeEvidenceProvider(args: {
   request: AuditRequest;
   rootPath: string;
   repoUrl: string | null;
+  commitSha?: string | null;
   analysisSummary?: unknown;
   fallbackFrom?: string | null;
   signal?: AbortSignal;
@@ -742,7 +747,7 @@ export async function executeEvidenceProvider(args: {
       const localScorecardAvailable = await directoryExists(args.rootPath);
       const invocation = resolveStaticToolInvocation("scorecard");
       const command = effectiveRepoUrl
-        ? ["--format", "json", "--repo", effectiveRepoUrl]
+        ? ["--format", "json", "--repo", effectiveRepoUrl, ...(args.commitSha ? ["--commit", args.commitSha] : [])]
         : localScorecardAvailable
           ? ["--format", "json", "--local", args.rootPath]
           : null;
@@ -784,22 +789,27 @@ export async function executeEvidenceProvider(args: {
         const normalized = parsed ? normalizeScorecard(parsed) : emptyNormalized("scorecard", { error_count: 1, notes: ["Scorecard did not return parseable JSON."] });
         const parsedChecks = Array.isArray((parsed as any)?.checks) ? (parsed as any).checks : [];
         const emptyScorecard = Boolean(parsed) && parsedChecks.length === 0;
+        const parsedCommit = typeof (parsed as any)?.repo?.commit === "string" ? (parsed as any).repo.commit.toLowerCase() : null;
+        const expectedCommit = args.commitSha?.toLowerCase() ?? null;
+        const commitMismatch = Boolean(expectedCommit && parsedCommit !== expectedCommit);
         return completedRecord({
           provider_id: "scorecard",
           provider_kind: "local_binary",
           tool: "scorecard",
-          status: parsed && !emptyScorecard ? "completed" : "failed",
+          status: parsed && !emptyScorecard && !commitMismatch ? "completed" : "failed",
           command: ["scorecard", ...command],
           exit_code: exitCode,
           summary: parsed
             ? emptyScorecard
               ? "Scorecard returned JSON but no checks; treating as failed/degraded evidence."
+              : commitMismatch
+                ? `Scorecard analyzed commit ${parsedCommit ?? "unknown"}, expected ${expectedCommit}; treating as failed/degraded evidence.`
               : summarizeScorecard(parsed)
             : "Scorecard did not return parseable JSON.",
           artifact_type: "scorecard-output",
           parsed,
           stderr: stderr || undefined,
-          failure_category: parsed && !emptyScorecard ? null : "parse_error",
+          failure_category: parsed && !emptyScorecard && !commitMismatch ? null : commitMismatch ? "runtime_error" : "parse_error",
           capability_status: "available",
           fallback_from: args.fallbackFrom ?? null,
           normalized
@@ -875,7 +885,7 @@ export async function executeEvidenceProvider(args: {
     }
     case "semgrep": {
       const semgrepConfig = await resolveSemgrepConfigPath();
-      const command = ["scan", "--config", semgrepConfig, "--json", "--metrics", "off", args.rootPath];
+      const command = ["scan", "--config", semgrepConfig, "--json", "--metrics", "off", "--no-git-ignore", args.rootPath];
       const invocation = resolveStaticToolInvocation("semgrep");
       if (localBinaryBlocked) {
         return skippedUnavailableRecord({

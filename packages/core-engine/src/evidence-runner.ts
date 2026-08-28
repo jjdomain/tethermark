@@ -38,6 +38,7 @@ export async function runEvidenceProviders(args: {
   providerIds: string[];
   rootPath: string;
   repoUrl: string | null;
+  commitSha?: string | null;
   request: any;
   analysisSummary?: unknown;
   signal?: AbortSignal;
@@ -53,6 +54,7 @@ export async function runEvidenceProviders(args: {
       request: args.request,
       rootPath: args.rootPath,
       repoUrl: args.repoUrl,
+      commitSha: args.commitSha,
       analysisSummary: args.analysisSummary,
       signal: args.signal
     });
@@ -73,6 +75,7 @@ export async function runEvidenceProviders(args: {
         request: args.request,
         rootPath: args.rootPath,
         repoUrl: args.repoUrl,
+        commitSha: args.commitSha,
         analysisSummary: args.analysisSummary,
         fallbackFrom: providerId,
         signal: args.signal

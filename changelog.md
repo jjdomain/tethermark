@@ -14,6 +14,7 @@
 
 ### Changed
 
+- Static Semgrep audits now ignore the parent Tethermark checkout's Git exclusions when scanning copied sandboxes and retain scanned-file coverage for clean, zero-finding results. This prevents a sandbox under `.artifacts` from being reported as a successful zero-finding scan after Semgrep inspected zero files. Scorecard repository audits now receive the target's pinned commit and fail degraded when returned evidence does not match it.
 - Release scanning now follows the releasable checkout boundary instead of ingesting ignored `.env`, `.tmp`, `.tethermark`, dependency, fixture, or generated state. Scanner children do not inherit unrelated credential variables, and only Scorecard receives the captured GitHub token. The authenticated native release gate passed npm advisories, dependency and repository licenses, Semgrep, every Trivy category, and Scorecard. Git checkout mode plus the Apache-2.0 declaration and Dependabot policy raise Scorecard from 3.9 to 5.3, above the unchanged 5.0 release floor.
 - Scorecard negative check scores are reported as nonblocking not-applicable results, while missing/malformed checks and the overall score still fail closed. Semgrep uses single-worker source-root scans and skips its unstable duplicate Windows pre-validation RPC while retaining actual-scan rule validation.
 - Scorecard now uses Git checkout mode so GitHub-generated source archives cannot hide repository policy files such as the Dependabot configuration from release evaluation.

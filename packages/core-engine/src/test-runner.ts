@@ -216,7 +216,7 @@ async function testStaticEvidenceUsesConfiguredScannerInvocations(): Promise<voi
     await fs.writeFile(path.join(targetDir, "app.js"), "const safe = true;\n", "utf8");
     const scorecardRunner = path.join(rootDir, "fake-scorecard.mjs");
     const trivyRunner = path.join(rootDir, "fake-trivy.mjs");
-    await fs.writeFile(scorecardRunner, "console.log(JSON.stringify({score: 9, checks: [{name: 'Pinned-Dependencies', score: 9}]}));\n", "utf8");
+    await fs.writeFile(scorecardRunner, "console.log(JSON.stringify({repo: {commit: 'abc123'}, score: 9, checks: [{name: 'Pinned-Dependencies', score: 9}]}));\n", "utf8");
     await fs.writeFile(trivyRunner, "console.log(JSON.stringify({Results: []}));\n", "utf8");
 
     await withEnv({
@@ -228,10 +228,15 @@ async function testStaticEvidenceUsesConfiguredScannerInvocations(): Promise<voi
     }, async () => {
       resetEvidenceProviderCapabilityCacheForTests();
       const request = { local_path: targetDir, run_mode: "static", audit_package: "deep-static", llm_provider: "mock" } as const;
-      const scorecard = await executeEvidenceProvider({ providerId: "scorecard", request, rootPath: targetDir, repoUrl: "https://github.com/example/example.git" });
+      const scorecard = await executeEvidenceProvider({ providerId: "scorecard", request, rootPath: targetDir, repoUrl: "https://github.com/example/example.git", commitSha: "abc123" });
+      const mismatchedScorecard = await executeEvidenceProvider({ providerId: "scorecard", request, rootPath: targetDir, repoUrl: "https://github.com/example/example.git", commitSha: "def456" });
       const trivy = await executeEvidenceProvider({ providerId: "trivy", request, rootPath: targetDir, repoUrl: null });
       assert.equal(scorecard.status, "completed", scorecard.summary);
+      assert.deepEqual(scorecard.command?.slice(-2), ["--commit", "abc123"]);
       assert.equal(scorecard.normalized?.signal_count, 1);
+      assert.equal(mismatchedScorecard.status, "failed");
+      assert.equal(mismatchedScorecard.failure_category, "runtime_error");
+      assert.match(mismatchedScorecard.summary, /expected def456/);
       assert.equal(trivy.status, "completed", trivy.summary);
       assert.equal(trivy.normalized?.result_type, "trivy");
     });
@@ -255,6 +260,13 @@ async function testStaticScannerTimeoutAndOutputFloodFailClosed(): Promise<void>
       HARNESS_STATIC_TOOL_MAX_BUFFER_BYTES: String(64 * 1024),
       HARNESS_DISABLE_LOCAL_BINARIES: undefined
     }, async () => {
+      await writeFake("process.stdout.write(JSON.stringify({ results: [], errors: [], paths: { scanned: ['app.js'] } }))");
+      resetEvidenceProviderCapabilityCacheForTests();
+      const scanned = await executeEvidenceProvider({ providerId: "semgrep", request: { local_path: targetDir, run_mode: "static", audit_package: "deep-static", llm_provider: "mock" }, rootPath: targetDir, repoUrl: null });
+      assert.equal(scanned.status, "completed");
+      assert.ok(scanned.command?.includes("--no-git-ignore"));
+      assert.deepEqual(scanned.normalized?.coverage_paths, ["app.js"]);
+
       await writeFake("process.stdout.write('x'.repeat(200000))");
       resetEvidenceProviderCapabilityCacheForTests();
       const flooded = await executeEvidenceProvider({ providerId: "semgrep", request: { local_path: targetDir, run_mode: "static", audit_package: "deep-static", llm_provider: "mock" }, rootPath: targetDir, repoUrl: null });

@@ -116,6 +116,7 @@ export async function stageCollectEvidence(args: {
     providerIds,
     rootPath: args.target.local_path ?? args.target.snapshot.value,
     repoUrl: args.target.repo_url,
+    commitSha: args.target.snapshot.commit_sha,
     request: args.request,
     analysisSummary: { analysis: args.analysis, repoContext: args.repoContext },
     signal: args.signal
