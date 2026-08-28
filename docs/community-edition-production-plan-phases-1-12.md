@@ -601,8 +601,8 @@ Release-candidate gates:
 
 - [x] Phases 1–11 exit criteria are closed or explicitly removed from the advertised release scope. Phase 11 closed with the verified `v0.2.1` release artifact set.
 - [x] `npm run release:check` passes on the release commit. Signed Release Artifacts run 33162165763 executed it successfully on tag `v0.2.1` / commit `0b90c37` before signing.
-- [ ] `npm run production:static-release` passes on the release commit.
-- [ ] `npm run production:runtime-readiness` passes and actually launches runtime fixtures.
+- [x] `npm run production:static-release` passes on the release commit. On 2026-08-28 the aggregate command passed from an isolated detached `v0.2.1` worktree at commit `0b90c37`, covering the build, complete regression suite, export compatibility, isolated Codex OAuth wiring, a real public Pi repository audit through the API, and Chromium UI review/remediation/assistant/approval/learning workflows. Scanner unavailability observed inside this static pipeline remains assigned to the separate real-scanner gate below and was not misrepresented as scanner evidence.
+- [x] `npm run production:runtime-readiness` passes and actually launches runtime fixtures. Candidate-bound **Native Runtime Verification** [run 33164469371](https://github.com/jjdomain/tethermark/actions/runs/33164469371) checked out `v0.2.1` at commit `0b90c37`, ran the exact aggregate command successfully on Ubuntu 24.04 Docker, and retained stronger native evidence. Docker, rootless Podman, and gVisor each passed pinned-backend readiness plus real containerized test, artifact-write, healthy-service, isolation, and complete-cleanup assertions; the macOS runner passed only the explicit no-false-execution boundary.
 - [ ] Real OpenAI Codex ChatGPT-session inference and end-to-end audit gates pass under the approved workload policy.
 - [ ] Real static tools run on a real repository; missing evidence behavior is reviewed.
 - [ ] Fresh-install, upgrade, backup/restore, cancellation/recovery, policy migration, and export compatibility pass.

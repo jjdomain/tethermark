@@ -19,6 +19,7 @@
 - Scorecard now uses Git checkout mode so GitHub-generated source archives cannot hide repository policy files such as the Dependabot configuration from release evaluation.
 - The Unix installer no longer expands an empty Bash array under `set -u`, preserving dry-run and install compatibility with the Bash 3.2 runtime shipped on macOS.
 - Corrected the signed-release workflow's Bash package-version expression after the unfulfilled `v0.2.0` tag stopped before checks or artifact generation; the next immutable release candidate is `v0.2.1`.
+- Native runtime verification now accepts an explicit immutable candidate ref and runs the aggregate production runtime-readiness gate before its stronger Docker workload/service checks. The `v0.2.1` candidate passed Docker, rootless Podman, and gVisor execution plus the documented macOS non-execution boundary.
 
 ## 2026-08-27
 
