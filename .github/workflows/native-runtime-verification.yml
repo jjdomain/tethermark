@@ -46,7 +46,7 @@ jobs:
         run: npm run production:runtime-native -- --backend docker
       - name: Retain Linux Docker evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: native-runtime-linux-docker
           path: .artifacts/runtime-native/linux-docker/native-runtime-verification.json
@@ -81,7 +81,7 @@ jobs:
         run: npm run production:runtime-native -- --backend rootless_podman
       - name: Retain rootless Podman evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: native-runtime-linux-rootless-podman
           path: .artifacts/runtime-native/linux-rootless_podman/native-runtime-verification.json
@@ -119,7 +119,7 @@ jobs:
         run: npm run production:runtime-native -- --backend gvisor_container
       - name: Retain gVisor evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: native-runtime-linux-gvisor
           path: .artifacts/runtime-native/linux-gvisor_container/native-runtime-verification.json
@@ -144,7 +144,7 @@ jobs:
         run: npm run production:runtime-native -- --backend docker_desktop --expect-blocked
       - name: Retain macOS boundary evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: native-runtime-macos-boundary
           path: .artifacts/runtime-native/darwin-docker_desktop/native-runtime-verification.json
