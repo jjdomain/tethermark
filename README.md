@@ -574,3 +574,7 @@ These records are available through the `/ui/settings` and `/ui/documents` API r
 - [`docs/HARNESS_ARCHITECTURE_NEXT.md`](docs/HARNESS_ARCHITECTURE_NEXT.md)
 - [`docs/API_Stability_and_Artifact_Boundary.md`](docs/API_Stability_and_Artifact_Boundary.md)
 - [`changelog.md`](changelog.md)
+
+## License
+
+Tethermark Community Edition is licensed under the [Apache License 2.0](LICENSE).

@@ -84,11 +84,11 @@ fi
 run git -C "$INSTALL_DIR" fetch --depth 1 origin "$VERSION_REF"
 run git -C "$INSTALL_DIR" checkout --detach --force FETCH_HEAD
 
-FIRST_RUN_ARGS=()
 if [ "$SKIP_ONBOARD" -eq 1 ]; then
-  FIRST_RUN_ARGS+=("--no-onboard")
+  run node "$INSTALL_DIR/scripts/first-run.mjs" --no-onboard
+else
+  run node "$INSTALL_DIR/scripts/first-run.mjs"
 fi
-run node "$INSTALL_DIR/scripts/first-run.mjs" "${FIRST_RUN_ARGS[@]}"
 
 if [ "$DRY_RUN" -eq 0 ]; then
   COMMIT_SHA="$(git -C "$INSTALL_DIR" rev-parse HEAD)"

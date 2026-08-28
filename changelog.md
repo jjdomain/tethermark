@@ -10,12 +10,14 @@
 - Added a redacted diagnostics bundle, preview/confirmed Tethermark credential scrubbing, a complete data-lifecycle/privacy runbook, and session-only browser storage for the instance API key with automatic removal of its legacy persistent field.
 - Added executable clean-install and two-ref upgrade validation with state-preservation and post-update API/UI launch assertions, a retained Windows/Ubuntu/macOS workflow, and an Ubuntu server-profile gate. The native matrix passed on Ubuntu 24.04 x64, Windows Server 2025 x64, and macOS 15 arm64 for commit `24286d9`. Fixed Windows Node 24 first-run execution to invoke npm through its JavaScript CLI instead of spawning `npm.cmd` directly. The API/UI smoke check now launches the already-built supervisor without a redundant deadline-consuming build and terminates its complete Windows or Unix process tree without reporting intentional cleanup as a failure.
 - Added a low-noise monthly Dependabot policy for npm and GitHub Actions dependencies, with separate production and development npm update groups and bounded open pull requests.
+- Licensed Tethermark Community Edition under Apache License 2.0, with matching SPDX declarations in the root package and lock metadata.
 
 ### Changed
 
 - Release scanning now follows the releasable checkout boundary instead of ingesting ignored `.env`, `.tmp`, `.tethermark`, dependency, fixture, or generated state. Scanner children do not inherit unrelated credential variables, and only Scorecard receives the captured GitHub token. The final authenticated Windows triage passed npm, dependency-license, Semgrep, and every Trivy check. Git checkout mode detects the Dependabot policy and raises Scorecard from 3.9 to 4.9; release remains blocked on Tethermark's unchosen root license and the resulting score still being below the 5.0 floor.
 - Scorecard negative check scores are reported as nonblocking not-applicable results, while missing/malformed checks and the overall score still fail closed. Semgrep uses single-worker source-root scans and skips its unstable duplicate Windows pre-validation RPC while retaining actual-scan rule validation.
 - Scorecard now uses Git checkout mode so GitHub-generated source archives cannot hide repository policy files such as the Dependabot configuration from release evaluation.
+- The Unix installer no longer expands an empty Bash array under `set -u`, preserving dry-run and install compatibility with the Bash 3.2 runtime shipped on macOS.
 
 ## 2026-08-27
 
