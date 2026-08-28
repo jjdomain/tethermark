@@ -4,6 +4,7 @@ import path from "node:path";
 
 import {
   applyExceptions,
+  buildScorecardArguments,
   evaluateDependencyLicenses,
   evaluateNpmAudit,
   evaluateRepositoryLicense,
@@ -18,6 +19,13 @@ import {
 const root = process.cwd();
 const policy = JSON.parse(await fs.readFile(path.join(root, "scripts", "release-security-policy.json"), "utf8"));
 const packageLock = JSON.parse(await fs.readFile(path.join(root, "package-lock.json"), "utf8"));
+
+assert.deepEqual(buildScorecardArguments("https://github.com/example/project"), [
+  "--format", "json",
+  "--show-details",
+  "--file-mode", "git",
+  "--repo", "https://github.com/example/project"
+]);
 
 assert.deepEqual(sanitizeScannerEnvironment({ PATH: "safe", OPENAI_API_KEY: "secret", GITHUB_AUTH_TOKEN: "token", HARNESS_PASSWORD: "password" }), { PATH: "safe" });
 

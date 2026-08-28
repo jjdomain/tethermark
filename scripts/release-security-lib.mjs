@@ -2,6 +2,15 @@ import { createHash } from "node:crypto";
 
 const severityOrder = new Map([["UNKNOWN", 0], ["LOW", 1], ["MEDIUM", 2], ["HIGH", 3], ["CRITICAL", 4]]);
 
+export function buildScorecardArguments(repository) {
+  return [
+    "--format", "json",
+    "--show-details",
+    "--file-mode", "git",
+    "--repo", repository
+  ];
+}
+
 export function sanitizeScannerEnvironment(environment) {
   return Object.fromEntries(Object.entries(environment ?? {}).filter(([key]) => !/(?:^|_)(?:API_?KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH)(?:_|$)/i.test(key)));
 }

@@ -9,6 +9,7 @@ import { BUNDLED_SEMGREP_RULESET_SHA256, resolveStaticToolInvocation } from "../
 import { buildToolPathEnv } from "../dist/packages/core-engine/src/tool-paths.js";
 import {
   applyExceptions,
+  buildScorecardArguments,
   evaluateDependencyLicenses,
   evaluateNpmAudit,
   evaluateRepositoryLicense,
@@ -174,9 +175,7 @@ async function runScorecard(policy) {
   const invocation = resolveStaticToolInvocation("scorecard");
   const result = await run(invocation.command, [
     ...invocation.prefix_args,
-    "--format", "json",
-    "--show-details",
-    "--repo", policy.scorecard.repository
+    ...buildScorecardArguments(policy.scorecard.repository)
   ], {
     timeoutMs: 5 * 60_000,
     env: scorecardGithubToken ? { GITHUB_AUTH_TOKEN: scorecardGithubToken } : {}

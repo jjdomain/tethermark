@@ -13,8 +13,9 @@
 
 ### Changed
 
-- Release scanning now follows the releasable checkout boundary instead of ingesting ignored `.env`, `.tmp`, `.tethermark`, dependency, fixture, or generated state. Scanner children do not inherit unrelated credential variables, and only Scorecard receives the captured GitHub token. The final authenticated Windows triage passed npm, dependency-license, Semgrep, and every Trivy check; release remains blocked on Tethermark's unchosen root license and a 3.9 remote Scorecard score below the 5.0 floor.
+- Release scanning now follows the releasable checkout boundary instead of ingesting ignored `.env`, `.tmp`, `.tethermark`, dependency, fixture, or generated state. Scanner children do not inherit unrelated credential variables, and only Scorecard receives the captured GitHub token. The final authenticated Windows triage passed npm, dependency-license, Semgrep, and every Trivy check. Git checkout mode detects the Dependabot policy and raises Scorecard from 3.9 to 4.9; release remains blocked on Tethermark's unchosen root license and the resulting score still being below the 5.0 floor.
 - Scorecard negative check scores are reported as nonblocking not-applicable results, while missing/malformed checks and the overall score still fail closed. Semgrep uses single-worker source-root scans and skips its unstable duplicate Windows pre-validation RPC while retaining actual-scan rule validation.
+- Scorecard now uses Git checkout mode so GitHub-generated source archives cannot hide repository policy files such as the Dependabot configuration from release evaluation.
 
 ## 2026-08-27
 
