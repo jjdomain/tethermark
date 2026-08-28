@@ -8156,6 +8156,7 @@ async function testPlaceholderSecretValuesAreIgnored(): Promise<void> {
   assert.equal(isLikelyPlaceholderSecretValue("e2b_xxx_your_key_here"), true);
   assert.equal(isLikelyPlaceholderSecretValue("sk_xxx"), true);
   assert.equal(isLikelyPlaceholderSecretValue("sk-123XXXXXXXXXXXX"), true);
+  assert.equal(isLikelyPlaceholderSecretValue("__model_info_lookup__"), true);
   assert.equal(isLikelyPlaceholderSecretValue("sk-live-8a7F3c2D9mQ4vX6z"), false);
 }
 

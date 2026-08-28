@@ -29,6 +29,7 @@ export function isLikelyPlaceholderSecretValue(value: string): boolean {
   if (/x{6,}/.test(normalized)) return true;
   if (/(?:^|[_-])your(?:[_-][a-z0-9]+){0,5}[_-](?:key|secret|token|password)(?:[_-](?:here|value))?$/.test(normalized)) return true;
   if (/(?:example|sample|placeholder|dummy|fake|changeme|change[_-]?me|replace[_-]?me|insert[_-]?here|test[_-]?(?:key|secret|token|password))/.test(normalized)) return true;
+  if (/^__+[a-z0-9]+(?:_[a-z0-9]+)+__+$/.test(normalized)) return true;
   if (/^[x*_-]{8,}$/.test(normalized)) return true;
   if (/^[A-Z][A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD)$/.test(value.trim())) return true;
   return false;
