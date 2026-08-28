@@ -6,6 +6,8 @@ import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
+  LIVE_E2E_MAX_REQUESTS,
+  LIVE_E2E_MAX_TOKENS,
   assertNoSecretValues,
   boundedPositiveInt,
   collectConfiguredSecrets,
@@ -86,8 +88,12 @@ async function main() {
   const model = readOption(args, "--model") ?? process.env.TETHERMARK_LIVE_LLM_MODEL;
   if (!model) throw new Error("live_model_required: pass --model or set TETHERMARK_LIVE_LLM_MODEL explicitly.");
 
-  const maxRequests = boundedPositiveInt(process.env.TETHERMARK_LIVE_E2E_MAX_REQUESTS, 12, 12, "TETHERMARK_LIVE_E2E_MAX_REQUESTS");
-  const maxTokens = boundedPositiveInt(process.env.TETHERMARK_LIVE_E2E_MAX_TOKENS, 260_000, 300_000, "TETHERMARK_LIVE_E2E_MAX_TOKENS");
+  const maxRequests = boundedPositiveInt(process.env.TETHERMARK_LIVE_E2E_MAX_REQUESTS, LIVE_E2E_MAX_REQUESTS, LIVE_E2E_MAX_REQUESTS, "TETHERMARK_LIVE_E2E_MAX_REQUESTS");
+  // The fixed deep-static validation run is governed by the built-in
+  // agentic-static-safe system policy. Keep the live gate inside that policy's
+  // immutable 240,000-token ceiling so the release check cannot request a
+  // budget that production correctly rejects.
+  const maxTokens = boundedPositiveInt(process.env.TETHERMARK_LIVE_E2E_MAX_TOKENS, LIVE_E2E_MAX_TOKENS, LIVE_E2E_MAX_TOKENS, "TETHERMARK_LIVE_E2E_MAX_TOKENS");
   const requestTimeoutMs = boundedPositiveInt(process.env.TETHERMARK_LIVE_REQUEST_TIMEOUT_MS, 180_000, 180_000, "TETHERMARK_LIVE_REQUEST_TIMEOUT_MS");
   const runTimeoutMs = boundedPositiveInt(process.env.TETHERMARK_LIVE_E2E_TIMEOUT_MS, 720_000, 900_000, "TETHERMARK_LIVE_E2E_TIMEOUT_MS");
   const credentialClass = providerId === "openai" ? "api_key" : "chatgpt_session";

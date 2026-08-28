@@ -5,6 +5,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  LIVE_E2E_MAX_REQUESTS,
+  LIVE_E2E_MAX_TOKENS,
   LIVE_VALIDATION_OPT_IN,
   assertNoSecretValues,
   boundedPositiveInt,
@@ -31,6 +33,10 @@ async function main() {
   assert.match(packageJson.scripts["e2e:audit:live"], /--codex\b/);
   assert.match(packageJson.scripts["test:integration:llm:api:live"], /--provider openai\b/);
   assert.match(packageJson.scripts["e2e:audit:api:live"], /--provider openai\b/);
+
+  const deepStaticPackage = JSON.parse(await fs.readFile(path.join(repoRoot, "packages", "core-engine", "audit-packages", "deep-static.json"), "utf8"));
+  assert.ok(LIVE_E2E_MAX_REQUESTS <= deepStaticPackage.max_agent_calls, "Live E2E request ceiling must not exceed the deep-static package.");
+  assert.equal(LIVE_E2E_MAX_TOKENS, deepStaticPackage.max_total_tokens, "Live E2E token ceiling must match the deep-static package.");
 
   assertThrowsCode(() => requireLiveValidationOptIn({}), "live_validation_opt_in_required");
   requireLiveValidationOptIn({ TETHERMARK_LIVE_MODEL_VALIDATION: LIVE_VALIDATION_OPT_IN });

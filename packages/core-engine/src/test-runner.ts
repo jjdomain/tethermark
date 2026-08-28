@@ -8864,6 +8864,26 @@ async function testSystemPolicyLifecycleAndResolution(): Promise<void> {
       rootDirOrOptions: rootDir
     }), /system_policy_agent_call_budget_exceeded/);
 
+    await setDefaultPersistedSystemPolicy("agentic-static-safe", "test-admin", "default", rootDir);
+    const agenticSnapshot = await resolvePersistedSystemPolicy({
+      request: { local_path: rootDir, audit_package: "deep-static", llm_provider: "mock", workspace_id: "default", project_id: "default" },
+      target_class: "tool_using_multi_turn_agent",
+      run_id: "run-policy-agentic-narrowing",
+      rootDirOrOptions: rootDir
+    });
+    assert.ok(agenticSnapshot);
+    const approvedLaneNarrowing = attachOperatorLaunchApprovals({
+      local_path: rootDir,
+      audit_package: "deep-static",
+      llm_provider: "mock",
+      llm_workload_class: "interactive_operator",
+      requested_by: "security-reviewer",
+      hints: { audit_package_overrides: { enabled_lanes: ["agentic_controls"] } }
+    });
+    const narrowedRequest = applyResolvedSystemPolicyToRequest(approvedLaneNarrowing, agenticSnapshot);
+    assert.deepEqual((narrowedRequest.hints as any).audit_package_overrides.enabled_lanes, ["agentic_controls"]);
+    assert.equal(isValidHumanApprovalRecord((narrowedRequest.hints as any).human_approvals.find((item: any) => item.action === "evidence_reduction"), { action: "evidence_reduction" }), true);
+
     await upsertPersistedSystemPolicyBinding({ policy_id: "agentic-static-safe", binding_type: "project", project_id: "agent-project", priority: 500, actor_id: "test-admin", workspace_id: "default" }, rootDir);
     const projectSnapshot = await resolvePersistedSystemPolicy({
       request: { local_path: rootDir, audit_package: "agentic-static", llm_provider: "mock", workspace_id: "default", project_id: "agent-project" },

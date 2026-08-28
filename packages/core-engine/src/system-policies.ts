@@ -687,6 +687,19 @@ export function applyResolvedSystemPolicyToRequest(request: AuditRequest, snapsh
     ? { ...externalTools, included_tool_ids: [...new Set([...uniqueStrings(externalTools.included_tool_ids), ...requiredStaticTools])] }
     : (hints as any).external_audit_tools;
   const requestedPackageOverrides = (hints as any).audit_package_overrides && typeof (hints as any).audit_package_overrides === "object" ? (hints as any).audit_package_overrides : {};
+  const selectedPackageLaneSet = new Set(selectedPackage?.enabled_lanes ?? []);
+  const requestedEnabledLanes = uniqueStrings(requestedPackageOverrides.enabled_lanes)
+    .filter((lane) => selectedPackageLaneSet.has(lane as any));
+  let effectiveEnabledLanes: string[] | undefined;
+  if (requestedEnabledLanes.length) {
+    const removedLanes = (selectedPackage?.enabled_lanes ?? []).filter((lane) => !requestedEnabledLanes.includes(lane));
+    if (removedLanes.length) {
+      if (!snapshot.definition_json.exceptions.allow_per_run_narrowing) throw new Error("system_policy_disallows_per_run_lane_narrowing");
+      requireRequestHumanApproval(request, "evidence_reduction");
+      if (removedLanes.includes("runtime_validation")) requireRequestHumanApproval(request, "runtime_probe_removal");
+    }
+    effectiveEnabledLanes = requestedEnabledLanes;
+  }
   const thresholdRank = { low: 0, medium: 1, high: 2 };
   const requestedThreshold = requestedPackageOverrides.publishability_threshold;
   const requiredThreshold = snapshot.definition_json.review.publishability_threshold;
@@ -695,7 +708,7 @@ export function applyResolvedSystemPolicyToRequest(request: AuditRequest, snapsh
     : requiredThreshold;
   const effectivePackageOverrides = {
     ...requestedPackageOverrides,
-    enabled_lanes: undefined,
+    enabled_lanes: effectiveEnabledLanes,
     max_agent_calls: Math.min(Number(requestedPackageOverrides.max_agent_calls) || snapshot.definition_json.providers.maximum_agent_calls, snapshot.definition_json.providers.maximum_agent_calls),
     max_total_tokens: Math.min(Number(requestedPackageOverrides.max_total_tokens) || snapshot.definition_json.providers.maximum_total_tokens, snapshot.definition_json.providers.maximum_total_tokens),
     max_rerun_rounds: Math.min(Number(requestedPackageOverrides.max_rerun_rounds) || snapshot.definition_json.providers.maximum_retries, snapshot.definition_json.providers.maximum_retries),

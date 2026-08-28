@@ -4,6 +4,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 export const LIVE_VALIDATION_OPT_IN = "I_UNDERSTAND_THIS_USES_A_LIVE_MODEL";
+export const LIVE_E2E_MAX_REQUESTS = 12;
+export const LIVE_E2E_MAX_TOKENS = 240_000;
 export const LIVE_PROVIDERS = new Set(["openai", "openai_codex"]);
 
 const sensitiveKeyPattern = /(api[_-]?key|authorization|access[_-]?token|refresh[_-]?token|id[_-]?token|password|secret|cookie)/i;

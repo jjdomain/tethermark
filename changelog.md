@@ -20,6 +20,7 @@
 - The Unix installer no longer expands an empty Bash array under `set -u`, preserving dry-run and install compatibility with the Bash 3.2 runtime shipped on macOS.
 - Corrected the signed-release workflow's Bash package-version expression after the unfulfilled `v0.2.0` tag stopped before checks or artifact generation; the next immutable release candidate is `v0.2.1`.
 - Native runtime verification now accepts an explicit immutable candidate ref and runs the aggregate production runtime-readiness gate before its stronger Docker workload/service checks. The `v0.2.1` candidate passed Docker, rootless Podman, and gVisor execution plus the documented macOS non-execution boundary.
+- Restored the bounded live Codex audit gate after System Policies began silently widening its operator-approved single-lane validation scope. Valid per-run lane narrowing is now preserved only for an identified interactive operator with immutable approval, unknown lanes remain excluded, and the validator's request/token ceilings are regression-checked against the `deep-static` package and its 240,000-token policy cap.
 
 ## 2026-08-27
 
