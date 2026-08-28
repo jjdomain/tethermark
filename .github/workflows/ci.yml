@@ -89,5 +89,8 @@ jobs:
       - name: Verify release security policy and result parsers
         run: npm run test:release-security
 
+      - name: Verify reproducible release artifacts and SBOM
+        run: npm run test:release-artifacts
+
       - name: Smoke test combined OSS launcher
         run: npm run oss:check

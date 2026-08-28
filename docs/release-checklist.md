@@ -35,6 +35,16 @@ npm run release:security
 
 Review the sanitized report using [`docs/release-security-gate.md`](./release-security-gate.md). Do not tag or publish while the gate is failed.
 
+Build the exact artifact set twice, verify its checksum manifest and SBOM coverage, and follow the tag-bound signing procedure in [`docs/release-artifact-verification.md`](./release-artifact-verification.md):
+
+```bash
+npm run test:release-artifacts
+npm run release:artifacts -- --tag vX.Y.Z
+npm run release:verify
+```
+
+Only the **Signed Release Artifacts** workflow may produce official release files. Verify its SLSA provenance and CycloneDX attestations with `gh attestation verify` before attaching files to a GitHub release.
+
 For static audit production release candidates, also run:
 
 ```bash

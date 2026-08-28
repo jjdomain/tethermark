@@ -40,6 +40,8 @@ The maintained Community Edition trust-boundary and residual-risk register is [d
 
 Release scanner thresholds, sanitized evidence, and expiring exact-finding exceptions are defined in [docs/release-security-gate.md](docs/release-security-gate.md).
 
+Official source-release checksum and GitHub attestation verification is defined in [docs/release-artifact-verification.md](docs/release-artifact-verification.md). Treat files without matching checksums and tag/workflow-bound attestations as unverified.
+
 ## Please Avoid Public Disclosure Until Fixed
 
 Public issues, PRs, or discussions should not contain:

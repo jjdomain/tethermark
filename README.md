@@ -390,6 +390,8 @@ The credential, webhook, archive, repository, artifact, and runtime-mount trust 
 
 Release dependency, license, secret, Semgrep, Trivy, and OpenSSF Scorecard thresholds and exception handling are documented in [`docs/release-security-gate.md`](docs/release-security-gate.md).
 
+Reproducible source archives, the combined npm/Python CycloneDX SBOM, SHA-256 manifests, GitHub/Sigstore attestations, and consumer verification commands are documented in [`docs/release-artifact-verification.md`](docs/release-artifact-verification.md).
+
 ## Release Checklist
 
 The maintainer release checklist lives at [`docs/release-checklist.md`](docs/release-checklist.md). The short version is:
