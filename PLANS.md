@@ -28,6 +28,7 @@ Completed:
 - actual static tool execution stage for selected tools with skip/fail reporting
 - checksum-locked, user-isolated Scorecard, Semgrep, and Trivy setup with focused production readiness diagnostics
 - bundled offline Semgrep rules, bounded scanner execution, and fail-closed publishability when required evidence is incomplete
+- a fail-closed Phase 11 release-security gate with secret-safe normalized npm, license, Semgrep, Trivy, and authenticated Scorecard triage; the implemented gate passes code/dependency scanners and explicitly blocks release on the unresolved repository license and sub-floor remote Scorecard posture
 - retained real-scanner evidence on Windows, Ubuntu, and macOS
 - persisted tool execution artifacts, control results, observations, framework scores, and remediation outputs
 - static clone provenance capture with commit SHA recording for repo targets

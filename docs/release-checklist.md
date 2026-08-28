@@ -20,11 +20,20 @@ That command currently covers:
 - Playwright package/manifest, static-tool archive, and runtime-image integrity-lock checks
 - fail-closed API/web UI network-exposure policy and direct/combined startup checks
 - credential, webhook SSRF, repository-clone, archive-extraction, and log-redaction boundary checks
+- dependency/license policy parsing, scanner-result thresholds, secret-safe reporting, and time-bounded release-security exception validation
 - export golden/schema checks
 - bundled fixture validation
 - deterministic live-validation opt-in, budget, usage, and redaction harness checks
 
 `release:check` never contacts a live model. For a release candidate, separately follow `docs/live-model-validation.md` and retain current passing `openai_codex`/`chatgpt_session` evidence from both bounded primary gates. Optional API-key evidence does not replace it.
+
+Run the network-backed repository release-security gate separately with checksum-locked scanners and authenticated GitHub access:
+
+```bash
+npm run release:security
+```
+
+Review the sanitized report using [`docs/release-security-gate.md`](./release-security-gate.md). Do not tag or publish while the gate is failed.
 
 For static audit production release candidates, also run:
 
@@ -82,6 +91,7 @@ Specifically re-check:
 
 - auth mode/trust model wording
 - the threat-model register and every credential/outbound/archive/clone/runtime-mount boundary
+- the live release-security report and every active exception using `docs/release-security-gate.md`
 - supported persistence modes
 - runtime limitations
 - assistant default-on behavior, explicit disable override, model routing, fallback, and Community Edition/Cloud boundaries

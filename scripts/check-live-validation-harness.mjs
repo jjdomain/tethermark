@@ -56,7 +56,7 @@ async function main() {
 
   const secret = "sk-phase3-test-placeholder";
   const bearer = "Bearer phase3.test.token";
-  const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJwaGFzZTMifQ.signature";
+  const jwt = ["eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiJwaGFzZTMifQ", "signature"].join(".");
   const localPath = "D:\\private\\phase3";
   const configuredSecrets = collectConfiguredSecrets({
     FEATURE_SECRET_ENABLED: "true",

@@ -388,6 +388,8 @@ If you need enforced auth in Community Edition, use `HARNESS_API_AUTH_MODE=api_k
 
 The credential, webhook, archive, repository, artifact, and runtime-mount trust boundaries are documented in [`docs/security-threat-model.md`](docs/security-threat-model.md).
 
+Release dependency, license, secret, Semgrep, Trivy, and OpenSSF Scorecard thresholds and exception handling are documented in [`docs/release-security-gate.md`](docs/release-security-gate.md).
+
 ## Release Checklist
 
 The maintainer release checklist lives at [`docs/release-checklist.md`](docs/release-checklist.md). The short version is:

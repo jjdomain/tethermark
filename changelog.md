@@ -1,5 +1,16 @@
 ﻿# Changelog
 
+## 2026-08-28
+
+### Added
+
+- Added a Phase 11 release-security gate covering npm advisories, dependency and repository licenses, Semgrep, Trivy vulnerabilities/licenses/secrets/misconfigurations, and authenticated OpenSSF Scorecard checks. It retains only normalized secret-safe findings, fails closed on tool/data errors, and supports exact approved exceptions capped at 90 days. Network-backed execution is an explicit release workflow dispatch while deterministic policy/parser checks remain automatic on every native CI platform.
+
+### Changed
+
+- Release scanning now follows the releasable checkout boundary instead of ingesting ignored `.env`, `.tmp`, `.tethermark`, dependency, fixture, or generated state. Scanner children do not inherit unrelated credential variables, and only Scorecard receives the captured GitHub token. The final authenticated Windows triage passed npm, dependency-license, Semgrep, and every Trivy check; release remains blocked on Tethermark's unchosen root license and a 3.9 remote Scorecard score below the 5.0 floor.
+- Scorecard negative check scores are reported as nonblocking not-applicable results, while missing/malformed checks and the overall score still fail closed. Semgrep uses single-worker source-root scans and skips its unstable duplicate Windows pre-validation RPC while retaining actual-scan rule validation.
+
 ## 2026-08-27
 
 ### Changed

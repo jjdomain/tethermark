@@ -30,6 +30,14 @@ on:
         options:
           - "false"
           - "true"
+      run_release_security:
+        description: "Run the live Tethermark release-security gate. Expected to fail while documented release blockers remain."
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
 jobs:
   deterministic-release-checks:
@@ -104,6 +112,12 @@ jobs:
       - name: Run real scanners against adversarial fixture
         run: npm run test:static-scanners:real
 
+      - name: Run release security gate against Tethermark
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_release_security == 'true' && runner.os == 'Linux' }}
+        env:
+          GITHUB_AUTH_TOKEN: ${{ github.token }}
+        run: npm run release:security
+
       - name: Retain scanner evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -111,6 +125,15 @@ jobs:
           name: static-scanner-evidence-${{ matrix.os }}
           path: .artifacts/phase4-static-scanner-fixtures.json
           if-no-files-found: warn
+          retention-days: 30
+
+      - name: Retain sanitized release security evidence
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_release_security == 'true' && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-security-evidence
+          path: .artifacts/release-security/report.json
+          if-no-files-found: error
           retention-days: 30
 
   static-pi-api-e2e:

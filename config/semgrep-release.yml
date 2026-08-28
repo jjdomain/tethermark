@@ -1,0 +1,19 @@
+rules:
+  - id: tethermark.generic.hardcoded-secret
+    message: Potential hardcoded secret or token material in source.
+    severity: WARNING
+    languages:
+      - generic
+    pattern-regex: (?i)(api[_-]?key|secret|token|password)\s*[:=]\s*['\"][A-Za-z0-9_./+=-]{16,}['\"]
+  - id: tethermark.generic.prompt-injection-surface
+    message: Prompt injection handling is referenced and should have an explicit control.
+    severity: INFO
+    languages:
+      - generic
+    pattern-regex: (?i)prompt\s+injection
+  - id: tethermark.generic.shell-execution-surface
+    message: Shell or subprocess execution surface should be reviewed for static audit controls.
+    severity: INFO
+    languages:
+      - generic
+    pattern-regex: (?i)(child_process|subprocess|exec\(|spawn\(|shell=True)

@@ -1,0 +1,43 @@
+{
+  "schema_version": "2026-08-27.release-security.v1",
+  "maximum_exception_days": 90,
+  "dependency_vulnerabilities": {
+    "blocking_severities": ["high", "critical"]
+  },
+  "dependency_licenses": {
+    "allowed_spdx_ids": [
+      "0BSD",
+      "Apache-2.0",
+      "BSD-2-Clause",
+      "BSD-3-Clause",
+      "CC0-1.0",
+      "ISC",
+      "MIT",
+      "Unlicense"
+    ],
+    "blocking_trivy_severities": ["UNKNOWN", "HIGH", "CRITICAL"]
+  },
+  "repository_license": {
+    "accepted_filenames": ["LICENSE", "LICENSE.md", "LICENSE.txt"],
+    "allowed_spdx_ids": ["AGPL-3.0-only", "Apache-2.0", "GPL-3.0-only", "MIT", "MPL-2.0"]
+  },
+  "secrets": {
+    "blocking_severities": ["UNKNOWN", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
+  },
+  "semgrep": {
+    "blocking_severities": ["ERROR"]
+  },
+  "trivy_misconfigurations": {
+    "blocking_severities": ["HIGH", "CRITICAL"]
+  },
+  "scorecard": {
+    "repository": "https://github.com/jjdomain/tethermark",
+    "minimum_overall_score": 5,
+    "negative_check_score_disposition": "report_only",
+    "minimum_check_scores": {
+      "Dangerous-Workflow": 5,
+      "Pinned-Dependencies": 5,
+      "Token-Permissions": 5
+    }
+  }
+}

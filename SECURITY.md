@@ -38,6 +38,8 @@ Misconfigurations that ignore that deployment boundary may still be important op
 
 The maintained Community Edition trust-boundary and residual-risk register is [docs/security-threat-model.md](docs/security-threat-model.md).
 
+Release scanner thresholds, sanitized evidence, and expiring exact-finding exceptions are defined in [docs/release-security-gate.md](docs/release-security-gate.md).
+
 ## Please Avoid Public Disclosure Until Fixed
 
 Public issues, PRs, or discussions should not contain:

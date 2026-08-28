@@ -86,5 +86,8 @@ jobs:
       - name: Verify credential and untrusted-input boundaries
         run: npm run test:security-boundaries
 
+      - name: Verify release security policy and result parsers
+        run: npm run test:release-security
+
       - name: Smoke test combined OSS launcher
         run: npm run oss:check
