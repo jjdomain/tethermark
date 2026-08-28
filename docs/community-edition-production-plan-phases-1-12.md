@@ -568,7 +568,7 @@ Exit criteria:
 
 ## Phase 11 — Package, secure, and verify cross-platform installation
 
-Status: **Partial**
+Status: **Complete**
 
 Objective: turn a source checkout into a supportable CE distribution.
 
@@ -580,7 +580,7 @@ Tasks:
 - [x] Default API/UI binding to localhost; make external binding require explicit auth and warning acknowledgement. API and UI hosts independently default to `127.0.0.1`; direct and combined startup paths reject every non-loopback bind unless API-key auth, a 32-character minimum key, and the exact network-exposure acknowledgement are configured. Allowed external starts emit a plain-HTTP/TLS-proxy warning, and cross-platform CI exercises the fail-closed policy without opening an external listener.
 - [x] Threat-model API key storage, Codex sign-in/session-cache discovery, logs, artifacts, webhooks, archive extraction, repository cloning, and runtime mounts. `docs/security-threat-model.md` is the canonical asset/principal, control, residual-risk, and operator-duty register. The implementation now blocks inline API keys in durable jobs, masks persisted signing secrets, hardens local secret/artifact permissions, bounds Codex cache inspection, recursively redacts logs, constrains webhook egress, validates archives before and after extraction, rejects credentialed/unsafe clone URLs while isolating Git's environment, and records the existing runtime-mount controls. `npm run test:security-boundaries` is part of the native CI and release gate.
 - [x] Run dependency, license, secret, Semgrep, Trivy, and Scorecard release checks with triage policy. `npm run release:security` now executes a fail-closed, checksum-bound, secret-safe gate over the releasable checkout with checked-in severity/license/Scorecard floors and exact, approved, maximum-90-day exceptions. Tethermark Community Edition is declared and distributed as Apache-2.0. **Static Audit Release Gate** [run 33161700440](https://github.com/jjdomain/tethermark/actions/runs/33161700440) passed on 2026-08-28 for commit `064f819`: the retained sanitized Ubuntu report records zero blocking findings across npm advisories, dependency and repository licenses, Semgrep, all Trivy categories, and authenticated Scorecard. Git checkout mode reports Scorecard 5.3, above the unchanged 5.0 floor, with License and Dependency-Update-Tool each scoring 10.
-- [ ] Produce an SBOM and signed/checksummed release artifacts; document verification. Implementation is ready: deterministic tag-bound `.zip`/`.tar.gz` source archives, a canonical CycloneDX 1.5 SBOM covering the npm graph plus 92 hash-locked Python requirements, `release-manifest.json`, exact `SHA256SUMS`, cross-platform verification/tamper tests, and a tag/manual-only GitHub OIDC workflow using commit-pinned `actions/attest` for SLSA provenance and SBOM predicates. Local double-build and tamper validation pass, and the license and Scorecard blockers are resolved. This task remains open only until an actual tagged workflow run produces signatures that pass the documented independent verification commands.
+- [x] Produce an SBOM and signed/checksummed release artifacts; document verification. Deterministic tag-bound `.zip`/`.tar.gz` source archives, a canonical CycloneDX 1.5 SBOM covering 162 components including 93 hash-locked Python requirements, `release-manifest.json`, and exact `SHA256SUMS` were produced by **Signed Release Artifacts** [run 33162165763](https://github.com/jjdomain/tethermark/actions/runs/33162165763) for immutable tag `v0.2.1` and commit `0b90c37`. The downloaded set passed the independent Tethermark checksum/manifest/SBOM verifier; `gh attestation verify` accepted the expected repository, tag, and commit-pinned workflow identity for all five files, and accepted the CycloneDX predicate for both source archives. The earlier `v0.2.0` workflow stopped during version resolution and produced no artifacts; the tag was not moved or reused.
 - [x] Add least-privilege service examples and filesystem permissions for shared trusted-team installs. `HARNESS_ARTIFACT_ROOT` now moves run artifacts, sandboxes, indexes, benchmarks, runtime-readiness evidence, and maintenance state out of the checkout, while `HARNESS_ENV_FILE` selects a bounded regular protected configuration file and `HARNESS_LOCAL_DB_ROOT` remains independently configurable. The checked-in systemd unit runs as a non-login account with an immutable checkout, owner-only state, no Linux capabilities, and systemd containment; launchd and Windows Task Scheduler templates use dedicated non-admin identities and explicit Unix modes/Windows ACLs. Shared service use remains restricted to mutually trusted API-key administrators and unattended model work requires an API provider rather than a personal Codex session. `npm run test:service-deployment` enforces the path and template contract across native CI.
 - [x] Document data locations, backups, retention, diagnostics bundle creation, privacy, and complete credential removal. `docs/data-lifecycle-and-privacy.md` maps checkout, external service, SQLite, raw artifact, sandbox, tool, worker, browser, Codex, and Git/SSH storage boundaries; separates verified SQLite backup/restore from raw-artifact copies; defines scheduled/manual retention and its non-erasure limits; and gives provider-first revocation plus local/external cleanup steps. `diagnostics create` emits an owner-only support JSON containing only versions, aggregate storage facts, protected-file status, and doctor IDs/statuses—never paths, environment values, credentials, filenames, or audit content. `credentials remove` previews then blanks Tethermark-managed secret environment values and scrubs persisted settings secrets. The UI now keeps the instance API key in session storage, removes the legacy local-storage field on load, and requires browser closure/site-data cleanup for complete removal. `npm run test:data-lifecycle` enforces these privacy properties across native CI.
 - [x] Validate clean install and upgrade on Windows, macOS, Ubuntu, and the supported container/server deployment. `test:install-upgrade` performs an actual isolated clone, lockfile install, build, detached revision marker check, two-ref update, protected configuration/state preservation check, clean-checkout assertion, and installed API/UI smoke launch. **Install And Upgrade Verification** [run 33156202491](https://github.com/jjdomain/tethermark/actions/runs/33156202491) passed for commit `24286d9` on Ubuntu 24.04 x64, Windows Server 2025 x64, and macOS 15 arm64; all three retained sanitized evidence files report every lifecycle assertion true, and Ubuntu also passed the hardened server-profile contract. Native execution exposed and fixed Windows Node 24 npm launching plus Windows/Unix nested smoke process-tree cleanup. macOS container execution remains explicitly deferred.
@@ -593,14 +593,14 @@ Exit criteria:
 
 ## Phase 12 — Release candidate, beta, and production launch
 
-Status: **Not started**
+Status: **Partial**
 
 Objective: promote CE only after current evidence proves the advertised feature boundary.
 
 Release-candidate gates:
 
-- [ ] Phases 1–11 exit criteria are closed or explicitly removed from the advertised release scope.
-- [ ] `npm run release:check` passes on the release commit.
+- [x] Phases 1–11 exit criteria are closed or explicitly removed from the advertised release scope. Phase 11 closed with the verified `v0.2.1` release artifact set.
+- [x] `npm run release:check` passes on the release commit. Signed Release Artifacts run 33162165763 executed it successfully on tag `v0.2.1` / commit `0b90c37` before signing.
 - [ ] `npm run production:static-release` passes on the release commit.
 - [ ] `npm run production:runtime-readiness` passes and actually launches runtime fixtures.
 - [ ] Real OpenAI Codex ChatGPT-session inference and end-to-end audit gates pass under the approved workload policy.
@@ -625,8 +625,8 @@ A static-only beta may be cut before Phases 8–9 finish only if it is explicitl
 
 ## Recommended execution order from this snapshot
 
-1. Complete Phase 11 packaging/cross-platform security.
-2. Execute Phase 12 release candidate and beta gates.
+1. Execute the remaining Phase 12 release-candidate gates on the immutable `v0.2.1` candidate.
+2. Run the consented beta and complete the production-launch evidence.
 
 ## Immediate next-task checklist
 
@@ -638,10 +638,4 @@ git diff origin/main...HEAD
 git diff -- PLANS.md changelog.md docs/community-edition-production-plan-phases-1-12.md docs/provider-workload-policy.md docs/provider-policy-decision-log.md
 ```
 
-Phases 1 through 10 are complete within the documented platform scope. Before closing Phase 11, rerun the deterministic release gate on the completed tracker tree:
-
-```powershell
-npm run release:check
-```
-
-Phase 10 is complete. Proceed to Phase 11 packaging and cross-platform security. The live commands in `docs/live-model-validation.md` remain the Phase 3 release-candidate refresh procedure; they are not part of ordinary pull-request CI.
+Phases 1 through 11 are complete within the documented platform scope. Proceed through the remaining Phase 12 gates without weakening the advertised runtime, model-provider, security, or native-platform boundaries. The live commands in `docs/live-model-validation.md` remain the Phase 3 release-candidate refresh procedure; they are not part of ordinary pull-request CI.
