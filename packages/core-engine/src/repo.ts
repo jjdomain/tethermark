@@ -40,7 +40,7 @@ function derivePackageSurface(files: string[]): { ecosystems: string[]; managers
     if (/(^|\/)(package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock)$/i.test(normalized)) {
       ecosystems.add("javascript");
     }
-    if (/(^|\/)(requirements(\.dev)?\.txt|pyproject\.toml|poetry\.lock|pipfile|pipfile\.lock)$/i.test(normalized)) {
+    if (/(^|\/)(requirements(\.dev)?\.txt|pyproject\.toml|poetry\.lock|pipfile|pipfile\.lock|uv\.lock)$/i.test(normalized)) {
       ecosystems.add("python");
     }
     if (/(^|\/)(go\.mod)$/i.test(normalized)) {
@@ -54,6 +54,7 @@ function derivePackageSurface(files: string[]): { ecosystems: string[]; managers
     if (/(^|\/)(yarn\.lock)$/i.test(normalized)) managers.add("yarn");
     if (/(^|\/)(requirements(\.dev)?\.txt|pipfile|pipfile\.lock)$/i.test(normalized)) managers.add("pip");
     if (/(^|\/)(pyproject\.toml|poetry\.lock)$/i.test(normalized)) managers.add("poetry");
+    if (/(^|\/)uv\.lock$/i.test(normalized)) managers.add("uv");
     if (/(^|\/)(go\.mod)$/i.test(normalized)) managers.add("go-mod");
     if (/(^|\/)(cargo\.toml|cargo\.lock)$/i.test(normalized)) managers.add("cargo");
   }
@@ -323,8 +324,8 @@ export async function analyzeTarget(target: TargetDescriptor): Promise<AnalysisS
     ...files.filter((file) => TEXT_FILE_RE.test(file) && /(agent|planner|eval|audit)/i.test(file)),
     ...(agenticSignals.aiFrameworks.length ? agenticSignals.signalFiles : [])
   ]);
-  const dependencyManifests = files.filter((file) => /(^|\/)(package\.json|requirements(\.dev)?\.txt|pyproject\.toml|poetry\.lock|Pipfile|Pipfile\.lock|go\.mod|Cargo\.toml)$/i.test(file));
-  const lockfiles = files.filter((file) => /(^|\/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|poetry\.lock|Pipfile\.lock|Cargo\.lock)$/i.test(file));
+  const dependencyManifests = files.filter((file) => /(^|\/)(package\.json|requirements(\.dev)?\.txt|pyproject\.toml|poetry\.lock|Pipfile|Pipfile\.lock|uv\.lock|go\.mod|Cargo\.toml)$/i.test(file));
+  const lockfiles = files.filter((file) => /(^|\/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|poetry\.lock|Pipfile\.lock|uv\.lock|Cargo\.lock)$/i.test(file));
   const ciWorkflows = files.filter((file) => /(^|\/)\.github\/workflows\/.*\.(yml|yaml)$/i.test(file));
   const securityDocs = files.filter((file) => /(^|\/)(SECURITY\.md|CODEOWNERS|\.github\/dependabot\.yml|\.github\/dependabot\.yaml|renovate\.json|renovate\.json5)$/i.test(file));
   const releaseFiles = files.filter((file) => /(^|\/)(release\.yml|release\.yaml|\.releaserc|semantic-release|changeset|\.github\/workflows\/.*release.*\.(yml|yaml))$/i.test(file));

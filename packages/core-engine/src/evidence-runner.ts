@@ -8,8 +8,16 @@ const AUTO_FALLBACKS: Record<string, string[]> = {
 function shouldAutoFallback(requestedProviderId: string, result: EvidenceExecutionRecord, uniqueProviders: string[]): string[] {
   const candidates = AUTO_FALLBACKS[requestedProviderId] ?? [];
   if (result.status !== "skipped") return [];
-  if (!(result.failure_category === "command_unavailable" || result.failure_category === "sandbox_blocked")) return [];
+  if (!(result.failure_category === "command_unavailable" || result.failure_category === "sandbox_blocked" || result.failure_category === "runtime_error")) return [];
   return candidates.filter((candidate) => !uniqueProviders.includes(candidate));
+}
+
+export function resolveAutoFallbackProviderIdsForTests(
+  requestedProviderId: string,
+  result: EvidenceExecutionRecord,
+  uniqueProviders: string[]
+): string[] {
+  return shouldAutoFallback(requestedProviderId, result, uniqueProviders);
 }
 
 function withAdapterMetadata(args: {

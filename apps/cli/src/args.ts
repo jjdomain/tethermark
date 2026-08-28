@@ -37,6 +37,7 @@ export function buildScanRequest(args: string[]): { request: AuditRequest; targe
   const runMode = (readFlag(args, "--mode") as AuditRequest["run_mode"]) ?? "static";
   const policyPath = readFlag(args, "--policy");
   const workloadClass = (readFlag(args, "--llm-workload") as AuditRequest["llm_workload_class"]) ?? "interactive_operator";
+  const evidencePlanPolicyVersion = readFlag(args, "--evidence-plan-policy");
 
   const request: AuditRequest = {
     run_mode: runMode,
@@ -55,8 +56,16 @@ export function buildScanRequest(args: string[]): { request: AuditRequest; targe
     requested_by: workloadClass === "interactive_operator" ? (process.env.USERNAME ?? process.env.USER ?? "local-cli-operator") : undefined
   };
 
+  if (evidencePlanPolicyVersion) {
+    request.hints = {
+      ...(request.hints ?? {}),
+      evidence_plan_policy_version: evidencePlanPolicyVersion
+    };
+  }
+
   if (readBooleanFlag(args, "--accept-runtime-warning") === true) {
     request.hints = {
+      ...(request.hints ?? {}),
       runtime_sandbox_accepted_at: new Date().toISOString(),
       launch_intent: { source_surface: "cli", preflight_accepted_at: new Date().toISOString() }
     };

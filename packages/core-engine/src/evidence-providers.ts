@@ -775,7 +775,8 @@ export async function executeEvidenceProvider(args: {
         });
       }
       try {
-        const { exitCode, stdout, stderr } = await runCommand(invocation.command, [...invocation.prefix_args, ...command], { timeoutMs: 3 * 60 * 1000 });
+        const scorecardTimeoutMs = boundedEnvInteger("HARNESS_SCORECARD_TIMEOUT_MS", 3 * 60 * 1000, 50, 10 * 60 * 1000);
+        const { exitCode, stdout, stderr } = await runCommand(invocation.command, [...invocation.prefix_args, ...command], { timeoutMs: scorecardTimeoutMs });
         const parsed = parseCommandJson(stdout, stderr);
         const failure = classifyCommandFailure(stdout, stderr);
         if (failure) {

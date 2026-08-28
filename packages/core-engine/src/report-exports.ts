@@ -1,4 +1,4 @@
-import type { PersistedFindingRecord, PersistedRemediationMemoRecord, PersistedResolvedConfigurationRecord, PersistedReviewDecisionRecord } from "./persistence/contracts.js";
+import type { PersistedFindingRecord, PersistedRemediationMemoRecord, PersistedResolvedConfigurationRecord, PersistedReviewDecisionRecord, PersistedReviewWorkflowRecord } from "./persistence/contracts.js";
 import type { FindingEvaluationSummary } from "./finding-evaluation.js";
 
 export interface ReportRunSummaryRecord {
@@ -18,6 +18,45 @@ function severityToSarifLevel(severity: string): "error" | "warning" | "note" {
 
 function toArray(value: unknown): string[] {
   return Array.isArray(value) ? value.map((item) => String(item)) : [];
+}
+
+export function resolveReviewedPublication(args: {
+  reviewDecision: PersistedReviewDecisionRecord | null;
+  reviewWorkflow?: PersistedReviewWorkflowRecord | null;
+  findings: PersistedFindingRecord[];
+}): {
+  automated_publishability_status: string | null;
+  publishability_status: string | null;
+  automated_human_review_required: boolean;
+  human_review_required: boolean;
+  review_workflow_status: string | null;
+  publication_basis: "automated" | "review_approved" | null;
+} {
+  const automatedStatus = args.reviewDecision?.publishability_status ?? null;
+  const automatedHumanReviewRequired = Boolean(args.reviewDecision?.human_review_required);
+  const findingsById = new Map(args.findings.map((finding) => [finding.id, finding]));
+  const activeGatingFindings = toArray(args.reviewDecision?.gating_findings_json)
+    .map((findingId) => findingsById.get(findingId))
+    .filter((finding): finding is PersistedFindingRecord => Boolean(finding));
+  const approvedForPublic = automatedStatus === "review_required"
+    && args.reviewWorkflow?.status === "approved"
+    && args.reviewWorkflow.last_action_type === "approve_run"
+    && args.reviewDecision?.public_summary_safe === true
+    && args.reviewDecision?.recommended_visibility === "public"
+    && activeGatingFindings.every((finding) => finding.publication_state === "public_safe");
+  const effectiveStatus = approvedForPublic ? "publishable" : automatedStatus;
+  return {
+    automated_publishability_status: automatedStatus,
+    publishability_status: effectiveStatus,
+    automated_human_review_required: automatedHumanReviewRequired,
+    human_review_required: approvedForPublic ? false : automatedHumanReviewRequired,
+    review_workflow_status: args.reviewWorkflow?.status ?? null,
+    publication_basis: approvedForPublic
+      ? "review_approved"
+      : automatedStatus === "publishable"
+        ? "automated"
+        : null
+  };
 }
 
 function severityRank(severity: string | null | undefined): number {
@@ -199,6 +238,7 @@ function summarizeControlCoverage(controlResults?: Array<Record<string, any>>): 
 }
 
 function summarizeValidationCompleteness(args: {
+  runMode?: string;
   evaluations: FindingEvaluationSummary;
   toolExecutions?: Array<Record<string, any>>;
   controlResults?: Array<Record<string, any>>;
@@ -209,8 +249,17 @@ function summarizeValidationCompleteness(args: {
   const stageExecutions = Array.isArray(args.stageExecutions) ? args.stageExecutions : [];
   const agentInvocations = Array.isArray(args.agentInvocations) ? args.agentInvocations : [];
   const controlCoverage = summarizeControlCoverage(args.controlResults);
+  const expectedStaticScopeGaps = args.runMode === "static"
+    ? new Set(controlCoverage.notAssessed.filter((controlId) => controlId.startsWith("runtime.") || controlId === "openssf.branch_protection" || controlId === "slsa.provenance"))
+    : new Set<string>();
+  const unexpectedNotAssessedControls = controlCoverage.notAssessed.filter((controlId) => !expectedStaticScopeGaps.has(controlId));
+  const completedFallbackProviders = new Set(toolExecutions
+    .filter((item) => item.status === "completed")
+    .map((item) => item.adapter_json ?? item.adapter)
+    .filter((adapter) => adapter?.adapter_action === "fallback" && adapter?.requested_provider_id)
+    .map((adapter) => String(adapter.requested_provider_id)));
   const incompleteTools = toolExecutions
-    .filter((item) => item.status !== "completed")
+    .filter((item) => item.status !== "completed" && !completedFallbackProviders.has(String(item.provider_id ?? item.tool ?? "unknown")))
     .map((item) => ({
       provider_id: String(item.provider_id ?? item.tool ?? "unknown"),
       status: String(item.status ?? "unknown"),
@@ -223,7 +272,7 @@ function summarizeValidationCompleteness(args: {
       status: String(item.status ?? "unknown")
     }));
   const incompleteModelInvocations = agentInvocations
-    .filter((item) => item.status !== "completed")
+    .filter((item) => !["success", "completed"].includes(String(item.status ?? "unknown")))
     .map((item) => ({
       agent_name: String(item.agent_name ?? "unknown"),
       stage_name: item.stage_name ? String(item.stage_name) : null,
@@ -238,7 +287,7 @@ function summarizeValidationCompleteness(args: {
     incompleteTools.length
     || incompleteStages.length
     || incompleteModelInvocations.length
-    || controlCoverage.notAssessed.length
+    || unexpectedNotAssessedControls.length
     || runtimeBlocked
     || runtimeFailed
     || args.evaluations.sandbox_execution?.attention_required
@@ -250,12 +299,18 @@ function summarizeValidationCompleteness(args: {
       : null,
     incomplete_tool_count: incompleteTools.length,
     incomplete_tools: incompleteTools,
+    completed_fallback_provider_count: completedFallbackProviders.size,
+    completed_fallback_providers: [...completedFallbackProviders],
     incomplete_stage_count: incompleteStages.length,
     incomplete_stages: incompleteStages,
     incomplete_model_invocation_count: incompleteModelInvocations.length,
     incomplete_model_invocations: incompleteModelInvocations,
     not_assessed_control_count: controlCoverage.notAssessed.length,
     not_assessed_controls: controlCoverage.notAssessed,
+    expected_scope_gap_count: expectedStaticScopeGaps.size,
+    expected_scope_gaps: [...expectedStaticScopeGaps],
+    unexpected_not_assessed_control_count: unexpectedNotAssessedControls.length,
+    unexpected_not_assessed_controls: unexpectedNotAssessedControls,
     runtime_blocked_count: runtimeBlocked,
     runtime_failed_count: runtimeFailed,
     sandbox_attention_required: Boolean(args.evaluations.sandbox_execution?.attention_required)
@@ -268,6 +323,7 @@ export function buildExecutiveSummaryPayload(args: {
   findings: PersistedFindingRecord[];
   evaluations: FindingEvaluationSummary;
   reviewDecision: PersistedReviewDecisionRecord | null;
+  reviewWorkflow?: PersistedReviewWorkflowRecord | null;
   remediation: PersistedRemediationMemoRecord | null;
   resolvedConfiguration: PersistedResolvedConfigurationRecord | null;
   toolExecutions?: Array<Record<string, any>>;
@@ -317,7 +373,8 @@ export function buildExecutiveSummaryPayload(args: {
       runtime_followup_outcome: item.runtime_followup_outcome,
       next_action: item.next_action
     }));
-  const validationCompleteness = summarizeValidationCompleteness(args);
+  const validationCompleteness = summarizeValidationCompleteness({ ...args, runMode: args.run.run_mode });
+  const publication = resolveReviewedPublication(args);
   return {
     run_id: args.run.id,
     status: args.run.status,
@@ -333,9 +390,13 @@ export function buildExecutiveSummaryPayload(args: {
     assessed_at: args.summary.assessed_at ?? null,
     repository_url: args.summary.repository_url ?? null,
     target_class: args.resolvedConfiguration?.initial_target_class ?? null,
-    publishability_status: args.reviewDecision?.publishability_status ?? null,
+    automated_publishability_status: publication.automated_publishability_status,
+    publishability_status: publication.publishability_status,
     public_summary_safe: Boolean(args.reviewDecision?.public_summary_safe),
-    human_review_required: Boolean(args.reviewDecision?.human_review_required),
+    automated_human_review_required: publication.automated_human_review_required,
+    human_review_required: publication.human_review_required,
+    review_workflow_status: publication.review_workflow_status,
+    publication_basis: publication.publication_basis,
     validation_completeness: validationCompleteness,
     finding_count: args.findings.length,
     top_findings: topFindings,
@@ -364,7 +425,7 @@ export function buildExecutiveSummaryPayload(args: {
     remediation_checklist: toArray(args.remediation?.checklist_json),
     outstanding_actions: [
       ...(validationCompleteness.status === "incomplete" ? ["validation_incomplete"] : []),
-      ...(args.reviewDecision?.human_review_required ? ["human_review_required"] : []),
+      ...(publication.human_review_required ? ["human_review_required"] : []),
       ...(args.evaluations.findings_needing_validation_count ? [`${args.evaluations.findings_needing_validation_count} findings need validation`] : []),
       ...(args.evaluations.runtime_followup_required_count ? [`${args.evaluations.runtime_followup_required_count} runtime follow-up items require action`] : []),
       ...(args.evaluations.findings_needing_disposition_review_count ? [`${args.evaluations.findings_needing_disposition_review_count} findings need disposition re-review`] : [])
@@ -378,6 +439,7 @@ export function buildExecutiveMarkdownReport(args: {
   findings: PersistedFindingRecord[];
   evaluations: FindingEvaluationSummary;
   reviewDecision: PersistedReviewDecisionRecord | null;
+  reviewWorkflow?: PersistedReviewWorkflowRecord | null;
   remediation: PersistedRemediationMemoRecord | null;
   resolvedConfiguration: PersistedResolvedConfigurationRecord | null;
   toolExecutions?: Array<Record<string, any>>;

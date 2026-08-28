@@ -85,6 +85,7 @@ import {
   buildMarkdownRunReport,
   buildExecutiveMarkdownReport,
   buildExecutiveSummaryPayload,
+  resolveReviewedPublication,
   buildTethermarkExportEnvelope,
   buildSarifRunReport,
   emitGenericWebhookEvent,
@@ -2273,6 +2274,7 @@ async function buildRunSummary(runId: string, rootDirOrOptions?: string | Persis
     evidenceRecords,
     runtimeFollowups
   });
+  const publication = resolveReviewedPublication({ reviewDecision, reviewWorkflow, findings });
   return {
     run_id: run.id,
     target_id: run.target_id,
@@ -2289,8 +2291,11 @@ async function buildRunSummary(runId: string, rootDirOrOptions?: string | Persis
     assessed_commit: targetArtifact?.snapshot?.commit_sha ?? null,
     assessed_at: targetArtifact?.snapshot?.captured_at ?? run.created_at,
     repository_url: targetArtifact?.repo_url ?? null,
-    publishability_status: reviewDecision?.publishability_status ?? null,
-    human_review_required: reviewDecision?.human_review_required ?? null,
+    automated_publishability_status: publication.automated_publishability_status,
+    publishability_status: publication.publishability_status,
+    automated_human_review_required: publication.automated_human_review_required,
+    human_review_required: publication.human_review_required,
+    publication_basis: publication.publication_basis,
     review_workflow_status: reviewWorkflow?.status ?? null,
     current_reviewer_id: reviewWorkflow?.current_reviewer_id ?? null,
     finding_count: findings.length,
@@ -5501,6 +5506,7 @@ export function createApiServer(options: { enableArtifactRetentionScheduler?: bo
                 findings,
                 evaluations,
                 reviewDecision,
+                reviewWorkflow: workflow,
                 remediation,
                 resolvedConfiguration,
                 toolExecutions,
@@ -5521,6 +5527,7 @@ export function createApiServer(options: { enableArtifactRetentionScheduler?: bo
               findings,
               evaluations,
               reviewDecision,
+              reviewWorkflow: workflow,
               remediation,
               resolvedConfiguration,
               toolExecutions,
@@ -5534,6 +5541,7 @@ export function createApiServer(options: { enableArtifactRetentionScheduler?: bo
               findings,
               evaluations,
               reviewDecision,
+              reviewWorkflow: workflow,
               remediation,
               resolvedConfiguration,
               toolExecutions,

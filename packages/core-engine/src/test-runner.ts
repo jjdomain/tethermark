@@ -16,6 +16,7 @@ import { describeArtifactType } from "./artifact-policy.js";
 import { pruneArtifacts, runScheduledArtifactRetention } from "./artifact-retention.js";
 import { buildPlannerContext } from "./agent-context-builders.js";
 import { executeEvidenceProvider, normalizeEvidenceSummaryForTests, normalizePublicScorecardProject, normalizePythonWorkerForTests, resetEvidenceProviderCapabilityCacheForTests } from "./evidence-providers.js";
+import { resolveAutoFallbackProviderIdsForTests } from "./evidence-runner.js";
 import { buildFixedCalibrationEvidenceSelection, CALIBRATION_EVIDENCE_PLAN_POLICY_VERSION, CALIBRATION_STATIC_EVIDENCE_PROVIDER_IDS } from "./evidence-selection-policy.js";
 import { buildFindingEvaluationSummary } from "./finding-evaluation.js";
 import { buildFindingQualitySummary } from "./finding-quality.js";
@@ -52,7 +53,8 @@ import { listPersistedUiDocuments, readPersistedUiSettings, updatePersistedUiSet
 import { markRuntimeFollowupJobTerminal, markRuntimeFollowupLaunched, readPersistedRuntimeFollowup, upsertRuntimeFollowupFromReviewAction } from "./persistence/runtime-followups.js";
 import { LinuxContainerSandboxBackend } from "./sandbox/backends/linux-container.js";
 import { buildReviewSummary } from "./review-summary.js";
-import { buildGoldenExports, readGoldenExports } from "./export-golden.js";
+import { buildGoldenExportInputs, buildGoldenExports, readGoldenExports } from "./export-golden.js";
+import { buildExecutiveSummaryPayload, resolveReviewedPublication } from "./report-exports.js";
 import { buildTethermarkExportEnvelope, isCompatibleExportEnvelope } from "./export-contract.js";
 import { evaluateStandardsAudit, isLikelyPlaceholderSecretValue } from "./standards-audit.js";
 import { computeBaselineDimensionScores, getControlCatalog, getMethodologyArtifact } from "./standards.js";
@@ -241,6 +243,10 @@ async function testStaticEvidenceUsesConfiguredScannerInvocations(): Promise<voi
 }
 
 async function testStaticScannerTimeoutAndOutputFloodFailClosed(): Promise<void> {
+  assert.deepEqual(resolveAutoFallbackProviderIdsForTests("scorecard", {
+    status: "skipped",
+    failure_category: "runtime_error"
+  } as any, ["scorecard", "semgrep", "trivy"]), ["scorecard_api"]);
   await withTempDir("tethermark-static-failure-", async (rootDir) => {
     const targetDir = path.join(rootDir, "target");
     await fs.mkdir(targetDir, { recursive: true });
@@ -487,9 +493,10 @@ async function testBuildScanRequestParsesLlmFlags(): Promise<void> {
   assert.equal(parsed.request.llm_workload_class, "interactive_operator");
   assert.equal(typeof parsed.request.requested_by, "string");
   assert.ok(parsed.request.local_path);
-  const runtimeParsed = buildScanRequest(["scan", "path", ".", "--mode", "runtime", "--accept-runtime-warning", "true"]);
+  const runtimeParsed = buildScanRequest(["scan", "path", ".", "--mode", "runtime", "--accept-runtime-warning", "true", "--evidence-plan-policy", CALIBRATION_EVIDENCE_PLAN_POLICY_VERSION]);
   assert.equal(typeof (runtimeParsed.request.hints as any)?.runtime_sandbox_accepted_at, "string");
   assert.equal((runtimeParsed.request.hints as any)?.launch_intent?.source_surface, "cli");
+  assert.equal((runtimeParsed.request.hints as any)?.evidence_plan_policy_version, CALIBRATION_EVIDENCE_PLAN_POLICY_VERSION);
 }
 
 async function testOpenAICodexProviderRegistryAndStructuredExec(): Promise<void> {
@@ -5253,6 +5260,100 @@ async function testExportCompatibilityContract(): Promise<void> {
   assert.equal(isCompatibleExportEnvelope({ ...legacyV1Envelope, schema_version: "1.9.0", additive_field: true }, { schemaName: "executive_summary.v1" }), true);
   assert.equal(isCompatibleExportEnvelope({ ...legacyV1Envelope, schema_version: "2.0.0" }, { schemaName: "executive_summary.v1" }), false);
   assert.equal(isCompatibleExportEnvelope({ ...legacyV1Envelope, schema_name: "run_comparison.v1" }, { schemaName: "executive_summary.v1" }), false);
+
+  const reviewDecision = {
+    run_id: "run_reviewed_publication",
+    publishability_status: "review_required",
+    human_review_required: true,
+    public_summary_safe: true,
+    threshold: "standard",
+    rationale_json: [],
+    gating_findings_json: ["finding_removed_by_correction"],
+    recommended_visibility: "public"
+  } as any;
+  const approvedWorkflow = {
+    run_id: "run_reviewed_publication",
+    status: "approved",
+    last_action_type: "approve_run"
+  } as any;
+  assert.deepEqual(resolveReviewedPublication({ reviewDecision, reviewWorkflow: approvedWorkflow, findings: [] }), {
+    automated_publishability_status: "review_required",
+    publishability_status: "publishable",
+    automated_human_review_required: true,
+    human_review_required: false,
+    review_workflow_status: "approved",
+    publication_basis: "review_approved"
+  });
+  assert.equal(resolveReviewedPublication({
+    reviewDecision: { ...reviewDecision, public_summary_safe: false, recommended_visibility: "internal" },
+    reviewWorkflow: approvedWorkflow,
+    findings: []
+  }).publishability_status, "review_required");
+  assert.equal(resolveReviewedPublication({
+    reviewDecision,
+    reviewWorkflow: approvedWorkflow,
+    findings: [{ id: "finding_removed_by_correction" } as any]
+  }).publishability_status, "review_required");
+  assert.equal(resolveReviewedPublication({
+    reviewDecision,
+    reviewWorkflow: approvedWorkflow,
+    findings: [{ id: "finding_removed_by_correction", publication_state: "public_safe" } as any]
+  }).publishability_status, "publishable");
+
+  const reviewedExecutive = buildExecutiveSummaryPayload({
+    ...buildGoldenExportInputs(),
+    reviewDecision,
+    reviewWorkflow: approvedWorkflow,
+    findings: []
+  });
+  assert.equal(reviewedExecutive.publishability_status, "publishable");
+  assert.equal(reviewedExecutive.automated_publishability_status, "review_required");
+  assert.equal(reviewedExecutive.human_review_required, false);
+  assert.equal(reviewedExecutive.publication_basis, "review_approved");
+
+  const completeStaticInputs = buildGoldenExportInputs();
+  const completeStaticExecutive = buildExecutiveSummaryPayload({
+    ...completeStaticInputs,
+    findings: [],
+    evaluations: {
+      ...completeStaticInputs.evaluations,
+      runtime_validation_blocked_count: 0,
+      runtime_validation_failed_count: 0,
+      sandbox_execution: { attention_required: false },
+      evaluations: []
+    },
+    toolExecutions: [{ provider_id: "repo_analysis", status: "completed" }],
+    stageExecutions: [{ stage_name: "assess_controls", status: "success" }],
+    agentInvocations: [{ agent_name: "planner_agent", status: "success", terminal_reason: "completed" }],
+    controlResults: [
+      { control_id: "runtime.prompt_injection_resistance", applicability: "applicable", assessability: "not_assessed", status: "not_assessed" },
+      { control_id: "openssf.branch_protection", applicability: "applicable", assessability: "not_assessed", status: "not_assessed" }
+    ]
+  });
+  assert.equal((completeStaticExecutive.validation_completeness as any).status, "complete");
+  assert.equal((completeStaticExecutive.validation_completeness as any).incomplete_model_invocation_count, 0);
+  assert.equal((completeStaticExecutive.validation_completeness as any).expected_scope_gap_count, 2);
+
+  const fallbackCompleteExecutive = buildExecutiveSummaryPayload({
+    ...completeStaticInputs,
+    findings: [],
+    evaluations: {
+      ...completeStaticInputs.evaluations,
+      runtime_validation_blocked_count: 0,
+      runtime_validation_failed_count: 0,
+      sandbox_execution: { attention_required: false },
+      evaluations: []
+    },
+    toolExecutions: [
+      { provider_id: "scorecard", status: "skipped", failure_category: "runtime_error", adapter_json: { adapter_action: "direct", requested_provider_id: "scorecard" } },
+      { provider_id: "scorecard_api", status: "completed", adapter_json: { adapter_action: "fallback", requested_provider_id: "scorecard" } }
+    ],
+    stageExecutions: [{ stage_name: "assess_controls", status: "success" }],
+    agentInvocations: [{ agent_name: "planner_agent", status: "success", terminal_reason: "completed" }],
+    controlResults: []
+  });
+  assert.equal((fallbackCompleteExecutive.validation_completeness as any).status, "complete");
+  assert.deepEqual((fallbackCompleteExecutive.validation_completeness as any).completed_fallback_providers, ["scorecard"]);
 }
 
 async function testFixedCalibrationEvidencePlanIsDeterministic(): Promise<void> {
@@ -5280,6 +5381,11 @@ async function testFixedCalibrationEvidencePlanIsDeterministic(): Promise<void> 
     runPlanProviderIds: ["repo_analysis", "scorecard", "semgrep", "trivy"],
     requestedOverrideIds: ["repo_analysis"]
   }), [...CALIBRATION_STATIC_EVIDENCE_PROVIDER_IDS], "supervisor correction must not narrow the fixed calibration provider set");
+  assert.deepEqual(buildFixedCalibrationEvidenceSelection({
+    request: { run_mode: "static", hints: { evidence_plan_policy_version: CALIBRATION_EVIDENCE_PLAN_POLICY_VERSION } } as any,
+    plannerArtifact,
+    controlCatalog
+  })?.baseline_tools, [...CALIBRATION_STATIC_EVIDENCE_PROVIDER_IDS], "direct production cohort requests must support the fixed evidence policy without benchmark semantics");
   assert.deepEqual(resolveAssessmentEvidenceProviderIds({
     request: { run_mode: "static" },
     runPlanProviderIds: ["repo_analysis", "secret_and_telemetry_redaction_review", "semgrep"]
@@ -7268,6 +7374,28 @@ async function testAgenticFindingsRequirePathLocalExecutionEvidence(): Promise<v
     for (const controlId of boundaryFindings[0]?.control_ids ?? []) {
       assert.equal(connected.controlResults.find((item) => item.control_id === controlId)?.status, "fail");
     }
+
+    await fs.writeFile(agentPath, [
+      "from transformers import ReactCodeAgent",
+      "agent = ReactCodeAgent(tools=[])",
+      "review_example = '''def unsafe(user_input):",
+      "    os.system(user_input)",
+      "'''",
+      "async def run_in_sandbox(session, command):",
+      "    return await session.exec(command, shell=True)"
+    ].join("\n"));
+    const inertAndSandboxed = await evaluate();
+    assert.equal(inertAndSandboxed.findings.some((item) => item.category === "agent_permission_boundary"), false);
+
+    await fs.writeFile(path.join(agentDir, "safe-grep.ts"), [
+      'import { execSync } from "node:child_process";',
+      "function shellEscape(arg: string): string {",
+      "  return \"'\" + arg.replace(/'/g, \"'\\\\''\") + \"'\";",
+      "}",
+      'export function grep(args: string[]) { return execSync(`grep ${args.map(shellEscape).join(" ")}`); }'
+    ].join("\n"));
+    const escapedShellArguments = await evaluate();
+    assert.equal(escapedShellArguments.findings.some((item) => item.category === "agent_permission_boundary"), false);
   });
 }
 
@@ -7354,6 +7482,100 @@ async function testGenericPluginPathsDoNotImplyMcp(): Promise<void> {
       tool_execution_indicators: Array.from({ length: 6 }, (_, index) => `src/tools/tool-${index}.py`)
     }, { local_path: mcpRoot } as any);
     assert.equal(broadAgentSdkProfile.primary_class, "tool_using_multi_turn_agent", "MCP integration must remain secondary for a broader agent SDK");
+  });
+}
+
+async function testUvLockRecognition(): Promise<void> {
+  await withTempDir("tethermark-uv-lock-", async (rootDir) => {
+    await fs.writeFile(path.join(rootDir, "pyproject.toml"), "[project]\nname = \"uv-project\"\nversion = \"1.0.0\"\n");
+    await fs.writeFile(path.join(rootDir, "uv.lock"), "version = 1\nrevision = 1\n");
+    const analysis = await analyzeTarget({ local_path: rootDir } as any);
+    assert.ok(analysis.dependency_manifests.includes("uv.lock"));
+    assert.ok(analysis.lockfiles.includes("uv.lock"));
+    assert.ok(analysis.package_managers.includes("uv"));
+  });
+}
+
+async function testTestFixtureSecretsStayRedactedAndNonProduction(): Promise<void> {
+  await withTempDir("tethermark-test-secret-fixtures-", async (rootDir) => {
+    const testsDir = path.join(rootDir, "tests");
+    const sourceDir = path.join(rootDir, "src");
+    await fs.mkdir(testsDir, { recursive: true });
+    await fs.mkdir(sourceDir, { recursive: true });
+    const controlCatalog = getControlCatalog().filter((item) => item.control_id === "owasp_llm.sensitive_information_disclosure");
+    const evaluate = () => evaluateStandardsAudit({
+      rootPath: rootDir,
+      analysis: {
+        root_path: rootDir, project_name: "secret-fixtures", file_count: 1, sample_files: [], frameworks: [], languages: ["Python"],
+        package_ecosystems: ["python"], package_managers: ["pip"], dependency_manifests: [], lockfiles: [], ci_workflows: [],
+        container_files: [], release_files: [], deployment_configs: [], security_docs: [], auth_files: [], network_files: [], prompt_assets: [],
+        mcp_indicators: [], agent_indicators: [], tool_execution_indicators: [], agentic_capabilities: [], agentic_control_indicators: []
+      } as any,
+      targetClass: "repo_posture_only" as any,
+      threatModel: { framework_focus: [], attack_surfaces: [], high_risk_components: [] } as any,
+      toolExecutions: [], evidenceRecords: [], controlCatalog,
+      applicableControlIds: controlCatalog.map((item) => item.control_id), deferredControlIds: [], nonApplicableControlIds: [],
+      methodology: getMethodologyArtifact()
+    });
+
+    const syntheticFixtureValue = "fixtureEncryptionMaterial98765";
+    await fs.writeFile(path.join(testsDir, "test_crypto.py"), `secret = "${syntheticFixtureValue}"\n`);
+    const fixtureOnly = await evaluate();
+    assert.equal(fixtureOnly.findings.some((item) => item.category === "secret_exposure"), false);
+    assert.equal(fixtureOnly.controlResults[0]?.status, "pass");
+    const fixtureObservation = fixtureOnly.observations.find((item) => item.title === "Credential-like literals are limited to test fixtures");
+    assert.ok(fixtureObservation);
+    assert.equal(JSON.stringify(fixtureObservation).includes(syntheticFixtureValue), false);
+
+    const productionCredential = "sk-proj-productionCredential987654321";
+    await fs.writeFile(path.join(sourceDir, "config.py"), `api_key = "${productionCredential}"\n`);
+    const production = await evaluate();
+    const finding = production.findings.find((item) => item.category === "secret_exposure");
+    assert.ok(finding);
+    assert.equal(JSON.stringify(finding).includes(productionCredential), false);
+    assert.ok(finding.evidence.some((item) => item.includes("redacted literal")));
+  });
+}
+
+async function testPurposeBoundWorkflowWritePermission(): Promise<void> {
+  await withTempDir("tethermark-workflow-permissions-", async (rootDir) => {
+    const workflowDir = path.join(rootDir, ".github", "workflows");
+    await fs.mkdir(workflowDir, { recursive: true });
+    const workflowPath = path.join(workflowDir, "docs.yml");
+    const controlCatalog = getControlCatalog().filter((item) => item.control_id === "openssf.token_permissions");
+    const evaluate = () => evaluateStandardsAudit({
+      rootPath: rootDir,
+      analysis: {
+        root_path: rootDir, project_name: "workflow-permissions", file_count: 1, sample_files: [".github/workflows/docs.yml"],
+        frameworks: [], languages: [], package_ecosystems: [], package_managers: [], dependency_manifests: [], lockfiles: [],
+        ci_workflows: [".github/workflows/docs.yml"], container_files: [], release_files: [], deployment_configs: [], security_docs: [],
+        auth_files: [], network_files: [], prompt_assets: [], mcp_indicators: [], agent_indicators: [], tool_execution_indicators: [],
+        agentic_capabilities: [], agentic_control_indicators: []
+      } as any,
+      targetClass: "repo_posture_only" as any,
+      threatModel: { framework_focus: [], attack_surfaces: [], high_risk_components: [] } as any,
+      toolExecutions: [{
+        tool: "scorecard", status: "completed", parsed: { checks: [{ name: "Token-Permissions", score: -1, reason: "No tokens found" }] }
+      } as any],
+      evidenceRecords: [], controlCatalog,
+      applicableControlIds: controlCatalog.map((item) => item.control_id), deferredControlIds: [], nonApplicableControlIds: [],
+      methodology: getMethodologyArtifact()
+    });
+
+    await fs.writeFile(workflowPath, "permissions:\n  contents: write # This allows pushing to gh-pages\njobs:\n  deploy_docs:\n    runs-on: ubuntu-latest\n");
+    const purposeBound = await evaluate();
+    assert.equal(purposeBound.findings.some((item) => item.category === "workflow_permissions"), false);
+    assert.equal(purposeBound.controlResults[0]?.status, "pass");
+
+    await fs.writeFile(workflowPath, "on:\n  pull_request:\npermissions:\n  contents: read\njobs:\n  optimize:\n    if: github.event.pull_request.head.repo.full_name == github.repository\n    permissions:\n      contents: write\n      pull-requests: write\n    steps:\n      - uses: calibreapp/image-actions@f32575787d333b0579f0b7d506ff03be63a669d1\n");
+    const imageOptimization = await evaluate();
+    assert.equal(imageOptimization.findings.some((item) => item.category === "workflow_permissions"), false);
+    assert.equal(imageOptimization.controlResults[0]?.status, "pass");
+
+    await fs.writeFile(workflowPath, "permissions:\n  contents: write\njobs:\n  build:\n    runs-on: ubuntu-latest\n");
+    const unexplained = await evaluate();
+    assert.equal(unexplained.findings.some((item) => item.category === "workflow_permissions"), true);
+    assert.equal(unexplained.controlResults[0]?.status, "fail");
   });
 }
 
@@ -7930,6 +8152,10 @@ async function testPlaceholderSecretValuesAreIgnored(): Promise<void> {
   assert.equal(isLikelyPlaceholderSecretValue("your-api-key-here"), true);
   assert.equal(isLikelyPlaceholderSecretValue("OPENAI_GATEWAY_SECRET"), true);
   assert.equal(isLikelyPlaceholderSecretValue("replace-me-with-a-token"), true);
+  assert.equal(isLikelyPlaceholderSecretValue("your_openai_api_key"), true);
+  assert.equal(isLikelyPlaceholderSecretValue("e2b_xxx_your_key_here"), true);
+  assert.equal(isLikelyPlaceholderSecretValue("sk_xxx"), true);
+  assert.equal(isLikelyPlaceholderSecretValue("sk-123XXXXXXXXXXXX"), true);
   assert.equal(isLikelyPlaceholderSecretValue("sk-live-8a7F3c2D9mQ4vX6z"), false);
 }
 
@@ -9384,6 +9610,7 @@ async function main(): Promise<void> {
       ["agentic findings require path-local execution evidence", testAgenticFindingsRequirePathLocalExecutionEvidence],
       ["MCP git_add path-boundary detection", testMcpGitAddPathBoundaryDetection],
       ["generic plugin paths do not imply MCP", testGenericPluginPathsDoNotImplyMcp],
+      ["uv lockfiles are recognized", testUvLockRecognition],
       ["planner deterministic control and classification floor", testPlannerDeterministicControlAndClassificationFloor],
       ["Gradio file-payload path validation detection", testGradioFilePayloadPathValidationDetection],
       ["Langflow sensitive-operation authentication detection", testLangflowSensitiveOperationAuthenticationDetection],
@@ -9395,6 +9622,8 @@ async function main(): Promise<void> {
       ["finding evaluation uses evidence symbols for grouping", testFindingEvaluationUsesEvidenceSymbolsForGrouping],
       ["finding quality flags unsupported evidence and control mismatch", testFindingQualityFlagsUnsupportedEvidenceAndControlMismatch],
       ["placeholder secret values are ignored", testPlaceholderSecretValuesAreIgnored],
+      ["test fixture secrets stay redacted and non-production", testTestFixtureSecretsStayRedactedAndNonProduction],
+      ["purpose-bound workflow write permissions are not overclaimed", testPurposeBoundWorkflowWritePermission],
       ["finding quality treats static dependency advisory impact as metadata", testFindingQualityTreatsStaticDependencyAdvisoryImpactAsMetadata],
       ["post-supervisor integrity does not veto semantic mapping hints", testPostSupervisorIntegrityDoesNotVetoSemanticMappingHints],
       ["run comparison uses evidence symbols for matching", testRunComparisonUsesEvidenceSymbolsForMatching]

@@ -9,6 +9,10 @@ export const CALIBRATION_STATIC_EVIDENCE_PROVIDER_IDS = [
 ] as const;
 
 function requestedCalibrationPolicyVersion(request: AuditRequest): string | null {
+  const directValue = request.hints && typeof request.hints === "object"
+    ? (request.hints as Record<string, unknown>).evidence_plan_policy_version
+    : null;
+  if (typeof directValue === "string" && directValue.trim()) return directValue.trim();
   const benchmark = request.hints?.benchmark;
   if (!benchmark || typeof benchmark !== "object") return null;
   const value = (benchmark as Record<string, unknown>).evidence_plan_policy_version;

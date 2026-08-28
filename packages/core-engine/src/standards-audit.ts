@@ -25,6 +25,9 @@ export function isLikelyPlaceholderSecretValue(value: string): boolean {
   const normalized = value.trim().toLowerCase();
   if (!normalized) return true;
   if (/^(?:your|my|the)[_-]?(?:api[_-]?)?(?:key|secret|token|password)(?:[_-]?(?:here|value))?$/.test(normalized)) return true;
+  if (/(?:^|[_-])x{3,}(?:[_-]|$)/.test(normalized)) return true;
+  if (/x{6,}/.test(normalized)) return true;
+  if (/(?:^|[_-])your(?:[_-][a-z0-9]+){0,5}[_-](?:key|secret|token|password)(?:[_-](?:here|value))?$/.test(normalized)) return true;
   if (/(?:example|sample|placeholder|dummy|fake|changeme|change[_-]?me|replace[_-]?me|insert[_-]?here|test[_-]?(?:key|secret|token|password))/.test(normalized)) return true;
   if (/^[x*_-]{8,}$/.test(normalized)) return true;
   if (/^[A-Z][A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD)$/.test(value.trim())) return true;
@@ -111,7 +114,9 @@ function importedShellExecEvidence(relative: string, text: string): string[] {
   const evidence = new Set<string>();
   for (const alias of importedShellExecAliases(text)) {
     const escapedAlias = escapeRegExp(alias);
-    const directCall = new RegExp(`\\b${escapedAlias}\\s*\\(`).test(text);
+    const safelyEscapedTemplateCall = text.includes("replace(/'/g, \"'\\\\''\")")
+      && new RegExp("\\b" + escapedAlias + "\\s*\\(\\s*`[^`]*\\$\\{[^}]*\\.map\\(\\s*shellEscape\\s*\\)[^}]*\\}[^`]*`", "s").test(text);
+    const directCall = new RegExp(`\\b${escapedAlias}\\s*\\(`).test(text) && !safelyEscapedTemplateCall;
     const promisifiedAliases = [...text.matchAll(new RegExp(`(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*(?:[A-Za-z_$][\\w$]*\\.)?promisify\\s*\\(\\s*${escapedAlias}\\s*\\)`, "g"))]
       .map((match) => match[1]);
     const promisifiedCall = promisifiedAliases.some((promisifiedAlias) => new RegExp(`\\b${escapeRegExp(promisifiedAlias)}\\s*\\(`).test(text));
@@ -128,6 +133,20 @@ function importedShellExecEvidence(relative: string, text: string): string[] {
     }
   }
   return [...evidence];
+}
+
+function isTestOrFixturePath(relative: string): boolean {
+  return /(^|\/)(?:tests?|testdata|fixtures?|__tests__)(\/|$)/i.test(relative)
+    || /(^|\/)(?:test|spec)[._-][^/]+\.(?:py|ts|tsx|js|jsx|mjs|cjs)$/i.test(relative);
+}
+
+function resemblesKnownCredentialFormat(value: string): boolean {
+  return /^(?:sk-(?:proj-)?|gh[pousr]_|github_pat_|AKIA|ASIA|AIza|xox[baprs]-|glpat-|npm_)/.test(value);
+}
+
+function executableScanText(relative: string, text: string): string {
+  if (!/\.py$/i.test(relative)) return text;
+  return text.replace(/(?:[rubf]{0,2})(?:"""[\s\S]*?"""|'''[\s\S]*?''')/gi, "");
 }
 
 function findTool(toolExecutions: ToolExecutionRecord[], tool: string): ToolExecutionRecord | undefined {
@@ -375,25 +394,32 @@ export async function evaluateStandardsAudit(args: {
       evidence: [`evidence:${record.evidence_id}`]
     });
   }
-  const secretCandidates = texts.flatMap((item) => {
+  const secretCandidateRecords = texts.flatMap((item) => {
     const matches = item.text.matchAll(/(api[_-]?key|secret|token|password)\s*[:=]\s*["']([A-Za-z0-9_\-]{16,})["']/gi);
     return [...matches]
       .filter((match) => !isLikelyPlaceholderSecretValue(match[2] ?? ""))
-      .map((match) => `${item.relative}: ${String(match[0]).slice(0, 120)}`);
+      .map((match) => ({ path: item.relative, key: match[1], value: match[2] ?? "" }));
   });
+  const secretCandidates = secretCandidateRecords
+    .filter((item) => !isTestOrFixturePath(item.path) || resemblesKnownCredentialFormat(item.value))
+    .map((item) => `${item.path}: ${item.key} assignment with redacted literal (${item.value.length} characters)`);
+  const excludedTestSecretCandidates = secretCandidateRecords
+    .filter((item) => isTestOrFixturePath(item.path) && !resemblesKnownCredentialFormat(item.value))
+    .map((item) => `${item.path}: ${item.key} test-fixture assignment with redacted literal (${item.value.length} characters)`);
   const dangerousExecRecords = texts.flatMap((item) => {
+    if (isTestOrFixturePath(item.relative)) return [];
+    const executableText = executableScanText(item.relative, item.text);
     const patterns = [
       /child_process\.exec\s*\(/i,
       /child_process\.execSync\s*\(/i,
-      /shell\s*=\s*True/i,
       /subprocess\.(run|Popen|call)\([^\)]*shell\s*=\s*True/i,
       /os\.system\s*\(/i
     ];
     const evidence = [
-      ...patterns.filter((pattern) => pattern.test(item.text)).map((pattern) => `${item.relative}: ${pattern.source}`),
-      ...importedShellExecEvidence(item.relative, item.text)
+      ...patterns.filter((pattern) => pattern.test(executableText)).map((pattern) => `${item.relative}: ${pattern.source}`),
+      ...importedShellExecEvidence(item.relative, executableText)
     ];
-    return evidence.map((reference) => ({ path: item.relative, reference, text: item.text }));
+    return evidence.map((reference) => ({ path: item.relative, reference, text: executableText }));
   });
   const agentDangerousExecMatches = dangerousExecRecords
     .filter((item) => /(?:^|\/)(?:mcp(?:-server)?|agents?|tools?)(?:[\/_.-]|$)/i.test(item.path)
@@ -451,7 +477,18 @@ export async function evaluateStandardsAudit(args: {
     return matches.filter((match) => !/@[a-f0-9]{40}$/i.test(match)).map((match) => `${item.relative}: ${match.trim()}`);
   });
   const broadPermissionWorkflows = texts
-    .filter((item) => /^\.github\/workflows\//i.test(item.relative) && (/permissions\s*:\s*write-all/i.test(item.text) || /contents\s*:\s*write/i.test(item.text)))
+    .filter((item) => {
+      if (!/^\.github\/workflows\//i.test(item.relative)) return false;
+      if (/permissions\s*:\s*write-all/i.test(item.text)) return true;
+      if (!/contents\s*:\s*write/i.test(item.text)) return false;
+      const explicitlyPurposeBound = /contents\s*:\s*write\s*#\s*[^\r\n]*(?:gh-pages|publish|deploy|release)/i.test(item.text)
+        || (/(?:docs?|pages|publish|deploy|release)/i.test(item.relative) && /(?:gh-pages|pages\s+deploy|publish|release)/i.test(item.text))
+        || (/calibreapp\/image-actions@/i.test(item.text)
+          && /pull_request\s*:/i.test(item.text)
+          && /head\.repo\.full_name\s*==\s*github\.repository/i.test(item.text)
+          && /pull-requests\s*:\s*write/i.test(item.text));
+      return !explicitlyPurposeBound;
+    })
     .map((item) => item.relative);
   const securityScanningWorkflowPresent = texts.some((item) => /^\.github\/workflows\//i.test(item.relative) && /codeql|semgrep|security|sast/i.test(item.text));
   const sandboxMentions = texts.filter((item) => /sandbox|allowlist|command_policy|read_only_analysis_only|tool policy/i.test(item.text)).map((item) => item.relative);
@@ -499,6 +536,15 @@ export async function evaluateStandardsAudit(args: {
     });
     return agentExecutionBoundaryFindingId;
   };
+
+  if (excludedTestSecretCandidates.length > 0 && secretCandidates.length === 0) {
+    observations.push({
+      observation_id: createId("obs_test_secret_fixture"),
+      title: "Credential-like literals are limited to test fixtures",
+      summary: "Generic credential-like assignments were detected only in test or fixture paths. Their values were redacted and they were not promoted to a production secret-exposure finding.",
+      evidence: excludedTestSecretCandidates.slice(0, 5)
+    });
+  }
 
   for (const control of args.controlCatalog) {
     if (args.nonApplicableControlIds.includes(control.control_id)) {
@@ -662,7 +708,8 @@ export async function evaluateStandardsAudit(args: {
 
     if (control.control_id === "openssf.token_permissions") {
       const check = scorecardCheck(args.toolExecutions, "Token-Permissions");
-      const passed = broadPermissionWorkflows.length === 0 && (typeof check?.score !== "number" || check.score >= 7);
+      const scorecardAssessed = typeof check?.score === "number" && check.score >= 0;
+      const passed = broadPermissionWorkflows.length === 0 && (!scorecardAssessed || check.score >= 7);
       const findingIds = passed ? [] : [addFinding(findings, {
         title: "Workflow token permissions appear broader than necessary",
         severity: "high",
