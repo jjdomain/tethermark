@@ -57,3 +57,7 @@ Before closing the Phase 11 task for a release candidate:
 6. keep the macOS runtime limitation explicit.
 
 Container-runtime execution evidence remains governed by [Native Runtime Verification](./native-runtime-verification.md). The install workflow must not be used to infer Docker, Podman, gVisor, or real-Mac runtime support.
+
+## Validated candidate
+
+Community Edition commit `24286d9cd726e98de2877f709a0efd58fdb768e6` passed [Install And Upgrade Verification run 33156202491](https://github.com/jjdomain/tethermark/actions/runs/33156202491) on Ubuntu 24.04 x64, Windows Server 2025 x64, and macOS 15 arm64 on 2026-08-28. The three retained evidence records report `status: passed`, all nine lifecycle assertions true, and no local paths or credentials. The Ubuntu job also passed the server-profile contract.
