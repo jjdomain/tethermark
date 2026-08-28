@@ -52,8 +52,8 @@ import { LinuxContainerSandboxBackend } from "./sandbox/backends/linux-container
 import { buildReviewSummary } from "./review-summary.js";
 import { buildGoldenExports, readGoldenExports } from "./export-golden.js";
 import { buildTethermarkExportEnvelope, isCompatibleExportEnvelope } from "./export-contract.js";
-import { evaluateStandardsAudit } from "./standards-audit.js";
-import { getControlCatalog, getMethodologyArtifact } from "./standards.js";
+import { evaluateStandardsAudit, isLikelyPlaceholderSecretValue } from "./standards-audit.js";
+import { computeBaselineDimensionScores, getControlCatalog, getMethodologyArtifact } from "./standards.js";
 import { deriveCanonicalTargetId } from "./target-identity.js";
 import { listBuiltinLlmProviders, listBuiltinLlmProviderPresets } from "./llm-provider-registry.js";
 import { createDefaultAssistantToolRegistry, EvidenceGroundedAssistantProvider } from "./assistant.js";
@@ -5278,6 +5278,10 @@ async function testFixedCalibrationEvidencePlanIsDeterministic(): Promise<void> 
     runPlanProviderIds: ["repo_analysis", "scorecard", "semgrep", "trivy"],
     requestedOverrideIds: ["repo_analysis"]
   }), [...CALIBRATION_STATIC_EVIDENCE_PROVIDER_IDS], "supervisor correction must not narrow the fixed calibration provider set");
+  assert.deepEqual(resolveAssessmentEvidenceProviderIds({
+    request: { run_mode: "static" },
+    runPlanProviderIds: ["repo_analysis", "secret_and_telemetry_redaction_review", "semgrep"]
+  }), ["repo_analysis", "semgrep"], "model-generated provider names must be constrained to implemented static providers");
   assert.equal(buildFixedCalibrationEvidenceSelection({ request: { run_mode: "static" }, plannerArtifact, controlCatalog }), null);
   assert.throws(() => buildFixedCalibrationEvidenceSelection({
     request: { run_mode: "static", hints: { benchmark: { evidence_plan_policy_version: "unknown-policy" } } },
@@ -7052,6 +7056,55 @@ async function testRuntimeEvidenceInfluencesStandardsAudit(): Promise<void> {
   });
 }
 
+async function testStaticBaselineExcludesRuntimeOnlyControls(): Promise<void> {
+  const catalog = getControlCatalog();
+  const staticControl = catalog.find((control) => control.control_id === "owasp_llm.prompt_injection_guardrails");
+  const runtimeControl = catalog.find((control) => control.control_id === "runtime.prompt_injection_resistance");
+  assert.ok(staticControl);
+  assert.ok(runtimeControl);
+
+  const dimensions = computeBaselineDimensionScores([
+    {
+      control_id: staticControl.control_id,
+      framework: staticControl.framework,
+      standard_ref: staticControl.standard_ref,
+      title: staticControl.title,
+      applicability: "applicable",
+      assessability: "assessed",
+      status: "pass",
+      score_weight: staticControl.weight,
+      max_score: staticControl.weight,
+      score_awarded: staticControl.weight,
+      rationale: ["Static evidence supports the control."],
+      evidence: ["evidence:static"],
+      finding_ids: [],
+      sources: ["repo_analysis"]
+    },
+    {
+      control_id: runtimeControl.control_id,
+      framework: runtimeControl.framework,
+      standard_ref: runtimeControl.standard_ref,
+      title: runtimeControl.title,
+      applicability: "applicable",
+      assessability: "not_assessed",
+      status: "not_assessed",
+      score_weight: runtimeControl.weight,
+      max_score: runtimeControl.weight,
+      score_awarded: 0,
+      rationale: ["Runtime validation was not performed."],
+      evidence: [],
+      finding_ids: [],
+      sources: []
+    }
+  ], catalog);
+
+  const agentic = dimensions.find((dimension) => dimension.dimension === "agentic_guardrails");
+  assert.ok(agentic);
+  assert.equal(agentic.percentage, 100);
+  assert.equal(agentic.applicable_controls, 1);
+  assert.deepEqual(agentic.control_ids, [staticControl.control_id]);
+}
+
 async function testImportedChildProcessExecDetection(): Promise<void> {
   await withTempDir("harness-imported-shell-exec-", async (rootDir) => {
     const sourceDir = path.join(rootDir, "src", "mcp-server", "tools", "gitInit");
@@ -7284,6 +7337,14 @@ async function testGenericPluginPathsDoNotImplyMcp(): Promise<void> {
     const mcpProfile = buildHeuristicTargetProfile(mcpAnalysis, { local_path: mcpRoot } as any);
     assert.ok(mcpAnalysis.mcp_indicators.includes("src/mcp-server/server.py"));
     assert.equal(mcpProfile.primary_class, "mcp_server_plugin_skill_package");
+
+    const broadAgentSdkProfile = buildHeuristicTargetProfile({
+      ...mcpAnalysis,
+      ai_frameworks: ["mcp", "openai_sdk"],
+      agent_indicators: Array.from({ length: 6 }, (_, index) => `src/agents/agent-${index}.py`),
+      tool_execution_indicators: Array.from({ length: 6 }, (_, index) => `src/tools/tool-${index}.py`)
+    }, { local_path: mcpRoot } as any);
+    assert.equal(broadAgentSdkProfile.primary_class, "tool_using_multi_turn_agent", "MCP integration must remain secondary for a broader agent SDK");
   });
 }
 
@@ -7815,6 +7876,52 @@ async function testFindingQualityFlagsUnsupportedEvidenceAndControlMismatch(): P
   assert.equal(quality.control_mapping_verdict, "wrong_control");
   assert.equal(quality.unsupported_claims.some((claim) => /runtime|exploit/i.test(claim)), true);
   assert.equal(quality.next_action === "fix_control_mapping" || quality.next_action === "needs_runtime_validation", true);
+
+  const directReferenceSummary = buildFindingQualitySummary({
+    runId: "run_quality_direct_refs",
+    request: { run_mode: "static" },
+    mode: "post_supervisor_integrity",
+    findings: [{
+      finding_id: "finding_quality_direct_refs",
+      title: "Repository evidence needs review",
+      severity: "medium",
+      category: "repository_evidence",
+      description: "Static evidence is tied to exact repository locations.",
+      evidence: ["pyproject.toml", "src/agent.py: shell\\s*=\\s*True", "artifact:repo-analysis"],
+      public_safe: true,
+      confidence: 0.8,
+      score_impact: 4,
+      source: "heuristic",
+      control_ids: ["harness_internal.architecture_evidence"],
+      standards_refs: []
+    }],
+    evidenceRecords: [{
+      evidence_id: "e_repo_analysis",
+      run_id: "run_quality_direct_refs",
+      source_type: "analysis",
+      source_id: "repo_analysis",
+      control_ids: ["harness_internal.architecture_evidence"],
+      summary: "Repository analysis evidence.",
+      confidence: 0.9,
+      locations: [
+        { source_kind: "file", path: "pyproject.toml" },
+        { source_kind: "file", path: "src/agent.py" }
+      ],
+      metadata: {}
+    }],
+    controlResults: [],
+    controlCatalog: getControlCatalog(),
+    toolExecutions: []
+  });
+  assert.equal(directReferenceSummary.findings[0]?.missing_evidence_refs.length, 0);
+  assert.equal(directReferenceSummary.findings[0]?.evidence_support_verdict, "supported");
+}
+
+async function testPlaceholderSecretValuesAreIgnored(): Promise<void> {
+  assert.equal(isLikelyPlaceholderSecretValue("your-api-key-here"), true);
+  assert.equal(isLikelyPlaceholderSecretValue("OPENAI_GATEWAY_SECRET"), true);
+  assert.equal(isLikelyPlaceholderSecretValue("replace-me-with-a-token"), true);
+  assert.equal(isLikelyPlaceholderSecretValue("sk-live-8a7F3c2D9mQ4vX6z"), false);
 }
 
 async function testFindingQualityTreatsStaticDependencyAdvisoryImpactAsMetadata(): Promise<void> {
@@ -9262,6 +9369,7 @@ async function main(): Promise<void> {
       ["linux container sandbox builds django runtime command", testLinuxContainerSandboxBuildsDjangoRuntimeCommand],
       ["linux container sandbox detects node entrypoint without scripts", testLinuxContainerSandboxDetectsNodeEntrypointWithoutScripts],
       ["runtime evidence influences standards audit", testRuntimeEvidenceInfluencesStandardsAudit],
+      ["static baseline excludes runtime-only controls", testStaticBaselineExcludesRuntimeOnlyControls],
       ["imported child_process exec detection", testImportedChildProcessExecDetection],
       ["agentic findings require path-local execution evidence", testAgenticFindingsRequirePathLocalExecutionEvidence],
       ["MCP git_add path-boundary detection", testMcpGitAddPathBoundaryDetection],
@@ -9276,6 +9384,7 @@ async function main(): Promise<void> {
       ["selective correction replaces stale lane findings", testSelectiveCorrectionReplacesStaleLaneFindings],
       ["finding evaluation uses evidence symbols for grouping", testFindingEvaluationUsesEvidenceSymbolsForGrouping],
       ["finding quality flags unsupported evidence and control mismatch", testFindingQualityFlagsUnsupportedEvidenceAndControlMismatch],
+      ["placeholder secret values are ignored", testPlaceholderSecretValuesAreIgnored],
       ["finding quality treats static dependency advisory impact as metadata", testFindingQualityTreatsStaticDependencyAdvisoryImpactAsMetadata],
       ["post-supervisor integrity does not veto semantic mapping hints", testPostSupervisorIntegrityDoesNotVetoSemanticMappingHints],
       ["run comparison uses evidence symbols for matching", testRunComparisonUsesEvidenceSymbolsForMatching]

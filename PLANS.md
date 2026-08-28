@@ -61,8 +61,11 @@ Completed:
 - reviewed-finding safeguards that require assessed-control support, path-local agent execution evidence, and prompt dataflow; consolidate duplicate framework claims; preserve non-agent shell sinks for appsec triage; and exclude fixture expectation metadata from audit evidence. Fresh fixed-Gradio Sol/Terra/Sol-repeat runs converged at 87 with one finding, and both formal variance gates passed with zero score and finding-count spread
 - project-owner approval to use the fixed-Gradio AI-adjudicated labels and move forward without representing them as independent human ground truth
 - static finding integrity distinguishes scanner advisory impact metadata from claims of executed or reproduced runtime behavior; explicit runtime assertions still fail closed
+- AISecurityBase publication readiness now has a v3 static baseline that excludes runtime-only controls from the static denominator, constrains lane evidence to implemented providers, filters obvious placeholder-secret values, and exports the score/methodology/dimension/commit/public-safety provenance required for reviewed ingestion
 
 Not completed:
+- complete and editorially approve a deliberately small AISecurityBase launch cohort; the first real OSS pilot correctly remained internal because its retained findings were weak and its public-safety gate was blocked
+- expand repository-class calibration beyond the initial general-agent-SDK rule so mixed framework, platform, security-tool, and protocol repositories remain comparable across the full candidate cohort
 - broader independently reviewed advisory coverage beyond the current four advisories and vulnerability classes, followed by multi-case/repeat model variance and weight/threshold calibration
 - broader reviewed Garak/PyRIT profiles and deeper scenario coverage beyond the completed bounded initial Inspect packs
 - richer control coverage and framework depth beyond the first static control set

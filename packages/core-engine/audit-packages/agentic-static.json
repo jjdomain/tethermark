@@ -4,7 +4,7 @@
   "run_mode": "static",
   "enabled_lanes": ["repo_posture", "supply_chain", "agentic_controls", "data_exposure"],
   "max_agent_calls": 12,
-  "max_total_tokens": 140000,
+  "max_total_tokens": 180000,
   "max_rerun_rounds": 1,
   "allow_runtime_execution": false,
   "publishability_threshold": "high"

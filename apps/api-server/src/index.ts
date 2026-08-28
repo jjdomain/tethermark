@@ -2232,9 +2232,10 @@ async function readArtifactPayload(filePath: string): Promise<{ format: Artifact
 }
 
 async function buildRunSummary(runId: string, rootDirOrOptions?: string | PersistenceReadOptions): Promise<Record<string, unknown>> {
-  const [run, scoreSummary, reviewDecision, reviewWorkflow, findings, controlResults, evidenceRecords, toolExecutions, stageExecutions, laneSpecialists, sandboxExecution, findingDispositions, runtimeFollowups] = await Promise.all([
+  const [run, scoreSummary, dimensionScores, reviewDecision, reviewWorkflow, findings, controlResults, evidenceRecords, toolExecutions, stageExecutions, laneSpecialists, sandboxExecution, findingDispositions, runtimeFollowups] = await Promise.all([
     getPersistedRun(runId, rootDirOrOptions),
     readPersistedScoreSummary(runId, rootDirOrOptions),
+    readPersistedDimensionScores(runId, rootDirOrOptions),
     readPersistedReviewDecision(runId, rootDirOrOptions),
     readPersistedReviewWorkflow(runId, rootDirOrOptions),
     readPersistedFindings(runId, rootDirOrOptions),
@@ -2250,6 +2251,17 @@ async function buildRunSummary(runId: string, rootDirOrOptions?: string | Persis
   if (!run) {
     throw new Error("run_not_found");
   }
+  const readArtifact = async (filename: string): Promise<Record<string, any> | null> => {
+    try {
+      return JSON.parse(await fs.readFile(path.join(run.artifact_root, filename), "utf8")) as Record<string, any>;
+    } catch {
+      return null;
+    }
+  };
+  const [runVersions, targetArtifact] = await Promise.all([
+    readArtifact("run-versions.json"),
+    readArtifact("target.json")
+  ]);
   const findingEvaluation = buildFindingEvaluationSummary({
     workflow: reviewWorkflow,
     findings,
@@ -2271,6 +2283,12 @@ async function buildRunSummary(runId: string, rootDirOrOptions?: string | Persis
     rating: run.rating,
     overall_score: scoreSummary?.overall_score ?? run.overall_score,
     static_score: run.static_score,
+    methodology_version: runVersions?.methodology_version ?? scoreSummary?.methodology_version ?? null,
+    static_baseline_version: runVersions?.static_baseline_version ?? null,
+    dimension_scores: Object.fromEntries(dimensionScores.map((item) => [item.dimension, item.percentage])),
+    assessed_commit: targetArtifact?.snapshot?.commit_sha ?? null,
+    assessed_at: targetArtifact?.snapshot?.captured_at ?? run.created_at,
+    repository_url: targetArtifact?.repo_url ?? null,
     publishability_status: reviewDecision?.publishability_status ?? null,
     human_review_required: reviewDecision?.human_review_required ?? null,
     review_workflow_status: reviewWorkflow?.status ?? null,

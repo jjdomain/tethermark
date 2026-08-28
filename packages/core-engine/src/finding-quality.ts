@@ -51,6 +51,28 @@ function includesLoose(haystack: unknown, needle: unknown): boolean {
   return tokenOverlapCount(normalizedHaystack, normalizedNeedle) >= 2;
 }
 
+function canonicalEvidenceIdentifier(value: unknown): string {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/^artifact[:_-]?/, "")
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+function evidenceReferenceCandidates(reference: string): string[] {
+  const candidates = [reference.trim()];
+  const filePrefix = reference.match(/^(.+\.[A-Za-z0-9]{1,12}):\s+/)?.[1];
+  if (filePrefix) candidates.push(filePrefix);
+  return [...new Set(candidates.filter(Boolean))];
+}
+
+function exactOrLooseMatch(value: unknown, reference: string): boolean {
+  const normalizedValue = String(value ?? "").toLowerCase().trim();
+  return evidenceReferenceCandidates(reference).some((candidate) => {
+    const normalizedCandidate = candidate.toLowerCase().trim();
+    return normalizedValue === normalizedCandidate || includesLoose(normalizedValue, normalizedCandidate);
+  });
+}
+
 function normalizeFinding(finding: Finding | AnyRecord): Finding {
   return {
     finding_id: String((finding as AnyRecord).finding_id ?? (finding as AnyRecord).id ?? ""),
@@ -170,9 +192,12 @@ function findRelatedEvidence(finding: Finding, evidenceRecords: EvidenceRecord[]
   for (const ref of findingRefs) {
     const direct = evidenceRecords.find((record) => {
       const identifiers = [record.evidence_id, record.source_id, record.raw_artifact_path].filter(Boolean);
-      return identifiers.some((id) => String(id) === ref || includesLoose(id, ref))
-        || includesLoose(record.summary, ref)
-        || (record.locations ?? []).some((location) => includesLoose([location.path, location.uri, location.symbol, location.label].filter(Boolean).join(" "), ref));
+      const canonicalRef = canonicalEvidenceIdentifier(ref);
+      return identifiers.some((id) => exactOrLooseMatch(id, ref) || canonicalEvidenceIdentifier(id) === canonicalRef)
+        || exactOrLooseMatch(record.summary, ref)
+        || (record.locations ?? []).some((location) => [location.path, location.uri, location.symbol, location.label]
+          .filter(Boolean)
+          .some((value) => exactOrLooseMatch(value, ref)));
     });
     if (direct) {
       directMatchedIds.add(direct.evidence_id);

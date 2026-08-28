@@ -665,11 +665,12 @@ export function getMethodologyArtifact(): MethodologyArtifact {
 
 export function getStaticBaselineMethodology(): StaticBaselineMethodology {
   return {
-    version: "2026-04-11.static-ai-baseline.v2",
+    version: "2026-08-28.static-ai-baseline.v3",
     summary: "Static AI Security Baseline Methodology that rolls standards-aligned and harness-internal controls into reusable AI security posture dimensions for repository-first assessment.",
     dimensions: BASELINE_DIMENSIONS,
     scoring_rules: [
-      "Dimension scores are computed only from applicable controls mapped to that dimension.",
+      "Dimension scores are computed only from applicable non-runtime controls mapped to that dimension.",
+      "Runtime-only controls are reported as coverage gaps in static runs but do not reduce the static score.",
       "Not assessed and not applicable controls do not award points but remain visible through coverage counts.",
       "Static score is a weighted average of the dimension percentages using the methodology-defined dimension weights.",
       "Static score should be treated as a baseline posture signal, not a substitute for runtime or behavioral validation."
@@ -686,7 +687,7 @@ export function computeBaselineDimensionScores(controlResults: ControlResult[], 
   return BASELINE_DIMENSIONS.map((dimension) => {
     const controls = controlResults.filter((control) => {
       const definition = controlMap.get(control.control_id);
-      return definition?.baseline_dimension === dimension.dimension;
+      return definition?.baseline_dimension === dimension.dimension && definition.audit_lane !== "runtime_validation";
     });
     const applicableControls = controls.filter((control) => control.applicability === "applicable");
     const assessedControls = applicableControls.filter((control) => control.assessability !== "not_assessed");

@@ -22,7 +22,22 @@ export function buildGoldenExportInputs(): {
       rating: "strong",
       overall_score: 91
     },
-    summary: { overall_score: 91 },
+    summary: {
+      overall_score: 91,
+      static_score: 88,
+      methodology_version: "2026-04-11.standards-static.v2",
+      static_baseline_version: "2026-08-28.static-ai-baseline.v3",
+      dimension_scores: {
+        repo_posture: 90,
+        agentic_guardrails: 82,
+        ai_data_exposure: 86,
+        observability_auditability: 96,
+        evidence_readiness: 91
+      },
+      assessed_commit: "0123456789abcdef0123456789abcdef01234567",
+      assessed_at: "2026-04-17T00:00:00.000Z",
+      repository_url: "https://github.com/example/golden"
+    },
     findings: [{
       id: "finding_golden",
       run_id: "run_golden",

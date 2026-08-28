@@ -13,8 +13,11 @@ export function resolveAssessmentEvidenceProviderIds(args: {
 }): string[] {
   const fixedCalibrationIds = getFixedCalibrationEvidenceProviderIds(args.request);
   if (fixedCalibrationIds) return fixedCalibrationIds;
-  if (args.requestedOverrideIds?.length) return [...new Set(args.requestedOverrideIds)];
-  return [...new Set(args.runPlanProviderIds)];
+  const supportedProviderIds = args.request.run_mode === "static"
+    ? new Set(["repo_analysis", "scorecard", "scorecard_api", "semgrep", "trivy"])
+    : new Set(["repo_analysis", "scorecard", "scorecard_api", "semgrep", "trivy", "inspect", "garak", "pyrit", "internal_python_worker"]);
+  const requestedIds = args.requestedOverrideIds?.length ? args.requestedOverrideIds : args.runPlanProviderIds;
+  return [...new Set(requestedIds.filter((providerId) => supportedProviderIds.has(providerId)))];
 }
 
 function buildSandboxEvidenceRecords(args: {
@@ -155,7 +158,11 @@ export async function stageAssessControls(args: {
     repoContext: (args.analysisSummaryForEvidence as any)?.repoContext ?? { summary: [], capability_signals: [], documents: [] },
     lanePlans: lanePlans.map((plan) => ({
       ...plan,
-      allowed_tools: getFixedCalibrationEvidenceProviderIds(args.request) ? assessmentProviderIds : args.evidenceOverrideIds?.length ? assessmentProviderIds : plan.allowed_tools
+      allowed_tools: resolveAssessmentEvidenceProviderIds({
+        request: args.request,
+        runPlanProviderIds: plan.allowed_tools,
+        requestedOverrideIds: args.evidenceOverrideIds
+      })
     })),
     signal: args.signal
   });

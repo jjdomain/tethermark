@@ -21,6 +21,16 @@ import { createId } from "./utils.js";
 
 const MAX_FILE_READ_BYTES = 256 * 1024;
 
+export function isLikelyPlaceholderSecretValue(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return true;
+  if (/^(?:your|my|the)[_-]?(?:api[_-]?)?(?:key|secret|token|password)(?:[_-]?(?:here|value))?$/.test(normalized)) return true;
+  if (/(?:example|sample|placeholder|dummy|fake|changeme|change[_-]?me|replace[_-]?me|insert[_-]?here|test[_-]?(?:key|secret|token|password))/.test(normalized)) return true;
+  if (/^[x*_-]{8,}$/.test(normalized)) return true;
+  if (/^[A-Z][A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD)$/.test(value.trim())) return true;
+  return false;
+}
+
 function clampScore(score: number): number {
   return Math.max(0, Math.min(100, Math.round(score)));
 }
@@ -366,8 +376,10 @@ export async function evaluateStandardsAudit(args: {
     });
   }
   const secretCandidates = texts.flatMap((item) => {
-    const matches = item.text.match(/(api[_-]?key|secret|token|password)\s*[:=]\s*["'][A-Za-z0-9_\-]{16,}["']/gi) ?? [];
-    return matches.map((match) => `${item.relative}: ${match.slice(0, 120)}`);
+    const matches = item.text.matchAll(/(api[_-]?key|secret|token|password)\s*[:=]\s*["']([A-Za-z0-9_\-]{16,})["']/gi);
+    return [...matches]
+      .filter((match) => !isLikelyPlaceholderSecretValue(match[2] ?? ""))
+      .map((match) => `${item.relative}: ${String(match[0]).slice(0, 120)}`);
   });
   const dangerousExecRecords = texts.flatMap((item) => {
     const patterns = [

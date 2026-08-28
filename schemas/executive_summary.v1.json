@@ -26,8 +26,25 @@
         "run_mode": { "type": "string" },
         "rating": { "type": ["string", "null"] },
         "overall_score": { "type": ["number", "null"] },
+        "static_score": { "type": ["number", "null"] },
+        "methodology_version": { "type": ["string", "null"] },
+        "static_baseline_version": { "type": ["string", "null"] },
+        "dimension_scores": {
+          "type": "object",
+          "properties": {
+            "repo_posture": { "type": "number" },
+            "agentic_guardrails": { "type": "number" },
+            "ai_data_exposure": { "type": "number" },
+            "observability_auditability": { "type": "number" },
+            "evidence_readiness": { "type": "number" }
+          }
+        },
+        "assessed_commit": { "type": ["string", "null"] },
+        "assessed_at": { "type": ["string", "null"] },
+        "repository_url": { "type": ["string", "null"] },
         "target_class": { "type": ["string", "null"] },
         "publishability_status": { "type": ["string", "null"] },
+        "public_summary_safe": { "type": "boolean" },
         "human_review_required": { "type": "boolean" },
         "validation_completeness": {
           "type": "object",

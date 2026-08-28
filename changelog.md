@@ -8,6 +8,12 @@
 
 ### Changed
 
+- The Static AI Baseline is now v3: runtime-only controls remain visible as validation coverage gaps but no longer reduce a static-only leaderboard score.
+- The Agentic Static package token ceiling increased from 140,000 to 180,000 so real-world SDK scans can complete the remediation stage instead of failing after successful evidence and supervisor passes.
+- Lane-level model output is constrained to implemented evidence providers before collection, preventing invented provider names from creating misleading skipped-tool gaps.
+- Broad agent SDKs with secondary MCP integrations now classify as tool-using agent frameworks when their non-MCP framework and execution surfaces predominate.
+- Documentation placeholders and environment-variable identifiers are excluded from deterministic hardcoded-secret candidates, and finding-quality matching now recognizes exact short paths, path-plus-pattern references, and normalized artifact aliases.
+- Executive exports now carry the static score, methodology and baseline versions, five dimension scores, assessed commit metadata, and public-safety decision required by the AISecurityBase publishing contract.
 - Release scanning now follows the releasable checkout boundary instead of ingesting ignored `.env`, `.tmp`, `.tethermark`, dependency, fixture, or generated state. Scanner children do not inherit unrelated credential variables, and only Scorecard receives the captured GitHub token. The final authenticated Windows triage passed npm, dependency-license, Semgrep, and every Trivy check; release remains blocked on Tethermark's unchosen root license and a 3.9 remote Scorecard score below the 5.0 floor.
 - Scorecard negative check scores are reported as nonblocking not-applicable results, while missing/malformed checks and the overall score still fail closed. Semgrep uses single-worker source-root scans and skips its unstable duplicate Windows pre-validation RPC while retaining actual-scan rule validation.
 

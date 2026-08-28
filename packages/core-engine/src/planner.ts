@@ -86,6 +86,19 @@ export function buildHeuristicTargetProfile(analysis: AnalysisSummary, request: 
   if (analysis.dependency_manifests.length > 0 || analysis.lockfiles.length > 0) secondaryTraits.add("dependency_surface_present");
   if (analysis.container_files.length > 0) secondaryTraits.add("container_surface_present");
 
+  const nonMcpAgentFrameworks = (analysis.ai_frameworks ?? []).filter((framework) => framework !== "mcp");
+  const broadAgentSurfaceCount = analysis.agent_indicators.length + analysis.tool_execution_indicators.length;
+  const mcpIsSecondaryToAgentFramework = nonMcpAgentFrameworks.length > 0
+    && broadAgentSurfaceCount > analysis.mcp_indicators.length;
+  if (mcpIsSecondaryToAgentFramework) {
+    evidence.push("MCP is treated as a secondary integration because broader agent-framework and execution surfaces predominate.");
+    return {
+      primary_class: "tool_using_multi_turn_agent",
+      secondary_traits: [...secondaryTraits],
+      confidence: 0.88,
+      evidence
+    };
+  }
   if (analysis.mcp_indicators.length > 0 || (analysis.ai_frameworks ?? []).includes("mcp")) {
     return {
       primary_class: "mcp_server_plugin_skill_package",
