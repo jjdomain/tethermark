@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import net from "node:net";
 import process from "node:process";
 
@@ -14,7 +14,13 @@ function terminate(child) {
     return;
   }
   if (process.platform === "win32") {
-    child.kill();
+    // npm scripts add cmd/npm wrapper processes on Windows. Killing only the
+    // immediate child leaves the API and web servers holding inherited pipes,
+    // which makes non-interactive release checks hang after they have passed.
+    spawnSync("taskkill.exe", ["/pid", String(child.pid), "/t", "/f"], {
+      stdio: "ignore",
+      windowsHide: true
+    });
     return;
   }
   child.kill("SIGTERM");
@@ -93,6 +99,7 @@ async function main() {
   const exitPromise = new Promise((resolve) => {
     child.on("exit", (code, signal) => resolve({ code, signal }));
   });
+  let exitedBeforeCleanup = false;
 
   try {
     for (const url of urlChecks) {
@@ -100,12 +107,13 @@ async function main() {
     }
     console.log("[tethermark:oss-check] API and web UI are reachable.");
   } finally {
+    exitedBeforeCleanup = child.exitCode !== null || child.signalCode !== null;
     terminate(child);
     await Promise.race([exitPromise, sleep(5000)]);
   }
 
   const result = await Promise.race([exitPromise, sleep(100)]);
-  if (result && typeof result === "object" && "code" in result && result.code && result.code !== 0) {
+  if (exitedBeforeCleanup && result && typeof result === "object" && "code" in result && result.code && result.code !== 0) {
     process.exit(result.code);
   }
 }
