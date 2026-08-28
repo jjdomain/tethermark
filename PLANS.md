@@ -62,6 +62,7 @@ Completed:
 - project-owner approval to use the fixed-Gradio AI-adjudicated labels and move forward without representing them as independent human ground truth
 - static finding integrity distinguishes scanner advisory impact metadata from claims of executed or reproduced runtime behavior; explicit runtime assertions still fail closed
 - AISecurityBase publication readiness now has a v3 static baseline that excludes runtime-only controls from the static denominator, constrains lane evidence to implemented providers, filters obvious placeholder-secret values, and exports the score/methodology/dimension/commit/public-safety provenance required for reviewed ingestion
+- assessment artifact reuse now fails closed across engine behavior changes by requiring an exact assessment-implementation version in the run manifest; legacy runs are never silently reused
 
 Not completed:
 - complete and editorially approve a deliberately small AISecurityBase launch cohort; the first real OSS pilot correctly remained internal because its retained findings were weak and its public-safety gate was blocked

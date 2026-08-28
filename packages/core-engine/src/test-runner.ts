@@ -21,6 +21,8 @@ import { buildFindingEvaluationSummary } from "./finding-evaluation.js";
 import { buildFindingQualitySummary } from "./finding-quality.js";
 import { attachOperatorLaunchApprovals, createHumanApprovalRecord, isValidHumanApprovalRecord, requireRequestHumanApproval } from "./human-approval.js";
 import { validateAuditPolicyPackDefinition } from "./audit-policy.js";
+import { isAssessmentImplementationCompatible } from "./commit-diff.js";
+import { ASSESSMENT_IMPLEMENTATION_VERSION } from "./implementation-version.js";
 import { applyLearningOverlayEvidenceRules, applyLearningOverlayPlannerRules, resolveLearningOverlays } from "./learning-overlays.js";
 import { createEngine, updateControlResultsWithFindings } from "./orchestrator.js";
 import { buildHeuristicTargetProfile } from "./planner.js";
@@ -7056,6 +7058,13 @@ async function testRuntimeEvidenceInfluencesStandardsAudit(): Promise<void> {
   });
 }
 
+async function testAssessmentImplementationReuseCompatibility(): Promise<void> {
+  assert.equal(isAssessmentImplementationCompatible(null), false);
+  assert.equal(isAssessmentImplementationCompatible({}), false);
+  assert.equal(isAssessmentImplementationCompatible({ assessment_implementation_version: "legacy" }), false);
+  assert.equal(isAssessmentImplementationCompatible({ assessment_implementation_version: ASSESSMENT_IMPLEMENTATION_VERSION }), true);
+}
+
 async function testStaticBaselineExcludesRuntimeOnlyControls(): Promise<void> {
   const catalog = getControlCatalog();
   const staticControl = catalog.find((control) => control.control_id === "owasp_llm.prompt_injection_guardrails");
@@ -9279,6 +9288,7 @@ async function main(): Promise<void> {
   delete process.env.LLM_API_KEY;
   delete process.env.OPENAI_API_KEY;
   const tests: Array<[string, () => Promise<void>]> = [
+    ["assessment implementation version invalidates stale reuse", testAssessmentImplementationReuseCompatibility],
     ["production static tool version and Scorecard API policy", testProductionStaticToolPolicy],
     ["static readiness rejects unsupported scanner versions", testStaticReadinessRejectsUnsupportedVersions],
     ["static evidence uses configured scanner invocations", testStaticEvidenceUsesConfiguredScannerInvocations],

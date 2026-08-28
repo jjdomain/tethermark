@@ -840,7 +840,8 @@ export interface ScoreSummary {
 }
 
 export interface RunVersionManifest {
-  schema_version: "2026-08-26.run-versions.v2";
+  schema_version: "2026-08-28.run-versions.v3";
+  assessment_implementation_version: string;
   methodology_version: string;
   static_baseline_version: string;
   control_catalog_version: string;
@@ -883,7 +884,7 @@ export interface CommitDiffGateArtifact {
   previous_run_id: string | null;
   current_commit_sha: string | null;
   previous_commit_sha: string | null;
-  comparison_mode: "no_prior_run" | "reuse_disabled" | "policy_changed" | "same_commit" | "git_diff" | "git_diff_unavailable" | "non_git_target";
+  comparison_mode: "no_prior_run" | "reuse_disabled" | "implementation_changed" | "policy_changed" | "same_commit" | "git_diff" | "git_diff_unavailable" | "non_git_target";
   changed_files: string[];
   stage_decisions: {
     planner: "reuse" | "rerun";

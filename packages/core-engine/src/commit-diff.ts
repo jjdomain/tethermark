@@ -4,6 +4,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import type { AuditPolicyArtifact, TargetDescriptor } from "./contracts.js";
+import { ASSESSMENT_IMPLEMENTATION_VERSION } from "./implementation-version.js";
 import { listRunArtifactLocations } from "./run-registry.js";
 import { hashObject } from "./utils.js";
 
@@ -13,7 +14,7 @@ export interface CommitDiffGateArtifact {
   previous_run_id: string | null;
   current_commit_sha: string | null;
   previous_commit_sha: string | null;
-  comparison_mode: "no_prior_run" | "reuse_disabled" | "policy_changed" | "same_commit" | "git_diff" | "git_diff_unavailable" | "non_git_target";
+  comparison_mode: "no_prior_run" | "reuse_disabled" | "implementation_changed" | "policy_changed" | "same_commit" | "git_diff" | "git_diff_unavailable" | "non_git_target";
   changed_files: string[];
   stage_decisions: {
     planner: "reuse" | "rerun";
@@ -21,6 +22,12 @@ export interface CommitDiffGateArtifact {
     eval_selection: "reuse" | "rerun";
   };
   rationale: string[];
+}
+
+export function isAssessmentImplementationCompatible(previousVersionManifest: unknown): boolean {
+  if (!previousVersionManifest || typeof previousVersionManifest !== "object") return false;
+  return (previousVersionManifest as { assessment_implementation_version?: unknown }).assessment_implementation_version
+    === ASSESSMENT_IMPLEMENTATION_VERSION;
 }
 
 async function readJson<T>(filePath: string): Promise<T | null> {
@@ -103,9 +110,22 @@ export async function computeCommitDiffGate(args: {
 
   const previousTarget = await readJson<any>(path.join(previous.artifact_dir, "target.json"));
   const previousPolicy = await readJson<AuditPolicyArtifact>(path.join(previous.artifact_dir, "audit-policy.json"));
+  const previousVersionManifest = await readJson<unknown>(path.join(previous.artifact_dir, "run-versions.json"));
   const previousCommit = previousTarget?.snapshot?.commit_sha ?? null;
   const currentCommit = args.target.snapshot.commit_sha ?? null;
   const policyChanged = hashObject(previousPolicy ?? {}) !== hashObject(args.auditPolicy);
+
+  if (!isAssessmentImplementationCompatible(previousVersionManifest)) {
+    return {
+      previous_run_id: previous.run_id,
+      current_commit_sha: currentCommit,
+      previous_commit_sha: previousCommit,
+      comparison_mode: "implementation_changed",
+      changed_files: [],
+      stage_decisions: { planner: "rerun", threat_model: "rerun", eval_selection: "rerun" },
+      rationale: [`Assessment implementation changed to ${ASSESSMENT_IMPLEMENTATION_VERSION}; prior stage and lane artifacts are not reusable.`]
+    };
+  }
 
   if (policyChanged) {
     return {

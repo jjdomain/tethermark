@@ -27,6 +27,7 @@ import { AUDIT_PACKAGE_CATALOG_VERSION, getBuiltinAuditPackage, resolveAuditPack
 import { AUDIT_PROMPT_SET_VERSION } from "./agent-context-builders.js";
 import { ArtifactStore } from "./artifact-store.js";
 import { computeCommitDiffGate } from "./commit-diff.js";
+import { ASSESSMENT_IMPLEMENTATION_VERSION } from "./implementation-version.js";
 import { applyLearningOverlayEvidenceRules, applyLearningOverlayPlannerRules, resolveLearningOverlays, type LearningOverlayResolution } from "./learning-overlays.js";
 import { refreshLaneArtifacts } from "./lane-analyzers.js";
 import { formatEventJsonl } from "./observability/events.js";
@@ -1398,7 +1399,8 @@ export class AuditEngine {
       modelIdentities.push({ provider: config.provider, model: config.model, credential_class: config.credential_class });
     }
     const versionManifest: RunVersionManifest = {
-      schema_version: "2026-08-26.run-versions.v2",
+      schema_version: "2026-08-28.run-versions.v3",
+      assessment_implementation_version: ASSESSMENT_IMPLEMENTATION_VERSION,
       methodology_version: methodology.version,
       static_baseline_version: staticBaseline.version,
       control_catalog_version: CONTROL_CATALOG_VERSION,

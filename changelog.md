@@ -8,6 +8,7 @@
 
 ### Changed
 
+- Stage and lane reuse now requires an exact assessment-implementation version match. Legacy or differently versioned run artifacts fail closed to a full reassessment, and the version is recorded in the v3 run-version manifest.
 - The Static AI Baseline is now v3: runtime-only controls remain visible as validation coverage gaps but no longer reduce a static-only leaderboard score.
 - The Agentic Static package token ceiling increased from 140,000 to 180,000 so real-world SDK scans can complete the remediation stage instead of failing after successful evidence and supervisor passes.
 - Lane-level model output is constrained to implemented evidence providers before collection, preventing invented provider names from creating misleading skipped-tool gaps.

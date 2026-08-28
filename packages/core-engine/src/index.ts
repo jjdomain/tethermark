@@ -11,6 +11,7 @@ export * from "./learning-overlays.js";
 export * from "./python-worker.js";
 export * from "./sandbox/manager.js";
 export * from "./standards.js";
+export * from "./implementation-version.js";
 export * from "./evidence-providers.js";
 export * from "./evidence-runner.js";
 export * from "./evidence-selection-policy.js";
