@@ -9,6 +9,10 @@ const parsed = parsePythonRequirementsLock("example-package==1.2.3 \\\n    --has
 assert.deepEqual(parsed, [{ name: "example-package", version: "1.2.3", hashes: ["a".repeat(64)] }]);
 assert.throws(() => parsePythonRequirementsLock("example==1.0.0\n"), /no SHA-256/);
 
+const releaseWorkflow = await fs.readFile(path.join(process.cwd(), ".github", "workflows", "release-artifacts.yml"), "utf8");
+assert.match(releaseWorkflow, /version="\$\(node -p 'require\("\.\/package\.json"\)\.version'\)"/);
+assert.doesNotMatch(releaseWorkflow, /node -p \\"require/);
+
 const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), "tethermark-release-artifacts-"));
 const first = path.join(temporaryRoot, "first");
 const second = path.join(temporaryRoot, "second");

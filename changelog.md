@@ -18,6 +18,7 @@
 - Scorecard negative check scores are reported as nonblocking not-applicable results, while missing/malformed checks and the overall score still fail closed. Semgrep uses single-worker source-root scans and skips its unstable duplicate Windows pre-validation RPC while retaining actual-scan rule validation.
 - Scorecard now uses Git checkout mode so GitHub-generated source archives cannot hide repository policy files such as the Dependabot configuration from release evaluation.
 - The Unix installer no longer expands an empty Bash array under `set -u`, preserving dry-run and install compatibility with the Bash 3.2 runtime shipped on macOS.
+- Corrected the signed-release workflow's Bash package-version expression after the unfulfilled `v0.2.0` tag stopped before checks or artifact generation; the next immutable release candidate is `v0.2.1`.
 
 ## 2026-08-27
 
