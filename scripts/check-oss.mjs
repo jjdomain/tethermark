@@ -23,7 +23,14 @@ function terminate(child) {
     });
     return;
   }
-  child.kill("SIGTERM");
+  try {
+    // The npm wrapper and both servers share this detached process group.
+    // Signalling the group prevents grandchildren from retaining captured
+    // stdout/stderr pipes when this check is nested under spawnSync.
+    process.kill(-child.pid, "SIGTERM");
+  } catch (error) {
+    if (error?.code !== "ESRCH") throw error;
+  }
 }
 
 function reservePort() {
@@ -83,18 +90,15 @@ async function main() {
     WEB_UI_PORT: String(webPort),
     WEB_UI_API_BASE_URL: apiBaseUrl
   };
-  const child =
-    process.platform === "win32"
-      ? spawn("cmd.exe", ["/d", "/s", "/c", "npm", "run", "oss"], {
-          cwd: process.cwd(),
-          env: childEnv,
-          stdio: "inherit"
-        })
-      : spawn("npm", ["run", "oss"], {
-          cwd: process.cwd(),
-          env: childEnv,
-          stdio: "inherit"
-        });
+  // The package-level oss:check command has already built the application.
+  // Launching `npm run oss` here would build a second time inside the health
+  // deadline and can fail on otherwise healthy cold runners.
+  const child = spawn(process.execPath, ["scripts/run-api-web.mjs"], {
+    cwd: process.cwd(),
+    env: childEnv,
+    stdio: "inherit",
+    detached: process.platform !== "win32"
+  });
 
   const exitPromise = new Promise((resolve) => {
     child.on("exit", (code, signal) => resolve({ code, signal }));
