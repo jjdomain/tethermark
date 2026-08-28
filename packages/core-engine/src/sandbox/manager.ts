@@ -2,6 +2,7 @@ import path from "node:path";
 
 import { assertRuntimeLaunchAllowed, buildRuntimeSandboxReadiness, isRuntimeRunMode } from "../../../validation-runner/src/index.js";
 import type { AuditRequest, SandboxSession } from "../contracts.js";
+import { resolveArtifactPath } from "../local-paths.js";
 import { LinuxContainerSandboxBackend } from "./backends/linux-container.js";
 import { LinuxStaticSandboxBackend } from "./backends/linux-static.js";
 import { WindowsLocalStaticSandboxBackend } from "./backends/windows-local-static.js";
@@ -11,7 +12,7 @@ export interface SandboxManager {
 }
 
 function defaultSandboxRoot(): string {
-  return path.resolve(process.cwd(), ".artifacts", "sandboxes");
+  return resolveArtifactPath("sandboxes");
 }
 
 export function createSandboxManager(rootDir = defaultSandboxRoot()): SandboxManager {

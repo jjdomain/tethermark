@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.tethermark.community</string>
+  <key>UserName</key>
+  <string>_tethermark</string>
+  <key>GroupName</key>
+  <string>_tethermark</string>
+  <key>WorkingDirectory</key>
+  <string>/opt/tethermark</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/tethermark/bin/node</string>
+    <string>/opt/tethermark/scripts/run-api-web.mjs</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HARNESS_ENV_FILE</key>
+    <string>/var/lib/tethermark/config/tethermark.env</string>
+    <key>HARNESS_ARTIFACT_ROOT</key>
+    <string>/var/lib/tethermark/artifacts</string>
+    <key>HARNESS_LOCAL_DB_ROOT</key>
+    <string>/var/lib/tethermark/state/local-db</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>Crashed</key>
+    <true/>
+  </dict>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+</dict>
+</plist>

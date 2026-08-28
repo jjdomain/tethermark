@@ -6,6 +6,7 @@
 
 - Added a Phase 11 release-security gate covering npm advisories, dependency and repository licenses, Semgrep, Trivy vulnerabilities/licenses/secrets/misconfigurations, and authenticated OpenSSF Scorecard checks. It retains only normalized secret-safe findings, fails closed on tool/data errors, and supports exact approved exceptions capped at 90 days. Network-backed execution is an explicit release workflow dispatch while deterministic policy/parser checks remain automatic on every native CI platform.
 - Added deterministic tag-bound Community Edition source archives, a canonical CycloneDX 1.5 SBOM combining npm and hash-locked Python dependencies, a release metadata manifest, exact SHA-256 checksums, cross-platform verification/tamper tests, and a tag/manual-only GitHub OIDC workflow for signed SLSA provenance and CycloneDX attestations. The signing task remains open until a release-eligible tag passes the security gate and the generated signatures are independently verified.
+- Added least-privilege shared-service deployment examples for systemd, macOS launchd, and Windows Task Scheduler, including dedicated non-admin identities, immutable release checkouts, protected Unix modes/Windows ACLs, an external protected environment file, and a canonical writable artifact root with cross-platform regression coverage.
 
 ### Changed
 

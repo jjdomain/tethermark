@@ -273,6 +273,9 @@ Useful environment variables:
 - `HARNESS_API_KEY`
 - `HARNESS_EXTERNAL_BIND_ACKNOWLEDGEMENT`
 - `HARNESS_DB_MODE`
+- `HARNESS_ENV_FILE`
+- `HARNESS_ARTIFACT_ROOT`
+- `HARNESS_LOCAL_DB_ROOT`
 
 Binding either service to a non-loopback address exposes audit operations because the web UI proxies `/api` requests. Tethermark therefore refuses to start unless all of these conditions are met:
 
@@ -387,6 +390,8 @@ Tethermark Community Edition is not claiming:
 If you need enforced auth in Community Edition, use `HARNESS_API_AUTH_MODE=api_key`. External binding additionally requires the explicit acknowledgement described above and a trusted TLS reverse proxy and firewall.
 
 The credential, webhook, archive, repository, artifact, and runtime-mount trust boundaries are documented in [`docs/security-threat-model.md`](docs/security-threat-model.md).
+
+Dedicated-account systemd, launchd, and Windows Task Scheduler examples, protected filesystem layouts, and the shared trusted-team boundary are documented in [`docs/shared-service-deployment.md`](docs/shared-service-deployment.md).
 
 Release dependency, license, secret, Semgrep, Trivy, and OpenSSF Scorecard thresholds and exception handling are documented in [`docs/release-security-gate.md`](docs/release-security-gate.md).
 

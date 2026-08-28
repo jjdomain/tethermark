@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import type { DatabaseMode } from "../contracts.js";
+import { resolveArtifactPath } from "../local-paths.js";
 import type { RunRegistryEntry } from "../run-registry.js";
 import { normalizeProjectId, normalizeWorkspaceId } from "../request-scope.js";
 import { deriveCanonicalTargetId } from "../target-identity.js";
@@ -349,7 +350,7 @@ export async function readPersistedDimensionScores(runId: string, rootDirOrOptio
 
 export async function readRunRegistry(rootDir?: string): Promise<RunRegistryEntry[]> {
   try {
-    const raw = await fs.readFile(path.resolve(rootDir ?? path.resolve(process.cwd(), ".artifacts", "run-index.json")), "utf8");
+    const raw = await fs.readFile(path.resolve(rootDir ?? resolveArtifactPath("run-index.json")), "utf8");
     return Object.values(JSON.parse(raw) as Record<string, RunRegistryEntry>);
   } catch {
     return [];

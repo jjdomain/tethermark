@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import type { DatabaseMode } from "../contracts.js";
+import { resolveArtifactPath } from "../local-paths.js";
 
 export interface BundleExportPolicy {
   database_mode: DatabaseMode;
@@ -55,7 +56,7 @@ export async function compactBundleExports(args?: {
   mode?: DatabaseMode;
 }): Promise<BundleExportCompactionSummary> {
   const mode = args?.mode ?? "local";
-  const root = path.resolve(args?.rootDir ?? path.resolve(process.cwd(), ".artifacts", "state", `${mode}-db`));
+  const root = path.resolve(args?.rootDir ?? resolveArtifactPath("state", `${mode}-db`));
   const dryRun = args?.dryRun ?? false;
   const policy = resolveBundleExportPolicy(mode);
   const retentionDays = args?.retentionDays ?? policy.retention_days;

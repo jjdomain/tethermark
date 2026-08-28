@@ -45,6 +45,14 @@ npm run release:verify
 
 Only the **Signed Release Artifacts** workflow may produce official release files. Verify its SLSA provenance and CycloneDX attestations with `gh attestation verify` before attaching files to a GitHub release.
 
+Verify the least-privilege shared-service path and platform-template contract:
+
+```bash
+npm run test:service-deployment
+```
+
+Review any local unit/task modifications against [`docs/shared-service-deployment.md`](./shared-service-deployment.md). A release checkout used by a service must remain read-only to the dedicated process identity.
+
 For static audit production release candidates, also run:
 
 ```bash

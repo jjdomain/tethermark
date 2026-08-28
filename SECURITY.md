@@ -42,6 +42,8 @@ Release scanner thresholds, sanitized evidence, and expiring exact-finding excep
 
 Official source-release checksum and GitHub attestation verification is defined in [docs/release-artifact-verification.md](docs/release-artifact-verification.md). Treat files without matching checksums and tag/workflow-bound attestations as unverified.
 
+Least-privilege shared-service identities, immutable checkout rules, protected state/configuration paths, and platform examples are defined in [docs/shared-service-deployment.md](docs/shared-service-deployment.md). Community Edition remains a trusted-team boundary: an API-key holder is an administrator, not an isolated tenant.
+
 ## Please Avoid Public Disclosure Until Fixed
 
 Public issues, PRs, or discussions should not contain:

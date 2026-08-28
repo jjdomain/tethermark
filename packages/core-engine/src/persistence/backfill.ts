@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import type { HarnessEvent, RepoContextArtifact, ResolvedConfigurationArtifact, TargetClass } from "../contracts.js";
+import { resolveArtifactPath } from "../local-paths.js";
 import {
   deriveCanonicalTargetId,
   deriveCanonicalTargetName as deriveSharedCanonicalTargetName
@@ -40,7 +41,7 @@ import {
 } from "./run-details.js";
 
 function defaultPersistenceRoot(): string {
-  return path.resolve(process.cwd(), ".artifacts", "state", "local-db");
+  return resolveArtifactPath("state", "local-db");
 }
 
 function isTargetClass(value: unknown): value is TargetClass {

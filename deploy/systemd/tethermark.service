@@ -1,0 +1,46 @@
+[Unit]
+Description=Tethermark Community Edition
+Documentation=https://github.com/jjdomain/tethermark/blob/main/docs/shared-service-deployment.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tethermark
+Group=tethermark
+WorkingDirectory=/opt/tethermark
+EnvironmentFile=/var/lib/tethermark/config/tethermark.env
+ExecStart=/usr/bin/node /opt/tethermark/scripts/run-api-web.mjs
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+KillMode=mixed
+UMask=0077
+
+# Keep the release checkout immutable. StateDirectory creates the one writable
+# service-owned tree used by HARNESS_ARTIFACT_ROOT and HARNESS_LOCAL_DB_ROOT.
+StateDirectory=tethermark
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/tethermark
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

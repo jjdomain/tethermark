@@ -38,6 +38,7 @@ import { RunObserver } from "./observability/run-observer.js";
 import { InMemoryJobQueue } from "./queue.js";
 import { CONTROL_CATALOG_VERSION, computeBaselineDimensionScores, computeStaticBaselineScore, getCandidateControls, getMethodologyArtifact, getStaticBaselineMethodology } from "./standards.js";
 import { createId, nowIso } from "./utils.js";
+import { resolveArtifactPath } from "./local-paths.js";
 import { stageAssessControls } from "./stages/stage-assess-controls.js";
 import { stageAllocateLanes } from "./stages/stage-allocate-lanes.js";
 import { applyControlDowngrades, applyUnsupportedFindingDrops, buildCorrectionPlanArtifact, buildCorrectionResultArtifact, hasSkepticActions, mergeSelectiveAssessmentCycle, retainFindingsSupportedByFinalControls, selectEvidenceSubset, selectLaneSubset, selectToolSubset } from "./stages/stage-corrections.js";
@@ -77,7 +78,7 @@ class CanceledRunError extends Error {
 }
 
 function defaultArtifactRoot(): string {
-  return path.resolve(process.cwd(), ".artifacts", "runs");
+  return resolveArtifactPath("runs");
 }
 function deriveRunLabel(request: AuditRequest): string {
   const source = request.repo_url ?? request.local_path ?? request.endpoint_url ?? "audit";
