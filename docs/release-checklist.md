@@ -53,6 +53,8 @@ npm run test:service-deployment
 
 Review any local unit/task modifications against [`docs/shared-service-deployment.md`](./shared-service-deployment.md). A release checkout used by a service must remain read-only to the dedicated process identity.
 
+Dispatch **Install And Upgrade Verification** for the release candidate and require retained Windows, Ubuntu, and macOS evidence to pass the acceptance contract in [`docs/install-upgrade-verification.md`](./install-upgrade-verification.md). The Ubuntu job must also pass the server-profile regression; the macOS result does not certify container execution.
+
 For static audit production release candidates, also run:
 
 ```bash

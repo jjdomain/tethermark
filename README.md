@@ -395,6 +395,8 @@ Dedicated-account systemd, launchd, and Windows Task Scheduler examples, protect
 
 The complete local data map, backup/restore and retention contract, redacted diagnostics command, privacy boundary, and credential-removal procedure are documented in [`docs/data-lifecycle-and-privacy.md`](docs/data-lifecycle-and-privacy.md).
 
+Executable clean-install, two-ref update, state-preservation, and post-update launch evidence across Windows, Ubuntu, and macOS is defined in [`docs/install-upgrade-verification.md`](docs/install-upgrade-verification.md).
+
 Release dependency, license, secret, Semgrep, Trivy, and OpenSSF Scorecard thresholds and exception handling are documented in [`docs/release-security-gate.md`](docs/release-security-gate.md).
 
 Reproducible source archives, the combined npm/Python CycloneDX SBOM, SHA-256 manifests, GitHub/Sigstore attestations, and consumer verification commands are documented in [`docs/release-artifact-verification.md`](docs/release-artifact-verification.md).

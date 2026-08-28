@@ -58,7 +58,7 @@ try {
 
   const firstRunPreview = invoke(process.execPath, [path.join(repoRoot, "scripts", "first-run.mjs"), "--dry-run"]);
   expectSuccess(firstRunPreview, "first-run dry run");
-  assert.match(firstRunPreview.output, /npm(?:\.cmd)? ci/i);
+  assert.match(firstRunPreview.output, /(?:npm(?:\.cmd)?|npm-cli\.js).* ci/i);
   assert.match(firstRunPreview.output, /index\.js onboard/i);
   assert.match(firstRunPreview.output, /no files or dependencies were changed/i);
 

@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -11,7 +12,18 @@ for (const arg of args) {
 }
 
 const dryRun = args.has("--dry-run");
-const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
+function resolveNpmInvocation() {
+  const candidates = [
+    process.env.npm_execpath,
+    path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js")
+  ].filter(Boolean);
+  const npmCli = candidates.find((candidate) => fs.existsSync(candidate));
+  if (npmCli) return { command: process.execPath, prefix: [npmCli] };
+  if (process.platform === "win32") return { command: process.env.ComSpec || "cmd.exe", prefix: ["/d", "/s", "/c", "npm.cmd"] };
+  return { command: "npm", prefix: [] };
+}
+
+const npm = resolveNpmInvocation();
 
 function printable(command, commandArgs) {
   return [command, ...commandArgs].map((item) => /\s/.test(item) ? JSON.stringify(item) : item).join(" ");
@@ -38,8 +50,8 @@ if (nodeMajor !== 22 && nodeMajor !== 24) {
 console.log("Tethermark reproducible first run");
 console.log(`Workspace: ${repoRoot}`);
 console.log(`Node.js: ${process.versions.node}`);
-run(npmCommand, ["ci"]);
-run(npmCommand, ["run", "build", "--silent"]);
+run(npm.command, [...npm.prefix, "ci"]);
+run(npm.command, [...npm.prefix, "run", "build", "--silent"]);
 
 if (!args.has("--no-onboard")) {
   const onboardArgs = [path.join(repoRoot, "dist", "apps", "cli", "src", "index.js"), "onboard"];

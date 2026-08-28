@@ -32,6 +32,7 @@
     "smoke:openai-codex-oauth:real": "npm run build --silent && node scripts/check-openai-codex-oauth.mjs --real",
     "test:live-validation-harness": "node scripts/check-live-validation-harness.mjs",
     "test:install-lifecycle": "node scripts/check-install-lifecycle.mjs",
+    "test:install-upgrade": "node scripts/check-install-upgrade.mjs",
     "toolchain:check": "node scripts/check-toolchain-integrity.mjs",
     "test:network-exposure": "npm run build --silent && node scripts/check-network-exposure.mjs",
     "test:security-boundaries": "npm run build --silent && node scripts/check-security-boundaries.mjs",

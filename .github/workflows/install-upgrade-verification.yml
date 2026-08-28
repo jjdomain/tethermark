@@ -1,0 +1,68 @@
+name: Install And Upgrade Verification
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/install-upgrade-verification.yml"
+      - "scripts/install.ps1"
+      - "scripts/install.sh"
+      - "scripts/first-run.mjs"
+      - "scripts/check-install-upgrade.mjs"
+      - "scripts/check-install-lifecycle.mjs"
+      - "scripts/check-service-deployment.mjs"
+      - "deploy/**"
+      - "package.json"
+      - "package-lock.json"
+
+concurrency:
+  group: install-upgrade-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AUDIT_LLM_PROVIDER: mock
+  AUDIT_LLM_MODEL: mock-agent-runtime
+  HARNESS_DISABLE_LEARNING_SCHEDULER: "1"
+  HARNESS_DISABLE_LOCAL_BINARIES: "1"
+  HARNESS_DISABLE_PYTHON_WORKERS: "1"
+
+jobs:
+  native-install-upgrade:
+    name: Native install and upgrade (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - windows-2025
+          - macos-15
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 2
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install candidate dependencies
+        run: npm ci
+      - name: Run real clean-install and upgrade verification
+        run: npm run test:install-upgrade -- --output .artifacts/install-upgrade/native-install-upgrade.json
+      - name: Verify server profile contract on Ubuntu
+        if: ${{ runner.os == 'Linux' }}
+        run: npm run test:service-deployment
+      - name: Retain install and upgrade evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: install-upgrade-${{ runner.os }}-${{ runner.arch }}
+          path: .artifacts/install-upgrade/native-install-upgrade.json
+          if-no-files-found: error
+          retention-days: 30
