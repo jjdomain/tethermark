@@ -81,6 +81,7 @@ const emptySettings = {
   learning_json: {}
 };
 const contextStorageKey = "harness-ui-context";
+const apiKeySessionStorageKey = "harness-ui-api-key";
 const defaultRequestContext = {
   workspaceId: "default",
   projectId: "default",
@@ -3411,7 +3412,8 @@ function App() {
   const [requestContext, setRequestContext] = useState(() => {
     try {
       const persisted = JSON.parse(window.localStorage.getItem(contextStorageKey) || "{}");
-      return { ...defaultRequestContext, ...persisted, workspaceId: "default" };
+      delete persisted.apiKey;
+      return { ...defaultRequestContext, ...persisted, apiKey: window.sessionStorage.getItem(apiKeySessionStorageKey) || "", workspaceId: "default" };
     } catch {
       return defaultRequestContext;
     }
@@ -4985,7 +4987,10 @@ function triageDecisionFromReviewSummary(summary) {
   }, [runDefaultsKey]);
 
   useEffect(() => {
-    window.localStorage.setItem(contextStorageKey, JSON.stringify(requestContext));
+    const { apiKey, ...nonSecretContext } = requestContext;
+    window.localStorage.setItem(contextStorageKey, JSON.stringify(nonSecretContext));
+    if (apiKey) window.sessionStorage.setItem(apiKeySessionStorageKey, apiKey);
+    else window.sessionStorage.removeItem(apiKeySessionStorageKey);
   }, [requestContext]);
 
   useEffect(() => {

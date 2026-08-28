@@ -5,6 +5,8 @@ import { backfillLocalPersistence, cleanupLocalJsonMirrors, compactBundleExports
 import { buildScanRequest, readBooleanFlag, readFlag, readFlags, readNumberFlag } from "./args.js";
 import { analyzeBenchmarkVariance, compareBenchmarkReports, formatBenchmarkCaseLine, loadBenchmarkSuite, printBenchmarkCompare, printBenchmarkSummary, printBenchmarkVariance, runBenchmarkSuite, selectBenchmarkCases } from "./benchmark-suite.js";
 import { buildDoctorReport, buildStaticScannerDoctorReport, printDoctorReport, runOnboarding } from "./doctor.js";
+import { buildDiagnosticsBundle } from "./diagnostics.js";
+import { removeManagedCredentials } from "./credentials.js";
 import { validateFixtures } from "./fixture-validation.js";
 import { parseVerifiableRuntimeBackend, printRuntimeDoctor, runSetupRuntime, validateRuntimeFixtures } from "./setup-runtime.js";
 import { runSetupTools } from "./setup-tools.js";
@@ -47,6 +49,8 @@ npm run scan -- benchmark variance --report <report.json> --report <report.json>
   npm run scan -- backup verify --backup <backup-dir> [--json]
   npm run scan -- backup restore --backup <backup-dir> [--root <dir>]
 npm run scan -- artifacts prune [--root <dir>] [--kind runs|sandboxes|all] [--older-than <days|30d>] [--retention-days <n>] [--max-gb <n>] [--dry-run]
+npm run scan -- diagnostics create [--output <file.json>] [--json]
+npm run scan -- credentials remove [--env-file <path>] [--root <dir>] [--yes] [--json]
 npm run scan -- validate-fixtures [--root <dir>] [--fixture <id>] [--package <id>] [--db-mode local|postgres|supabase] [--persistence-root <dir>] [--llm-provider openai|mock] [--llm-model <id>]
 npm run scan -- review queue [--root <dir>] [--db-mode local|postgres|supabase] [--status <review-status>] [--limit <n>]
 npm run scan -- review status <run-id> [--root <dir>] [--db-mode local|postgres|supabase]
@@ -812,6 +816,30 @@ async function main(): Promise<void> {
 
   if (args[0] === "artifacts") {
     await runArtifacts(args);
+    return;
+  }
+
+  if (args[0] === "diagnostics") {
+    if (args[1] !== "create") throw new Error("unsupported_diagnostics_command: use diagnostics create");
+    const result = await buildDiagnosticsBundle({ outputPath: readFlag(args, "--output"), doctorReport: buildDoctorReport() });
+    if (args.includes("--json")) console.log(JSON.stringify(result, null, 2));
+    else {
+      console.log(`Diagnostics bundle: ${result.output_path}`);
+      console.log("Paths, credentials, environment values, and audit content are excluded. Review the JSON before sharing.");
+    }
+    return;
+  }
+
+  if (args[0] === "credentials") {
+    if (args[1] !== "remove") throw new Error("unsupported_credentials_command: use credentials remove");
+    const result = await removeManagedCredentials({ yes: args.includes("--yes"), envPath: readFlag(args, "--env-file"), persistenceRoot: readFlag(args, "--root") });
+    if (args.includes("--json")) console.log(JSON.stringify(result, null, 2));
+    else {
+      console.log(`Environment credential values found: ${result.env_values_found}`);
+      console.log(`Persisted settings credential scrub required/removed: ${result.persisted_values_found}`);
+      console.log(result.changed ? "Tethermark-managed credential values removed." : "Preview only; re-run with --yes to remove values.");
+      console.log("Close all Tethermark browser tabs to clear the session-only instance API key. Tethermark does not delete Codex, Git, SSH, or operating-system credential stores.");
+    }
     return;
   }
 

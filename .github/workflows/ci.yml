@@ -95,5 +95,8 @@ jobs:
       - name: Verify least-privilege service deployment contract
         run: npm run test:service-deployment
 
+      - name: Verify diagnostics and credential storage privacy
+        run: npm run test:data-lifecycle
+
       - name: Smoke test combined OSS launcher
         run: npm run oss:check
