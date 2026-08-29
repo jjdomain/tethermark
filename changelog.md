@@ -5,6 +5,7 @@
 ### Added
 
 - Added a clean-checkout, commit-bound Phase 12 lifecycle/recovery gate covering fresh installation, upgrade, verified backup/restore, database migration rollback, durable cancellation/restart recovery, System Policy migration, and export compatibility. The root Community Edition release candidate version is now `0.2.2`; the immutable `v0.2.1` tag remains unchanged.
+- Added clean-checkout release-security evidence binding to the exact package version, proposed tag, and full candidate revision. Dirty checkouts and prerelease package versions now fail closed before network-backed release checks begin.
 
 ### Changed
 
@@ -13,6 +14,7 @@
 ### Verified
 
 - The full deterministic regression suite passed. The consolidated lifecycle/recovery gate then passed from a clean checkout of candidate product commit `c9a1891` on Windows x64 with Node 24.12.0, retaining revision-bound evidence with all fresh-install, upgrade, backup/restore, cancellation/recovery, policy migration, and export-compatibility assertions true and no development override.
+- The live release-security gate passed on clean candidate commit `3088f0c` with zero blockers and zero applied exceptions across dependency vulnerabilities/licenses, repository licensing, Semgrep, four Trivy checks, and authenticated OpenSSF Scorecard. Artifact reproducibility, SBOM coverage, checksums, tamper rejection, and a final four-file unsigned candidate build also passed; final tag-bound signing and attestations remain intentionally pending.
 
 ## 2026-08-28
 
