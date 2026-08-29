@@ -9,6 +9,7 @@ import { BUNDLED_SEMGREP_RULESET_SHA256, resolveStaticToolInvocation } from "../
 import { buildToolPathEnv } from "../dist/packages/core-engine/src/tool-paths.js";
 import {
   applyExceptions,
+  buildReleaseCandidateIdentity,
   buildScorecardArguments,
   evaluateDependencyLicenses,
   evaluateNpmAudit,
@@ -194,6 +195,7 @@ async function writeReport(report) {
 }
 
 const startedAt = new Date().toISOString();
+let candidate = null;
 try {
   const [policy, exceptionDocument, packageLock, packageJson, rootEntries] = await Promise.all([
     readJson(policyPath),
@@ -204,6 +206,11 @@ try {
   ]);
   validatePolicy(policy);
   const exceptions = validateExceptions(exceptionDocument, policy);
+  candidate = buildReleaseCandidateIdentity({
+    packageVersion: packageJson.version,
+    revisionSha: (await run("git", ["rev-parse", "HEAD"])).stdout.trim(),
+    checkoutStatus: (await run("git", ["status", "--porcelain", "--untracked-files=all"])).stdout
+  });
 
   const npmAudit = await runNpmAudit();
   const semgrep = await runSemgrep();
@@ -229,9 +236,10 @@ try {
     check.status = check.blocking_count ? "failed" : "passed";
   }
   const report = {
-    schema_version: "2026-08-27.release-security-report.v1",
+    schema_version: "2026-08-29.release-security-report.v2",
     started_at: startedAt,
     finished_at: new Date().toISOString(),
+    candidate,
     policy_sha256: policySha256(policy),
     status: exceptionResult.blocking.length ? "failed" : "passed",
     scorecard_repository: policy.scorecard.repository,
@@ -243,9 +251,10 @@ try {
   if (report.status !== "passed") process.exitCode = 1;
 } catch (error) {
   const report = {
-    schema_version: "2026-08-27.release-security-report.v1",
+    schema_version: "2026-08-29.release-security-report.v2",
     started_at: startedAt,
     finished_at: new Date().toISOString(),
+    candidate,
     status: "failed",
     execution_error: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500),
     checks: []

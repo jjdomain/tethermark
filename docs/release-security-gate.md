@@ -11,11 +11,20 @@ npm run scan -- setup-tools --yes
 npm run release:security
 ```
 
-The setup command installs the checksum-locked Scorecard, Semgrep, and Trivy versions. The release command writes a sanitized report to `.artifacts/release-security/report.json`. Raw secret matches are held only in a temporary scanner response and are never copied into the retained report.
+The setup command installs the checksum-locked Scorecard, Semgrep, and Trivy versions. The release command requires a clean Git checkout and writes a sanitized report to `.artifacts/release-security/report.json`. The report binds the package version, proposed tag, full candidate revision, and clean-checkout assertion. Raw secret matches are held only in a temporary scanner response and are never copied into the retained report.
 
 Trivy scans the releasable checkout and explicitly excludes the same generated, private, dependency, fixture, and local-runtime paths ignored by the repository, including `.env`, `.tmp`, `.tethermark`, `node_modules`, and build output. Tracked examples, source, locks, workflows, scripts, and deployment configuration remain in scope. Semgrep scans the production source roots with the checksum-bound rules and single-worker execution. Its separate pre-scan rule-validation RPC is disabled because the actual scan subprocess still validates the rules and the extra RPC is unstable in the pinned Windows build.
 
 The live gate needs the npm advisory service, Trivy databases/check bundles, GitHub, and the repository configured in `scripts/release-security-policy.json`. Scorecard uses Git checkout mode so repository policy files such as `.github/dependabot.yml` are evaluated even when GitHub's generated source archive omits them. In GitHub Actions, `GITHUB_TOKEN` is passed only to Scorecard as its read-only authentication token. Other API keys, tokens, passwords, authentication values, and credential variables loaded by the parent environment are removed from scanner child environments. A missing tool, unavailable data source, timeout, malformed scanner response, or scan error fails the gate and cannot be waived.
+
+On a managed Windows workstation where the npm registry certificate chains to a root already trusted by the Windows certificate store, use Node's system-CA integration rather than disabling TLS verification:
+
+```powershell
+$env:NODE_USE_SYSTEM_CA = "1"
+npm run release:security
+```
+
+First confirm that `npm ping --registry=https://registry.npmjs.org/` succeeds with the same setting. Never set npm `strict-ssl=false`; an unverified advisory response is not release evidence.
 
 ## Enforced checks
 
