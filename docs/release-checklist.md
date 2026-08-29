@@ -71,6 +71,14 @@ npm run production:lifecycle-recovery
 
 This retains commit-bound evidence for fresh install/update/uninstall, a clean two-ref upgrade, verified SQLite backup/restore and database migration rollback, durable cancellation/restart recovery, selected-version System Policy export/import migration, and current/legacy export compatibility. A dirty checkout fails closed; `-- --allow-dirty` is only for developing the gate and is recorded as a non-candidate override.
 
+Run the focused extensive System Policies candidate gate from the same clean checkout:
+
+```bash
+npm run production:system-policies
+```
+
+This verifies that both extensive templates retain their reviewed checksums, require the complete versioned control catalog, enforce their static/runtime package and evidence boundaries, resolve the reviewed ten-case template/target matrix deterministically, and persist immutable per-run snapshots. It also reruns the lifecycle/resolution regression and the extensive-static incomplete-evidence audit. A dirty checkout fails closed; `-- --allow-dirty` is a recorded development override only.
+
 ## 2. Local Runtime Smoke Test
 
 Before the runtime smoke, verify a fresh ref-pinned install and an update preview on the release operating system using [`docs/installation.md`](./installation.md). Run the guarded uninstall dry run against the test installation and confirm that it identifies the exact checkout and preservation directory without changing either.

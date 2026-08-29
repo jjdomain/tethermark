@@ -6,6 +6,7 @@
 
 - Added a clean-checkout, commit-bound Phase 12 lifecycle/recovery gate covering fresh installation, upgrade, verified backup/restore, database migration rollback, durable cancellation/restart recovery, System Policy migration, and export compatibility. The root Community Edition release candidate version is now `0.2.2`; the immutable `v0.2.1` tag remains unchanged.
 - Added clean-checkout release-security evidence binding to the exact package version, proposed tag, and full candidate revision. Dirty checkouts and prerelease package versions now fail closed before network-backed release checks begin.
+- Added a focused, candidate-bound extensive System Policies gate covering reviewed template checksums, the complete control catalog, the deterministic static/runtime target matrix, persisted snapshot immutability, and fail-closed extensive-static evidence behavior.
 
 ### Changed
 
