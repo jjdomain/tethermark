@@ -1,6 +1,6 @@
 {
   "name": "tethermark",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -53,6 +53,7 @@
     "production:static-release": "npm run production:static-readiness",
     "production:runtime-readiness": "npm run build --silent && node dist/apps/cli/src/index.js runtime-doctor --json && node dist/apps/cli/src/index.js validate-runtime-fixtures && npm run exports:check --silent",
     "production:runtime-native": "npm run build --silent && node scripts/check-native-runtime.mjs",
+    "production:lifecycle-recovery": "node scripts/check-release-lifecycle.mjs",
     "production:harness-readiness": "npm run production:static-readiness && npm run production:runtime-readiness",
     "scan": "npm run build --silent && node dist/apps/cli/src/index.js",
     "scan:self": "npm run build --silent && node dist/apps/cli/src/index.js scan path . --output ./.artifacts/runs/self-scan-ts --mode static",

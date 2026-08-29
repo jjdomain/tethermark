@@ -8943,9 +8943,24 @@ async function testSystemPolicyLifecycleAndResolution(): Promise<void> {
     assert.equal(archived.policy.status, "archived");
 
     const exported = exportSystemPolicy((await getPersistedSystemPolicy("custom-baseline", "default", rootDir))!);
+    assert.equal((exported.export_schema as any).compatibility.policy, "same-major-additive");
     const imported = await importSystemPolicy(exported, "test-admin", "import-workspace", rootDir);
     assert.equal(imported.policy.id, "custom-baseline");
     assert.equal(imported.policy.workspace_id, "import-workspace");
+    assert.equal(imported.versions[0].checksum, firstVersion.checksum, "Policy migration must import the selected rolled-back version rather than a newer superseded version");
+    const legacyExport = structuredClone(exported) as any;
+    delete legacyExport.export_schema;
+    legacyExport.policy.id = "custom-baseline-legacy";
+    const importedLegacy = await importSystemPolicy(legacyExport, "test-admin", "legacy-import-workspace", rootDir);
+    assert.equal(importedLegacy.versions[0].checksum, firstVersion.checksum, "Legacy policy exports without compatibility metadata remain importable");
+    await assert.rejects(
+      () => importSystemPolicy({ ...exported, export_schema: { schema_name: "system_policy.v1", schema_version: "2.0.0" } }, "test-admin", "future-import-workspace", rootDir),
+      /incompatible_system_policy_import/
+    );
+    await assert.rejects(
+      () => importSystemPolicy({ ...exported, export_schema: { schema_name: "different_policy.v1", schema_version: "1.0.0" } }, "test-admin", "wrong-import-workspace", rootDir),
+      /incompatible_system_policy_import/
+    );
 
     const concurrentResults = await Promise.all([
       listPersistedSystemPolicies("default", rootDir),
@@ -8961,7 +8976,7 @@ async function testSystemPolicyLifecycleAndResolution(): Promise<void> {
 
     const db = await openSqliteDatabase(rootDir);
     try {
-      assert.equal(readSqliteTable<any>(db, "system_policies").length, 6);
+      assert.equal(readSqliteTable<any>(db, "system_policies").length, 7);
       assert.ok(readSqliteTable<any>(db, "system_policy_versions").length >= 7);
       assert.equal(readSqliteTable<any>(db, "policy_resolution_snapshots").length, 1);
       assert.ok(readSqliteTable<any>(db, "policy_change_events").length >= 10);

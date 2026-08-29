@@ -1,5 +1,15 @@
 ﻿# Changelog
 
+## 2026-08-29
+
+### Added
+
+- Added a clean-checkout, commit-bound Phase 12 lifecycle/recovery gate covering fresh installation, upgrade, verified backup/restore, database migration rollback, durable cancellation/restart recovery, System Policy migration, and export compatibility. The root Community Edition release candidate version is now `0.2.2`; the immutable `v0.2.1` tag remains unchanged.
+
+### Changed
+
+- System Policy exports now declare same-major additive compatibility. Imports select the policy's current or active version instead of whichever version happens to appear first, continue to accept legacy metadata-free exports, and reject incompatible schema names or future major versions.
+
 ## 2026-08-28
 
 ### Added
