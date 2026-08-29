@@ -171,6 +171,13 @@ function runtimeMetadata(record: Record<string, any>): Record<string, any> {
   return (record.metadata_json ?? record.metadata ?? {}) as Record<string, any>;
 }
 
+function isRuntimeEvidenceRecord(record: Record<string, any>): boolean {
+  const category = String(runtimeMetadata(record).category ?? "");
+  return category === "sandbox_execution"
+    || category === "runtime_evaluation_coverage"
+    || category === "runtime_evaluation_observation";
+}
+
 function resolveRuntimeFollowupResolution(actions: PersistedReviewActionRecord[]): {
   resolution: FindingEvaluationRecord["runtime_followup_resolution"];
   resolvedAt: string | null;
@@ -353,9 +360,10 @@ export function buildFindingEvaluationSummary(args: {
     : [];
   const graderByFinding = new Map(graderOutputs.map((item) => [String(item.finding_id), item]));
   const sandboxSummary = summarizeSandboxExecution(args.sandboxExecution);
-  const runtimeEvidenceRecords = Array.isArray(args.evidenceRecords)
+  const evidenceRecords = Array.isArray(args.evidenceRecords)
     ? args.evidenceRecords
     : [];
+  const runtimeEvidenceRecords = evidenceRecords.filter(isRuntimeEvidenceRecord);
   const runtimeFollowupsByFinding = new Map(
     (Array.isArray(args.runtimeFollowups) ? args.runtimeFollowups : [])
       .map((item) => [item.finding_id, item] as const)
@@ -365,7 +373,7 @@ export function buildFindingEvaluationSummary(args: {
       finding.id,
       collectFindingEvidenceSymbols({
         finding,
-        evidenceRecords: runtimeEvidenceRecords
+        evidenceRecords
       })
     ] as const)
   );
@@ -384,7 +392,7 @@ export function buildFindingEvaluationSummary(args: {
       const leftSymbols = new Set(evidenceSymbolsByFinding.get(left.id) ?? []);
       const rightSymbols = new Set(evidenceSymbolsByFinding.get(right.id) ?? []);
       const overlappingSymbols = [...leftSymbols].filter((item) => rightSymbols.has(item));
-      if ((sameCategory && similarTitle) || (overlappingControls.length > 0 && similarTitle) || overlappingSymbols.length > 0) {
+      if (similarTitle && (sameCategory || overlappingControls.length > 0 || overlappingSymbols.length > 0)) {
         duplicates.set(left.id, new Set([...(duplicates.get(left.id) ?? []), right.id]));
         duplicates.set(right.id, new Set([...(duplicates.get(right.id) ?? []), left.id]));
       }

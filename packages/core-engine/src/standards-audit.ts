@@ -365,10 +365,21 @@ export async function evaluateStandardsAudit(args: {
       evidence: [`evidence:${record.evidence_id}`]
     });
   }
-  const secretCandidates = texts.flatMap((item) => {
-    const matches = item.text.match(/(api[_-]?key|secret|token|password)\s*[:=]\s*["'][A-Za-z0-9_\-]{16,}["']/gi) ?? [];
-    return matches.map((match) => `${item.relative}: ${match.slice(0, 120)}`);
+  const secretCandidateRecords = texts.flatMap((item) => {
+    const pattern = /(api[_-]?key|secret|token|password)\s*[:=]\s*["']([A-Za-z0-9_\-]{16,})["']/gi;
+    return [...item.text.matchAll(pattern)].map((match) => {
+      const name = String(match[1] ?? "credential");
+      const value = String(match[2] ?? "");
+      const placeholder = /(?:^|[_-])(test|example|sample|dummy|fake|placeholder|changeme|notasecret)(?:[_-]|$)/i.test(value)
+        || /(?:^|\/)(test|tests|fixture|fixtures|example|examples|sample|samples|demo)(?:\/|$)/i.test(item.relative);
+      return {
+        evidence: `${item.relative}: ${name} = "[REDACTED]"`,
+        placeholder
+      };
+    });
   });
+  const secretCandidates = secretCandidateRecords.map((item) => item.evidence);
+  const confirmedSecretCandidates = secretCandidateRecords.filter((item) => !item.placeholder);
   const dangerousExecRecords = texts.flatMap((item) => {
     const patterns = [
       /child_process\.exec\s*\(/i,
@@ -778,23 +789,30 @@ export async function evaluateStandardsAudit(args: {
 
     if (control.control_id === "owasp_llm.sensitive_information_disclosure") {
       const hasSecretExposure = secretCandidates.length > 0;
+      const placeholderOnly = hasSecretExposure && confirmedSecretCandidates.length === 0;
       const findingIds = hasSecretExposure ? [addFinding(findings, {
         title: "Potential hardcoded secret material detected",
-        severity: "critical",
+        severity: placeholderOnly ? "medium" : "high",
         category: "secret_exposure",
-        description: "Static audit found credential-like assignments in repository content. These may be fixtures or placeholders, but they need review before publication or deployment.",
+        description: placeholderOnly
+          ? "Static audit found test or placeholder credential-like assignments. The values were redacted and require review, but static evidence does not establish a live-secret disclosure."
+          : "Static audit found credential-like assignments in repository content. The values were redacted and require review before publication or deployment; static evidence alone does not establish validity.",
         evidence: secretCandidates.slice(0, 5),
         public_safe: false,
-        confidence: 0.72,
+        confidence: placeholderOnly ? 0.58 : 0.76,
         score_impact: control.weight,
         source: "heuristic",
         control_ids: [control.control_id],
         standards_refs: [control.standard_ref]
       })] : [];
       controlResults.push(makeControlResult(control, {
-        status: hasSecretExposure ? "fail" : "pass",
-        score_awarded: hasSecretExposure ? 0 : control.weight,
-        rationale: [hasSecretExposure ? "Potential credential exposure markers were detected." : "No obvious credential-like literal assignments were detected in sampled text files."],
+        status: hasSecretExposure ? (placeholderOnly ? "partial" : "fail") : "pass",
+        score_awarded: hasSecretExposure ? (placeholderOnly ? Math.round(control.weight / 2) : 0) : control.weight,
+        rationale: [hasSecretExposure
+          ? placeholderOnly
+            ? "Only test or placeholder credential markers were detected; review is required without treating them as confirmed live secrets."
+            : "Potential credential exposure markers were detected; values were redacted and require validation."
+          : "No obvious credential-like literal assignments were detected in sampled text files."],
         evidence: hasSecretExposure ? secretCandidates.slice(0, 5) : ["No obvious secret-like assignments detected in sampled files"],
         finding_ids: findingIds,
         sources: ["repo-analysis"]

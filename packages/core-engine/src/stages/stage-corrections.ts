@@ -54,6 +54,46 @@ export function retainFindingsSupportedByFinalControls(findings: Finding[], cont
   });
 }
 
+function normalizedFindingTitle(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function findingDeduplicationSignature(finding: Finding): string {
+  const title = normalizedFindingTitle(finding.title);
+  if (/\bhardcoded\b/.test(title) && /\b(secret|token|credential)s?\b/.test(title)) {
+    return "secret_exposure::hardcoded_secret_or_token";
+  }
+  return `${finding.category.trim().toLowerCase()}::${title}`;
+}
+
+function moreSevereFinding(left: Finding["severity"], right: Finding["severity"]): Finding["severity"] {
+  const rank: Record<Finding["severity"], number> = { low: 1, medium: 2, high: 3, critical: 4 };
+  return rank[right] > rank[left] ? right : left;
+}
+
+export function deduplicateFindings(findings: Finding[]): Finding[] {
+  const merged = new Map<string, Finding>();
+  for (const finding of findings) {
+    const signature = findingDeduplicationSignature(finding);
+    const existing = merged.get(signature);
+    if (!existing) {
+      merged.set(signature, { ...finding });
+      continue;
+    }
+    merged.set(signature, {
+      ...existing,
+      severity: moreSevereFinding(existing.severity, finding.severity),
+      evidence: [...new Set([...existing.evidence, ...finding.evidence])],
+      public_safe: existing.public_safe && finding.public_safe,
+      confidence: Math.max(existing.confidence, finding.confidence),
+      score_impact: Math.max(existing.score_impact, finding.score_impact),
+      control_ids: [...new Set([...existing.control_ids, ...finding.control_ids])],
+      standards_refs: [...new Set([...existing.standards_refs, ...finding.standards_refs])]
+    });
+  }
+  return [...merged.values()];
+}
+
 export function applyControlDowngrades(
   controlResults: any[],
   skeptic: SkepticArtifact,

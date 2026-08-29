@@ -754,7 +754,7 @@ function RunDetailPanelComponent(props) {
     { label: "Target", value: run.target?.canonical_name || run.target_summary?.canonical_name || run.target_id || "n/a" },
     { label: "Status", value: summary.status || run.status || "unknown" },
     { label: "Review", value: summary.review_workflow_status || run.review_workflow?.status || "none" },
-    { label: "Score", value: String(summary.overall_score ?? run.overall_score ?? "n/a") },
+    { label: "Overall Score", value: String(summary.overall_score ?? run.overall_score ?? "n/a") },
     { label: "Findings", value: String(findings.length || run.finding_count || 0) },
     { label: "Follow-ups", value: String(runtimeFollowupCount(run)) }
   ];

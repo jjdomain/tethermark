@@ -30,8 +30,9 @@ import { analyzeTarget } from "./repo.js";
 import { PYTHON_WORKER_DEFAULT_MAX_ATTEMPTS, PYTHON_WORKER_DEFAULT_OUTPUT_BYTES, PYTHON_WORKER_DEFAULT_TIMEOUT_MS, PYTHON_WORKER_MAX_ATTEMPTS, PYTHON_WORKER_MAX_OUTPUT_BYTES, PYTHON_WORKER_MAX_TIMEOUT_MS, resetPythonWorkerCapabilityCacheForTests, resolvePythonWorkerInvocationLimits, resolvePythonWorkerRetryPolicy, runPythonWorkerAttemptsForTests } from "./python-worker.js";
 import { inspectPythonWorkerEnvironment, isSupportedPythonWorkerVersion, parsePythonVersion, parsePythonWorkerLock, pythonWorkerVenvExecutable, resolvePythonWorkerExecutable } from "./python-worker-environment.js";
 import { resolveAssessmentEvidenceProviderIds } from "./stages/stage-assess-controls.js";
+import { normalizeEvalSelectionForExecution } from "./stages/stage-select-evidence.js";
 import { assessRuntimeRepeatability, buildRuntimeEvidenceRecords, normalizeRuntimeEvaluation, RUNTIME_MINIMUM_REPEAT_RUNS } from "./runtime-evidence.js";
-import { applyControlDowngrades, applyUnsupportedFindingDrops, mergeSelectiveAssessmentCycle, retainFindingsSupportedByFinalControls } from "./stages/stage-corrections.js";
+import { applyControlDowngrades, applyUnsupportedFindingDrops, deduplicateFindings, mergeSelectiveAssessmentCycle, retainFindingsSupportedByFinalControls } from "./stages/stage-corrections.js";
 import { createPersistenceStore } from "./persistence/backend.js";
 import { backfillLocalPersistence, cleanupLocalJsonMirrors, validateLocalPersistence } from "./persistence/backfill.js";
 import { compactBundleExports } from "./persistence/bundle-exports.js";
@@ -2467,6 +2468,8 @@ async function testFreshRunPersistsExpectedRecords(): Promise<void> {
     assert.equal(scoreSummary?.overall_score, result.score_summary.overall_score);
     assert.equal(reviewDecision?.publishability_status, result.publishability.publishability_status);
     assert.equal(events.at(-1)?.event_type, "run_completed");
+    assert.equal(events.at(-1)?.details?.overall_score, result.score_summary.overall_score);
+    assert.equal(events.at(-1)?.details?.static_score, result.static_score);
     assert.equal(metrics.some((item) => item.name === "findings_total"), true);
     assert.equal(evidenceRecords.length >= 0, true);
     assert.equal(findings.length >= 0, true);
@@ -7699,7 +7702,7 @@ async function testSelectiveCorrectionReplacesStaleLaneFindings(): Promise<void>
   assert.match(merged.cycle.scoreSummary.leaderboard_summary, /2 findings were emitted/);
 }
 
-async function testFindingEvaluationUsesEvidenceSymbolsForGrouping(): Promise<void> {
+async function testFindingEvaluationDoesNotTreatSharedSymbolsAsDuplicates(): Promise<void> {
   const summary = buildFindingEvaluationSummary({
     findings: [
       {
@@ -7774,13 +7777,183 @@ async function testFindingEvaluationUsesEvidenceSymbolsForGrouping(): Promise<vo
     ]
   });
 
-  assert.equal(summary.duplicate_groups.length, 1);
-  assert.deepEqual(summary.duplicate_groups[0], ["finding_symbol_left", "finding_symbol_right"]);
+  assert.equal(summary.duplicate_groups.length, 0);
   assert.equal(summary.conflict_pairs.length, 1);
   assert.equal(summary.conflict_pairs[0]?.reason, "linked controls have conflicting visibility/publication posture");
   assert.deepEqual(summary.evaluations.find((item) => item.finding_id === "finding_symbol_left")?.evidence_symbols, ["unsafe_tool_access"]);
-  assert.deepEqual(summary.evaluations.find((item) => item.finding_id === "finding_symbol_left")?.duplicate_with_finding_ids, ["finding_symbol_right"]);
-  assert.deepEqual(summary.evaluations.find((item) => item.finding_id === "finding_symbol_right")?.duplicate_with_finding_ids, ["finding_symbol_left"]);
+  assert.deepEqual(summary.evaluations.find((item) => item.finding_id === "finding_symbol_left")?.duplicate_with_finding_ids, []);
+  assert.deepEqual(summary.evaluations.find((item) => item.finding_id === "finding_symbol_right")?.duplicate_with_finding_ids, []);
+}
+
+async function testStaticEvidenceDoesNotCountAsRuntimeValidation(): Promise<void> {
+  const summary = buildFindingEvaluationSummary({
+    findings: [{
+      id: "finding_static_runtime_sensitive",
+      run_id: "run_static_evidence",
+      lane_name: null,
+      title: "Automated security checks need review",
+      severity: "medium",
+      category: "automated_security_checks",
+      description: "Static scanner evidence only.",
+      confidence: 0.8,
+      source: "tool",
+      publication_state: "internal_only",
+      needs_human_review: true,
+      score_impact: 5,
+      control_ids_json: ["nist_ssdf.automated_security_checks"],
+      standards_refs_json: [],
+      evidence_json: ["semgrep completed"],
+      created_at: "2026-08-29T00:00:00.000Z"
+    } as any],
+    supervisorReview: null,
+    workflow: null,
+    actions: [],
+    comments: [],
+    dispositions: [],
+    sandboxExecution: null,
+    runtimeFollowups: [],
+    evidenceRecords: [{
+      evidence_id: "e_semgrep_static",
+      control_ids_json: ["nist_ssdf.automated_security_checks"],
+      summary: "Semgrep parsed four findings.",
+      metadata_json: { tool: "semgrep", status: "completed" }
+    }]
+  });
+
+  assert.equal(summary.runtime_validation_validated_count, 0);
+  assert.equal(summary.runtime_validated_finding_count, 0);
+  assert.equal(summary.runtime_strengthened_finding_count, 0);
+  assert.equal(summary.evaluations[0]?.runtime_validation_status, "recommended");
+  assert.deepEqual(summary.evaluations[0]?.runtime_evidence_ids, []);
+}
+
+async function testEvalSelectionRejectsInventedAndModeIncompatibleProviders(): Promise<void> {
+  const selection = normalizeEvalSelectionForExecution({
+    baseline_tools: ["semgrep", "agentic_static_guardrails", "secret_disclosure_static"],
+    runtime_tools: ["inspect", "shell_tool_boundary_static"],
+    custom_eval_packs: [],
+    validation_candidates: [],
+    control_tool_map: [
+      { control_id: "CTRL-A", tools: ["agentic_static_guardrails", "semgrep"], rationale: "agentic coverage" },
+      { control_id: "CTRL-B", tools: ["shell_tool_boundary_static"], rationale: "boundary coverage" }
+    ],
+    rationale: ["model selection"]
+  }, { run_mode: "static" });
+
+  assert.deepEqual(selection.baseline_tools, ["repo_analysis", "semgrep"]);
+  assert.deepEqual(selection.runtime_tools, []);
+  assert.deepEqual(selection.control_tool_map[0]?.tools, ["semgrep"]);
+  assert.deepEqual(selection.control_tool_map[1]?.tools, ["repo_analysis"]);
+  assert.match(selection.rationale.at(-1) ?? "", /agentic_static_guardrails|shell_tool_boundary_static/);
+}
+
+async function testFinalFindingDeduplicationMergesCrossStandardMappings(): Promise<void> {
+  const findings = deduplicateFindings([
+    {
+      finding_id: "finding_security_policy_openssf",
+      title: "Repository does not publish a visible security policy",
+      severity: "medium",
+      category: "security_policy",
+      description: "OpenSSF mapping.",
+      evidence: ["SECURITY.md not found"],
+      public_safe: true,
+      confidence: 0.8,
+      score_impact: 5,
+      source: "heuristic",
+      control_ids: ["openssf.security_policy"],
+      standards_refs: ["OpenSSF/Security-Policy"]
+    },
+    {
+      finding_id: "finding_security_policy_nist",
+      title: "Repository does not publish a visible security policy",
+      severity: "high",
+      category: "security_policy",
+      description: "NIST mapping.",
+      evidence: ["disclosure process not found"],
+      public_safe: false,
+      confidence: 0.9,
+      score_impact: 8,
+      source: "heuristic",
+      control_ids: ["nist_ssdf.disclosure_process"],
+      standards_refs: ["NIST SSDF/RV.1"]
+    }
+  ]);
+
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0]?.finding_id, "finding_security_policy_openssf");
+  assert.equal(findings[0]?.severity, "high");
+  assert.equal(findings[0]?.public_safe, false);
+  assert.equal(findings[0]?.score_impact, 8);
+  assert.deepEqual(findings[0]?.control_ids, ["openssf.security_policy", "nist_ssdf.disclosure_process"]);
+  assert.deepEqual(findings[0]?.evidence, ["SECURITY.md not found", "disclosure process not found"]);
+}
+
+async function testFinalFindingDeduplicationMergesCrossProviderSecretSignals(): Promise<void> {
+  const findings = deduplicateFindings([
+    {
+      finding_id: "finding_secret_baseline",
+      title: "Potential hardcoded secret material detected",
+      severity: "medium",
+      category: "secret_exposure",
+      description: "Repository-analysis signal.",
+      evidence: ["src/agent.js: TOKEN = \"[REDACTED]\""],
+      public_safe: false,
+      confidence: 0.5,
+      score_impact: 10,
+      source: "heuristic",
+      control_ids: ["owasp_llm.sensitive_information_disclosure"],
+      standards_refs: ["OWASP LLM Top 10 / Sensitive Information Disclosure"]
+    },
+    {
+      finding_id: "finding_secret_semgrep",
+      title: "Semgrep: Potential hardcoded secret or token material in source.",
+      severity: "medium",
+      category: "static_analysis",
+      description: "Semgrep signal.",
+      evidence: ["src/agent.js: Potential hardcoded secret or token material in source."],
+      public_safe: true,
+      confidence: 0.62,
+      score_impact: 4,
+      source: "tool",
+      control_ids: ["nist_ssdf.automated_security_checks"],
+      standards_refs: ["NIST SSDF / Automated security checks"]
+    }
+  ]);
+
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0]?.finding_id, "finding_secret_baseline");
+  assert.deepEqual(findings[0]?.control_ids, [
+    "owasp_llm.sensitive_information_disclosure",
+    "nist_ssdf.automated_security_checks"
+  ]);
+  assert.equal(findings[0]?.evidence.length, 2);
+}
+
+async function testPlaceholderSecretsAreRedactedAndNotCritical(): Promise<void> {
+  const fixturePath = path.resolve("fixtures/validation-targets/agent-tool-boundary-risky");
+  const analysis = await analyzeTarget({ local_path: fixturePath } as any);
+  const controlCatalog = getControlCatalog().filter((control) => control.control_id === "owasp_llm.sensitive_information_disclosure");
+  const result = await evaluateStandardsAudit({
+    rootPath: fixturePath,
+    analysis,
+    targetClass: "tool_using_multi_turn_agent",
+    threatModel: { framework_focus: [], attack_surfaces: [], high_risk_components: [] } as any,
+    toolExecutions: [],
+    evidenceRecords: [],
+    controlCatalog,
+    applicableControlIds: controlCatalog.map((control) => control.control_id),
+    deferredControlIds: [],
+    nonApplicableControlIds: [],
+    methodology: { version: "test" } as any
+  });
+  const finding = result.findings.find((item) => item.category === "secret_exposure");
+  const control = result.controlResults.find((item) => item.control_id === "owasp_llm.sensitive_information_disclosure");
+
+  assert.ok(finding);
+  assert.equal(finding?.severity, "medium");
+  assert.equal(control?.status, "partial");
+  assert.ok(finding?.evidence.some((item) => item.includes("[REDACTED]")));
+  assert.ok(finding?.evidence.every((item) => !item.includes("test_token_1234567890abcdef")));
 }
 
 async function testFindingQualityFlagsUnsupportedEvidenceAndControlMismatch(): Promise<void> {
@@ -9338,7 +9511,12 @@ async function main(): Promise<void> {
       ["final findings require an assessed mapped control", testFinalFindingsRequireAnAssessedMappedControl],
       ["deterministic controls require approval to downgrade", testDeterministicControlsRequireApprovalToDowngrade],
       ["selective correction replaces stale lane findings", testSelectiveCorrectionReplacesStaleLaneFindings],
-      ["finding evaluation uses evidence symbols for grouping", testFindingEvaluationUsesEvidenceSymbolsForGrouping],
+      ["finding evaluation does not treat shared symbols as duplicates", testFindingEvaluationDoesNotTreatSharedSymbolsAsDuplicates],
+      ["static evidence does not count as runtime validation", testStaticEvidenceDoesNotCountAsRuntimeValidation],
+      ["eval selection rejects invented and mode-incompatible providers", testEvalSelectionRejectsInventedAndModeIncompatibleProviders],
+      ["final finding deduplication merges cross-standard mappings", testFinalFindingDeduplicationMergesCrossStandardMappings],
+      ["final finding deduplication merges cross-provider secret signals", testFinalFindingDeduplicationMergesCrossProviderSecretSignals],
+      ["placeholder secrets are redacted and not critical", testPlaceholderSecretsAreRedactedAndNotCritical],
       ["finding quality flags unsupported evidence and control mismatch", testFindingQualityFlagsUnsupportedEvidenceAndControlMismatch],
       ["finding quality treats static dependency advisory impact as metadata", testFindingQualityTreatsStaticDependencyAdvisoryImpactAsMetadata],
       ["post-supervisor integrity does not veto semantic mapping hints", testPostSupervisorIntegrityDoesNotVetoSemanticMappingHints],
