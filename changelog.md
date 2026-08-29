@@ -10,6 +10,10 @@
 
 - System Policy exports now declare same-major additive compatibility. Imports select the policy's current or active version instead of whichever version happens to appear first, continue to accept legacy metadata-free exports, and reject incompatible schema names or future major versions.
 
+### Verified
+
+- The full deterministic regression suite passed. The consolidated lifecycle/recovery gate then passed from a clean checkout of candidate product commit `c9a1891` on Windows x64 with Node 24.12.0, retaining revision-bound evidence with all fresh-install, upgrade, backup/restore, cancellation/recovery, policy migration, and export-compatibility assertions true and no development override.
+
 ## 2026-08-28
 
 ### Added

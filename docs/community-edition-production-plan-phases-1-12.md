@@ -1,6 +1,6 @@
 # Tethermark Community Edition Production Plan — Phases 1–12
 
-Last updated: 2026-08-18
+Last updated: 2026-08-29
 Purpose: durable implementation and release handoff for a fresh Codex task
 Scope: Tethermark Community Edition (CE) in this repository
 
@@ -605,7 +605,7 @@ Release-candidate gates:
 - [x] `npm run production:runtime-readiness` passes and actually launches runtime fixtures. Candidate-bound **Native Runtime Verification** [run 33164469371](https://github.com/jjdomain/tethermark/actions/runs/33164469371) checked out `v0.2.1` at commit `0b90c37`, ran the exact aggregate command successfully on Ubuntu 24.04 Docker, and retained stronger native evidence. Docker, rootless Podman, and gVisor each passed pinned-backend readiness plus real containerized test, artifact-write, healthy-service, isolation, and complete-cleanup assertions; the macOS runner passed only the explicit no-false-execution boundary.
 - [x] Real OpenAI Codex ChatGPT-session inference and end-to-end audit gates pass under the approved workload policy. On 2026-08-28, `npm run phase3:codex:live` passed on commit `698d564` with Codex CLI `0.147.0`, `openai_codex`, `gpt-5.6-sol`, `interactive_operator`, and `chatgpt_session`. The structured integration used 1 request and 11,071/20,000 measured tokens. The fixed `deep-static` E2E used 8/12 requests and 164,584/240,000 tokens, exercised all six required agent roles, produced 10/10 evidence-cited findings across 35 control results and 54 artifacts, round-tripped persistence, generated Markdown/SARIF/executive exports, retained no raw source/model output or credentials in its redacted evidence, and proved static target execution remained blocked. The refresh exposed and fixed a Phase 7 regression that silently widened the validator's immutable operator-approved `agentic_controls` lane to all four package lanes; valid approved narrowing is preserved again without raising any package or System Policy limit.
 - [x] Real static tools run on a real repository; missing evidence behavior is reviewed. On 2026-08-28, run `run_pi-3d9e14d_b0609702-25c8-461f-9351-b6ecee478c09` audited `earendil-works/pi` at pinned commit `3d9e14d7482f4a99d5224926099bec0d17ff86fd` with the `agentic-static` package, mock model, and a Windows static-only sandbox that blocked target install, build, runtime execution, and network egress. Scorecard completed 9 checks against that exact commit, Trivy parsed 41 vulnerabilities, and Semgrep scanned 555 files with 3 bundled rules and parsed 128 review signals. The audit produced 18 consolidated findings and a 26/100 score; 12 controls passed, 13 failed, and 13 remained explicitly `not_assessed`, including branch protection, provenance, and all runtime-only controls. The gate exposed and fixed two evidence-integrity defects before sign-off: copied sandboxes under the parent `.artifacts` ignore rule previously let Semgrep report success after scanning zero files, and Scorecard previously assessed remote HEAD instead of the pinned target commit.
-- [ ] Fresh-install, upgrade, backup/restore, cancellation/recovery, policy migration, and export compatibility pass.
+- [x] Fresh-install, upgrade, backup/restore, cancellation/recovery, policy migration, and export compatibility pass. On 2026-08-29, `npm run production:lifecycle-recovery` passed from a clean Windows checkout of the `0.2.2` candidate product commit `c9a1891`. The retained evidence binds all twelve checks to full revision `c9a189111d8d1be33eb9601c7cb2d92c8cd0a6da` with no development override: native install/update/first-run/guarded-uninstall, isolated clean-clone/two-ref upgrade with protected state and API/UI smoke, verified SQLite backup/restore and release migration rollback, durable cancellation/retry plus restart and terminal-follow-up recovery, selected-version System Policy export/import migration with legacy/future-schema boundaries, and current/golden export compatibility. The full deterministic regression suite also passed before the candidate commit. `v0.2.1` was not moved; `v0.2.2` remains the proposed release tag until all remaining Phase 12 gates close.
 - [ ] Security review, dependency/license review, SBOM, artifact checksums/signing, docs, and rollback notes are complete.
 - [ ] The System Policies extensive-scan templates resolve the expected controls and immutable snapshots.
 
@@ -625,7 +625,7 @@ A static-only beta may be cut before Phases 8–9 finish only if it is explicitl
 
 ## Recommended execution order from this snapshot
 
-1. Execute the remaining Phase 12 release-candidate gates on the immutable `v0.2.1` candidate.
+1. Execute the remaining Phase 12 security/artifact/documentation and System Policies gates on the commit-bound `0.2.2` candidate; do not create `v0.2.2` until every release-candidate gate is closed.
 2. Run the consented beta and complete the production-launch evidence.
 
 ## Immediate next-task checklist
