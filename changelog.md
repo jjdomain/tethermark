@@ -16,6 +16,7 @@
 
 - The full deterministic regression suite passed. The consolidated lifecycle/recovery gate then passed from a clean checkout of candidate product commit `c9a1891` on Windows x64 with Node 24.12.0, retaining revision-bound evidence with all fresh-install, upgrade, backup/restore, cancellation/recovery, policy migration, and export-compatibility assertions true and no development override.
 - The live release-security gate passed on clean candidate commit `3088f0c` with zero blockers and zero applied exceptions across dependency vulnerabilities/licenses, repository licensing, Semgrep, four Trivy checks, and authenticated OpenSSF Scorecard. Artifact reproducibility, SBOM coverage, checksums, tamper rejection, and a final four-file unsigned candidate build also passed; final tag-bound signing and attestations remain intentionally pending.
+- The focused extensive System Policies gate passed on clean candidate commit `1f0c395`: both 39-control template checksums and the ten-case resolution matrix matched their reviewed values, all snapshots persisted immutably and rejected mutation, and the extensive-static E2E blocked publishability on incomplete scanner evidence without falsely passing runtime controls.
 
 ## 2026-08-28
 

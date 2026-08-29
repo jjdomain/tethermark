@@ -56,6 +56,9 @@ jobs:
       - name: Run deterministic release checks
         run: npm run release:check
 
+      - name: Verify extensive System Policy candidate
+        run: npm run production:system-policies
+
       - name: Install checksum-locked production scanners
         run: npm run scan -- setup-tools --yes
 
