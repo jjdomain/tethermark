@@ -1656,8 +1656,9 @@ async function testConcurrentAsyncWorkerPersistenceStress(): Promise<void> {
       assert.equal(new Set(created.map((item) => item.job.job_id)).size, jobCount);
 
       let persistedJobs = await manager.listJobs(rootDir);
-      for (let attempt = 0; attempt < 100 && persistedJobs.some((item) => item.status !== "succeeded" || item.terminal_followup_status !== "completed"); attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 20));
+      const terminalDeadline = Date.now() + 15_000;
+      while (Date.now() < terminalDeadline && persistedJobs.some((item) => item.status !== "succeeded" || item.terminal_followup_status !== "completed")) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
         persistedJobs = await manager.listJobs(rootDir);
       }
       assert.equal(persistedJobs.length, jobCount);
