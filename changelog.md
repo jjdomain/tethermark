@@ -15,6 +15,8 @@
 - The complete local regression suite and production static-readiness workflow passed, including the new runtime-evidence, provider-normalization, cross-provider deduplication, shared-symbol, score-event, and placeholder-redaction regressions.
 - Two subscription-backed static audits exercised the corrected pipeline against the `agent-tool-boundary-risky` fixture. The final acceptance run used only `repo_analysis`, Scorecard, Semgrep, and Trivy; reported zero duplicate groups and zero runtime-validated/strengthened findings; and retained one redacted medium placeholder-secret review item.
 - Main-branch CI run `33241409300` passed verification plus Ubuntu, Windows, and macOS Community Edition smoke jobs for the product-fix commit `457044e`.
+- Release-candidate CI run `33299739843`, native install/upgrade run `33299762669`, and Static Audit Release Gate run `33299763794` passed on exact candidate commit `cbc5d55`, including real scanners on Ubuntu, Windows, and macOS plus Pi API and Chromium/Firefox/WebKit UI acceptance.
+- Exact-tag Signed Release Artifacts run `33301036880` passed deterministic release checks, System Policy verification, the authenticated release-security gate, reproducible artifact verification, SLSA provenance, and CycloneDX attestations for immutable `v0.2.3` commit `cbc5d55`. The downloaded five-file set passed independent checksum/manifest/SBOM, provenance, and archive SBOM-attestation verification before publication.
 
 ## 2026-08-29
 

@@ -102,7 +102,7 @@ Updated on 2026-08-20 during Phase 5 calibration work from merged Phase 4:
 | 9 | Operationalize runtime evals and Python workers | **Complete** | None; bounded packs, failure containment, normalized artifacts, and repeatability qualification are implemented |
 | 10 | Harden persistence, jobs, maintenance, and governed learning | **Complete** | None; recovery, retention, governed overlays, approval, synthesis, learning-input, and edition boundaries are closed |
 | 11 | Package, secure, and verify cross-platform installation | **Complete** | None; installers, signed/SBOM releases, hardened deployment profiles, and three-OS CI are verified |
-| 12 | Run release candidate, beta, and production launch gates | **Complete** | `v0.2.2` published 2026-08-29; continue ordinary post-launch monitoring |
+| 12 | Run release candidate, beta, and production launch gates | **Complete** | `v0.2.3` published 2026-08-30; continue ordinary post-launch monitoring |
 
 ---
 
@@ -593,7 +593,7 @@ Exit criteria:
 
 ## Phase 12 — Release candidate, beta, and production launch
 
-Status: **Complete — `v0.2.2` published 2026-08-29**
+Status: **Complete — `v0.2.3` published 2026-08-30**
 
 Objective: promote CE only after current evidence proves the advertised feature boundary.
 
@@ -608,6 +608,7 @@ Release-candidate gates:
 - [x] Fresh-install, upgrade, backup/restore, cancellation/recovery, policy migration, and export compatibility pass. On 2026-08-29, `npm run production:lifecycle-recovery` passed from a clean Windows checkout of the `0.2.2` candidate product commit `c9a1891`. The retained evidence binds all twelve checks to full revision `c9a189111d8d1be33eb9601c7cb2d92c8cd0a6da` with no development override: native install/update/first-run/guarded-uninstall, isolated clean-clone/two-ref upgrade with protected state and API/UI smoke, verified SQLite backup/restore and release migration rollback, durable cancellation/retry plus restart and terminal-follow-up recovery, selected-version System Policy export/import migration with legacy/future-schema boundaries, and current/golden export compatibility. The full deterministic regression suite also passed before the candidate commit. Immutable `v0.2.1` was not moved and remains the documented rollback target for published `v0.2.2`.
 - [x] Security review, dependency/license review, SBOM, artifact checksums/signing, docs, and rollback notes are complete. On 2026-08-29, the live candidate-bound security gate passed from clean commit `3088f0c`: npm dependency vulnerabilities and licenses, repository licensing, Semgrep, Trivy vulnerabilities/licenses/secrets/misconfigurations, and authenticated OpenSSF Scorecard all reported zero blockers with no applied exceptions. The deterministic artifact gate reproduced both archives and verified manifest, CycloneDX SBOM coverage (162 components, including 93 hash-locked Python components), SHA-256 checksums, and tamper rejection. Exact-tag [Signed Release Artifacts run 33232275185](https://github.com/jjdomain/tethermark/actions/runs/33232275185) then passed the deterministic release suite, focused System Policies gate, live security gate, artifact verification, OIDC signing, SLSA provenance, CycloneDX attestations, and retained upload for immutable tag `v0.2.2` at commit `dddcaaf`. The downloaded five-file set independently passed Tethermark's checksum/manifest/SBOM verifier, SLSA verification for every file, and CycloneDX verification for both archives before the [public GitHub release](https://github.com/jjdomain/tethermark/releases/tag/v0.2.2) was created. Release notes document installation, compatibility, platform/provider limits, and exact rollback to immutable `v0.2.1`.
 - [x] The System Policies extensive-scan templates resolve the expected controls and immutable snapshots. On 2026-08-29, `npm run production:system-policies` passed from clean candidate commit `1f0c395`. Both `extensive-static-safe` and `extensive-runtime-local-safe` retained their reviewed definition checksums, required all 39 controls in catalog `2026-08-21.control-catalog.v5`, and enforced their expected audit-package, evidence-provider, review, isolation, and no-host-fallback boundaries. Ten conservative pre-analysis resolutions across both templates and all five target classes matched reviewed matrix checksum `976a875c7ffc1f7161b0b82f145541ac3150b1352650fe514ea5c48c66fb37bc`; each snapshot round-tripped persistence and rejected mutation. The focused lifecycle regression passed, and the extensive-static E2E kept runtime-only controls from falsely passing and blocked publishability when required deterministic scanner evidence was unavailable. The exact-tag signed-artifact workflow now reruns this gate before security scanning, artifact construction, signing, or attestation.
+- [x] Patch release `v0.2.3` is independently verified and public. Candidate commit `cbc5d55` passed local `release:check`, `production:static-release`, lifecycle/recovery, System Policy, and signed-in `phase3:codex:live` gates. Main CI [run 33299739843](https://github.com/jjdomain/tethermark/actions/runs/33299739843), native install/upgrade [run 33299762669](https://github.com/jjdomain/tethermark/actions/runs/33299762669), and Static Audit Release Gate [run 33299763794](https://github.com/jjdomain/tethermark/actions/runs/33299763794) passed at the same commit. Exact-tag [Signed Release Artifacts run 33301036880](https://github.com/jjdomain/tethermark/actions/runs/33301036880) then passed its authenticated Ubuntu release-security gate, deterministic/System Policy gates, reproducible artifacts, OIDC SLSA provenance, CycloneDX attestations, and retained upload for immutable tag `v0.2.3`. The downloaded five-file set independently passed checksum/manifest/SBOM verification, tag/workflow provenance verification for every file, and CycloneDX predicate verification for both archives before the [public GitHub release](https://github.com/jjdomain/tethermark/releases/tag/v0.2.3) was created. Immutable `v0.2.2` remains the rollback target.
 
 Launch sequence:
 
@@ -625,9 +626,8 @@ A static-only beta may be cut before Phases 8–9 finish only if it is explicitl
 
 ## Recommended execution order from this snapshot
 
-1. Publish patch release `v0.2.3` with the post-launch static-evidence, provider-selection, deduplication, score-labeling, and placeholder-secret corrections, retaining `v0.2.2` as its immutable rollback target.
-2. Monitor `v0.2.3` for audit-quality regressions, authentication/rate failures, runtime cleanup, scoring drift, and upgrade failures against the documented rollback criteria.
-3. Treat future methodology/catalog expansion and additional representative OSS samples as versioned post-launch work, not a reason to reopen the completed release gates without a qualifying regression.
+1. Monitor `v0.2.3` for audit-quality regressions, authentication/rate failures, runtime cleanup, scoring drift, and upgrade failures against the documented rollback criteria.
+2. Treat future methodology/catalog expansion and additional representative OSS samples as versioned post-launch work, not a reason to reopen the completed release gates without a qualifying regression.
 
 ## Immediate next-task checklist
 
@@ -639,4 +639,4 @@ git diff origin/main...HEAD
 git diff -- PLANS.md changelog.md docs/community-edition-production-plan-phases-1-12.md docs/provider-workload-policy.md docs/provider-policy-decision-log.md
 ```
 
-Phases 1 through 12 are complete within the documented platform scope, and `v0.2.2` is public. Patch candidate `v0.2.3` is limited to the documented post-launch audit-quality corrections and preserves the existing product boundaries. Continue ordinary post-launch monitoring without weakening the advertised runtime, model-provider, security, or native-platform boundaries. The live commands in `docs/live-model-validation.md` remain the release-candidate refresh procedure for a future version; they are not part of ordinary pull-request CI.
+Phases 1 through 12 are complete within the documented platform scope, and `v0.2.3` is public with exact-tag signed artifact and attestation evidence. The patch is limited to the documented post-launch audit-quality corrections and preserves the existing product boundaries; immutable `v0.2.2` remains its rollback target. Continue ordinary post-launch monitoring without weakening the advertised runtime, model-provider, security, or native-platform boundaries. The live commands in `docs/live-model-validation.md` remain the release-candidate refresh procedure for a future version; they are not part of ordinary pull-request CI.
