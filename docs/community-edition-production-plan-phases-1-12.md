@@ -625,8 +625,9 @@ A static-only beta may be cut before Phases 8–9 finish only if it is explicitl
 
 ## Recommended execution order from this snapshot
 
-1. Monitor `v0.2.2` issues, authentication/rate failures, runtime cleanup, scoring drift, and upgrade failures against the documented rollback criteria.
-2. Treat future methodology/catalog expansion and additional representative OSS samples as versioned post-launch work, not a reason to reopen the completed release gates without a qualifying regression.
+1. Publish patch release `v0.2.3` with the post-launch static-evidence, provider-selection, deduplication, score-labeling, and placeholder-secret corrections, retaining `v0.2.2` as its immutable rollback target.
+2. Monitor `v0.2.3` for audit-quality regressions, authentication/rate failures, runtime cleanup, scoring drift, and upgrade failures against the documented rollback criteria.
+3. Treat future methodology/catalog expansion and additional representative OSS samples as versioned post-launch work, not a reason to reopen the completed release gates without a qualifying regression.
 
 ## Immediate next-task checklist
 
@@ -638,4 +639,4 @@ git diff origin/main...HEAD
 git diff -- PLANS.md changelog.md docs/community-edition-production-plan-phases-1-12.md docs/provider-workload-policy.md docs/provider-policy-decision-log.md
 ```
 
-Phases 1 through 12 are complete within the documented platform scope, and `v0.2.2` is public. Continue ordinary post-launch monitoring without weakening the advertised runtime, model-provider, security, or native-platform boundaries. The live commands in `docs/live-model-validation.md` remain the release-candidate refresh procedure for a future version; they are not part of ordinary pull-request CI.
+Phases 1 through 12 are complete within the documented platform scope, and `v0.2.2` is public. Patch candidate `v0.2.3` is limited to the documented post-launch audit-quality corrections and preserves the existing product boundaries. Continue ordinary post-launch monitoring without weakening the advertised runtime, model-provider, security, or native-platform boundaries. The live commands in `docs/live-model-validation.md` remain the release-candidate refresh procedure for a future version; they are not part of ordinary pull-request CI.

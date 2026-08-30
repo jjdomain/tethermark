@@ -1,5 +1,21 @@
 ﻿# Changelog
 
+## 2026-08-30
+
+### Changed
+
+- Static evidence no longer counts as runtime validation or runtime-strengthening evidence. Review rollups now require normalized sandbox/runtime evidence categories, and static-only runs report zero runtime-validated findings.
+- Audit completion events now record both `overall_score` and `static_score`, while the existing run-summary card labels its value as **Overall Score** without changing the established UI layout.
+- Model-selected evidence providers are normalized against the registered static provider catalog. Static runs discard invented and runtime-only provider names, always retain deterministic repository analysis, and repair empty control mappings safely.
+- Final findings are deduplicated before policy, scoring, remediation, and persistence. Exact cross-standard duplicates and equivalent cross-provider hardcoded-secret signals merge conservatively, while shared file/symbol locations alone no longer misclassify distinct findings as duplicates.
+- Test and placeholder credential literals are redacted in persisted evidence and remain medium-severity review signals rather than confirmed critical secret disclosures. Static evidence does not claim that a credential is live.
+
+### Verified
+
+- The complete local regression suite and production static-readiness workflow passed, including the new runtime-evidence, provider-normalization, cross-provider deduplication, shared-symbol, score-event, and placeholder-redaction regressions.
+- Two subscription-backed static audits exercised the corrected pipeline against the `agent-tool-boundary-risky` fixture. The final acceptance run used only `repo_analysis`, Scorecard, Semgrep, and Trivy; reported zero duplicate groups and zero runtime-validated/strengthened findings; and retained one redacted medium placeholder-secret review item.
+- Main-branch CI run `33241409300` passed verification plus Ubuntu, Windows, and macOS Community Edition smoke jobs for the product-fix commit `457044e`.
+
 ## 2026-08-29
 
 ### Added

@@ -22,17 +22,17 @@ const policy = JSON.parse(await fs.readFile(path.join(root, "scripts", "release-
 const packageLock = JSON.parse(await fs.readFile(path.join(root, "package-lock.json"), "utf8"));
 
 assert.deepEqual(buildReleaseCandidateIdentity({
-  packageVersion: "0.2.2",
+  packageVersion: "0.2.3",
   revisionSha: "a".repeat(40),
   checkoutStatus: ""
 }), {
-  package_version: "0.2.2",
-  proposed_tag: "v0.2.2",
+  package_version: "0.2.3",
+  proposed_tag: "v0.2.3",
   revision_sha: "a".repeat(40),
   clean_checkout: true
 });
-assert.throws(() => buildReleaseCandidateIdentity({ packageVersion: "0.2.2", revisionSha: "a".repeat(40), checkoutStatus: " M package.json" }), /clean checkout/);
-assert.throws(() => buildReleaseCandidateIdentity({ packageVersion: "0.2.2-rc.1", revisionSha: "a".repeat(40), checkoutStatus: "" }), /stable semantic package version/);
+assert.throws(() => buildReleaseCandidateIdentity({ packageVersion: "0.2.3", revisionSha: "a".repeat(40), checkoutStatus: " M package.json" }), /clean checkout/);
+assert.throws(() => buildReleaseCandidateIdentity({ packageVersion: "0.2.3-rc.1", revisionSha: "a".repeat(40), checkoutStatus: "" }), /stable semantic package version/);
 
 assert.deepEqual(buildScorecardArguments("https://github.com/example/project"), [
   "--format", "json",
