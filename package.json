@@ -63,9 +63,9 @@
     "web": "npm run build --silent && node dist/apps/web-ui/src/index.js"
   },
   "devDependencies": {
-    "@types/node": "^22.15.17",
-    "playwright": "1.60.0",
-    "typescript": "^5.8.3"
+    "@types/node": "^26.4.0",
+    "playwright": "1.62.1",
+    "typescript": "^7.0.2"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.15",
