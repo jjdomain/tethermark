@@ -7532,8 +7532,10 @@ async function testUvLockRecognition(): Promise<void> {
 async function testTestFixtureSecretsStayRedactedAndNonProduction(): Promise<void> {
   await withTempDir("tethermark-test-secret-fixtures-", async (rootDir) => {
     const testsDir = path.join(rootDir, "tests");
+    const scriptsDir = path.join(rootDir, "scripts");
     const sourceDir = path.join(rootDir, "src");
     await fs.mkdir(testsDir, { recursive: true });
+    await fs.mkdir(scriptsDir, { recursive: true });
     await fs.mkdir(sourceDir, { recursive: true });
     const controlCatalog = getControlCatalog().filter((item) => item.control_id === "owasp_llm.sensitive_information_disclosure");
     const evaluate = () => evaluateStandardsAudit({
@@ -7560,6 +7562,12 @@ async function testTestFixtureSecretsStayRedactedAndNonProduction(): Promise<voi
     assert.ok(fixtureObservation);
     assert.equal(JSON.stringify(fixtureObservation).includes(syntheticFixtureValue), false);
 
+    const suffixTestValue = "managedIntegrationFixture98765";
+    await fs.writeFile(path.join(scriptsDir, "run-managed.test.mjs"), `api_key = "${suffixTestValue}"\n`);
+    const suffixFixture = await evaluate();
+    assert.equal(suffixFixture.findings.some((item) => item.category === "secret_exposure"), false);
+    assert.equal(JSON.stringify(suffixFixture.observations).includes(suffixTestValue), false);
+
     const productionCredential = "sk-proj-productionCredential987654321";
     await fs.writeFile(path.join(sourceDir, "config.py"), `api_key = "${productionCredential}"\n`);
     const production = await evaluate();
@@ -7567,6 +7575,74 @@ async function testTestFixtureSecretsStayRedactedAndNonProduction(): Promise<voi
     assert.ok(finding);
     assert.equal(JSON.stringify(finding).includes(productionCredential), false);
     assert.ok(finding.evidence.some((item) => item.includes("redacted literal")));
+  });
+}
+
+async function testContradictoryScorecardWorkflowEvidenceIsInconclusive(): Promise<void> {
+  await withTempDir("tethermark-scorecard-workflow-conflict-", async (rootDir) => {
+    const workflowPath = path.join(rootDir, ".github", "workflows", "ci.yml");
+    await fs.mkdir(path.dirname(workflowPath), { recursive: true });
+    await fs.writeFile(workflowPath, "name: CI\non: [push]\njobs: {}\n");
+    const controlCatalog = getControlCatalog().filter((item) => item.control_id === "openssf.dangerous_workflow");
+    const result = await evaluateStandardsAudit({
+      rootPath: rootDir,
+      analysis: {
+        root_path: rootDir, project_name: "workflow-conflict", file_count: 1, sample_files: [".github/workflows/ci.yml"],
+        frameworks: [], languages: ["YAML"], package_ecosystems: [], package_managers: [], dependency_manifests: [], lockfiles: [],
+        ci_workflows: [".github/workflows/ci.yml"], container_files: [], release_files: [], deployment_configs: [], security_docs: [],
+        auth_files: [], network_files: [], prompt_assets: [], mcp_indicators: [], agent_indicators: [], tool_execution_indicators: [],
+        agentic_capabilities: [], agentic_control_indicators: []
+      } as any,
+      targetClass: "repo_posture_only" as any,
+      threatModel: { framework_focus: [], attack_surfaces: [], high_risk_components: [] } as any,
+      toolExecutions: [
+        { tool: "scorecard", status: "completed", parsed: { checks: [{ name: "Dangerous-Workflow", score: 0, reason: "no workflows found" }] } },
+        { tool: "semgrep", status: "completed", parsed: { results: [] } }
+      ] as any,
+      evidenceRecords: [], controlCatalog,
+      applicableControlIds: controlCatalog.map((item) => item.control_id), deferredControlIds: [], nonApplicableControlIds: [],
+      methodology: getMethodologyArtifact()
+    });
+    assert.equal(result.findings.some((item) => item.category === "dangerous_workflow"), false);
+    assert.equal(result.controlResults[0]?.status, "partial");
+    assert.equal(result.controlResults[0]?.assessability, "partially_assessed");
+  });
+}
+
+async function testGenericScannerResultsRemainDetailedObservations(): Promise<void> {
+  await withTempDir("tethermark-scanner-observations-", async (rootDir) => {
+    const sourcePath = path.join(rootDir, "src", "worker.ts");
+    const lockPath = path.join(rootDir, "package-lock.json");
+    await fs.mkdir(path.dirname(sourcePath), { recursive: true });
+    await fs.writeFile(sourcePath, "export const worker = true;\n");
+    await fs.writeFile(lockPath, "{}\n");
+    const result = await evaluateStandardsAudit({
+      rootPath: rootDir,
+      analysis: {
+        root_path: rootDir, project_name: "scanner-observations", file_count: 2, sample_files: ["src/worker.ts", "package-lock.json"],
+        frameworks: [], languages: ["TypeScript"], package_ecosystems: ["npm"], package_managers: ["npm"],
+        dependency_manifests: ["package-lock.json"], lockfiles: ["package-lock.json"], ci_workflows: [], container_files: [],
+        release_files: [], deployment_configs: [], security_docs: [], auth_files: [], network_files: [], prompt_assets: [],
+        mcp_indicators: [], agent_indicators: [], tool_execution_indicators: [], agentic_capabilities: [], agentic_control_indicators: []
+      } as any,
+      targetClass: "repo_posture_only" as any,
+      threatModel: { framework_focus: [], attack_surfaces: [], high_risk_components: [] } as any,
+      toolExecutions: [
+        { tool: "semgrep", status: "completed", parsed: { results: [{ path: sourcePath, check_id: "review.exec", extra: { message: "Execution surface", severity: "WARNING" } }] } },
+        { tool: "trivy", status: "completed", parsed: { Results: [{ Target: lockPath, Vulnerabilities: [{ VulnerabilityID: "CVE-2099-0001", PkgName: "example-package", InstalledVersion: "1.0.0", FixedVersion: "1.0.1", Severity: "HIGH", PrimaryURL: "https://example.invalid/CVE-2099-0001" }] }] } }
+      ] as any,
+      evidenceRecords: [], controlCatalog: [], applicableControlIds: [], deferredControlIds: [], nonApplicableControlIds: [],
+      methodology: getMethodologyArtifact()
+    });
+    assert.equal(result.findings.some((item) => item.category === "static_analysis" || item.category === "dependency_or_misconfig"), false);
+    const semgrepObservation = result.observations.find((item) => item.title === "Semgrep result requires control-specific triage");
+    assert.ok(semgrepObservation);
+    assert.equal(semgrepObservation.evidence.some((item) => item.startsWith("src/worker.ts:")), true);
+    assert.equal(JSON.stringify(semgrepObservation).includes(rootDir), false);
+    const trivyObservation = result.observations.find((item) => item.title === "Trivy dependency advisory: CVE-2099-0001");
+    assert.ok(trivyObservation);
+    assert.match(trivyObservation.summary, /installed 1\.0\.0; fixed 1\.0\.1/);
+    assert.equal(trivyObservation.evidence.some((item) => item.startsWith("package-lock.json: CVE-2099-0001")), true);
   });
 }
 
@@ -9868,6 +9944,8 @@ async function main(): Promise<void> {
       ["placeholder secret values are ignored", testPlaceholderSecretValuesAreIgnored],
       ["test fixture secrets stay redacted and non-production", testTestFixtureSecretsStayRedactedAndNonProduction],
       ["purpose-bound workflow write permissions are not overclaimed", testPurposeBoundWorkflowWritePermission],
+      ["contradictory Scorecard workflow evidence is inconclusive", testContradictoryScorecardWorkflowEvidenceIsInconclusive],
+      ["generic scanner results remain detailed observations", testGenericScannerResultsRemainDetailedObservations],
       ["finding quality treats static dependency advisory impact as metadata", testFindingQualityTreatsStaticDependencyAdvisoryImpactAsMetadata],
       ["post-supervisor integrity does not veto semantic mapping hints", testPostSupervisorIntegrityDoesNotVetoSemanticMappingHints],
       ["run comparison uses evidence symbols for matching", testRunComparisonUsesEvidenceSymbolsForMatching]

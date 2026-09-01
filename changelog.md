@@ -1,5 +1,14 @@
 ﻿# Changelog
 
+## 2026-09-01
+
+### Changed
+
+- Public-cohort assessment now recognizes suffix-style test files such as `*.test.mjs`, deduplicates redacted credential evidence, and keeps generic test-only credential literals as non-production observations.
+- Contradictory Scorecard workflow evidence now produces a partial review state instead of a false dangerous-workflow failure when repository analysis confirms workflow files exist.
+- Generic Semgrep and Trivy results now remain detailed, repository-relative observations unless a control-specific evaluator supports a scored finding. Trivy observations retain advisory ID, target path, installed version, fixed version, severity, and source URL without claiming reachability or runtime impact.
+- Assessment implementation version v5 invalidates older reusable assessment artifacts so these evidence-quality corrections apply to every new cohort run.
+
 ## 2026-08-30
 
 ### Changed

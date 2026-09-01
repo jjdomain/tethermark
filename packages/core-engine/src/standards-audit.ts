@@ -138,7 +138,8 @@ function importedShellExecEvidence(relative: string, text: string): string[] {
 
 function isTestOrFixturePath(relative: string): boolean {
   return /(^|\/)(?:tests?|testdata|fixtures?|__tests__)(\/|$)/i.test(relative)
-    || /(^|\/)(?:test|spec)[._-][^/]+\.(?:py|ts|tsx|js|jsx|mjs|cjs)$/i.test(relative);
+    || /(^|\/)(?:test|spec)[._-][^/]+\.(?:py|ts|tsx|js|jsx|mjs|cjs)$/i.test(relative)
+    || /(?:^|\/)[^/]+[._-](?:test|spec)\.(?:py|ts|tsx|js|jsx|mjs|cjs)$/i.test(relative);
 }
 
 function resemblesKnownCredentialFormat(value: string): boolean {
@@ -172,6 +173,14 @@ function semgrepResults(toolExecutions: ToolExecutionRecord[]): any[] {
 function trivyResults(toolExecutions: ToolExecutionRecord[]): any[] {
   const parsed = findTool(toolExecutions, "trivy")?.parsed as any;
   return Array.isArray(parsed?.Results) ? parsed.Results : [];
+}
+
+function repositoryRelativePath(rootPath: string, candidate: string): string {
+  if (!candidate) return "unknown";
+  if (!path.isAbsolute(candidate)) return candidate.split(path.sep).join("/");
+  const relative = path.relative(rootPath, candidate).split(path.sep).join("/");
+  if (relative && relative !== ".." && !relative.startsWith("../")) return relative;
+  return path.basename(candidate);
 }
 
 function runtimeEvidenceRecords(evidenceRecords: EvidenceRecord[]): EvidenceRecord[] {
@@ -406,6 +415,7 @@ export async function evaluateStandardsAudit(args: {
   const secretCandidates = secretCandidateRecords
     .filter((item) => !isTestOrFixtureCandidate(item.path) || resemblesKnownCredentialFormat(item.value))
     .map((item) => `${item.path}: ${item.key} = "[REDACTED]" redacted literal (${item.value.length} characters)`);
+  const uniqueSecretCandidates = [...new Set(secretCandidates)];
   const confirmedSecretCandidates = secretCandidateRecords
     .filter((item) => !isTestOrFixtureCandidate(item.path));
   const excludedTestSecretCandidates = secretCandidateRecords
@@ -742,7 +752,10 @@ export async function evaluateStandardsAudit(args: {
     if (control.control_id === "openssf.dangerous_workflow") {
       const check = scorecardCheck(args.toolExecutions, "Dangerous-Workflow");
       const semgrepWorkflowFindings = semgrepFindingList.filter((item: any) => typeof item?.path === "string" && item.path.includes(".github/workflows"));
-      const failed = (typeof check?.score === "number" && check.score < 5) || semgrepWorkflowFindings.length > 0;
+      const scorecardAssessed = typeof check?.score === "number" && check.score >= 0;
+      const scorecardWorkflowConflict = hasCi && typeof check?.reason === "string" && /no workflows? found/i.test(check.reason);
+      const failed = (scorecardAssessed && check.score < 5 && !scorecardWorkflowConflict) || semgrepWorkflowFindings.length > 0;
+      const inconclusive = scorecardWorkflowConflict && semgrepWorkflowFindings.length === 0;
       const findingIds = failed ? [addFinding(findings, {
         title: "CI/CD workflow issues require manual review",
         severity: "high",
@@ -757,10 +770,19 @@ export async function evaluateStandardsAudit(args: {
         standards_refs: [control.standard_ref]
       })] : [];
       controlResults.push(makeControlResult(control, {
-        status: failed ? "fail" : "pass",
-        score_awarded: failed ? 0 : control.weight,
-        rationale: [failed ? "Workflow scanners identified risky CI/CD patterns." : "No dangerous workflow patterns were detected by current static checks."],
-        evidence: [...semgrepWorkflowFindings.slice(0, 3).map((item: any) => `${item.path}: ${item.extra?.message ?? item.check_id ?? "workflow issue"}`), ...(typeof check?.reason === "string" ? [check.reason] : [])],
+        assessability: inconclusive ? "partially_assessed" : "assessed",
+        status: failed ? "fail" : inconclusive ? "partial" : "pass",
+        score_awarded: failed ? 0 : inconclusive ? Math.round(control.weight / 2) : control.weight,
+        rationale: [failed
+          ? "Workflow scanners identified risky CI/CD patterns."
+          : inconclusive
+            ? "Scorecard reported no workflows while repository analysis found workflow files; the contradictory evidence requires review and is not treated as a failure."
+            : "No dangerous workflow patterns were detected by current static checks."],
+        evidence: [
+          ...semgrepWorkflowFindings.slice(0, 3).map((item: any) => `${repositoryRelativePath(args.rootPath, item.path)}: ${item.extra?.message ?? item.check_id ?? "workflow issue"}`),
+          ...(inconclusive ? args.analysis.ci_workflows.slice(0, 3) : []),
+          ...(typeof check?.reason === "string" ? [check.reason] : [])
+        ],
         finding_ids: findingIds,
         sources: [semgrep?.status === "completed" ? "semgrep" : "repo-analysis", scorecard?.status === "completed" ? "scorecard" : "repo-analysis"]
       }));
@@ -841,7 +863,7 @@ export async function evaluateStandardsAudit(args: {
     }
 
     if (control.control_id === "owasp_llm.sensitive_information_disclosure") {
-      const hasSecretExposure = secretCandidates.length > 0;
+      const hasSecretExposure = uniqueSecretCandidates.length > 0;
       const placeholderOnly = hasSecretExposure && confirmedSecretCandidates.length === 0;
       const findingIds = hasSecretExposure ? [addFinding(findings, {
         title: "Potential hardcoded secret material detected",
@@ -850,7 +872,7 @@ export async function evaluateStandardsAudit(args: {
         description: placeholderOnly
           ? "Static audit found test or placeholder credential-like assignments. The values were redacted and require review, but static evidence does not establish a live-secret disclosure."
           : "Static audit found credential-like assignments in repository content. The values were redacted and require review before publication or deployment; static evidence alone does not establish validity.",
-        evidence: secretCandidates.slice(0, 5),
+        evidence: uniqueSecretCandidates.slice(0, 5),
         public_safe: false,
         confidence: placeholderOnly ? 0.58 : 0.76,
         score_impact: control.weight,
@@ -866,7 +888,7 @@ export async function evaluateStandardsAudit(args: {
             ? "Only test or placeholder credential markers were detected; review is required without treating them as confirmed live secrets."
             : "Potential credential exposure markers were detected; values were redacted and require validation."
           : "No obvious credential-like literal assignments were detected in sampled text files."],
-        evidence: hasSecretExposure ? secretCandidates.slice(0, 5) : ["No obvious secret-like assignments detected in sampled files"],
+        evidence: hasSecretExposure ? uniqueSecretCandidates.slice(0, 5) : ["No obvious secret-like assignments detected in sampled files"],
         finding_ids: findingIds,
         sources: ["repo-analysis"]
       }));
@@ -1331,40 +1353,35 @@ export async function evaluateStandardsAudit(args: {
 
   for (const semgrepFinding of semgrepFindingList.slice(0, 5)) {
     const message = semgrepFinding?.extra?.message ?? semgrepFinding?.check_id ?? "Semgrep finding";
-    const severity = typeof semgrepFinding?.extra?.severity === "string" && /error|high/i.test(semgrepFinding.extra.severity) ? "high" : "medium";
-    addFinding(findings, {
-      title: `Semgrep: ${message}`,
-      severity,
-      category: "static_analysis",
-      description: "Semgrep identified a code pattern that should be reviewed as part of the standards-based audit.",
-      evidence: [`${semgrepFinding?.path ?? "unknown"}: ${message}`],
-      public_safe: true,
-      confidence: 0.7,
-      score_impact: severity === "high" ? 6 : 4,
-      source: "tool",
-      control_ids: ["nist_ssdf.automated_security_checks"],
-      standards_refs: ["NIST SSDF / Automated security checks"]
+    observations.push({
+      observation_id: createId("obs_semgrep"),
+      title: "Semgrep result requires control-specific triage",
+      summary: `${message} This generic scanner result is retained as an observation because no implemented evaluator maps the code pattern itself to a scored control.`,
+      evidence: [`${repositoryRelativePath(args.rootPath, semgrepFinding?.path ?? "unknown")}: ${message}`]
     });
   }
 
   const trivyHighIssues = trivyResultList.flatMap((result: any) => {
     const vulnerabilities = Array.isArray(result?.Vulnerabilities) ? result.Vulnerabilities : [];
     const misconfigurations = Array.isArray(result?.Misconfigurations) ? result.Misconfigurations : [];
-    return [...vulnerabilities, ...misconfigurations].filter((item: any) => /HIGH|CRITICAL/i.test(item?.Severity ?? ""));
+    return [...vulnerabilities, ...misconfigurations]
+      .filter((item: any) => /HIGH|CRITICAL/i.test(item?.Severity ?? ""))
+      .map((issue: any) => ({ issue, target: result?.Target }));
   }).slice(0, 5);
-  for (const issue of trivyHighIssues) {
-    addFinding(findings, {
-      title: `Trivy: ${issue?.Title ?? issue?.VulnerabilityID ?? "High-severity issue"}`,
-      severity: /CRITICAL/i.test(issue?.Severity ?? "") ? "critical" : "high",
-      category: "dependency_or_misconfig",
-      description: "Trivy reported a high-severity dependency or configuration issue during the static audit.",
-      evidence: [issue?.PkgName ?? issue?.Type ?? "unknown component", issue?.Severity ?? "unknown severity"].filter(Boolean),
-      public_safe: true,
-      confidence: 0.82,
-      score_impact: /CRITICAL/i.test(issue?.Severity ?? "") ? 8 : 6,
-      source: "tool",
-      control_ids: ["openssf.pinned_dependencies", "nist_ssdf.automated_security_checks"],
-      standards_refs: ["OpenSSF Scorecard / Pinned-Dependencies", "NIST SSDF / Automated security checks"]
+  for (const { issue, target } of trivyHighIssues) {
+    const advisoryId = issue?.VulnerabilityID ?? issue?.ID ?? "unknown advisory";
+    const component = issue?.PkgName ?? issue?.Type ?? "unknown component";
+    const installed = issue?.InstalledVersion ? ` installed ${issue.InstalledVersion}` : "";
+    const fixed = issue?.FixedVersion ? `; fixed ${issue.FixedVersion}` : "; no fixed version reported";
+    observations.push({
+      observation_id: createId("obs_trivy"),
+      title: `Trivy dependency advisory: ${advisoryId}`,
+      summary: `${component}${installed}${fixed}. Severity ${issue?.Severity ?? "unknown"}. Static dependency evidence does not establish reachability or runtime impact and is not mapped to dependency-pinning or scanner-adoption controls.`,
+      evidence: [
+        `${repositoryRelativePath(args.rootPath, target ?? "unknown")}: ${advisoryId}`,
+        `${component}${installed}${fixed}`,
+        ...(issue?.PrimaryURL ? [String(issue.PrimaryURL)] : [])
+      ]
     });
   }
 
