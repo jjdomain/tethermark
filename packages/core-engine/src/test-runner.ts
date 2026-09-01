@@ -7318,6 +7318,19 @@ async function testImportedChildProcessExecDetection(): Promise<void> {
     }
 
     await fs.writeFile(logicPath, [
+      'import { exec } from "child_process";',
+      'import { promisify } from "util";',
+      'import { shellTool } from "@openai/agents";',
+      'const execAsync = promisify(exec);',
+      'const shell = { run: async (command: string) => execAsync(command) };',
+      'export const bounded = shellTool({ shell, needsApproval: true });'
+    ].join("\n"));
+    const locallyBounded = await evaluate();
+    assert.equal(locallyBounded.findings.some((item) => item.category === "agent_permission_boundary"), false);
+    assert.equal(locallyBounded.controlResults.every((item) => item.status === "pass"), true);
+    assert.equal(locallyBounded.observations.some((item) => item.title === "Agent shell execution has path-local boundary evidence"), true);
+
+    await fs.writeFile(logicPath, [
       'import { execFile } from "child_process";',
       'import { promisify } from "util";',
       'const execFileAsync = promisify(execFile);',
@@ -7643,6 +7656,49 @@ async function testGenericScannerResultsRemainDetailedObservations(): Promise<vo
     assert.ok(trivyObservation);
     assert.match(trivyObservation.summary, /installed 1\.0\.0; fixed 1\.0\.1/);
     assert.equal(trivyObservation.evidence.some((item) => item.startsWith("package-lock.json: CVE-2099-0001")), true);
+  });
+}
+
+async function testRepositoryControlsDoNotBorrowAuditToolExecution(): Promise<void> {
+  await withTempDir("tethermark-repository-control-evidence-", async (rootDir) => {
+    const workflowPath = path.join(rootDir, ".github", "workflows", "ci.yml");
+    await fs.mkdir(path.dirname(workflowPath), { recursive: true });
+    await fs.writeFile(workflowPath, "name: CI\non: [push]\njobs:\n  test:\n    steps:\n      - uses: actions/checkout@0123456789012345678901234567890123456789\n");
+    await fs.writeFile(path.join(rootDir, "package-lock.json"), "{}\n");
+    const controlIds = ["openssf.pinned_dependencies", "slsa.pinned_build_dependencies", "nist_ssdf.automated_security_checks"];
+    const controlCatalog = getControlCatalog().filter((item) => controlIds.includes(item.control_id));
+    const result = await evaluateStandardsAudit({
+      rootPath: rootDir,
+      analysis: {
+        root_path: rootDir, project_name: "repository-control-evidence", file_count: 2,
+        sample_files: [".github/workflows/ci.yml", "package-lock.json"], frameworks: [], languages: ["YAML"],
+        package_ecosystems: ["npm"], package_managers: ["npm"], dependency_manifests: ["package-lock.json"],
+        lockfiles: ["package-lock.json"], ci_workflows: [".github/workflows/ci.yml"], container_files: [], release_files: [],
+        deployment_configs: [], security_docs: [], auth_files: [], network_files: [], prompt_assets: [], mcp_indicators: [],
+        agent_indicators: [], tool_execution_indicators: [], agentic_capabilities: [], agentic_control_indicators: []
+      } as any,
+      targetClass: "repo_posture_only" as any,
+      threatModel: { framework_focus: [], attack_surfaces: [], high_risk_components: [] } as any,
+      toolExecutions: [
+        { tool: "scorecard", status: "completed", summary: "Scorecard completed", parsed: { checks: [{ name: "Pinned-Dependencies", score: 0, reason: "dependency not pinned by hash detected -- score normalized to 0" }] } },
+        { tool: "semgrep", status: "completed", summary: "Semgrep completed", parsed: { results: [] } },
+        { tool: "trivy", status: "completed", summary: "Trivy completed", parsed: { Results: [] } }
+      ] as any,
+      evidenceRecords: [], controlCatalog,
+      applicableControlIds: controlCatalog.map((item) => item.control_id), deferredControlIds: [], nonApplicableControlIds: [],
+      methodology: getMethodologyArtifact()
+    });
+    const pinned = result.controlResults.find((item) => item.control_id === "openssf.pinned_dependencies");
+    assert.equal(pinned?.status, "partial");
+    assert.equal(pinned?.assessability, "partially_assessed");
+    const slsa = result.controlResults.find((item) => item.control_id === "slsa.pinned_build_dependencies");
+    assert.equal(slsa?.status, "pass");
+    assert.ok((slsa?.evidence.length ?? 0) > 0);
+    const automatedChecks = result.controlResults.find((item) => item.control_id === "nist_ssdf.automated_security_checks");
+    assert.equal(automatedChecks?.status, "partial");
+    assert.deepEqual(automatedChecks?.sources, ["repo-analysis"]);
+    assert.equal(JSON.stringify(automatedChecks).includes("Semgrep completed"), false);
+    assert.equal(JSON.stringify(automatedChecks).includes("Trivy completed"), false);
   });
 }
 
@@ -9946,6 +10002,7 @@ async function main(): Promise<void> {
       ["purpose-bound workflow write permissions are not overclaimed", testPurposeBoundWorkflowWritePermission],
       ["contradictory Scorecard workflow evidence is inconclusive", testContradictoryScorecardWorkflowEvidenceIsInconclusive],
       ["generic scanner results remain detailed observations", testGenericScannerResultsRemainDetailedObservations],
+      ["repository controls do not borrow audit tool execution", testRepositoryControlsDoNotBorrowAuditToolExecution],
       ["finding quality treats static dependency advisory impact as metadata", testFindingQualityTreatsStaticDependencyAdvisoryImpactAsMetadata],
       ["post-supervisor integrity does not veto semantic mapping hints", testPostSupervisorIntegrityDoesNotVetoSemanticMappingHints],
       ["run comparison uses evidence symbols for matching", testRunComparisonUsesEvidenceSymbolsForMatching]

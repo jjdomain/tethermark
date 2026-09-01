@@ -136,6 +136,16 @@ function importedShellExecEvidence(relative: string, text: string): string[] {
   return [...evidence];
 }
 
+function hasPathLocalShellBoundary(text: string): boolean {
+  const shellToolConfiguration = /\bshellTool\s*\(\s*\{[\s\S]{0,3000}?(?:\bneedsApproval\s*:\s*(?:true|(?:async\s*)?\([^)]*\)\s*=>)|\bonApproval\s*:)/i;
+  const explicitSandboxExecution = /\b(?:run|execute)[A-Za-z0-9_$]*InSandbox\s*\(|\b(?:sandbox|container)\.(?:exec|execute|run)\s*\(/i;
+  return shellToolConfiguration.test(text) || explicitSandboxExecution.test(text);
+}
+
+function hasPromptInfluencedShellExecution(text: string): boolean {
+  return /(?:\bsubprocess\.(?:run|Popen|call)|\bos\.system|\b[A-Za-z_$][\w$]*(?:exec|execAsync|execSync))\s*\(\s*(?:prompt|user[_-]?input|input|instruction|tool[_-]?input)\b/i.test(text);
+}
+
 function isTestOrFixturePath(relative: string): boolean {
   return /(^|\/)(?:tests?|testdata|fixtures?|__tests__)(\/|$)/i.test(relative)
     || /(^|\/)(?:test|spec)[._-][^/]+\.(?:py|ts|tsx|js|jsx|mjs|cjs)$/i.test(relative)
@@ -436,12 +446,20 @@ export async function evaluateStandardsAudit(args: {
     ];
     return evidence.map((reference) => ({ path: item.relative, reference, text: executableText }));
   });
-  const agentDangerousExecMatches = dangerousExecRecords
+  const agentDangerousExecRecords = dangerousExecRecords
     .filter((item) => /(?:^|\/)(?:mcp(?:-server)?|agents?|tools?)(?:[\/_.-]|$)/i.test(item.path)
-      || /ReactCodeAgent|AgentExecutor|create_openai_tools_agent|McpServer|FastMCP|registerTool|server\.tool|tools\/call|tool_calls?/i.test(item.text))
+      || /ReactCodeAgent|AgentExecutor|create_openai_tools_agent|McpServer|FastMCP|registerTool|server\.tool|tools\/call|tool_calls?|shellTool\s*\(/i.test(item.text));
+  const boundedAgentDangerousExecMatches = agentDangerousExecRecords
+    .filter((item) => hasPathLocalShellBoundary(item.text))
+    .map((item) => item.reference);
+  const agentDangerousExecMatches = agentDangerousExecRecords
+    .filter((item) => !hasPathLocalShellBoundary(item.text))
+    .map((item) => item.reference);
+  const promptInfluencedAgentDangerousExecMatches = agentDangerousExecRecords
+    .filter((item) => !hasPathLocalShellBoundary(item.text) && hasPromptInfluencedShellExecution(item.text))
     .map((item) => item.reference);
   const nonAgentDangerousExecMatches = dangerousExecRecords
-    .filter((item) => !agentDangerousExecMatches.includes(item.reference))
+    .filter((item) => !agentDangerousExecRecords.includes(item))
     .map((item) => item.reference);
   const mcpPathBoundaryMatches = texts.flatMap((item) => {
     if (!/\.py$/i.test(item.relative)) return [];
@@ -529,9 +547,9 @@ export async function evaluateStandardsAudit(args: {
   let agentExecutionBoundaryFindingId: string | null = null;
   const agentExecutionBoundaryControlIds = [
     "harness_internal.agent_permission_boundaries",
-    "owasp_llm.prompt_injection_guardrails",
     "owasp_agentic.tool_misuse_boundary",
-    "mitre_atlas.tool_misuse_mitigation"
+    "mitre_atlas.tool_misuse_mitigation",
+    ...(promptInfluencedAgentDangerousExecMatches.length > 0 ? ["owasp_llm.prompt_injection_guardrails"] : [])
   ].filter((controlId) => args.applicableControlIds.includes(controlId));
   const ensureAgentExecutionBoundaryFinding = (): string => {
     if (agentExecutionBoundaryFindingId) return agentExecutionBoundaryFindingId;
@@ -696,8 +714,10 @@ export async function evaluateStandardsAudit(args: {
 
     if (control.control_id === "openssf.pinned_dependencies") {
       const check = scorecardCheck(args.toolExecutions, "Pinned-Dependencies");
-      const passed = hasLockfile || (typeof check?.score === "number" && check.score >= 7);
-      const findingIds = passed ? [] : [addFinding(findings, {
+      const scorecardAssessed = typeof check?.score === "number" && check.score >= 0;
+      const contradictoryPinningEvidence = hasLockfile && scorecardAssessed && check.score < 7;
+      const passed = !contradictoryPinningEvidence && (hasLockfile || (scorecardAssessed && check.score >= 7));
+      const findingIds = passed || contradictoryPinningEvidence ? [] : [addFinding(findings, {
         title: "Dependency manifests exist without recognized lockfile coverage",
         severity: "high",
         category: "dependency_locking",
@@ -711,9 +731,14 @@ export async function evaluateStandardsAudit(args: {
         standards_refs: [control.standard_ref, "OWASP LLM Top 10 / Supply Chain"]
       })];
       controlResults.push(makeControlResult(control, {
-        status: passed ? "pass" : "fail",
-        score_awarded: passed ? control.weight : 0,
-        rationale: [passed ? "Dependency pinning evidence detected." : "Dependency pinning evidence was not sufficient."],
+        assessability: contradictoryPinningEvidence ? "partially_assessed" : "assessed",
+        status: passed ? "pass" : contradictoryPinningEvidence ? "partial" : "fail",
+        score_awarded: passed ? control.weight : contradictoryPinningEvidence ? Math.round(control.weight / 2) : 0,
+        rationale: [passed
+          ? "Dependency pinning evidence detected."
+          : contradictoryPinningEvidence
+            ? "A lockfile is present, but Scorecard reports incomplete immutable pinning; the evidence supports partial credit rather than a clean pass."
+            : "Dependency pinning evidence was not sufficient."],
         evidence: [...(hasLockfile ? args.analysis.lockfiles.slice(0, 5) : []), ...(typeof check?.reason === "string" ? [check.reason] : [])],
         finding_ids: findingIds,
         sources: [scorecard?.status === "completed" ? "scorecard" : "repo-analysis"]
@@ -802,12 +827,24 @@ export async function evaluateStandardsAudit(args: {
 
     if (control.control_id === "slsa.pinned_build_dependencies") {
       const passed = unpinnedActions.length === 0 && hasCi;
+      const workflowDependencyEvidence = texts.flatMap((item) => {
+        if (!/^\.github\/workflows\//i.test(item.relative)) return [];
+        const references = item.text.match(/uses\s*:\s*[^\s]+/g) ?? [];
+        return references.map((reference) => `${item.relative}: ${reference.trim()}`);
+      });
+      const buildDependencyEvidence = unpinnedActions.length > 0
+        ? unpinnedActions.slice(0, 5)
+        : hasCi
+          ? (workflowDependencyEvidence.length > 0
+            ? workflowDependencyEvidence.slice(0, 5)
+            : args.analysis.ci_workflows.slice(0, 5).map((workflow) => `${workflow}: no external GitHub Action reference detected`))
+          : [];
       const findingIds = passed ? [] : [addFinding(findings, {
         title: "Build or workflow dependencies are not pinned strongly enough",
         severity: "medium",
         category: "build_integrity",
         description: "GitHub Actions are referenced by mutable tags or versions rather than full commit SHAs, which weakens CI supply-chain integrity.",
-        evidence: unpinnedActions.slice(0, 5),
+        evidence: buildDependencyEvidence,
         public_safe: true,
         confidence: 0.93,
         score_impact: control.weight,
@@ -820,7 +857,7 @@ export async function evaluateStandardsAudit(args: {
         assessability: hasCi ? "assessed" : "not_assessed",
         score_awarded: passed ? control.weight : 0,
         rationale: [passed ? "Workflow dependencies appear pinned more tightly." : hasCi ? "Workflow dependencies are not pinned to immutable SHAs." : "No CI workflows were present to assess build dependency pinning."],
-        evidence: unpinnedActions.slice(0, 5),
+        evidence: buildDependencyEvidence,
         finding_ids: findingIds,
         sources: ["repo-analysis"]
       }));
@@ -829,35 +866,26 @@ export async function evaluateStandardsAudit(args: {
 
     if (control.control_id === "nist_ssdf.automated_security_checks") {
       const runtimeAutomationEvidence = [...completedRuntimeTests, ...completedRuntimeBuilds, ...completedRuntimeProbes];
-      const passed = securityScanningWorkflowPresent || semgrep?.status === "completed" || trivy?.status === "completed" || scorecard?.status === "completed" || runtimeAutomationEvidence.length > 0;
-      const degradedByRuntimeFailure = !passed && runtimeExecutionFailures.length > 0;
-      const findingIds = passed ? [] : [addFinding(findings, {
-        title: "No visible automated security checks were detected",
-        severity: "medium",
-        category: "automated_security_checks",
-        description: "Static audit did not find visible security scanning workflows or successful security tool execution evidence for this run.",
-        evidence: hasCi ? args.analysis.ci_workflows.slice(0, 5) : [".github/workflows not found"],
-        public_safe: true,
-        confidence: 0.78,
-        score_impact: control.weight,
-        source: "heuristic",
-        control_ids: [control.control_id],
-        standards_refs: [control.standard_ref]
-      })];
+      const controlBoundRuntimeAutomation = runtimeAutomationEvidence.filter((record) => record.control_ids.includes(control.control_id));
+      const passed = securityScanningWorkflowPresent || controlBoundRuntimeAutomation.length > 0;
+      const partiallyAssessed = !passed && hasCi;
       controlResults.push(makeControlResult(control, {
-        status: passed ? "pass" : degradedByRuntimeFailure ? "partial" : "fail",
-        score_awarded: passed ? control.weight : degradedByRuntimeFailure ? Math.round(control.weight / 2) : 0,
-        rationale: [passed ? "Automated security or validation evidence was present in workflows, tool results, or bounded runtime validation steps." : degradedByRuntimeFailure ? "Bounded validation steps were attempted but did not complete cleanly enough to count as successful automated security checks." : "Automated security or validation evidence was not found."],
+        assessability: passed ? "assessed" : partiallyAssessed ? "partially_assessed" : "not_assessed",
+        status: passed ? "pass" : partiallyAssessed ? "partial" : "not_assessed",
+        score_awarded: passed ? control.weight : partiallyAssessed ? Math.round(control.weight / 2) : 0,
+        rationale: [passed
+          ? "Repository development workflows contain visible security-scanning markers."
+          : partiallyAssessed
+            ? "Development workflows exist, but the static sample did not identify clear security-scanning markers; tools run by this audit do not prove repository development practice."
+            : "No development workflow was present to assess repository-owned automated security checks."],
         evidence: [
           securityScanningWorkflowPresent ? "Security-scanning workflow markers detected" : "No security-scanning workflow markers detected",
-          semgrep?.summary ?? "",
-          trivy?.summary ?? "",
-          scorecard?.summary ?? "",
-          ...runtimeEvidenceSummaries(runtimeAutomationEvidence),
+          ...args.analysis.ci_workflows.slice(0, 5),
+          ...runtimeEvidenceSummaries(controlBoundRuntimeAutomation),
           ...runtimeEvidenceSummaries(runtimeExecutionFailures)
         ].filter(Boolean),
-        finding_ids: degradedByRuntimeFailure ? [] : findingIds,
-        sources: ["repo-analysis", ...(semgrep ? ["semgrep"] : []), ...(trivy ? ["trivy"] : []), ...(scorecard ? ["scorecard"] : []), ...(runtimeAutomationEvidence.length || runtimeExecutionFailures.length ? ["runtime-validation"] : [])]
+        finding_ids: [],
+        sources: ["repo-analysis", ...(controlBoundRuntimeAutomation.length || runtimeExecutionFailures.length ? ["runtime-validation"] : [])]
       }));
       continue;
     }
@@ -1048,7 +1076,7 @@ export async function evaluateStandardsAudit(args: {
         status: passed ? "pass" : "fail",
         score_awarded: passed ? control.weight : 0,
         rationale: [passed ? "Permission-boundary evidence was detected or no risky agentic capability was found." : "Risky agentic capability was detected without visible permission-boundary evidence."],
-        evidence: [...sandboxMentions.slice(0, 5), ...agentDangerousExecMatches.slice(0, 5)],
+        evidence: [...sandboxMentions.slice(0, 5), ...boundedAgentDangerousExecMatches.slice(0, 5), ...agentDangerousExecMatches.slice(0, 5)],
         finding_ids: findingIds,
         sources: ["repo-analysis"]
       }));
@@ -1300,15 +1328,18 @@ export async function evaluateStandardsAudit(args: {
         }));
         continue;
       }
-      const assessable = sandboxMentions.length > 0 || agentDangerousExecMatches.length > 0;
-      const passed = assessable && sandboxMentions.length > 0 && agentDangerousExecMatches.length === 0;
+      const dangerousMatches = control.control_id === "owasp_llm.prompt_injection_guardrails"
+        ? promptInfluencedAgentDangerousExecMatches
+        : agentDangerousExecMatches;
+      const assessable = sandboxMentions.length > 0 || boundedAgentDangerousExecMatches.length > 0 || dangerousMatches.length > 0;
+      const passed = assessable && dangerousMatches.length === 0 && (sandboxMentions.length > 0 || boundedAgentDangerousExecMatches.length > 0);
       const findingIds = !assessable || passed ? [] : [ensureAgentExecutionBoundaryFinding()];
       controlResults.push(makeControlResult(control, {
         assessability: assessable ? "assessed" : "not_assessed",
         status: !assessable ? "not_assessed" : passed ? "pass" : "fail",
         score_awarded: passed ? control.weight : 0,
         rationale: [!assessable ? "Agentic applicability was established, but static evidence did not connect a dangerous execution path to the agent surface." : passed ? "Visible guardrail or sandbox markers were detected around agentic surfaces." : "An agentic execution path was connected to shell execution without visible boundary evidence."],
-        evidence: [...sandboxMentions.slice(0, 5), ...agentDangerousExecMatches.slice(0, 5)],
+        evidence: [...sandboxMentions.slice(0, 5), ...boundedAgentDangerousExecMatches.slice(0, 5), ...dangerousMatches.slice(0, 5)],
         finding_ids: findingIds,
         sources: ["repo-analysis", "threat-model"]
       }));
@@ -1358,6 +1389,15 @@ export async function evaluateStandardsAudit(args: {
       title: "Semgrep result requires control-specific triage",
       summary: `${message} This generic scanner result is retained as an observation because no implemented evaluator maps the code pattern itself to a scored control.`,
       evidence: [`${repositoryRelativePath(args.rootPath, semgrepFinding?.path ?? "unknown")}: ${message}`]
+    });
+  }
+
+  if (boundedAgentDangerousExecMatches.length > 0) {
+    observations.push({
+      observation_id: createId("obs_bounded_agent_exec"),
+      title: "Agent shell execution has path-local boundary evidence",
+      summary: `Static analysis found ${boundedAgentDangerousExecMatches.length} agent-linked shell-execution pattern(s) with approval or sandbox evidence in the same source file. They are retained for review without being treated as a missing-boundary finding.`,
+      evidence: boundedAgentDangerousExecMatches.slice(0, 8)
     });
   }
 

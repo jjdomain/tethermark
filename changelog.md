@@ -4,6 +4,8 @@
 
 ### Changed
 
+- Public-cohort assessment v6 now distinguishes agent-linked shell execution with path-local approval or sandbox evidence from an unbounded execution path, and only maps prompt-injection controls when the same source shows prompt-like input reaching the shell operation.
+- Repository posture controls no longer borrow credit from scanners executed by the audit itself. Conflicting lockfile/Scorecard pinning evidence is partial, build-dependency passes retain concrete workflow evidence, and repository-owned automated-security checks require development-workflow evidence.
 - Public-cohort assessment now recognizes suffix-style test files such as `*.test.mjs`, deduplicates redacted credential evidence, and keeps generic test-only credential literals as non-production observations.
 - Contradictory Scorecard workflow evidence now produces a partial review state instead of a false dangerous-workflow failure when repository analysis confirms workflow files exist.
 - Generic Semgrep and Trivy results now remain detailed, repository-relative observations unless a control-specific evaluator supports a scored finding. Trivy observations retain advisory ID, target path, installed version, fixed version, severity, and source URL without claiming reachability or runtime impact.
