@@ -687,6 +687,19 @@ export function applyResolvedSystemPolicyToRequest(request: AuditRequest, snapsh
     ? { ...externalTools, included_tool_ids: [...new Set([...uniqueStrings(externalTools.included_tool_ids), ...requiredStaticTools])] }
     : (hints as any).external_audit_tools;
   const requestedPackageOverrides = (hints as any).audit_package_overrides && typeof (hints as any).audit_package_overrides === "object" ? (hints as any).audit_package_overrides : {};
+  const selectedPackageLaneSet = new Set(selectedPackage?.enabled_lanes ?? []);
+  const requestedEnabledLanes = uniqueStrings(requestedPackageOverrides.enabled_lanes)
+    .filter((lane) => selectedPackageLaneSet.has(lane as any));
+  let effectiveEnabledLanes: string[] | undefined;
+  if (requestedEnabledLanes.length) {
+    const removedLanes = (selectedPackage?.enabled_lanes ?? []).filter((lane) => !requestedEnabledLanes.includes(lane));
+    if (removedLanes.length) {
+      if (!snapshot.definition_json.exceptions.allow_per_run_narrowing) throw new Error("system_policy_disallows_per_run_lane_narrowing");
+      requireRequestHumanApproval(request, "evidence_reduction");
+      if (removedLanes.includes("runtime_validation")) requireRequestHumanApproval(request, "runtime_probe_removal");
+    }
+    effectiveEnabledLanes = requestedEnabledLanes;
+  }
   const thresholdRank = { low: 0, medium: 1, high: 2 };
   const requestedThreshold = requestedPackageOverrides.publishability_threshold;
   const requiredThreshold = snapshot.definition_json.review.publishability_threshold;
@@ -695,7 +708,7 @@ export function applyResolvedSystemPolicyToRequest(request: AuditRequest, snapsh
     : requiredThreshold;
   const effectivePackageOverrides = {
     ...requestedPackageOverrides,
-    enabled_lanes: undefined,
+    enabled_lanes: effectiveEnabledLanes,
     max_agent_calls: Math.min(Number(requestedPackageOverrides.max_agent_calls) || snapshot.definition_json.providers.maximum_agent_calls, snapshot.definition_json.providers.maximum_agent_calls),
     max_total_tokens: Math.min(Number(requestedPackageOverrides.max_total_tokens) || snapshot.definition_json.providers.maximum_total_tokens, snapshot.definition_json.providers.maximum_total_tokens),
     max_rerun_rounds: Math.min(Number(requestedPackageOverrides.max_rerun_rounds) || snapshot.definition_json.providers.maximum_retries, snapshot.definition_json.providers.maximum_retries),
@@ -757,12 +770,37 @@ export async function readPersistedPolicyResolutionSnapshot(runId: string, rootD
 }
 
 export function exportSystemPolicy(detail: SystemPolicyDetail): Record<string, unknown> {
-  return { export_schema: { schema_name: "system_policy.v1", schema_version: "1.0.0", generated_at: nowIso() }, policy: detail.policy, versions: detail.versions, bindings: detail.bindings, events: detail.events };
+  return {
+    export_schema: {
+      schema_name: "system_policy.v1",
+      schema_version: "1.0.0",
+      generated_at: nowIso(),
+      compatibility: {
+        contract: "system_policy.v1",
+        major_version: 1,
+        minimum_reader_schema_version: "1.0.0",
+        policy: "same-major-additive"
+      }
+    },
+    policy: detail.policy,
+    versions: detail.versions,
+    bindings: detail.bindings,
+    events: detail.events
+  };
 }
 
 export async function importSystemPolicy(payload: any, actorId?: string, workspaceId?: string, rootDirOrOptions?: string | PersistenceReadOptions): Promise<SystemPolicyDetail> {
+  const exportSchema = payload?.export_schema;
+  if (exportSchema != null) {
+    const schemaMajor = String(exportSchema.schema_version ?? "").match(/^(\d+)\./)?.[1];
+    if (exportSchema.schema_name !== "system_policy.v1" || schemaMajor !== "1") throw new Error("incompatible_system_policy_import");
+  }
   const policy = payload?.policy;
-  const version = Array.isArray(payload?.versions) ? payload.versions[0] : null;
+  const versions = Array.isArray(payload?.versions) ? payload.versions : [];
+  const version = versions.find((item: any) => item?.id === policy?.current_version_id)
+    ?? versions.find((item: any) => item?.id === policy?.active_version_id)
+    ?? versions[0]
+    ?? null;
   if (!policy?.name || !version?.definition_json) throw new Error("invalid_system_policy_import");
   return createPersistedSystemPolicy({ id: policy.id, name: policy.name, description: policy.description, definition: version.definition_json, actor_id: actorId, reason: "import", workspace_id: workspaceId }, rootDirOrOptions);
 }

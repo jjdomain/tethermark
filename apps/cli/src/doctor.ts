@@ -4,6 +4,8 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 import { buildToolPathEnv, staticToolPathDetails } from "../../../packages/core-engine/src/tool-paths.js";
+import { resolveArtifactRoot } from "../../../packages/core-engine/src/local-paths.js";
+import { resolveEnvironmentFilePath } from "../../../packages/core-engine/src/env.js";
 import { resolvePostgresConnectionConfig } from "../../../packages/core-engine/src/persistence/postgres.js";
 import { inspectPythonWorkerEnvironment } from "../../../packages/core-engine/src/python-worker-environment.js";
 import { buildRuntimeSandboxReadiness } from "../../../packages/validation-runner/src/index.js";
@@ -316,9 +318,9 @@ export function buildDoctorReport(): DoctorReport {
   checks.push({
     id: "env-file",
     label: ".env",
-    status: fs.existsSync(path.resolve(process.cwd(), ".env")) ? "pass" : "warn",
-    summary: fs.existsSync(path.resolve(process.cwd(), ".env")) ? ".env found." : ".env not found; defaults and process environment will be used.",
-    fix: fs.existsSync(path.resolve(process.cwd(), ".env")) ? undefined : ["Copy .env.example to .env and configure provider credentials before live runs."]
+    status: fs.existsSync(resolveEnvironmentFilePath()) ? "pass" : "warn",
+    summary: fs.existsSync(resolveEnvironmentFilePath()) ? `Environment file found at ${resolveEnvironmentFilePath()}.` : "Environment file not found; defaults and process environment will be used.",
+    fix: fs.existsSync(resolveEnvironmentFilePath()) ? undefined : ["Copy .env.example to .env, or set HARNESS_ENV_FILE to a protected service configuration file."]
   });
   addCommandCheck(checks, { id: "node", label: "Node.js", command: "node", required: true, fix: ["Install supported Node.js 22.x or 24.x from https://nodejs.org/."] });
   addCommandCheck(checks, { id: "npm", label: "npm", command: "npm", shell: process.platform === "win32", required: true, fix: ["Install supported npm 10.x or 11.x with Node.js 22.x or 24.x."] });
@@ -399,7 +401,7 @@ export function buildDoctorReport(): DoctorReport {
         ? ["Set HARNESS_POSTGRES_URL, SUPABASE_DB_URL, or DATABASE_URL, then run npm run scan -- migrate postgres --dry-run."]
         : undefined
   });
-  checks.push(checkWritableDirectory(path.resolve(process.cwd(), ".artifacts")));
+  checks.push(checkWritableDirectory(resolveArtifactRoot()));
   checks.push(...buildProviderChecks());
 
   const apiKey = envConfigured(["AUDIT_LLM_API_KEY", "OPENAI_API_KEY", "LLM_API_KEY"]);
@@ -448,7 +450,7 @@ export function buildStaticScannerDoctorReport(): DoctorReport {
   addProductionStaticToolCheck(checks, "semgrep");
   addProductionStaticToolCheck(checks, "trivy");
   addStaticScannerNetworkCheck(checks);
-  checks.push(checkWritableDirectory(path.resolve(process.cwd(), ".artifacts")));
+  checks.push(checkWritableDirectory(resolveArtifactRoot()));
   const summary = checks.reduce((acc, check) => {
     acc[check.status] += 1;
     return acc;
@@ -474,24 +476,26 @@ export function printDoctorReport(report: DoctorReport, json = false): void {
 }
 
 function hardenLocalEnvFile(): void {
-  const envPath = path.resolve(process.cwd(), ".env");
+  const envPath = resolveEnvironmentFilePath();
   if (process.platform !== "win32" && fs.existsSync(envPath)) fs.chmodSync(envPath, 0o600);
 }
 
 export function printOnboarding(args: { dryRun?: boolean } = {}): void {
-  const envExists = fs.existsSync(path.resolve(process.cwd(), ".env"));
+  const envPath = resolveEnvironmentFilePath();
+  const envExists = fs.existsSync(envPath);
   console.log("Tethermark onboarding");
   if (!envExists) {
     if (args.dryRun) {
-      console.log("Would create .env from .env.example.");
+      console.log(`Would create ${envPath} from .env.example.`);
     } else if (fs.existsSync(path.resolve(process.cwd(), ".env.example"))) {
-      fs.copyFileSync(path.resolve(process.cwd(), ".env.example"), path.resolve(process.cwd(), ".env"));
-      console.log("Created .env from .env.example.");
+      fs.mkdirSync(path.dirname(envPath), { recursive: true });
+      fs.copyFileSync(path.resolve(process.cwd(), ".env.example"), envPath);
+      console.log(`Created ${envPath} from .env.example.`);
     } else {
       console.log("No .env.example found; skipping .env creation.");
     }
   } else {
-    console.log(".env already exists; leaving it unchanged.");
+    console.log(`${envPath} already exists; leaving it unchanged.`);
   }
   if (!args.dryRun) hardenLocalEnvFile();
   console.log("");
@@ -507,20 +511,22 @@ export function printOnboarding(args: { dryRun?: boolean } = {}): void {
 }
 
 export function runOnboarding(args: { dryRun?: boolean; skipDoctor?: boolean; skipFixtures?: boolean } = {}): DoctorReport | null {
-  const envExists = fs.existsSync(path.resolve(process.cwd(), ".env"));
+  const envPath = resolveEnvironmentFilePath();
+  const envExists = fs.existsSync(envPath);
   console.log("Tethermark onboarding");
   console.log("Step 1/7: Workspace configuration");
   if (!envExists) {
     if (args.dryRun) {
-      console.log("Would create .env from .env.example.");
+      console.log(`Would create ${envPath} from .env.example.`);
     } else if (fs.existsSync(path.resolve(process.cwd(), ".env.example"))) {
-      fs.copyFileSync(path.resolve(process.cwd(), ".env.example"), path.resolve(process.cwd(), ".env"));
-      console.log("Created .env from .env.example.");
+      fs.mkdirSync(path.dirname(envPath), { recursive: true });
+      fs.copyFileSync(path.resolve(process.cwd(), ".env.example"), envPath);
+      console.log(`Created ${envPath} from .env.example.`);
     } else {
       console.log("No .env.example found; skipping .env creation.");
     }
   } else {
-    console.log(".env already exists; leaving it unchanged.");
+    console.log(`${envPath} already exists; leaving it unchanged.`);
   }
   if (!args.dryRun) hardenLocalEnvFile();
 

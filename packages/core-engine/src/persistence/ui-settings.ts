@@ -236,6 +236,55 @@ function listSettingRows(db: any): PersistedUiSettingsRecord[] {
   return readSqliteTable<PersistedUiSettingsRecord>(db, "ui_settings");
 }
 
+function scrubSecretFields(value: unknown): { value: unknown; removed: number } {
+  if (Array.isArray(value)) {
+    const items = value.map(scrubSecretFields);
+    return { value: items.map((item) => item.value), removed: items.reduce((sum, item) => sum + item.removed, 0) };
+  }
+  if (!value || typeof value !== "object") return { value, removed: 0 };
+  const next: Record<string, unknown> = {};
+  let removed = 0;
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (/(?:api_?key|access_?token|refresh_?token|secret|password)$/i.test(key)) {
+      removed += item == null || item === "" ? 0 : 1;
+      next[key] = null;
+      continue;
+    }
+    const nested = scrubSecretFields(item);
+    next[key] = nested.value;
+    removed += nested.removed;
+  }
+  return { value: next, removed };
+}
+
+export async function removePersistedUiCredentials(rootDirOrOptions?: string | PersistenceReadOptions, options: { dryRun?: boolean } = {}): Promise<{ settings_rows: number; values_removed: number }> {
+  const { db, location } = await openUiDb(rootDirOrOptions);
+  try {
+    const rows = listSettingRows(db);
+    let removed = 0;
+    for (const row of rows) {
+      const credentials = scrubSecretFields(row.credentials_json);
+      const integrations = scrubSecretFields(row.integrations_json);
+      const providers = scrubSecretFields(row.providers_json);
+      const rowRemoved = credentials.removed + integrations.removed + providers.removed;
+      if (!rowRemoved) continue;
+      removed += rowRemoved;
+      const next: PersistedUiSettingsRecord = {
+        ...row,
+        credentials_json: credentials.value as Record<string, unknown>,
+        integrations_json: integrations.value as Record<string, unknown>,
+        providers_json: providers.value as Record<string, unknown>,
+        updated_at: nowIso()
+      };
+      upsertSqliteRecord({ db, tableName: "ui_settings", recordKey: next.id, payload: next, createdAt: next.updated_at, parentKey: next.workspace_id ?? undefined });
+    }
+    if (removed && !options.dryRun) await saveSqliteDatabase(location.rootDir, db, location.mode);
+    return { settings_rows: rows.length, values_removed: removed };
+  } finally {
+    db.close();
+  }
+}
+
 function findSetting(rows: PersistedUiSettingsRecord[], args: { scope: PersistedUiSettingsRecord["scope"]; workspaceId?: string; projectId?: string }): PersistedUiSettingsRecord {
   if (args.scope === "global") {
     return rows.find((item) => item.scope === "global") ?? defaultUiSettingsForScope({ scope: "global" });

@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import type { AuditRequest, RunStatus, TargetKind } from "./contracts.js";
+import { resolveArtifactPath } from "./local-paths.js";
 import { nowIso } from "./utils.js";
 
 export interface RunRegistryEntry {
@@ -16,7 +17,7 @@ export interface RunRegistryEntry {
 }
 
 function defaultRegistryPath(): string {
-  return path.resolve(process.cwd(), ".artifacts", "run-index.json");
+  return resolveArtifactPath("run-index.json");
 }
 
 async function readRegistry(registryPath: string): Promise<Record<string, RunRegistryEntry>> {

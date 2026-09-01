@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import type { LocalSandboxBackendId, RuntimeSandboxReadiness } from "../../../packages/validation-runner/src/index.js";
+import { resolveArtifactPath } from "../../../packages/core-engine/src/local-paths.js";
 
 export const RUNTIME_FIXTURE_IMAGE = "docker.io/library/alpine@sha256:1e42bbe2508154c9126d48c2b8a75420c3544343bf86fd041fb7527e017a4b4a";
 export const RUNTIME_FIXTURE_IMAGE_DIGEST = "sha256:1e42bbe2508154c9126d48c2b8a75420c3544343bf86fd041fb7527e017a4b4a";
@@ -307,7 +308,7 @@ async function createFixturePaths(): Promise<RuntimeFixturePaths> {
 
 async function writeEvidence(result: RuntimeFixtureExecutionResult): Promise<string | null> {
   try {
-    const root = path.resolve(process.cwd(), ".artifacts", "runtime-readiness");
+    const root = resolveArtifactPath("runtime-readiness");
     await fs.mkdir(root, { recursive: true });
     const stamp = result.started_at.replaceAll(":", "-").replaceAll(".", "-");
     const evidencePath = path.join(root, `runtime-fixture-${stamp}.json`);

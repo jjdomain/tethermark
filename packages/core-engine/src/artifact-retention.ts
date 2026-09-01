@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import { defaultPersistenceRoot } from "./persistence/backend.js";
+import { resolveArtifactRoot } from "./local-paths.js";
 import type { PersistedArtifactIndexRecord, PersistedAsyncJobRecord, PersistedRunRecord } from "./persistence/contracts.js";
 import { deleteSqliteRecord, ensureSqliteSchema, hasSqliteDatabase, openSqliteDatabase, readSqliteTable, saveSqliteDatabase } from "./persistence/sqlite.js";
 
@@ -100,7 +101,7 @@ export interface ScheduledArtifactRetentionResult {
 }
 
 function defaultArtifactBaseRoot(): string {
-  return path.resolve(process.cwd(), ".artifacts");
+  return resolveArtifactRoot();
 }
 
 function parsePositiveNumber(value: string | undefined): number | null {

@@ -40,6 +40,12 @@ The maintained Community Edition trust-boundary and residual-risk register is [d
 
 Release scanner thresholds, sanitized evidence, and expiring exact-finding exceptions are defined in [docs/release-security-gate.md](docs/release-security-gate.md).
 
+Official source-release checksum and GitHub attestation verification is defined in [docs/release-artifact-verification.md](docs/release-artifact-verification.md). Treat files without matching checksums and tag/workflow-bound attestations as unverified.
+
+Least-privilege shared-service identities, immutable checkout rules, protected state/configuration paths, and platform examples are defined in [docs/shared-service-deployment.md](docs/shared-service-deployment.md). Community Edition remains a trusted-team boundary: an API-key holder is an administrator, not an isolated tenant.
+
+Data locations, backup/retention sensitivity, redacted diagnostics, provider revocation, browser cleanup, and complete Tethermark/external credential removal are defined in [docs/data-lifecycle-and-privacy.md](docs/data-lifecycle-and-privacy.md).
+
 ## Please Avoid Public Disclosure Until Fixed
 
 Public issues, PRs, or discussions should not contain:

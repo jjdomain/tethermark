@@ -273,6 +273,9 @@ Useful environment variables:
 - `HARNESS_API_KEY`
 - `HARNESS_EXTERNAL_BIND_ACKNOWLEDGEMENT`
 - `HARNESS_DB_MODE`
+- `HARNESS_ENV_FILE`
+- `HARNESS_ARTIFACT_ROOT`
+- `HARNESS_LOCAL_DB_ROOT`
 
 Binding either service to a non-loopback address exposes audit operations because the web UI proxies `/api` requests. Tethermark therefore refuses to start unless all of these conditions are met:
 
@@ -388,7 +391,15 @@ If you need enforced auth in Community Edition, use `HARNESS_API_AUTH_MODE=api_k
 
 The credential, webhook, archive, repository, artifact, and runtime-mount trust boundaries are documented in [`docs/security-threat-model.md`](docs/security-threat-model.md).
 
+Dedicated-account systemd, launchd, and Windows Task Scheduler examples, protected filesystem layouts, and the shared trusted-team boundary are documented in [`docs/shared-service-deployment.md`](docs/shared-service-deployment.md).
+
+The complete local data map, backup/restore and retention contract, redacted diagnostics command, privacy boundary, and credential-removal procedure are documented in [`docs/data-lifecycle-and-privacy.md`](docs/data-lifecycle-and-privacy.md).
+
+Executable clean-install, two-ref update, state-preservation, and post-update launch evidence across Windows, Ubuntu, and macOS is defined in [`docs/install-upgrade-verification.md`](docs/install-upgrade-verification.md).
+
 Release dependency, license, secret, Semgrep, Trivy, and OpenSSF Scorecard thresholds and exception handling are documented in [`docs/release-security-gate.md`](docs/release-security-gate.md).
+
+Reproducible source archives, the combined npm/Python CycloneDX SBOM, SHA-256 manifests, GitHub/Sigstore attestations, and consumer verification commands are documented in [`docs/release-artifact-verification.md`](docs/release-artifact-verification.md).
 
 ## Release Checklist
 
@@ -563,3 +574,7 @@ These records are available through the `/ui/settings` and `/ui/documents` API r
 - [`docs/HARNESS_ARCHITECTURE_NEXT.md`](docs/HARNESS_ARCHITECTURE_NEXT.md)
 - [`docs/API_Stability_and_Artifact_Boundary.md`](docs/API_Stability_and_Artifact_Boundary.md)
 - [`changelog.md`](changelog.md)
+
+## License
+
+Tethermark Community Edition is licensed under the [Apache License 2.0](LICENSE).

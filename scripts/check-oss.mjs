@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import net from "node:net";
 import process from "node:process";
 
@@ -14,10 +14,23 @@ function terminate(child) {
     return;
   }
   if (process.platform === "win32") {
-    child.kill();
+    // npm scripts add cmd/npm wrapper processes on Windows. Killing only the
+    // immediate child leaves the API and web servers holding inherited pipes,
+    // which makes non-interactive release checks hang after they have passed.
+    spawnSync("taskkill.exe", ["/pid", String(child.pid), "/t", "/f"], {
+      stdio: "ignore",
+      windowsHide: true
+    });
     return;
   }
-  child.kill("SIGTERM");
+  try {
+    // The npm wrapper and both servers share this detached process group.
+    // Signalling the group prevents grandchildren from retaining captured
+    // stdout/stderr pipes when this check is nested under spawnSync.
+    process.kill(-child.pid, "SIGTERM");
+  } catch (error) {
+    if (error?.code !== "ESRCH") throw error;
+  }
 }
 
 function reservePort() {
@@ -77,22 +90,20 @@ async function main() {
     WEB_UI_PORT: String(webPort),
     WEB_UI_API_BASE_URL: apiBaseUrl
   };
-  const child =
-    process.platform === "win32"
-      ? spawn("cmd.exe", ["/d", "/s", "/c", "npm", "run", "oss"], {
-          cwd: process.cwd(),
-          env: childEnv,
-          stdio: "inherit"
-        })
-      : spawn("npm", ["run", "oss"], {
-          cwd: process.cwd(),
-          env: childEnv,
-          stdio: "inherit"
-        });
+  // The package-level oss:check command has already built the application.
+  // Launching `npm run oss` here would build a second time inside the health
+  // deadline and can fail on otherwise healthy cold runners.
+  const child = spawn(process.execPath, ["scripts/run-api-web.mjs"], {
+    cwd: process.cwd(),
+    env: childEnv,
+    stdio: "inherit",
+    detached: process.platform !== "win32"
+  });
 
   const exitPromise = new Promise((resolve) => {
     child.on("exit", (code, signal) => resolve({ code, signal }));
   });
+  let exitedBeforeCleanup = false;
 
   try {
     for (const url of urlChecks) {
@@ -100,12 +111,13 @@ async function main() {
     }
     console.log("[tethermark:oss-check] API and web UI are reachable.");
   } finally {
+    exitedBeforeCleanup = child.exitCode !== null || child.signalCode !== null;
     terminate(child);
     await Promise.race([exitPromise, sleep(5000)]);
   }
 
   const result = await Promise.race([exitPromise, sleep(100)]);
-  if (result && typeof result === "object" && "code" in result && result.code && result.code !== 0) {
+  if (exitedBeforeCleanup && result && typeof result === "object" && "code" in result && result.code && result.code !== 0) {
     process.exit(result.code);
   }
 }

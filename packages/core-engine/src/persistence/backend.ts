@@ -1,6 +1,7 @@
 import path from "node:path";
 
 import type { DatabaseMode } from "../contracts.js";
+import { resolveArtifactPath } from "../local-paths.js";
 import type { PersistenceStore } from "./contracts.js";
 import { LocalPersistenceStore } from "./local-store.js";
 import { SqliteFilePersistenceStore } from "./sqlite-file-store.js";
@@ -35,7 +36,7 @@ export function defaultPersistenceRoot(mode?: DatabaseMode): string {
   if (resolvedMode === "postgres" || resolvedMode === "supabase") return resolvedMode;
   const envRoot = resolveModeRootEnv(resolvedMode);
   if (envRoot) return path.resolve(envRoot);
-  return path.resolve(process.cwd(), ".artifacts", "state", "local-db");
+  return resolveArtifactPath("state", "local-db");
 }
 
 export function resolvePersistenceLocation(args?: PersistenceReadOptions): PersistenceLocation {

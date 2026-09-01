@@ -4,6 +4,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { resolveEnvironmentFilePath } from "../../../packages/core-engine/src/env.js";
 
 import {
   evaluateStaticToolVersion,
@@ -191,7 +192,7 @@ function upsertEnvValue(contents: string, key: string, value: string): string {
 }
 
 function recordManagedToolPath(installedDirs: string[]): string[] {
-  const envPath = path.resolve(process.cwd(), ".env");
+  const envPath = resolveEnvironmentFilePath();
   const existingContents = fs.existsSync(envPath) ? fs.readFileSync(envPath, "utf8") : "";
   const existingEnv = existingContents.split(/\r?\n/)
     .map((line) => line.trim())

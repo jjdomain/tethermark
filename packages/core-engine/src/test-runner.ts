@@ -33,8 +33,9 @@ import { analyzeTarget } from "./repo.js";
 import { PYTHON_WORKER_DEFAULT_MAX_ATTEMPTS, PYTHON_WORKER_DEFAULT_OUTPUT_BYTES, PYTHON_WORKER_DEFAULT_TIMEOUT_MS, PYTHON_WORKER_MAX_ATTEMPTS, PYTHON_WORKER_MAX_OUTPUT_BYTES, PYTHON_WORKER_MAX_TIMEOUT_MS, resetPythonWorkerCapabilityCacheForTests, resolvePythonWorkerInvocationLimits, resolvePythonWorkerRetryPolicy, runPythonWorkerAttemptsForTests } from "./python-worker.js";
 import { inspectPythonWorkerEnvironment, isSupportedPythonWorkerVersion, parsePythonVersion, parsePythonWorkerLock, pythonWorkerVenvExecutable, resolvePythonWorkerExecutable } from "./python-worker-environment.js";
 import { resolveAssessmentEvidenceProviderIds } from "./stages/stage-assess-controls.js";
+import { normalizeEvalSelectionForExecution } from "./stages/stage-select-evidence.js";
 import { assessRuntimeRepeatability, buildRuntimeEvidenceRecords, normalizeRuntimeEvaluation, RUNTIME_MINIMUM_REPEAT_RUNS } from "./runtime-evidence.js";
-import { applyControlDowngrades, applyUnsupportedFindingDrops, mergeSelectiveAssessmentCycle, retainFindingsSupportedByFinalControls } from "./stages/stage-corrections.js";
+import { applyControlDowngrades, applyUnsupportedFindingDrops, deduplicateFindings, mergeSelectiveAssessmentCycle, retainFindingsSupportedByFinalControls } from "./stages/stage-corrections.js";
 import { createPersistenceStore } from "./persistence/backend.js";
 import { backfillLocalPersistence, cleanupLocalJsonMirrors, validateLocalPersistence } from "./persistence/backfill.js";
 import { compactBundleExports } from "./persistence/bundle-exports.js";
@@ -220,7 +221,7 @@ async function testStaticEvidenceUsesConfiguredScannerInvocations(): Promise<voi
     await fs.writeFile(path.join(targetDir, "app.js"), "const safe = true;\n", "utf8");
     const scorecardRunner = path.join(rootDir, "fake-scorecard.mjs");
     const trivyRunner = path.join(rootDir, "fake-trivy.mjs");
-    await fs.writeFile(scorecardRunner, "console.log(JSON.stringify({score: 9, checks: [{name: 'Pinned-Dependencies', score: 9}]}));\n", "utf8");
+    await fs.writeFile(scorecardRunner, "console.log(JSON.stringify({repo: {commit: 'abc123'}, score: 9, checks: [{name: 'Pinned-Dependencies', score: 9}]}));\n", "utf8");
     await fs.writeFile(trivyRunner, "console.log(JSON.stringify({Results: []}));\n", "utf8");
 
     await withEnv({
@@ -232,10 +233,15 @@ async function testStaticEvidenceUsesConfiguredScannerInvocations(): Promise<voi
     }, async () => {
       resetEvidenceProviderCapabilityCacheForTests();
       const request = { local_path: targetDir, run_mode: "static", audit_package: "deep-static", llm_provider: "mock" } as const;
-      const scorecard = await executeEvidenceProvider({ providerId: "scorecard", request, rootPath: targetDir, repoUrl: "https://github.com/example/example.git" });
+      const scorecard = await executeEvidenceProvider({ providerId: "scorecard", request, rootPath: targetDir, repoUrl: "https://github.com/example/example.git", commitSha: "abc123" });
+      const mismatchedScorecard = await executeEvidenceProvider({ providerId: "scorecard", request, rootPath: targetDir, repoUrl: "https://github.com/example/example.git", commitSha: "def456" });
       const trivy = await executeEvidenceProvider({ providerId: "trivy", request, rootPath: targetDir, repoUrl: null });
       assert.equal(scorecard.status, "completed", scorecard.summary);
+      assert.deepEqual(scorecard.command?.slice(-2), ["--commit", "abc123"]);
       assert.equal(scorecard.normalized?.signal_count, 1);
+      assert.equal(mismatchedScorecard.status, "failed");
+      assert.equal(mismatchedScorecard.failure_category, "runtime_error");
+      assert.match(mismatchedScorecard.summary, /expected def456/);
       assert.equal(trivy.status, "completed", trivy.summary);
       assert.equal(trivy.normalized?.result_type, "trivy");
     });
@@ -263,6 +269,13 @@ async function testStaticScannerTimeoutAndOutputFloodFailClosed(): Promise<void>
       HARNESS_STATIC_TOOL_MAX_BUFFER_BYTES: String(64 * 1024),
       HARNESS_DISABLE_LOCAL_BINARIES: undefined
     }, async () => {
+      await writeFake("process.stdout.write(JSON.stringify({ results: [], errors: [], paths: { scanned: ['app.js'] } }))");
+      resetEvidenceProviderCapabilityCacheForTests();
+      const scanned = await executeEvidenceProvider({ providerId: "semgrep", request: { local_path: targetDir, run_mode: "static", audit_package: "deep-static", llm_provider: "mock" }, rootPath: targetDir, repoUrl: null });
+      assert.equal(scanned.status, "completed");
+      assert.ok(scanned.command?.includes("--no-git-ignore"));
+      assert.deepEqual(scanned.normalized?.coverage_paths, ["app.js"]);
+
       await writeFake("process.stdout.write('x'.repeat(200000))");
       resetEvidenceProviderCapabilityCacheForTests();
       const flooded = await executeEvidenceProvider({ providerId: "semgrep", request: { local_path: targetDir, run_mode: "static", audit_package: "deep-static", llm_provider: "mock" }, rootPath: targetDir, repoUrl: null });
@@ -392,6 +405,19 @@ async function waitForAsyncRun(baseUrl: string, jobId: string, timeoutMs = 18000
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
   throw new Error(`Timed out waiting for async job ${jobId}`);
+}
+
+async function waitForAsyncTerminalFollowup(baseUrl: string, jobId: string, timeoutMs = 45000): Promise<any> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const response = await fetch(`${baseUrl}/runs/async/${jobId}`);
+    if (response.ok) {
+      const payload = await response.json() as any;
+      if (payload.job?.terminal_followup_status === "completed" || payload.job?.terminal_followup_status === "failed") return payload;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`Timed out waiting for async terminal follow-up ${jobId}`);
 }
 
 async function waitForCondition(label: string, predicate: () => boolean, timeoutMs = 45000): Promise<void> {
@@ -1639,8 +1665,9 @@ async function testConcurrentAsyncWorkerPersistenceStress(): Promise<void> {
       assert.equal(new Set(created.map((item) => item.job.job_id)).size, jobCount);
 
       let persistedJobs = await manager.listJobs(rootDir);
-      for (let attempt = 0; attempt < 100 && persistedJobs.some((item) => item.status !== "succeeded" || item.terminal_followup_status !== "completed"); attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 20));
+      const terminalDeadline = Date.now() + 15_000;
+      while (Date.now() < terminalDeadline && persistedJobs.some((item) => item.status !== "succeeded" || item.terminal_followup_status !== "completed")) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
         persistedJobs = await manager.listJobs(rootDir);
       }
       assert.equal(persistedJobs.length, jobCount);
@@ -2451,6 +2478,8 @@ async function testFreshRunPersistsExpectedRecords(): Promise<void> {
     assert.equal(scoreSummary?.overall_score, result.score_summary.overall_score);
     assert.equal(reviewDecision?.publishability_status, result.publishability.publishability_status);
     assert.equal(events.at(-1)?.event_type, "run_completed");
+    assert.equal(events.at(-1)?.details?.overall_score, result.score_summary.overall_score);
+    assert.equal(events.at(-1)?.details?.static_score, result.static_score);
     assert.equal(metrics.some((item) => item.name === "findings_total"), true);
     assert.equal(evidenceRecords.length >= 0, true);
     assert.equal(findings.length >= 0, true);
@@ -4302,6 +4331,10 @@ async function testAsyncRunLifecycleApi(): Promise<void> {
         assert.equal(listResponse.status, 200);
         assert.equal(listPayload.jobs.some((item: any) => item.job_id === queuedPayload.job.job_id), true);
         assert.equal(listPayload.jobs.some((item: any) => item.job_id === queuedCancelPayload.job.job_id), true);
+        for (const jobId of [queuedPayload.job.job_id, pendingPayload.job.job_id, queuedCancelPayload.job.job_id]) {
+          const terminalPayload = await waitForAsyncTerminalFollowup(baseUrl, jobId);
+          assert.equal(terminalPayload.job.terminal_followup_status, "completed");
+        }
       } finally {
         await new Promise<void>((resolve, reject) => {
           server.close((error) => {
@@ -7962,7 +7995,7 @@ async function testSelectiveCorrectionReplacesStaleLaneFindings(): Promise<void>
   assert.match(merged.cycle.scoreSummary.leaderboard_summary, /2 findings were emitted/);
 }
 
-async function testFindingEvaluationUsesEvidenceSymbolsForGrouping(): Promise<void> {
+async function testFindingEvaluationDoesNotTreatSharedSymbolsAsDuplicates(): Promise<void> {
   const summary = buildFindingEvaluationSummary({
     findings: [
       {
@@ -8037,13 +8070,183 @@ async function testFindingEvaluationUsesEvidenceSymbolsForGrouping(): Promise<vo
     ]
   });
 
-  assert.equal(summary.duplicate_groups.length, 1);
-  assert.deepEqual(summary.duplicate_groups[0], ["finding_symbol_left", "finding_symbol_right"]);
+  assert.equal(summary.duplicate_groups.length, 0);
   assert.equal(summary.conflict_pairs.length, 1);
   assert.equal(summary.conflict_pairs[0]?.reason, "linked controls have conflicting visibility/publication posture");
   assert.deepEqual(summary.evaluations.find((item) => item.finding_id === "finding_symbol_left")?.evidence_symbols, ["unsafe_tool_access"]);
-  assert.deepEqual(summary.evaluations.find((item) => item.finding_id === "finding_symbol_left")?.duplicate_with_finding_ids, ["finding_symbol_right"]);
-  assert.deepEqual(summary.evaluations.find((item) => item.finding_id === "finding_symbol_right")?.duplicate_with_finding_ids, ["finding_symbol_left"]);
+  assert.deepEqual(summary.evaluations.find((item) => item.finding_id === "finding_symbol_left")?.duplicate_with_finding_ids, []);
+  assert.deepEqual(summary.evaluations.find((item) => item.finding_id === "finding_symbol_right")?.duplicate_with_finding_ids, []);
+}
+
+async function testStaticEvidenceDoesNotCountAsRuntimeValidation(): Promise<void> {
+  const summary = buildFindingEvaluationSummary({
+    findings: [{
+      id: "finding_static_runtime_sensitive",
+      run_id: "run_static_evidence",
+      lane_name: null,
+      title: "Automated security checks need review",
+      severity: "medium",
+      category: "automated_security_checks",
+      description: "Static scanner evidence only.",
+      confidence: 0.8,
+      source: "tool",
+      publication_state: "internal_only",
+      needs_human_review: true,
+      score_impact: 5,
+      control_ids_json: ["nist_ssdf.automated_security_checks"],
+      standards_refs_json: [],
+      evidence_json: ["semgrep completed"],
+      created_at: "2026-08-29T00:00:00.000Z"
+    } as any],
+    supervisorReview: null,
+    workflow: null,
+    actions: [],
+    comments: [],
+    dispositions: [],
+    sandboxExecution: null,
+    runtimeFollowups: [],
+    evidenceRecords: [{
+      evidence_id: "e_semgrep_static",
+      control_ids_json: ["nist_ssdf.automated_security_checks"],
+      summary: "Semgrep parsed four findings.",
+      metadata_json: { tool: "semgrep", status: "completed" }
+    }]
+  });
+
+  assert.equal(summary.runtime_validation_validated_count, 0);
+  assert.equal(summary.runtime_validated_finding_count, 0);
+  assert.equal(summary.runtime_strengthened_finding_count, 0);
+  assert.equal(summary.evaluations[0]?.runtime_validation_status, "recommended");
+  assert.deepEqual(summary.evaluations[0]?.runtime_evidence_ids, []);
+}
+
+async function testEvalSelectionRejectsInventedAndModeIncompatibleProviders(): Promise<void> {
+  const selection = normalizeEvalSelectionForExecution({
+    baseline_tools: ["semgrep", "agentic_static_guardrails", "secret_disclosure_static"],
+    runtime_tools: ["inspect", "shell_tool_boundary_static"],
+    custom_eval_packs: [],
+    validation_candidates: [],
+    control_tool_map: [
+      { control_id: "CTRL-A", tools: ["agentic_static_guardrails", "semgrep"], rationale: "agentic coverage" },
+      { control_id: "CTRL-B", tools: ["shell_tool_boundary_static"], rationale: "boundary coverage" }
+    ],
+    rationale: ["model selection"]
+  }, { run_mode: "static" });
+
+  assert.deepEqual(selection.baseline_tools, ["repo_analysis", "semgrep"]);
+  assert.deepEqual(selection.runtime_tools, []);
+  assert.deepEqual(selection.control_tool_map[0]?.tools, ["semgrep"]);
+  assert.deepEqual(selection.control_tool_map[1]?.tools, ["repo_analysis"]);
+  assert.match(selection.rationale.at(-1) ?? "", /agentic_static_guardrails|shell_tool_boundary_static/);
+}
+
+async function testFinalFindingDeduplicationMergesCrossStandardMappings(): Promise<void> {
+  const findings = deduplicateFindings([
+    {
+      finding_id: "finding_security_policy_openssf",
+      title: "Repository does not publish a visible security policy",
+      severity: "medium",
+      category: "security_policy",
+      description: "OpenSSF mapping.",
+      evidence: ["SECURITY.md not found"],
+      public_safe: true,
+      confidence: 0.8,
+      score_impact: 5,
+      source: "heuristic",
+      control_ids: ["openssf.security_policy"],
+      standards_refs: ["OpenSSF/Security-Policy"]
+    },
+    {
+      finding_id: "finding_security_policy_nist",
+      title: "Repository does not publish a visible security policy",
+      severity: "high",
+      category: "security_policy",
+      description: "NIST mapping.",
+      evidence: ["disclosure process not found"],
+      public_safe: false,
+      confidence: 0.9,
+      score_impact: 8,
+      source: "heuristic",
+      control_ids: ["nist_ssdf.disclosure_process"],
+      standards_refs: ["NIST SSDF/RV.1"]
+    }
+  ]);
+
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0]?.finding_id, "finding_security_policy_openssf");
+  assert.equal(findings[0]?.severity, "high");
+  assert.equal(findings[0]?.public_safe, false);
+  assert.equal(findings[0]?.score_impact, 8);
+  assert.deepEqual(findings[0]?.control_ids, ["openssf.security_policy", "nist_ssdf.disclosure_process"]);
+  assert.deepEqual(findings[0]?.evidence, ["SECURITY.md not found", "disclosure process not found"]);
+}
+
+async function testFinalFindingDeduplicationMergesCrossProviderSecretSignals(): Promise<void> {
+  const findings = deduplicateFindings([
+    {
+      finding_id: "finding_secret_baseline",
+      title: "Potential hardcoded secret material detected",
+      severity: "medium",
+      category: "secret_exposure",
+      description: "Repository-analysis signal.",
+      evidence: ["src/agent.js: TOKEN = \"[REDACTED]\""],
+      public_safe: false,
+      confidence: 0.5,
+      score_impact: 10,
+      source: "heuristic",
+      control_ids: ["owasp_llm.sensitive_information_disclosure"],
+      standards_refs: ["OWASP LLM Top 10 / Sensitive Information Disclosure"]
+    },
+    {
+      finding_id: "finding_secret_semgrep",
+      title: "Semgrep: Potential hardcoded secret or token material in source.",
+      severity: "medium",
+      category: "static_analysis",
+      description: "Semgrep signal.",
+      evidence: ["src/agent.js: Potential hardcoded secret or token material in source."],
+      public_safe: true,
+      confidence: 0.62,
+      score_impact: 4,
+      source: "tool",
+      control_ids: ["nist_ssdf.automated_security_checks"],
+      standards_refs: ["NIST SSDF / Automated security checks"]
+    }
+  ]);
+
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0]?.finding_id, "finding_secret_baseline");
+  assert.deepEqual(findings[0]?.control_ids, [
+    "owasp_llm.sensitive_information_disclosure",
+    "nist_ssdf.automated_security_checks"
+  ]);
+  assert.equal(findings[0]?.evidence.length, 2);
+}
+
+async function testPlaceholderSecretsAreRedactedAndNotCritical(): Promise<void> {
+  const fixturePath = path.resolve("fixtures/validation-targets/agent-tool-boundary-risky");
+  const analysis = await analyzeTarget({ local_path: fixturePath } as any);
+  const controlCatalog = getControlCatalog().filter((control) => control.control_id === "owasp_llm.sensitive_information_disclosure");
+  const result = await evaluateStandardsAudit({
+    rootPath: fixturePath,
+    analysis,
+    targetClass: "tool_using_multi_turn_agent",
+    threatModel: { framework_focus: [], attack_surfaces: [], high_risk_components: [] } as any,
+    toolExecutions: [],
+    evidenceRecords: [],
+    controlCatalog,
+    applicableControlIds: controlCatalog.map((control) => control.control_id),
+    deferredControlIds: [],
+    nonApplicableControlIds: [],
+    methodology: { version: "test" } as any
+  });
+  const finding = result.findings.find((item) => item.category === "secret_exposure");
+  const control = result.controlResults.find((item) => item.control_id === "owasp_llm.sensitive_information_disclosure");
+
+  assert.ok(finding);
+  assert.equal(finding?.severity, "medium");
+  assert.equal(control?.status, "partial");
+  assert.ok(finding?.evidence.some((item) => item.includes("[REDACTED]")));
+  assert.ok(finding?.evidence.every((item) => !item.includes("test_token_1234567890abcdef")));
 }
 
 async function testFindingQualityFlagsUnsupportedEvidenceAndControlMismatch(): Promise<void> {
@@ -9207,6 +9410,26 @@ async function testSystemPolicyLifecycleAndResolution(): Promise<void> {
       rootDirOrOptions: rootDir
     }), /system_policy_agent_call_budget_exceeded/);
 
+    await setDefaultPersistedSystemPolicy("agentic-static-safe", "test-admin", "default", rootDir);
+    const agenticSnapshot = await resolvePersistedSystemPolicy({
+      request: { local_path: rootDir, audit_package: "deep-static", llm_provider: "mock", workspace_id: "default", project_id: "default" },
+      target_class: "tool_using_multi_turn_agent",
+      run_id: "run-policy-agentic-narrowing",
+      rootDirOrOptions: rootDir
+    });
+    assert.ok(agenticSnapshot);
+    const approvedLaneNarrowing = attachOperatorLaunchApprovals({
+      local_path: rootDir,
+      audit_package: "deep-static",
+      llm_provider: "mock",
+      llm_workload_class: "interactive_operator",
+      requested_by: "security-reviewer",
+      hints: { audit_package_overrides: { enabled_lanes: ["agentic_controls"] } }
+    });
+    const narrowedRequest = applyResolvedSystemPolicyToRequest(approvedLaneNarrowing, agenticSnapshot);
+    assert.deepEqual((narrowedRequest.hints as any).audit_package_overrides.enabled_lanes, ["agentic_controls"]);
+    assert.equal(isValidHumanApprovalRecord((narrowedRequest.hints as any).human_approvals.find((item: any) => item.action === "evidence_reduction"), { action: "evidence_reduction" }), true);
+
     await upsertPersistedSystemPolicyBinding({ policy_id: "agentic-static-safe", binding_type: "project", project_id: "agent-project", priority: 500, actor_id: "test-admin", workspace_id: "default" }, rootDir);
     const projectSnapshot = await resolvePersistedSystemPolicy({
       request: { local_path: rootDir, audit_package: "agentic-static", llm_provider: "mock", workspace_id: "default", project_id: "agent-project" },
@@ -9237,9 +9460,24 @@ async function testSystemPolicyLifecycleAndResolution(): Promise<void> {
     assert.equal(archived.policy.status, "archived");
 
     const exported = exportSystemPolicy((await getPersistedSystemPolicy("custom-baseline", "default", rootDir))!);
+    assert.equal((exported.export_schema as any).compatibility.policy, "same-major-additive");
     const imported = await importSystemPolicy(exported, "test-admin", "import-workspace", rootDir);
     assert.equal(imported.policy.id, "custom-baseline");
     assert.equal(imported.policy.workspace_id, "import-workspace");
+    assert.equal(imported.versions[0].checksum, firstVersion.checksum, "Policy migration must import the selected rolled-back version rather than a newer superseded version");
+    const legacyExport = structuredClone(exported) as any;
+    delete legacyExport.export_schema;
+    legacyExport.policy.id = "custom-baseline-legacy";
+    const importedLegacy = await importSystemPolicy(legacyExport, "test-admin", "legacy-import-workspace", rootDir);
+    assert.equal(importedLegacy.versions[0].checksum, firstVersion.checksum, "Legacy policy exports without compatibility metadata remain importable");
+    await assert.rejects(
+      () => importSystemPolicy({ ...exported, export_schema: { schema_name: "system_policy.v1", schema_version: "2.0.0" } }, "test-admin", "future-import-workspace", rootDir),
+      /incompatible_system_policy_import/
+    );
+    await assert.rejects(
+      () => importSystemPolicy({ ...exported, export_schema: { schema_name: "different_policy.v1", schema_version: "1.0.0" } }, "test-admin", "wrong-import-workspace", rootDir),
+      /incompatible_system_policy_import/
+    );
 
     const concurrentResults = await Promise.all([
       listPersistedSystemPolicies("default", rootDir),
@@ -9255,7 +9493,7 @@ async function testSystemPolicyLifecycleAndResolution(): Promise<void> {
 
     const db = await openSqliteDatabase(rootDir);
     try {
-      assert.equal(readSqliteTable<any>(db, "system_policies").length, 6);
+      assert.equal(readSqliteTable<any>(db, "system_policies").length, 7);
       assert.ok(readSqliteTable<any>(db, "system_policy_versions").length >= 7);
       assert.equal(readSqliteTable<any>(db, "policy_resolution_snapshots").length, 1);
       assert.ok(readSqliteTable<any>(db, "policy_change_events").length >= 10);
@@ -9620,7 +9858,12 @@ async function main(): Promise<void> {
       ["final findings require an assessed mapped control", testFinalFindingsRequireAnAssessedMappedControl],
       ["deterministic controls require approval to downgrade", testDeterministicControlsRequireApprovalToDowngrade],
       ["selective correction replaces stale lane findings", testSelectiveCorrectionReplacesStaleLaneFindings],
-      ["finding evaluation uses evidence symbols for grouping", testFindingEvaluationUsesEvidenceSymbolsForGrouping],
+      ["finding evaluation does not treat shared symbols as duplicates", testFindingEvaluationDoesNotTreatSharedSymbolsAsDuplicates],
+      ["static evidence does not count as runtime validation", testStaticEvidenceDoesNotCountAsRuntimeValidation],
+      ["eval selection rejects invented and mode-incompatible providers", testEvalSelectionRejectsInventedAndModeIncompatibleProviders],
+      ["final finding deduplication merges cross-standard mappings", testFinalFindingDeduplicationMergesCrossStandardMappings],
+      ["final finding deduplication merges cross-provider secret signals", testFinalFindingDeduplicationMergesCrossProviderSecretSignals],
+      ["placeholder secrets are redacted and not critical", testPlaceholderSecretsAreRedactedAndNotCritical],
       ["finding quality flags unsupported evidence and control mismatch", testFindingQualityFlagsUnsupportedEvidenceAndControlMismatch],
       ["placeholder secret values are ignored", testPlaceholderSecretValuesAreIgnored],
       ["test fixture secrets stay redacted and non-production", testTestFixtureSecretsStayRedactedAndNonProduction],

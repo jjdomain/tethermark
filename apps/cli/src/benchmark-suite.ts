@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { CALIBRATION_EVIDENCE_PLAN_POLICY_VERSION, createEngine, type AuditPackageId, type AuditRequest, type AuditResult, type DatabaseMode, type RunVersionManifest, type TargetClass } from "../../../packages/core-engine/src/index.js";
+import { resolveArtifactPath } from "../../../packages/core-engine/src/local-paths.js";
 
 export const BENCHMARK_FINDING_SUMMARY_SCHEMA_VERSION = "2026-08-19.benchmark-finding-summary.v1" as const;
 export const BENCHMARK_SCORING_SUMMARY_SCHEMA_VERSION = "2026-08-19.benchmark-scoring-summary.v1" as const;
@@ -904,7 +905,7 @@ function evaluateBenchmarkResult(suite: BenchmarkSuiteManifest, item: BenchmarkC
 }
 
 async function ensureOutputDir(outputDir?: string): Promise<string> {
-  const resolved = path.resolve(outputDir ?? path.join(process.cwd(), ".artifacts", "benchmarks"));
+  const resolved = path.resolve(outputDir ?? resolveArtifactPath("benchmarks"));
   await fs.mkdir(resolved, { recursive: true });
   return resolved;
 }

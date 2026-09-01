@@ -1,10 +1,53 @@
 ﻿# Changelog
 
+## 2026-08-30
+
+### Changed
+
+- Static evidence no longer counts as runtime validation or runtime-strengthening evidence. Review rollups now require normalized sandbox/runtime evidence categories, and static-only runs report zero runtime-validated findings.
+- Audit completion events now record both `overall_score` and `static_score`, while the existing run-summary card labels its value as **Overall Score** without changing the established UI layout.
+- Model-selected evidence providers are normalized against the registered static provider catalog. Static runs discard invented and runtime-only provider names, always retain deterministic repository analysis, and repair empty control mappings safely.
+- Final findings are deduplicated before policy, scoring, remediation, and persistence. Exact cross-standard duplicates and equivalent cross-provider hardcoded-secret signals merge conservatively, while shared file/symbol locations alone no longer misclassify distinct findings as duplicates.
+- Test and placeholder credential literals are redacted in persisted evidence and remain medium-severity review signals rather than confirmed critical secret disclosures. Static evidence does not claim that a credential is live.
+
+### Verified
+
+- The complete local regression suite and production static-readiness workflow passed, including the new runtime-evidence, provider-normalization, cross-provider deduplication, shared-symbol, score-event, and placeholder-redaction regressions.
+- Two subscription-backed static audits exercised the corrected pipeline against the `agent-tool-boundary-risky` fixture. The final acceptance run used only `repo_analysis`, Scorecard, Semgrep, and Trivy; reported zero duplicate groups and zero runtime-validated/strengthened findings; and retained one redacted medium placeholder-secret review item.
+- Main-branch CI run `33241409300` passed verification plus Ubuntu, Windows, and macOS Community Edition smoke jobs for the product-fix commit `457044e`.
+- Release-candidate CI run `33299739843`, native install/upgrade run `33299762669`, and Static Audit Release Gate run `33299763794` passed on exact candidate commit `cbc5d55`, including real scanners on Ubuntu, Windows, and macOS plus Pi API and Chromium/Firefox/WebKit UI acceptance.
+- Exact-tag Signed Release Artifacts run `33301036880` passed deterministic release checks, System Policy verification, the authenticated release-security gate, reproducible artifact verification, SLSA provenance, and CycloneDX attestations for immutable `v0.2.3` commit `cbc5d55`. The downloaded five-file set passed independent checksum/manifest/SBOM, provenance, and archive SBOM-attestation verification before publication.
+
+## 2026-08-29
+
+### Added
+
+- Added a clean-checkout, commit-bound Phase 12 lifecycle/recovery gate covering fresh installation, upgrade, verified backup/restore, database migration rollback, durable cancellation/restart recovery, System Policy migration, and export compatibility. The root Community Edition release candidate version is now `0.2.2`; the immutable `v0.2.1` tag remains unchanged.
+- Added clean-checkout release-security evidence binding to the exact package version, proposed tag, and full candidate revision. Dirty checkouts and prerelease package versions now fail closed before network-backed release checks begin.
+- Added a focused, candidate-bound extensive System Policies gate covering reviewed template checksums, the complete control catalog, the deterministic static/runtime target matrix, persisted snapshot immutability, and fail-closed extensive-static evidence behavior.
+
+### Changed
+
+- System Policy exports now declare same-major additive compatibility. Imports select the policy's current or active version instead of whichever version happens to appear first, continue to accept legacy metadata-free exports, and reject incompatible schema names or future major versions.
+
+### Verified
+
+- The full deterministic regression suite passed. The consolidated lifecycle/recovery gate then passed from a clean checkout of candidate product commit `c9a1891` on Windows x64 with Node 24.12.0, retaining revision-bound evidence with all fresh-install, upgrade, backup/restore, cancellation/recovery, policy migration, and export-compatibility assertions true and no development override.
+- The live release-security gate passed on clean candidate commit `3088f0c` with zero blockers and zero applied exceptions across dependency vulnerabilities/licenses, repository licensing, Semgrep, four Trivy checks, and authenticated OpenSSF Scorecard. Artifact reproducibility, SBOM coverage, checksums, tamper rejection, and a final four-file unsigned candidate build also passed; final tag-bound signing and attestations remain intentionally pending.
+- The focused extensive System Policies gate passed on clean candidate commit `1f0c395`: both 39-control template checksums and the ten-case resolution matrix matched their reviewed values, all snapshots persisted immutably and rejected mutation, and the extensive-static E2E blocked publishability on incomplete scanner evidence without falsely passing runtime controls.
+- Exact-tag Signed Release Artifacts run `33232275185` passed every deterministic, System Policy, live security, artifact, OIDC provenance, and CycloneDX attestation step for immutable `v0.2.2` commit `dddcaaf`. The downloaded five-file set then passed independent checksum/manifest/SBOM and GitHub attestation verification before publication.
+
 ## 2026-08-28
 
 ### Added
 
 - Added a Phase 11 release-security gate covering npm advisories, dependency and repository licenses, Semgrep, Trivy vulnerabilities/licenses/secrets/misconfigurations, and authenticated OpenSSF Scorecard checks. It retains only normalized secret-safe findings, fails closed on tool/data errors, and supports exact approved exceptions capped at 90 days. Network-backed execution is an explicit release workflow dispatch while deterministic policy/parser checks remain automatic on every native CI platform.
+- Added deterministic tag-bound Community Edition source archives, a canonical CycloneDX 1.5 SBOM combining npm and hash-locked Python dependencies, a release metadata manifest, exact SHA-256 checksums, cross-platform verification/tamper tests, and a tag/manual-only GitHub OIDC workflow for signed SLSA provenance and CycloneDX attestations. The `v0.2.1` workflow passed the exact-tag release and security gates; independent checksum, provenance, and CycloneDX verification passed for the downloaded artifact set.
+- Added least-privilege shared-service deployment examples for systemd, macOS launchd, and Windows Task Scheduler, including dedicated non-admin identities, immutable release checkouts, protected Unix modes/Windows ACLs, an external protected environment file, and a canonical writable artifact root with cross-platform regression coverage.
+- Added a redacted diagnostics bundle, preview/confirmed Tethermark credential scrubbing, a complete data-lifecycle/privacy runbook, and session-only browser storage for the instance API key with automatic removal of its legacy persistent field.
+- Added executable clean-install and two-ref upgrade validation with state-preservation and post-update API/UI launch assertions, a retained Windows/Ubuntu/macOS workflow, and an Ubuntu server-profile gate. The native matrix passed on Ubuntu 24.04 x64, Windows Server 2025 x64, and macOS 15 arm64 for commit `24286d9`. Fixed Windows Node 24 first-run execution to invoke npm through its JavaScript CLI instead of spawning `npm.cmd` directly. The API/UI smoke check now launches the already-built supervisor without a redundant deadline-consuming build and terminates its complete Windows or Unix process tree without reporting intentional cleanup as a failure.
+- Added a low-noise monthly Dependabot policy for npm and GitHub Actions dependencies, with separate production and development npm update groups and bounded open pull requests.
+- Licensed Tethermark Community Edition under Apache License 2.0, with matching SPDX declarations in the root package and lock metadata.
 
 ### Changed
 
@@ -23,8 +66,14 @@
 - Broad agent SDKs with secondary MCP integrations now classify as tool-using agent frameworks when their non-MCP framework and execution surfaces predominate.
 - Documentation placeholders and environment-variable identifiers are excluded from deterministic hardcoded-secret candidates, and finding-quality matching now recognizes exact short paths, path-plus-pattern references, and normalized artifact aliases.
 - Executive exports now carry the static score, methodology and baseline versions, five dimension scores, assessed commit metadata, and public-safety decision required by the AISecurityBase publishing contract.
-- Release scanning now follows the releasable checkout boundary instead of ingesting ignored `.env`, `.tmp`, `.tethermark`, dependency, fixture, or generated state. Scanner children do not inherit unrelated credential variables, and only Scorecard receives the captured GitHub token. The final authenticated Windows triage passed npm, dependency-license, Semgrep, and every Trivy check; release remains blocked on Tethermark's unchosen root license and a 3.9 remote Scorecard score below the 5.0 floor.
+- Static Semgrep audits now ignore the parent Tethermark checkout's Git exclusions when scanning copied sandboxes and retain scanned-file coverage for clean, zero-finding results. This prevents a sandbox under `.artifacts` from being reported as a successful zero-finding scan after Semgrep inspected zero files. Scorecard repository audits now receive the target's pinned commit and fail degraded when returned evidence does not match it.
+- Release scanning now follows the releasable checkout boundary instead of ingesting ignored `.env`, `.tmp`, `.tethermark`, dependency, fixture, or generated state. Scanner children do not inherit unrelated credential variables, and only Scorecard receives the captured GitHub token. The authenticated native release gate passed npm advisories, dependency and repository licenses, Semgrep, every Trivy category, and Scorecard. Git checkout mode plus the Apache-2.0 declaration and Dependabot policy raise Scorecard from 3.9 to 5.3, above the unchanged 5.0 release floor.
 - Scorecard negative check scores are reported as nonblocking not-applicable results, while missing/malformed checks and the overall score still fail closed. Semgrep uses single-worker source-root scans and skips its unstable duplicate Windows pre-validation RPC while retaining actual-scan rule validation.
+- Scorecard now uses Git checkout mode so GitHub-generated source archives cannot hide repository policy files such as the Dependabot configuration from release evaluation.
+- The Unix installer no longer expands an empty Bash array under `set -u`, preserving dry-run and install compatibility with the Bash 3.2 runtime shipped on macOS.
+- Corrected the signed-release workflow's Bash package-version expression after the unfulfilled `v0.2.0` tag stopped before checks or artifact generation; the next immutable release candidate is `v0.2.1`.
+- Native runtime verification now accepts an explicit immutable candidate ref and runs the aggregate production runtime-readiness gate before its stronger Docker workload/service checks. The `v0.2.1` candidate passed Docker, rootless Podman, and gVisor execution plus the documented macOS non-execution boundary.
+- Restored the bounded live Codex audit gate after System Policies began silently widening its operator-approved single-lane validation scope. Valid per-run lane narrowing is now preserved only for an identified interactive operator with immutable approval, unknown lanes remain excluded, and the validator's request/token ceilings are regression-checked against the `deep-static` package and its 240,000-token policy cap.
 
 ## 2026-08-27
 

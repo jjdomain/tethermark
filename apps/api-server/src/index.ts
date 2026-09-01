@@ -10,7 +10,8 @@ import { enforceNetworkExposurePolicy, formatHostForUrl, resolveNetworkExposureC
 import { compareBenchmarkReports, listBenchmarkSuites, loadBenchmarkSuite, runBenchmarkSuite, selectBenchmarkCases } from "../../cli/src/benchmark-suite.js";
 import { buildRuntimeSetupPlan, executeRuntimeSetupPlan, runtimeSetupCommandLine } from "../../cli/src/setup-runtime.js";
 import { describeArtifactType } from "../../../packages/core-engine/src/artifact-policy.js";
-import { loadEnvironment } from "../../../packages/core-engine/src/env.js";
+import { resolveArtifactPath } from "../../../packages/core-engine/src/local-paths.js";
+import { loadEnvironment, resolveEnvironmentFilePath } from "../../../packages/core-engine/src/env.js";
 import {
   createEngine,
   getPersistedRun,
@@ -726,7 +727,7 @@ function parseEnvFileValue(contents: string, key: string): { exists: boolean; va
 }
 
 async function readEnvFileValue(key: string): Promise<{ env_path: string; env_file_exists: boolean; file_value: string; effective_value: string; delimiter: string }> {
-  const envPath = path.resolve(process.cwd(), ".env");
+  const envPath = resolveEnvironmentFilePath();
   let contents = "";
   let envFileExists = true;
   try {
@@ -749,7 +750,7 @@ async function writeEnvFileValue(key: string, value: string): Promise<{ env_path
   if (/[\r\n]/.test(value)) {
     throw new Error("env_value_must_be_single_line");
   }
-  const envPath = path.resolve(process.cwd(), ".env");
+  const envPath = resolveEnvironmentFilePath();
   let contents = "";
   let envFileExists = true;
   try {
@@ -779,6 +780,7 @@ async function writeEnvFileValue(key: string, value: string): Promise<{ env_path
   }
   if (!wrote && trimmedValue) nextLines.push(`${key}=${trimmedValue}`);
   const nextContents = `${nextLines.join("\n").replace(/\n*$/, "")}${nextLines.length ? "\n" : ""}`;
+  await fs.mkdir(path.dirname(envPath), { recursive: true, mode: 0o700 });
   await fs.writeFile(envPath, nextContents, "utf8");
   await hardenEnvFilePermissions(envPath);
   if (trimmedValue) process.env[key] = trimmedValue;
@@ -793,7 +795,7 @@ async function writeEnvFileValue(key: string, value: string): Promise<{ env_path
 }
 
 async function writeEnvValues(updates: Record<string, string | null | undefined>): Promise<void> {
-  const envPath = path.resolve(process.cwd(), ".env");
+  const envPath = resolveEnvironmentFilePath();
   let contents = "";
   try {
     contents = await fs.readFile(envPath, "utf8");
@@ -819,6 +821,7 @@ async function writeEnvValues(updates: Record<string, string | null | undefined>
     process.env[key] = value;
     nextLines.push(`${key}=${stringifyEnvValue(value)}`);
   }
+  await fs.mkdir(path.dirname(envPath), { recursive: true, mode: 0o700 });
   await fs.writeFile(envPath, `${nextLines.join("\n").replace(/\n*$/, "")}\n`, "utf8");
   await hardenEnvFilePermissions(envPath);
 }
@@ -1503,7 +1506,7 @@ function readHeader(req: http.IncomingMessage, name: string): string | undefined
 }
 
 function benchmarkReportRoot(): string {
-  return path.resolve(process.env.HARNESS_BENCHMARK_REPORT_ROOT ?? path.join(process.cwd(), ".artifacts", "benchmarks"));
+  return path.resolve(process.env.HARNESS_BENCHMARK_REPORT_ROOT ?? resolveArtifactPath("benchmarks"));
 }
 
 function safeBenchmarkReportPath(input: string): string {

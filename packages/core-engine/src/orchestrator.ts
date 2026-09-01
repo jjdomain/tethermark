@@ -39,9 +39,10 @@ import { RunObserver } from "./observability/run-observer.js";
 import { InMemoryJobQueue } from "./queue.js";
 import { CONTROL_CATALOG_VERSION, computeBaselineDimensionScores, computeStaticBaselineScore, getCandidateControls, getMethodologyArtifact, getStaticBaselineMethodology } from "./standards.js";
 import { createId, nowIso } from "./utils.js";
+import { resolveArtifactPath } from "./local-paths.js";
 import { stageAssessControls } from "./stages/stage-assess-controls.js";
 import { stageAllocateLanes } from "./stages/stage-allocate-lanes.js";
-import { applyControlDowngrades, applyUnsupportedFindingDrops, buildCorrectionPlanArtifact, buildCorrectionResultArtifact, hasSkepticActions, mergeSelectiveAssessmentCycle, retainFindingsSupportedByFinalControls, selectEvidenceSubset, selectLaneSubset, selectToolSubset } from "./stages/stage-corrections.js";
+import { applyControlDowngrades, applyUnsupportedFindingDrops, buildCorrectionPlanArtifact, buildCorrectionResultArtifact, deduplicateFindings, hasSkepticActions, mergeSelectiveAssessmentCycle, retainFindingsSupportedByFinalControls, selectEvidenceSubset, selectLaneSubset, selectToolSubset } from "./stages/stage-corrections.js";
 import { stagePlanScope } from "./stages/stage-plan-scope.js";
 import { stagePrepareTarget } from "./stages/stage-prepare-target.js";
 import { computeLaneReuseDecisions } from "./lane-reuse.js";
@@ -78,7 +79,7 @@ class CanceledRunError extends Error {
 }
 
 function defaultArtifactRoot(): string {
-  return path.resolve(process.cwd(), ".artifacts", "runs");
+  return resolveArtifactPath("runs");
 }
 function deriveRunLabel(request: AuditRequest): string {
   const source = request.repo_url ?? request.local_path ?? request.endpoint_url ?? "audit";
@@ -1288,10 +1289,10 @@ export class AuditEngine {
       observer.metrics.increment("provider_execution_total", 1, { provider_id: execution.provider_id, status: execution.status });
     }
 
-    const findingsPrePolicy = retainFindingsSupportedByFinalControls(
+    const findingsPrePolicy = deduplicateFindings(retainFindingsSupportedByFinalControls(
       applySkepticReview(cycle.findings, skepticReview, preSupervisorEvidencePacket),
       cycle.controlResults
-    );
+    ));
     let controlResultsPrePolicy = updateControlResultsWithFindings(cycle.controlResults, findingsPrePolicy);
     controlResultsPrePolicy = applyControlDowngrades(controlResultsPrePolicy, skepticReview);
     const policyApplied = stageApplyPolicyOverrides({
@@ -1388,7 +1389,18 @@ export class AuditEngine {
     observer.metrics.gauge("llm_total_tokens_total", usageTotals.totalTokensTotal);
     observer.metrics.gauge("llm_estimated_cost_usd", Number(usageTotals.estimatedCostUsdTotal.toFixed(8)));
 
-    observer.emit({ level: "info", stage: "run", actor: "orchestrator", eventType: "run_completed", status: "success", details: { static_score: staticScore, findings: findings.length } });
+    observer.emit({
+      level: "info",
+      stage: "run",
+      actor: "orchestrator",
+      eventType: "run_completed",
+      status: "success",
+      details: {
+        overall_score: scoreSummary.overall_score,
+        static_score: staticScore,
+        findings: findings.length
+      }
+    });
 
     const seenModelIdentities = new Set<string>();
     const modelIdentities: RunVersionManifest["model_identities"] = [];

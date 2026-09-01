@@ -35,6 +35,26 @@ npm run release:security
 
 Review the sanitized report using [`docs/release-security-gate.md`](./release-security-gate.md). Do not tag or publish while the gate is failed.
 
+Build the exact artifact set twice, verify its checksum manifest and SBOM coverage, and follow the tag-bound signing procedure in [`docs/release-artifact-verification.md`](./release-artifact-verification.md):
+
+```bash
+npm run test:release-artifacts
+npm run release:artifacts -- --tag vX.Y.Z
+npm run release:verify
+```
+
+Only the **Signed Release Artifacts** workflow may produce official release files. Verify its SLSA provenance and CycloneDX attestations with `gh attestation verify` before attaching files to a GitHub release.
+
+Verify the least-privilege shared-service path and platform-template contract:
+
+```bash
+npm run test:service-deployment
+```
+
+Review any local unit/task modifications against [`docs/shared-service-deployment.md`](./shared-service-deployment.md). A release checkout used by a service must remain read-only to the dedicated process identity.
+
+Dispatch **Install And Upgrade Verification** for the release candidate and require retained Windows, Ubuntu, and macOS evidence to pass the acceptance contract in [`docs/install-upgrade-verification.md`](./install-upgrade-verification.md). The Ubuntu job must also pass the server-profile regression; the macOS result does not certify container execution.
+
 For static audit production release candidates, also run:
 
 ```bash
@@ -42,6 +62,22 @@ npm run production:static-release
 ```
 
 That command adds the deterministic Codex OAuth first-run smoke, Pi Agent static API E2E, Pi Agent browser/UI E2E, and export checks. See `docs/static-audit-production-readiness.md` for the full gate and release evidence requirements.
+
+Run the consolidated candidate lifecycle and recovery gate from a clean checkout:
+
+```bash
+npm run production:lifecycle-recovery
+```
+
+This retains commit-bound evidence for fresh install/update/uninstall, a clean two-ref upgrade, verified SQLite backup/restore and database migration rollback, durable cancellation/restart recovery, selected-version System Policy export/import migration, and current/legacy export compatibility. A dirty checkout fails closed; `-- --allow-dirty` is only for developing the gate and is recorded as a non-candidate override.
+
+Run the focused extensive System Policies candidate gate from the same clean checkout:
+
+```bash
+npm run production:system-policies
+```
+
+This verifies that both extensive templates retain their reviewed checksums, require the complete versioned control catalog, enforce their static/runtime package and evidence boundaries, resolve the reviewed ten-case template/target matrix deterministically, and persist immutable per-run snapshots. It also reruns the lifecycle/resolution regression and the extensive-static incomplete-evidence audit. A dirty checkout fails closed; `-- --allow-dirty` is a recorded development override only.
 
 ## 2. Local Runtime Smoke Test
 

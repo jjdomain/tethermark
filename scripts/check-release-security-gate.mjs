@@ -4,6 +4,8 @@ import path from "node:path";
 
 import {
   applyExceptions,
+  buildReleaseCandidateIdentity,
+  buildScorecardArguments,
   evaluateDependencyLicenses,
   evaluateNpmAudit,
   evaluateRepositoryLicense,
@@ -18,6 +20,26 @@ import {
 const root = process.cwd();
 const policy = JSON.parse(await fs.readFile(path.join(root, "scripts", "release-security-policy.json"), "utf8"));
 const packageLock = JSON.parse(await fs.readFile(path.join(root, "package-lock.json"), "utf8"));
+
+assert.deepEqual(buildReleaseCandidateIdentity({
+  packageVersion: "0.2.3",
+  revisionSha: "a".repeat(40),
+  checkoutStatus: ""
+}), {
+  package_version: "0.2.3",
+  proposed_tag: "v0.2.3",
+  revision_sha: "a".repeat(40),
+  clean_checkout: true
+});
+assert.throws(() => buildReleaseCandidateIdentity({ packageVersion: "0.2.3", revisionSha: "a".repeat(40), checkoutStatus: " M package.json" }), /clean checkout/);
+assert.throws(() => buildReleaseCandidateIdentity({ packageVersion: "0.2.3-rc.1", revisionSha: "a".repeat(40), checkoutStatus: "" }), /stable semantic package version/);
+
+assert.deepEqual(buildScorecardArguments("https://github.com/example/project"), [
+  "--format", "json",
+  "--show-details",
+  "--file-mode", "git",
+  "--repo", "https://github.com/example/project"
+]);
 
 assert.deepEqual(sanitizeScannerEnvironment({ PATH: "safe", OPENAI_API_KEY: "secret", GITHUB_AUTH_TOKEN: "token", HARNESS_PASSWORD: "password" }), { PATH: "safe" });
 
